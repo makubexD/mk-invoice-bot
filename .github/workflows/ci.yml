@@ -53,6 +53,9 @@ jobs:
       - name: Mypy
         run: uv run mypy src
 
+      - name: Lint imports
+        run: uv run lint-imports
+
       - name: Pytest
         run: uv run pytest -q
 

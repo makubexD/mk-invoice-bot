@@ -1,0 +1,15 @@
+[importlinter]
+root_package = invoicebot
+
+[importlinter:contract:zero-consumer]
+name = Core modules must not import consumer modules (R-12.7)
+type = forbidden
+source_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
+    invoicebot.channels
+    invoicebot.rules
+forbidden_modules =
+    invoicebot.api
+    invoicebot.events
