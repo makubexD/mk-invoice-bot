@@ -77,6 +77,7 @@ You keep visual customization when you want it, and the core never depends on it
 ## 3. Data model (Postgres)
 ```
 messages(channel TEXT, external_id TEXT, profile_id, kind, received_at, payload_json,
+         invoice_id NULL /*the invoice this message belongs to; resolves a quoted message (R-1.5)*/,
          PRIMARY KEY (channel, external_id))                          -- idempotency (R-1.8)
 invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_id, state,
          natural_key TEXT UNIQUE NULL,

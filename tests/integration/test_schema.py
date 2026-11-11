@@ -99,10 +99,10 @@ async def test_second_upgrade_head_is_a_noop(
 async def test_downgrade_then_upgrade_restores_schema(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-9.4: downgrade -1 drops the schema and upgrade head recreates the same tables."""
+    """R-9.4: downgrading to base drops the schema and upgrade head recreates the same tables."""
     before = await _tables(db_pool)
     try:
-        await asyncio.to_thread(_run_alembic, db_pool.conninfo, "-1", downgrade=True)
+        await asyncio.to_thread(_run_alembic, db_pool.conninfo, "base", downgrade=True)
         downgraded = await _tables(db_pool)
     finally:
         # Leave the database at head even if an assertion below fails.
