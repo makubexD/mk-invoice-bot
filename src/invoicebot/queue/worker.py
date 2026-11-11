@@ -73,6 +73,8 @@ class Worker:
         """Give the LISTEN connection back to the pool with its defaults."""
         try:
             if not conn.closed:
+                # A pooled connection must not keep receiving job notifications.
+                await conn.execute("UNLISTEN *")
                 await conn.set_autocommit(False)
         except Exception:  # the connection may have died while listening
             logger.warning("worker %s: could not reset the LISTEN connection", self._worker_id)

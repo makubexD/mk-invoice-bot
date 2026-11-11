@@ -13,8 +13,10 @@ services:
       DATABASE_URL: postgresql://invoicebot:invoicebot@postgres:5432/invoicebot
     volumes:
       - ${CONFIG_DIR:-../config}:/app/runtime-config:ro
+    # Loopback only: the same file is used on the deploy host, where the tunnel
+    # reaches the app locally and nothing may listen on a public interface.
     ports:
-      - "8080:8080"
+      - "127.0.0.1:8080:8080"
     depends_on:
       postgres:
         condition: service_healthy
@@ -35,7 +37,7 @@ services:
       timeout: 5s
       retries: 10
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
 
 volumes:
   pgdata:
