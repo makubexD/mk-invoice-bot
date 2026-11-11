@@ -4,7 +4,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 
 | # | Phase (plan file) | Backlog | Milestone | Needs from the owner first |
 |---|---|---|---|---|
-| 1 | `foundation` | E1 (S1.1–S1.10, S5.1, S12.2) | part of M1 | Nothing |
+| 1 | `foundation` (done 2026-11-11) | E1 (S1.1–S1.10, S5.1, S12.2) | part of M1 | Nothing |
 | 2 | `whatsapp` | E2 (incl. S2.7–S2.9 window and templates) | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted |
 | 3 | `extraction` | E0 spikes S0.2, S0.3; E3 | part of M1 | S0.1: ≥ 30 synthetic or anonymised invoice photos + expected JSON |
 | 4 | `routing` | E4, rest of E5 | M1 demo | Owner and work RUCs on the VPS only (never in git) |
