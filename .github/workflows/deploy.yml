@@ -1,0 +1,127 @@
+# Deploy the image built from the exact commit CI passed on main.
+#
+# Required repository variable:
+#   DEPLOY_ENABLED      "true" enables deploys; unset or any other value keeps them off.
+# Required repository secrets:
+#   DEPLOY_SSH_KEY      private key allowed to log in to the host as DEPLOY_USER
+#   DEPLOY_KNOWN_HOSTS  the host's known_hosts entry (output of ssh-keyscan)
+#   DEPLOY_HOST         host name or address of the VPS
+#   DEPLOY_USER         account used for the SSH connection
+#   DEPLOY_PATH         absolute path of the repository checkout on the host
+#
+# The host needs a checkout of this repository at DEPLOY_PATH (the remote script
+# fetches and checks out the deployed commit) and pull access to the GHCR image.
+
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-24.04
+    # Off until a VPS exists (D31).
+    if: >-
+      vars.DEPLOY_ENABLED == 'true' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    permissions:
+      contents: read
+      packages: write
+    env:
+      HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Resolve image
+        run: |
+          set -euo pipefail
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::workflow_run.head_sha is not a full commit hash"
+            exit 1
+          fi
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/invoicebot-app"
+          echo "IMAGE_REPO=$IMAGE_REPO" >> "$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf "%s" "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Build and push
+        run: |
+          set -euo pipefail
+          docker build -f deploy/Dockerfile -t "$IMAGE_REPO:$HEAD_SHA" .
+          docker push "$IMAGE_REPO:$HEAD_SHA"
+
+      - name: Deploy over SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          set -euo pipefail
+          for name in DEPLOY_SSH_KEY DEPLOY_KNOWN_HOSTS DEPLOY_HOST DEPLOY_USER DEPLOY_PATH; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::required secret $name is empty"
+              exit 1
+            fi
+          done
+          if [[ ! "$DEPLOY_PATH" =~ ^[A-Za-z0-9_./-]+$ ]]; then
+            echo "::error::DEPLOY_PATH contains characters outside [A-Za-z0-9_./-]"
+            exit 1
+          fi
+          umask 077
+          printf "%s\n" "$DEPLOY_SSH_KEY" >"$RUNNER_TEMP/deploy_key"
+          printf "%s\n" "$DEPLOY_KNOWN_HOSTS" >"$RUNNER_TEMP/known_hosts"
+          ssh -i "$RUNNER_TEMP/deploy_key" \
+            -o BatchMode=yes \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o UserKnownHostsFile="$RUNNER_TEMP/known_hosts" \
+            "$DEPLOY_USER@$DEPLOY_HOST" bash -s -- "$HEAD_SHA" "$IMAGE_REPO" "$DEPLOY_PATH" <<'REMOTE'
+          set -euo pipefail
+          sha="$1"
+          image_repo="$2"
+          cd "$3"
+          git fetch --quiet origin main
+          git checkout --quiet --detach "$sha"
+          engine="${CONTAINER_ENGINE:-}"
+          if [[ -z "$engine" ]]; then
+            if command -v podman >/dev/null 2>&1; then
+              engine=podman
+            else
+              engine=docker
+            fi
+          fi
+          "$engine" pull "$image_repo:$sha"
+          APP_IMAGE_REPO="$image_repo" deploy/deploy.sh "$sha"
+          REMOTE
+
+      - name: Remove deploy key
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "$RUNNER_TEMP/deploy_key" "$RUNNER_TEMP/known_hosts"
