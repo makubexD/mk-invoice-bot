@@ -1,0 +1,207 @@
+# Shape of the runtime configuration (illustrative; validated by pydantic at startup).
+# Secrets are NOT here and NOT in .env: they come from the age-encrypted secrets file
+# (or systemd-creds), decrypted into memory at start (R-9.9). ALL_CAPS names below are
+# secret names; each adapter receives only the ones it declares (R-9.10).
+# .env holds only non-secret settings. All values here are placeholders (D27).
+
+owner:
+  ruc: "20XXXXXXXXX"          # your company RUC (flow A buyer)
+  profile: yo                 # owner profile: admin alerts go to its preferred channel
+  timezone: America/Lima
+  language: es-PE
+
+work:
+  ruc: "20YYYYYYYYY"          # employer RUC (flow B buyer)
+
+# Sender profiles = the allowlist (R-1.2, R-1.9). One profile per person; it links at most
+# one WhatsApp number (E.164 without +) and one Telegram user id. Placeholders only.
+profiles:
+  yo:
+    name: "Yo"
+    whatsapp: "51999999999"
+    telegram_user_id: 100000001
+    preferred_channel: whatsapp       # where admin alerts go
+    flows: [personal_google, work_microsoft]
+    can_send_batch: true
+    admin: true
+  asistente:
+    name: "Asistente"
+    whatsapp: "51988888888"
+    flows: [personal_google]
+    can_send_batch: false
+
+channels:
+  - kind: whatsapp_cloud
+    phone_number_id: "123456789"
+    graph_api_version: v23.0          # verify current version at build time
+    templates:                        # approved utility templates (R-1.10), used outside the 24 h window
+      completion: invoice_done
+      manual_required: manual_required
+      resume_notice: resume_notice
+      pending_user_reminder: pending_user_reminder
+      batch_preview: batch_preview
+      admin_alert: admin_alert
+    # secrets: WHATSAPP_TOKEN, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN
+  - kind: telegram                    # v1.1 (R-1.7)
+    enabled: false
+    # secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET (redacted in logs, R-9.16)
+
+sunat:
+  validez_api: { enabled: true }        # secrets: SUNAT_CLIENT_ID / SUNAT_CLIENT_SECRET
+  sol: { enabled: true }                # secrets: SOL_RUC / SOL_USER / SOL_PASSWORD (secondary user; sunat_sol only)
+  padron: { refresh_cron: "0 4 * * 0" } # weekly Sunday 04:00 (ZIP ~395 MB, updated daily by SUNAT)
+
+extraction:
+  max_image_px: 2000
+  ocr: { engine: tesseract, lang: spa, timeout_s: 30 }
+  review_threshold: 0.8
+  max_invoice_age_days: 365
+
+# Vision-LLM fallback (R-2.11, D43). Runs only after QR, XML and OCR fail, only for flows
+# set to true here. Output is re-checked by the R-2.4 validators and always needs confirmation.
+llm_fallback:
+  provider: deepseek                    # provider-neutral port; switchable by config
+  model: deepseek-flash                 # accepts images (~1,024 tokens per image)
+  max_image_px: 1024                    # images are downscaled before sending
+  monthly_cap_usd: 2.00                 # at the cap: BR-E08
+  flows:
+    personal_google: false              # opt in per flow
+    work_microsoft: false               # D43: work invoices never go to DeepSeek; check_config.py rejects true
+  # secret: LLM_API_KEY
+
+# Automatic routing (R-3.1). Ordered; the first match wins. No menu unless nothing matches (BR-R03).
+routing:
+  confirm_mode: auto            # auto: proceed when every field is ok | always: wait for a confirmation tap
+  rules:
+    - id: BR-R01
+      when: { num_doc_adq: ["{owner.ruc}"] }
+      flow: personal_google
+    - id: BR-R02
+      when: { num_doc_adq: ["{work.ruc}"] }
+      flow: work_microsoft
+    # Example for later: a second company, or route by issuer
+    # - id: BR-R10
+    #   when: { num_doc_adq: ["20ZZZZZZZZZ"] }
+    #   flow: second_company
+  unmatched: ask                # ask (BR-R03) | reject (BR-R07)
+
+flows:
+  personal_google:
+    label: "Mi empresa (Google)"
+    fetchers: [qr_url, portal_registry, sunat_sol, email_inbox, manual]   # a fetcher's final failure passes to the next
+    required_docs: [xml]                # pdf is nice-to-have
+    deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
+    sinks:
+      - kind: google_drive
+        root_folder_id: "DRIVE_FOLDER_ID"
+        path: "{fecha:%Y}/{fecha:%m}"
+        filename: "{fecha:%Y-%m-%d}_{ruc_emisor}_{serie}-{numero}"
+        upload: [photo, pdf, xml]
+      - kind: google_sheets
+        spreadsheet_id: "SHEET_ID"
+        tab: "Compras"
+        upsert_key: natural_key
+        columns:                        # header -> expression
+          Fecha: "{fecha:%d/%m/%Y}"
+          RUC: "{ruc_emisor}"
+          "Razón social": "{razon_social}"
+          Tipo: "{tipo_desc}"
+          "Serie-Número": "{serie}-{numero}"
+          Base: "{base}"
+          IGV: "{igv}"
+          Total: "{total}"
+          "Estado SUNAT": "{sunat.estado_cp_desc}"
+          Foto: "{refs.google_drive.photo.link}"
+          PDF: "{refs.google_drive.pdf.link}"
+          XML: "{refs.google_drive.xml.link}"
+      # n8n is not a sink: it subscribes to signed events (invoice.delivered, …) via the contract (R-12.4, v1.1)
+
+  work_microsoft:
+    label: "Trabajo (Microsoft)"
+    fetchers: [qr_url, portal_registry, email_inbox, manual]   # no sunat_sol: no access to work RUC
+    required_docs: [xml, pdf]
+    deliver_without_docs: false
+    sinks:
+      - kind: onedrive
+        account: personal               # MSAL cache name
+        path: "/Facturas Trabajo/{fecha:%Y}/{fecha:%m}"
+        filename: "{fecha:%Y-%m-%d}_{ruc_emisor}_{serie}-{numero}"
+        upload: [photo, pdf, xml]
+      - kind: excel_template
+        template: "/Plantillas/rendicion.xlsx"   # OneDrive path of your template
+        template_sha256: "0000000000000000000000000000000000000000000000000000000000000000"   # pinned (R-7.10)
+        allow_macros: false                       # .xlsm (keep_vba) only with explicit opt-in
+        output: "/Facturas Trabajo/{fecha:%Y}/{fecha:%m}/{serie}-{numero}.xlsx"
+        sheet: "Hoja1"
+        cells:                          # fixed cells you said need updating
+          C4: "{fecha:%d/%m/%Y}"
+          C5: "{ruc_emisor}"
+          C6: "{razon_social}"
+          C7: "{serie}-{numero}"
+          C8: "{total}"
+      - kind: mailer
+        provider: graph                 # graph (MVP) | gmail (post-MVP)
+        batch_aware: true               # invoices wait as BATCHED; DONE when the batch is sent
+        trigger:
+          modes: [on_command]           # MVP: on_command. Post-MVP: per_invoice | scheduled
+          # schedule: "0 18 * * 5"      # post-MVP: Fridays 18:00 Lima
+          confirm_before_send: true
+          min_items: 1
+        to: ["contabilidad@empresa.pe"]
+        cc: []
+        subject: "Rendición de gastos {batch.from:%d/%m} - {batch.to:%d/%m} ({batch.count} comprobantes)"
+        body_template: "templates/email_rendicion.html.j2"
+        attach: [pdf, xml, excel_template]
+        zip_if_over_mb: 3
+
+retrieval:
+  email_inbox:
+    provider: gmail                     # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
+    retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
+  captcha:
+    local_ocr_attempts: 2
+    ask_user_timeout_s: 300
+    paid_solver: { enabled: false, provider: 2captcha }   # secret: TWOCAPTCHA_KEY
+  paid_api: { enabled: false, provider: factiliza }       # never receives SOL credentials (R-9.10)
+
+gaps:                           # R-11 · capability gaps → issue in the private ops repo + owner alert (D44)
+  github:
+    enabled: true
+    repo: "owner/mk-invoice-bot-ops"   # private ops repo (placeholder)
+    app_id: 0                          # GitHub App (D45), Issues permission only
+    installation_id: 0
+    labels: [gap]
+    daily_write_budget: 20
+    # secret: GITHUB_APP_PRIVATE_KEY
+  admins: [yo]                  # profile ids; alerts go to each profile's preferred channel
+  teach_via_chat: true          # BR-F02: ask the user for the portal link (once per issuer); owner approves (BR-S06)
+  realert_days: 7
+  # gap_sla_days: 3             # post-MVP: gap-watch workflow (D44)
+  broken_after: 3               # consecutive technical failures → PORTAL_BROKEN issue; the owner sets status: broken
+  digest_kinds: [PARSER_MISS, UNROUTED_BUYER]
+  digest_cron: "0 8 * * *"
+
+# Deploy: one path (D46). A green CI run on main deploys code and config; the app reloads
+# config on SIGHUP. There is no pull timer on the host.
+
+ops:                            # R-9.11 to R-9.14
+  backup:
+    cron: "0 3 * * *"           # nightly pg_dump (without kv) + config tarball
+    age_recipient: "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # public key only
+    target: { kind: onedrive, path: "/Backups/mk-invoice-bot" }
+  retention_days: { messages_payload: 30, outbox: 90, events: 90, jobs: 90 }
+  self_alerts:
+    outbox_backlog: { max_rows: 20, max_age_min: 15 }   # BR-O01
+    disk_pct: 80                                        # BR-O02
+
+limits:
+  max_queued_per_sender: 20     # BR-S01
+  question_timeout_h: 24        # BR-S08 → PENDING_USER
+  media:                        # R-1.11, BR-E07 (never above the channel's own limit; Telegram getFile ≤ 20 MB)
+    max_megapixels: 40
+    max_bytes: { image: 10485760, pdf: 10485760, xml: 2097152, zip: 20971520 }
+    zip_max_entries: 20
+    zip_max_ratio: 50
+  heavy_concurrency: 1
+  browser_idle_close_s: 60
+  per_domain_min_interval_s: 10

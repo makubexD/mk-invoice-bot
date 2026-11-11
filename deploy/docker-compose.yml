@@ -1,0 +1,43 @@
+# Local development stack. Works unchanged with `podman compose` and `docker compose`.
+name: invoicebot
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ${APP_IMAGE:-localhost/invoicebot-app:dev}
+    restart: unless-stopped
+    mem_limit: 900m
+    environment:
+      DATABASE_URL: postgresql://invoicebot:invoicebot@postgres:5432/invoicebot
+    volumes:
+      - ${CONFIG_DIR:-../config}:/app/runtime-config:ro
+    # Loopback only: the same file is used on the deploy host, where the tunnel
+    # reaches the app locally and nothing may listen on a public interface.
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: docker.io/library/postgres:16-alpine
+    mem_limit: 300m
+    command: -c shared_buffers=64MB -c max_connections=20
+    environment:
+      POSTGRES_USER: invoicebot
+      POSTGRES_PASSWORD: invoicebot
+      POSTGRES_DB: invoicebot
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U invoicebot -d invoicebot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "127.0.0.1:5432:5432"
+
+volumes:
+  pgdata:

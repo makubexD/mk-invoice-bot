@@ -1,0 +1,9 @@
+# Synthetic RUCs only. check_fixtures.py (R-9.17) accepts the values listed here
+# even though their SUNAT check digit is valid. Never put a real RUC in this file.
+# One 11-digit value per line; text after # is a comment.
+#
+# 20 + 00000 + a 3-digit sequence is the deliberately synthetic RUC shape.
+20000000001
+# Synthetic WhatsApp placeholder used by tests/unit/test_channels_base.py: it is a
+# phone number that happens to pass the RUC check digit, so it must be listed too.
+51900000000
