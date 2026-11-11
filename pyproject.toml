@@ -31,6 +31,8 @@ dev = [
     "import-linter>=2.0",
     "bandit>=1.8",
     "pip-audit>=2.7",
+    "pytest-cov>=6.0",
+    "pytest-timeout>=2.4",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -77,3 +79,13 @@ files = ["src"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+timeout = 60 # a hung LISTEN/NOTIFY or pool wait fails the test instead of the run
+
+[tool.coverage.run]
+source = ["src/invoicebot"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true

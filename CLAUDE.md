@@ -17,8 +17,17 @@ podman compose -f deploy/docker-compose.yml up -d postgres   # integration tests
 uv run pytest -q tests/unit/test_x.py                        # one file while working
 uv run ruff check src tests scripts migrations && uv run ruff format --check src tests scripts migrations
 uv run mypy src && uv run lint-imports
-uv run pytest -q                                             # full suite: once, before a PR
+uv run pytest -q --cov                                       # full suite with branch coverage (floor 90%): once, before a PR
 ```
+
+Dependencies are managed with `uv` and `uv.lock` (build backend `hatchling`); this project does not use Poetry. Add
+one with the `py-add-package` skill, which vets it first, and only when the plan step says so.
+
+## Review
+
+- A phase's finish review runs the `py-code-reviewer` agent on the whole diff, next to the usual review.
+- A phase that touches a webhook, secrets, file parsing or an outbound request also runs `py-security-auditor`.
+- Both only report. The main session decides what to fix.
 
 ## Design rules
 
