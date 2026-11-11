@@ -18,22 +18,18 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from psycopg import AsyncConnection
-from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.queue.jobs import Job, claim, complete, fail
+from invoicebot.queue.retry import describe_error
+from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
-
-Pool = AsyncConnectionPool[AsyncConnection[Any]]
 
 Handler = Callable[[Job], Awaitable[None]]
 
 #: The single heavy-work slot of this process. Heavy handlers (OCR, LLM calls)
 #: must hold it with ``async with HEAVY:`` so at most one runs at a time.
 HEAVY = asyncio.Semaphore(1)
-
-#: ``last_error`` only needs to identify the failure; a traceback is in the log.
-MAX_ERROR_CHARS = 500
 
 
 class Worker:
@@ -119,8 +115,3 @@ class Worker:
         """Wait for one ``jobs`` notification, or the idle timeout (R-9.4)."""
         async for _notification in conn.notifies(timeout=self._idle_timeout_s):
             return
-
-
-def describe_error(exc: BaseException) -> str:
-    """Render ``exc`` as ``Type: message``, capped for the jobs table."""
-    return f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
