@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, Portal
 
 # Dotted, brace-wrapped paths without a format spec, e.g. "{owner.ruc}".
 # Single-name ({total}) and format-spec ({fecha:%Y}) tokens are runtime template
@@ -26,6 +26,23 @@ def load_config(path: str | Path) -> Config:
     if not isinstance(document, dict):
         raise ValueError(f"config root must be a mapping, got {type(document).__name__}")
     return Config.model_validate(_resolve_placeholders(document))
+
+
+def load_portals(path: str | Path) -> list[Portal]:
+    """Read and validate the portal registry (R-5.8).
+
+    The file is optional: when it does not exist an empty registry is returned.
+    Only ``yaml.safe_load`` is used.
+    """
+    registry_path = Path(path)
+    if not registry_path.exists():
+        return []
+    document = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
+    if document is None:
+        return []
+    if not isinstance(document, list):
+        raise ValueError(f"portals root must be a list, got {type(document).__name__}")
+    return [Portal.model_validate(entry) for entry in document]
 
 
 def _resolve_placeholders(document: dict[str, Any]) -> dict[str, Any]:

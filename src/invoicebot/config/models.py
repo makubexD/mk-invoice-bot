@@ -369,3 +369,47 @@ class Config(BaseModel):
     gaps: Gaps
     ops: Ops
     limits: Limits
+
+
+class PortalMatch(BaseModel):
+    """Issuer match rules for a portal registry entry (R-5.8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ruc: list[str] = Field(default_factory=list)
+    url_contains: list[str] = Field(default_factory=list)
+
+
+class PortalCaptcha(BaseModel):
+    """Captcha selectors and solvers for a portal (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    image: str
+    input: str
+    solver: list[str]
+
+
+class PortalDownloads(BaseModel):
+    """Selectors that locate the downloadable documents (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    xml: str | None = None
+    pdf: str | None = None
+
+
+class Portal(BaseModel):
+    """One entry of the portal registry in ``config/portals.yaml`` (R-5.8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    status: Literal["active", "todo", "broken"] = "active"
+    match: PortalMatch = Field(default_factory=PortalMatch)
+    adapter: str
+    url: str | None = None
+    fields: dict[str, str | dict[str, str]] = Field(default_factory=dict)
+    captcha: PortalCaptcha | None = None
+    submit: str | None = None
+    downloads: PortalDownloads | None = None
