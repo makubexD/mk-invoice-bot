@@ -25,7 +25,7 @@ ACTION_MAX_CHARS = 32
 
 _MIN_LENGTH = 1
 _ACTION_PATTERN = rf"[a-z_]{{1,{ACTION_MAX_CHARS}}}"
-_BUTTON_ID_PATTERN = rf"([0-9]+):({_ACTION_PATTERN})"
+_BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})"
 
 
 def _check_chars(value: str, *, maximum: int, field: str) -> None:

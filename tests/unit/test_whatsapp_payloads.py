@@ -145,6 +145,12 @@ def test_button_id_round_trips_through_parse() -> None:
     assert parse_button_id("12:confirm") == (12, "confirm")
 
 
+def test_parse_button_id_bounds_the_invoice_to_nine_digits() -> None:
+    """R-3.2: a ten-digit invoice id parses to None; nine digits still parse."""
+    assert parse_button_id("9999999999:confirm") is None
+    assert parse_button_id("123456789:confirm") == (123456789, "confirm")
+
+
 @pytest.mark.parametrize("value", ["x:confirm", "12", "12:Bad-Action", ""])
 def test_parse_button_id_returns_none_for_malformed_values(value: str) -> None:
     """R-3.2: a malformed reply id parses to None instead of raising."""

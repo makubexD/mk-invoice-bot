@@ -146,6 +146,17 @@ async def test_closed_window_sends_the_rule_template(db_pool: Pool) -> None:
     ]
 
 
+async def test_template_parameter_collapses_tabs_and_space_runs(db_pool: Pool) -> None:
+    """PT-4: a tab and a run of six spaces become single spaces in the template parameter."""
+    await _prepare(db_pool, window_hours_ago=None)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text="Revisa\tel      comprobante")))
+
+    assert sent[0]["template"]["components"] == [
+        {"type": "body", "parameters": [{"type": "text", "text": "Revisa el comprobante"}]}
+    ]
+
+
 async def test_window_expired_on_send_falls_back_to_template(db_pool: Pool) -> None:
     """PT-4: a free-form send answered with Meta code 131047 is retried as a template."""
     await _prepare(db_pool, window_hours_ago=1)

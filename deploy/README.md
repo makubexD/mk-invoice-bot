@@ -135,7 +135,7 @@ or `.env`; startup refuses secret-looking variables, R-9.9):
 |---|---|
 | `whatsapp_token` | Graph API access token of the business number |
 | `whatsapp_app_secret` | Meta app secret, used to check `X-Hub-Signature-256` |
-| `whatsapp_verify_token` | Any string you choose; Meta echoes it in the handshake |
+| `whatsapp_verify_token` | Generate with `openssl rand -hex 32`; Meta echoes it in the handshake |
 
 If any of them is missing the webhook is not mounted and one error is logged.
 
@@ -145,6 +145,7 @@ Encrypt the file with `age` and keep its identity beside it as
 
 ```sh
 age-keygen -o config/age-identity.txt
+chmod 600 config/age-identity.txt
 age -r "$(age-keygen -y config/age-identity.txt)" -o config/secrets.age secrets.yaml
 shred -u secrets.yaml
 ```

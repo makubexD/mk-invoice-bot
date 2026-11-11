@@ -115,6 +115,16 @@ async def add_file(conn: AsyncConnection[Any], invoice_id: int, record: FileReco
     return int(row[0])
 
 
+async def has_file(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Return True when the invoice already has at least one stored file (R-1.4)."""
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM files WHERE invoice_id = %s)",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    return row is not None and bool(row[0])
+
+
 async def touch_window(
     conn: AsyncConnection[Any], channel: ChannelName, profile_id: str, at: datetime
 ) -> None:

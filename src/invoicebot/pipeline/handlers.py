@@ -19,7 +19,7 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
 from invoicebot.store.db import Pool
-from invoicebot.store.invoices import FileRecord, add_file, set_state
+from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
 #: Rule that cancels media over a cap or of an unsupported type (BR-E07).
 RULE_MEDIA_REJECTED = "BR-E07"
@@ -37,12 +37,17 @@ def make_download_handler(
     """Build the handler that downloads an invoice's first attachment (R-1.4).
 
     A successful download stores a ``files`` row and leaves the invoice in
-    ``RECEIVED``. ``MediaRejected`` cancels the invoice with BR-E07 and replies
-    to the sender; the handler returns normally, so the job completes rather
-    than retrying. Any other exception propagates for the queue to retry.
+    ``RECEIVED``; an invoice that already has a file is left untouched, so a
+    retried job never downloads it twice. ``MediaRejected`` cancels the invoice
+    with BR-E07 and replies to the sender; the handler returns normally, so the
+    job completes rather than retrying. Any other exception propagates for the
+    queue to retry.
     """
 
     async def handle(job: Job) -> None:
+        async with pool.connection() as conn:
+            if await has_file(conn, job.invoice_id):
+                return
         msg = await _load_message(pool, job.invoice_id)
         attachment = _first_attachment(msg)
         try:

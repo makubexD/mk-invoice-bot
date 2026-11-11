@@ -98,5 +98,9 @@ def _template_name(templates: ChannelTemplates, msg: OutboundMessage) -> str:
 
 
 def _template_parameter(text: str) -> str:
-    """Fit the message text into one template body parameter on a single line."""
-    return text[:TEMPLATE_PARAM_MAX_CHARS].replace("\n", " ")
+    """Fit the message text into one template body parameter on a single line.
+
+    Meta rejects newlines, tabs and runs of more than four spaces, so the text
+    is truncated first and every whitespace run is collapsed to one space.
+    """
+    return " ".join(text[:TEMPLATE_PARAM_MAX_CHARS].split())

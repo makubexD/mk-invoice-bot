@@ -20,7 +20,7 @@ import httpx
 GRAPH_API_BASE_URL = "https://graph.facebook.com"
 REQUEST_TIMEOUT_SECONDS = 30.0
 WINDOW_EXPIRED_CODE = 131047
-ALLOWED_MEDIA_HOST_SUFFIXES = (".facebook.com", ".fbcdn.net", ".whatsapp.net")
+ALLOWED_MEDIA_HOST_SUFFIXES = (".facebook.com", ".fbcdn.net", ".whatsapp.net", ".fbsbx.com")
 NOT_SENT_STATUS = 0  # the status of an error raised before any request
 _MEDIA_ID_PATTERN = r"[0-9A-Za-z_-]{1,128}"
 

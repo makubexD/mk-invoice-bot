@@ -19,6 +19,7 @@ from invoicebot.store.invoices import (
     count_active_jobs,
     create_invoice,
     get_state,
+    has_file,
     set_state,
     touch_window,
     window_open,
@@ -132,6 +133,27 @@ async def test_add_file_stores_sha256_and_size(
         row = await cur.fetchone()
 
     assert row == ("photo", "data/photo.jpg", "media-1", digest, size)
+
+
+async def test_has_file_is_false_before_and_true_after_add_file(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.4: has_file reports whether the invoice already has a stored file."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        before = await has_file(conn, invoice_id)
+        record = FileRecord(
+            kind="photo",
+            local_path="data/photo.jpg",
+            remote_ref="media-1",
+            sha256="a" * 64,
+            size=4321,
+        )
+        await add_file(conn, invoice_id, record)
+        after = await has_file(conn, invoice_id)
+
+    assert before is False
+    assert after is True
 
 
 async def test_touch_window_keeps_the_newest_time(

@@ -169,6 +169,27 @@ async def test_stream_media_rejects_a_non_meta_url_without_a_request(url: str) -
     assert requests == []
 
 
+async def test_stream_media_accepts_lookaside_fbsbx_but_not_over_plain_http() -> None:
+    """R-1.4: lookaside.fbsbx.com over HTTPS is streamed; over HTTP it is refused."""
+    url = "https://lookaside.fbsbx.com/whatsapp_business/attachments/?mid=1"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"media")
+
+    async with _make_client(handler) as client:
+        async with client.stream_media(url) as body:
+            chunks = [chunk async for chunk in body]
+        with pytest.raises(WhatsAppError):
+            async with client.stream_media(url.replace("https://", "http://")):
+                pass
+
+    assert chunks == [b"media"]
+    assert len(requests) == 1
+    assert str(requests[0].url) == url
+
+
 async def test_send_non_json_error_body_raises_without_a_meta_code() -> None:
     """R-3.2: a non-JSON error body still raises WhatsAppError, with code None and the status."""
 

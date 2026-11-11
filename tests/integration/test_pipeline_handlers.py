@@ -219,6 +219,39 @@ async def test_valid_photo_stores_the_file_and_keeps_the_invoice_received(
     assert (state, rule_id) == ("RECEIVED", None)
 
 
+async def test_second_download_run_stores_one_file_and_sends_no_request(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.4: re-running the download for an invoice with a file sends no request to Meta."""
+    media_ref = f"ref-{uuid4().hex}"
+    body = _png_header(2000, 1500) + b"\x00" * 50
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.host == GRAPH_HOST:
+            return httpx.Response(
+                200,
+                json={"url": MEDIA_URL, "mime_type": PNG_MIME, "file_size": len(body)},
+            )
+        return httpx.Response(200, content=body)
+
+    profile_id = _profile()
+    invoice_id = await _queue_photo(db_pool, profile_id, media_ref)
+    async with _make_client(handler) as client:
+        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        await download(_job(invoice_id))
+        requests_after_first_run = len(requests)
+        await download(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        files = await _files(conn, invoice_id)
+
+    assert requests_after_first_run == 2
+    assert len(requests) == requests_after_first_run
+    assert len(files) == 1
+
+
 async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

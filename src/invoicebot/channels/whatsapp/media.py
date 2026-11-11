@@ -21,9 +21,15 @@ from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient
 from invoicebot.config.models import MediaLimits
 
 MEDIA_ID_PATTERN = r"[A-Za-z0-9_-]{1,128}"
-MEDIA_HEADER_BYTES = 64 * 1024
+MEDIA_HEADER_BYTES = 512 * 1024
+#: Whole-download deadline; must stay below the worker lease (300 s in queue/worker.py).
+DOWNLOAD_TIMEOUT_S = 120.0
 FILE_NAME = "file"
 DIRECTORY_MODE = 0o700
+
+
+class MediaChecksumMismatch(Exception):
+    """The downloaded bytes do not match the SHA-256 media_info reported (R-1.4)."""
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,7 @@ async def download_media(
 
     Raises ``ValueError`` for a media id that could escape the destination
     directory, ``MediaRejected`` for an unsupported kind or a size over the cap,
+    ``MediaChecksumMismatch`` when the bytes differ from media_info's SHA-256,
     and ``WhatsAppError`` for a Graph API failure. On any failure the partial
     file and its directory are removed.
     """
@@ -61,7 +68,10 @@ async def download_media(
     try:
         directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
         path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
-        size, sha256 = await _stream_to_file(client, info, path, ByteCap(limit), kind, limits)
+        async with asyncio.timeout(DOWNLOAD_TIMEOUT_S):
+            size, sha256 = await _stream_to_file(client, info, path, ByteCap(limit), kind, limits)
+        if info.sha256 is not None and info.sha256.lower() != sha256.lower():
+            raise MediaChecksumMismatch(media_id)
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
@@ -78,8 +88,9 @@ async def _stream_to_file(
 ) -> tuple[int, str]:
     """Stream the body into ``path`` and return the bytes written and their hex SHA-256.
 
-    A photo's first 64 KiB are held in memory until ``check_image_header``
-    passes, so a rejected image never reaches the disk (BR-E07).
+    A photo's first 512 KiB are held in memory until ``check_image_header``
+    passes, so a rejected image never reaches the disk (BR-E07). The larger
+    window keeps the SOF marker findable behind a long EXIF/APP1 segment.
     """
     digest = hashlib.sha256()
     written = 0
