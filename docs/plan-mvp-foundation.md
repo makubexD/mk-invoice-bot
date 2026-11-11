@@ -5,7 +5,8 @@ Roadmap: `docs/plan-mvp.md`. Backlog: `specs/04-tasks.md` E1 (S1.1–S1.10, S5.1
 Conventions for every step:
 - Python 3.12, `uv`, package `src/invoicebot/`, tests in `tests/unit/` (no DB) and `tests/integration/` (real Postgres).
 - Libraries fixed for this phase: FastAPI + uvicorn, pydantic v2 + pydantic-settings, PyYAML (`safe_load` only), psycopg 3 + `psycopg_pool` (async), Alembic (plain-SQL `op.execute` revisions; SQLAlchemy only as Alembic's engine), pytest + pytest-asyncio, ruff, mypy (strict on `src/`), `pyrage` (age), `import-linter`. Logging uses the stdlib with a JSON formatter (no structlog).
-- Integration tests read `TEST_DATABASE_URL` (default `postgresql://invoicebot:invoicebot@localhost:5432/invoicebot_test`) and fail, not skip, when Postgres is unreachable. Start it with `docker compose -f deploy/docker-compose.yml up -d postgres`.
+- Integration tests read `TEST_DATABASE_URL` (default `postgresql://invoicebot:invoicebot@localhost:5432/invoicebot_test`) and fail, not skip, when Postgres is unreachable. Start it with `podman compose -f deploy/docker-compose.yml up -d postgres`.
+- Container engine: Podman and Docker are both supported from the same files (`deploy/Dockerfile`, `deploy/docker-compose.yml`). Nothing engine-specific goes in them: image names are fully qualified (`docker.io/library/...`, Podman does not resolve short names by default), no BuildKit-only syntax, no `container_name`. Local commands in this plan use `podman`; `docker` works by swapping the word. Scripts read `CONTAINER_ENGINE` (default: `podman` if on PATH, else `docker`) and never hardcode either.
 - Every test docstring cites its requirement or rule ID. No real RUCs or phone numbers: use the synthetic values from `config/example.yaml`.
 
 ## Step 1: Project scaffold and health endpoint `[worker]`
@@ -24,11 +25,12 @@ Test: `uv sync && uv run pytest tests/unit/test_health.py -q && uv run ruff chec
 
 Files: `deploy/Dockerfile`, `deploy/docker-compose.yml`, `.dockerignore`.
 
-- `Dockerfile`: multi-stage, `python:3.12-slim`, `uv sync --frozen --no-dev` into `/app/.venv`, non-root user `bot`, `CMD uvicorn invoicebot.app:app --host 0.0.0.0 --port 8080 --workers 1`. No Tesseract or Chromium yet (later phases).
-- Compose project `invoicebot`: service `app` (build `..`, `mem_limit: 900m`, env `DATABASE_URL`, port `8080:8080`, `depends_on: postgres: condition: service_healthy`); service `postgres` (`postgres:16-alpine`, `mem_limit: 300m`, command `-c shared_buffers=64MB -c max_connections=20`, volume `pgdata`, healthcheck `pg_isready`, port `5432:5432` for local dev only, user/password/db `invoicebot`). Credentials here are local-dev only.
+- `Dockerfile`: multi-stage, `docker.io/library/python:3.12-slim`, `uv sync --frozen --no-dev` into `/app/.venv`, non-root user `bot`, `CMD uvicorn invoicebot.app:app --host 0.0.0.0 --port 8080 --workers 1`. No Tesseract or Chromium yet (later phases).
+- Compose project `invoicebot`: service `app` (build `..`, `mem_limit: 900m`, env `DATABASE_URL`, port `8080:8080`, `depends_on: postgres: condition: service_healthy`); service `postgres` (`docker.io/library/postgres:16-alpine`, `mem_limit: 300m`, command `-c shared_buffers=64MB -c max_connections=20`, volume `pgdata`, healthcheck `pg_isready`, port `5432:5432` for local dev only, user/password/db `invoicebot`). Credentials here are local-dev only.
 - `uv.lock` must be committed (generated in step 1).
+- Must build and run unchanged under both `podman compose` and `docker compose` (see the container engine convention): the build sets `dockerfile: deploy/Dockerfile` with context `..`, and the image gets an explicit `image: localhost/invoicebot-app:dev` name.
 
-Test: `docker compose -f deploy/docker-compose.yml up -d --build && sleep 5 && curl -s -o /dev/null -w '%{http_code}' localhost:8080/health; docker compose -f deploy/docker-compose.yml down` (prints 503 until step 6, which is expected here; the test is that the image builds and both services start).
+Test: `podman compose -f deploy/docker-compose.yml up -d --build && sleep 5 && curl -s -o /dev/null -w '%{http_code}' localhost:8080/health; podman compose -f deploy/docker-compose.yml down` (prints 503 until step 6, which is expected here; the test is that the image builds and both services start).
 
 ## Step 3: Typed config models `[worker]`
 
@@ -63,7 +65,7 @@ Files: `alembic.ini`, `migrations/env.py`, `src/invoicebot/store/db.py`, `src/in
 - `tests/integration/conftest.py`: session fixture that drops and recreates database `invoicebot_test`, runs `alembic upgrade head`, and yields a pool.
 - Tests (R-9.14): `/health` is 200 with the DB up; 503 when the pool points at a closed port.
 
-Test: `docker compose -f deploy/docker-compose.yml up -d postgres && uv run pytest tests/integration/test_db_health.py -q`
+Test: `podman compose -f deploy/docker-compose.yml up -d postgres && uv run pytest tests/integration/test_db_health.py -q`
 
 ## Step 6: Initial schema migration `[worker]`
 
@@ -176,9 +178,9 @@ Test: `uv run lint-imports && uv run pytest tests/unit/test_import_boundary.py -
 
 Files: `deploy/deploy.sh`, `deploy/README.md`, `tests/deploy/test_deploy.sh`.
 
-- `deploy.sh <image_tag>`: records the current image tag; `pg_dump` (excluding `kv`) to `/data/backups/pre-<tag>.sql.gz`; runs `alembic upgrade head` with the new image; starts `app` with the new tag; polls `/health` for 60 s; on failure restarts the previous tag and exits 1. Config-only mode `deploy.sh --config`: validates with `check_config.py`, copies config, sends `SIGHUP`; an invalid config exits 1 and leaves the old one.
+- `deploy.sh <image_tag>`: records the current image tag; `pg_dump` (excluding `kv`) to `/data/backups/pre-<tag>.sql.gz`; runs `alembic upgrade head` with the new image; starts `app` with the new tag; polls `/health` for 60 s; on failure restarts the previous tag and exits 1. All container calls go through `$CONTAINER_ENGINE` (see conventions). Config-only mode `deploy.sh --config`: validates with `check_config.py`, copies config, sends `SIGHUP`; an invalid config exits 1 and leaves the old one.
 - `tests/deploy/test_deploy.sh`: against local Compose, deploys a good tag (health 200), then a tag whose app exits at start (rollback happens, previous tag running, exit 1), then an invalid config (refused).
-- `deploy/README.md`: how to run it locally and on a VPS (R-9.13).
+- `deploy/README.md`: how to run it locally and on a VPS with either Podman or Docker (R-9.13).
 
 Test: `bash tests/deploy/test_deploy.sh`
 
@@ -190,4 +192,4 @@ Files: `.github/workflows/deploy.yml`, `.github/workflows/ci.yml`.
 - `ci.yml`: a job that builds the previous `main` image, migrates a fresh Postgres to the new head, and runs the previous image's `/health` against it (expand/contract check, S12.2).
 - Check: the workflows pass `actionlint`.
 
-Test: `docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:1.7.7`
+Test: `podman run --rm -v "$PWD:/repo:Z" -w /repo docker.io/rhysd/actionlint:1.7.7`
