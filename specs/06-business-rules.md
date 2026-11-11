@@ -4,9 +4,9 @@ Every time the bot stops, warns or changes route, it does so because of **one na
 - an ID (`BR-…`);
 - a condition;
 - the resulting state;
-- the exact chat message (es-PE). Messages live in code as a catalog (`pipeline/messages_es.py`), keyed by rule ID, so they are testable and easy to reword.
+- the exact chat message (es-PE). Messages live in code as a catalog: `rules/catalog.py` maps each rule ID to its state and message key, and `rules/messages_es.py` holds the texts. Both are keyed by rule ID, so they are testable and easy to reword.
 
-When the root cause is something **missing from the repository** (a portal, a parsing rule, a template mapping), the rule also raises a **capability gap** (§3). The gap opens a GitHub issue plus a draft PR, keeps CI red, and alerts the admin on WhatsApp.
+When the root cause is something **missing from the repository** (a portal, a parsing rule, a template mapping), the rule also raises a **capability gap** (§3). In the MVP the gap opens an issue in the private ops repo and alerts the owner in chat (D44). Draft PRs and red-CI watches are post-MVP.
 
 Placeholders like `{razon_social}` are filled from the invoice. Messages stay short: one idea, one action.
 
@@ -19,10 +19,11 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 |---|---|---|---|
 | BR-R01 | Buyer RUC = `owner.ruc` | Flow A (`personal_google`), silently | *(shown inside the summary)* `🏢 Mi empresa → Google` |
 | BR-R02 | Buyer RUC = `work.ruc` | Flow B (`work_microsoft`), silently | *(inside the summary)* `💼 Trabajo → Microsoft` |
-| BR-R03 | Buyer is missing, is a DNI, or is a RUC that matches no rule | `CONFIRMING`; ask with buttons **Mi empresa / Trabajo / Cancelar** | `Este comprobante está a nombre de {buyer_desc}, que no es tu empresa ni tu trabajo. ¿Dónde lo registro?` |
+| BR-R03 | Buyer is missing, is a DNI, or is a RUC that matches no rule, and `routing.unmatched: ask` | `CONFIRMING`; ask with buttons **Mi empresa / Trabajo / Cancelar** (WhatsApp's maximum of 3; a third flow needs a list message) | `Este comprobante está a nombre de {buyer_desc}, que no es tu empresa ni tu trabajo. ¿Dónde lo registro?` |
 | BR-R04 | The buyer was read by OCR with confidence below `review_threshold` | `CONFIRMING`, with the detected flow pre-selected | `No pude leer bien el RUC del cliente ({num_doc_adq}?). Lo registro en {flow.label}. ¿Correcto?` [Sí] [Cambiar] [Cancelar] |
 | BR-R05 | The routed flow isn't allowed for the sender's profile | `CANCELLED` | `No tienes permiso para registrar comprobantes de {flow.label}. Pídele al administrador que te habilite.` |
 | BR-R06 | The same unknown buyer RUC is seen 3 or more times in 30 days | Raises gap `UNROUTED_BUYER`, then continues as BR-R03 | *(no extra chat message; the admin is alerted)* |
+| BR-R07 | No rule matches and `routing.unmatched: reject` | `CANCELLED` | `Este comprobante está a nombre de {buyer_desc}. Solo registro comprobantes de tu empresa o de tu trabajo, así que no lo proceso.` |
 
 `{buyer_desc}`: `el RUC 20… (Razón social)`, `el DNI 4…`, or `ningún cliente (boleta sin datos)`.
 
@@ -37,6 +38,8 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-E04 | The natural key already exists and isn't failed | Stop | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Si quieres repetirlo: /reprocesar {id}` |
 | BR-E05 | Not a supported CPE (`tipo` ∉ config) | `CANCELLED` | `Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.` |
 | BR-E06 | OCR fails 2 or more times on photos from the same issuer | Raises gap `PARSER_MISS` | *(no extra message; E01 already asked the user)* |
+| BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported, or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) o el PDF/XML del comprobante, de hasta {max_mb} MB.` |
+| BR-E08 | Deterministic extraction failed, and the LLM fallback reached its monthly cap | `EXTRACT_FAILED` (as E01); admin alert once per month | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` Admin: `🤖 Se alcanzó el tope mensual de lectura con IA ({cap}). Se reactiva el {date}.` |
 
 ### SUNAT validation (V)
 | ID | Condition | Result | Chat message |
@@ -45,16 +48,23 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-V02 | `estadoCp = 2` (annulled) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante está ANULADO. ¿Lo registro igual?` [Sí] [Cancelar] |
 | BR-V03 | Issuer RUC isn't `ACTIVO`/`HABIDO` | Continue; warn | *(one line in the summary)* `⚠️ El emisor figura {estado}/{condicion} en SUNAT.` |
 | BR-V04 | The SUNAT API is down or credentials are missing | Continue as "not validated"; retry later | *(one line in the summary)* `ℹ️ No pude validar con SUNAT ahora; lo intento luego.` |
+| BR-V05 | `estadoCp = 3` (authorized; only for some CPE types, e.g. pre-printed receipts authorized by SUNAT) | Continue | *(one line in the summary)* `ℹ️ SUNAT lo registra como AUTORIZADO (comprobante autorizado, no electrónico).` |
+| BR-V06 | `estadoCp = 4` (not authorized) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante NO está AUTORIZADO. ¿Lo registro igual?` [Sí] [Cancelar] |
+
+`estadoCp = 1` (accepted) continues with no message.
 
 ### Document retrieval (F)
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-F01 | Flow B: `sunat_sol` isn't applicable (not the owner's RUC) | Skipped by design; **not a gap** | *(only listed in the F07 message)* `• SUNAT: no aplica (solo para facturas de tu empresa)` |
-| BR-F02 | No portal entry for the issuer RUC, and no `qr_url` | Raises gap `PORTAL_MISSING`; the chain **continues**; asks the user to teach the link (once per issuer) | `No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. Si no, responde "no sé".` |
+| BR-F02 | The chain ended in `MANUAL_REQUIRED`, and the issuer RUC has no portal entry and no `qr_url` | Raises gap `PORTAL_MISSING`; asks the user to teach the link (once per issuer). A taught link is used only after the owner approves it (BR-S06) | `No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. Si no, responde "no sé".` |
 | BR-F03 | A portal adapter fails `broken_after` (default 3) times in a row for technical reasons (selectors, HTTP 4xx/5xx, timeouts; not "invoice not found") | Raises gap `PORTAL_BROKEN`; the chain continues | *(only in the F07 message)* `• Portal {portal}: con fallas, ya avisé para arreglarlo` |
 | BR-F04 | reCAPTCHA or hCaptcha, and no paid solver | Skip to the next fetcher | *(only in F07)* `• Portal {portal}: captcha que no puedo resolver` |
 | BR-F05 | The user doesn't answer an image captcha within `ask_user_timeout_s` | Skip to the next fetcher | `Se venció el tiempo del captcha; sigo con otras opciones.` |
 | BR-F06 | The fetched XML doesn't match the invoice (RUC, serie, número or total) | Discard it; next fetcher | *(only in F07)* `• {fetcher}: el XML no coincide` |
+| BR-F08 | The request guard blocks a URL (not `https`, private or reserved IP, bad redirect, blocked scheme) | Skip to the next fetcher; the reason is an enum code | *(only in F07)* `• {fetcher}: enlace no permitido` |
+| BR-F09 | The XML is unsafe or invalid (`DOCTYPE`, over 2 MB, does not parse) | Discard it; next fetcher | *(only in F07)* `• {fetcher}: el XML no es válido` |
+| BR-F10 | An XML from email or a user upload has no valid XMLDSig signature, or the signer's RUC ≠ `ruc_emisor` | Kept as a **hint**: the file is stored and delivered, but its values don't replace the read data | *(one line in the summary)* `ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos.` |
 | BR-F07 | Every fetcher failed | `MANUAL_REQUIRED` (auto-resumable when a linked gap is fixed) | `❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:` + one `•` line per fetcher + `Puedes enviarme el PDF/XML aquí y lo completo. {gap_line}` |
 
 `{gap_line}`, when a gap is linked: `Ya avisé para agregar este portal; cuando esté listo lo reintento solo.`
@@ -63,43 +73,70 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-D01 | A Google or Microsoft token expired or was revoked | `PENDING_AUTH` (auto-resumes after re-auth); **admin-only alert**, not a repo gap | User: `Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar.` Admin: `🔑 Reautoriza {provider}: ejecuta scripts/auth_{provider}.py` |
-| BR-D02 | The Excel template is missing, or a `cells:` expression references an unknown field | Raises gap `TEMPLATE_INVALID`; `MANUAL_REQUIRED` | `No pude llenar la plantilla de Excel (configuración incompleta). Ya avisé para corregirlo; reintento automáticamente.` |
-| BR-D03 | Email send failed after retries | `FAILED` (retry with `/reprocesar`); admin alert | `No pude enviar el correo del lote #{batch}. Reintenta con /enviar o /reprocesar.` |
+| BR-D02 | The Excel template is missing, its SHA-256 doesn't match the pinned one, or a `cells:` expression references an unknown field | Raises gap `TEMPLATE_INVALID`; `DELIVERING` → `MANUAL_REQUIRED` | `No pude llenar la plantilla de Excel (configuración incompleta). Ya avisé para corregirlo; reintento automáticamente.` |
+| BR-D03 | Email send failed after retries | The batch goes `failed`; its invoices stay `BATCHED` (retry with `/enviar`); admin alert | `No pude enviar el correo del lote #{batch}. Reintenta con /enviar.` |
 | BR-D04 | `/enviar` with an empty batch | No-op | `No hay comprobantes pendientes de envío.` |
-| BR-D05 | The GitHub token expires in less than 14 days | Admin-only alert, daily | Admin: `🔑 El token de GitHub vence el {date}. Renuévalo.` |
+| BR-D05 | The GitHub App can't get an installation token (private key revoked or invalid, App uninstalled from the ops repo, Issues permission missing) | Admin-only alert, at most daily; gap issues wait in the outbox | Admin: `🔑 La GitHub App no puede abrir issues en {repo} ({reason_desc}). Revisa la instalación o la clave.` |
+
+### System and session (S)
+| ID | Condition | Result | Chat message |
+|---|---|---|---|
+| BR-S01 | The sender profile already has `max_queued_per_sender` jobs queued (back-pressure) | The message is stored but not enqueued | `Estoy procesando {n} comprobantes tuyos. Envíame este de nuevo cuando te avise que terminé.` |
+| BR-S02 | A button is pressed for an invoice that has moved past the state it was meant for (stale button) | No change | `Ese botón ya no aplica: el comprobante #{id} ya está {state_desc}.` |
+| BR-S03 | A transient error repeats 5 times, or the worker dies twice on the same job (crash loop) | `FAILED`; admin alert | `❌ No pude terminar el comprobante #{id} por un error técnico. Ya avisé al administrador; puedes reintentar con /reprocesar {id}.` Admin: `⚙️ Falló el trabajo {step} del comprobante #{id}: {error_code}.` |
+| BR-S04 | A WhatsApp message falls outside the 24 h window, or Meta answers error 131047 (`WINDOW_EXPIRED`) | The outbox resends it as the matching utility template; if none is approved, it stays queued and the owner is alerted | *(no extra message; the template carries the text)* Admin: `📨 Falta la plantilla aprobada «{template}» en WhatsApp; hay mensajes en espera.` |
+| BR-S05 | An API or MCP client asks for a write (`cancel_invoice`, `reprocess_invoice`, `attach_document`) | Pending action; nothing changes until the owner decides (expires in 24 h) | Owner: `🔐 {client} pide {action_desc} del comprobante #{id}. ¿Lo apruebo?` [Aprobar] [Rechazar] |
+| BR-S06 | A sender teaches a portal link (BR-F02 answer or `/portal`) | Stored as `proposed`; used only after the owner approves | Owner: `🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?` [Aprobar] [Rechazar]. Sender: `Gracias. Lo revisará el administrador antes de usarlo.` |
+| BR-S07 | A command names an invoice id that doesn't exist or belongs to another profile (sender not admin) | No change | `No encontré el comprobante #{id}.` |
+| BR-S08 | A question isn't answered within `question_timeout` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
+
+### Operations (O) · admin-only
+| ID | Condition | Result | Chat message (admin) |
+|---|---|---|---|
+| BR-O01 | The outbox has more than 20 unsent rows, or one older than 15 min | Alert, rate-limited | `📮 Hay {n} mensajes sin enviar (el más antiguo de hace {age}).` |
+| BR-O02 | Disk usage on the data volume is above 80% | Alert, rate-limited | `💾 El disco está al {pct}%.` |
+| BR-O03 | A channel token is rejected (WhatsApp 401/190, Telegram 401) | Alert; sends on that channel wait in the outbox | `🔑 El token de {channel} no funciona. Renuévalo.` |
+| BR-O04 | The nightly backup failed or wasn't uploaded | Alert | `🗄️ Falló la copia de seguridad de anoche ({reason_desc}).` |
 
 ---
 
 ## 3. Capability gaps
-A **gap** is a missing capability that only a change to the repository can fix. Gaps are deduplicated by **fingerprint**, so 10 invoices from the same unknown store make **1** issue, **1** PR and **1** admin alert.
+A **gap** is a missing capability that only a change to the repository can fix. Gaps are deduplicated by **fingerprint**, so 10 invoices from the same unknown store make **1** issue and **1** owner alert. Issues go only to the **private ops repo** (D44).
 
-| Kind | Fingerprint | Raised by | GitHub | Admin WhatsApp | Auto-resume when |
+| Kind | Fingerprint | Raised by | GitHub (ops repo) | Owner alert (chat) | Auto-resume when |
 |---|---|---|---|---|---|
-| `PORTAL_MISSING` | `portal_missing:{ruc_emisor}` | BR-F02 | Issue + **draft PR** adding a `status: todo` stub to `config/portals.yaml` (with the taught URL, if any) | Yes | A deployed registry has an `active` entry matching the RUC |
-| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | Issue + draft PR setting the entry to `status: broken` | Yes | The entry is `active` again and the version has changed |
+| `PORTAL_MISSING` | `portal_missing:{ruc_emisor}` | BR-F02, only when the chain ended in `MANUAL_REQUIRED` | Issue, with the approved taught URL if any | Yes | A deployed registry has an `active` entry matching the RUC |
+| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | Issue; the owner sets the entry to `status: broken` | Yes | The entry is `active` again and the version has changed |
 | `TEMPLATE_INVALID` | `template_invalid:{flow}:{sink}` | BR-D02 | Issue | Yes | The config reloads and passes validation |
 | `PARSER_MISS` | `parser_miss:{ruc_emisor}` | BR-E06 | Issue | Digest only | — (the user already typed the data) |
 | `UNROUTED_BUYER` | `unrouted:{num_doc_adq}` | BR-R06 | Issue ("add a routing rule or a new flow?") | Digest only | — |
 
-**What is *not* a gap:** expected business outcomes (flow B has no SOL access, an annulled invoice, a duplicate) and operations problems (expired OAuth tokens, SUNAT down). Those get a chat message and, for operations, an admin alert, but nothing in GitHub.
+Draft PRs with a `portals.yaml` stub and the `gap-watch` workflow are post-MVP (D44, spec 04 E16).
+
+**What is *not* a gap:** expected business outcomes (flow B has no SOL access, an annulled invoice, a duplicate) and operations problems (expired OAuth tokens, SUNAT down, backups). Those get a chat message and, for operations, an admin alert, but nothing in GitHub.
 
 ### Gap lifecycle
 ```
-detected ─► OPEN (row in `gaps`, linked invoices) ─► REPORTED (issue + PR created, admin alerted)
-            ─► FIXED (a deploy makes the capability available → linked invoices re-enqueued, users notified)
-            ─► CLOSED (the PR merge closes the issue via "Closes #n")
-       OPEN/REPORTED ─► IGNORED (admin replies /gap ignorar <id>: no more alerts for this fingerprint)
+detected ─► OPEN (row in `gaps`, linked invoices)
+         ─► REPORTED (issue opened in the ops repo, owner alerted)
+         ─► FIXED (the owner's fix is merged and deployed by CI; after the reload the re-check passes
+                   → linked invoices re-enqueued, senders notified)
+         ─► CLOSED (verified: a linked invoice got past the failing step, or none is left;
+                    the bot closes the issue with a comment, `gap.closed`)
+    OPEN/REPORTED ─► IGNORED (admin replies /gap ignorar <id>: no more alerts for this fingerprint)
 ```
+If a re-enqueued invoice fails again at the same step, the gap goes back to REPORTED and the issue stays open. There are no "Closes #n" PRs in the MVP.
 
 ### What goes into GitHub (privacy)
-Only **public or technical** data:
-- issuer RUC and razón social (public in the padrón);
-- CPE type and serie (no número);
-- fetcher reasons;
-- the portal URL (taught or printed).
+Only typed **public or technical** data (R-11.12):
+- issuer RUC (11 digits) and razón social from the padrón;
+- CPE type;
+- fetcher reason codes;
+- the portal URL, reduced to `https://host/path`, in a code fence, and only once the owner approved it.
 
 **Never:**
-- buyer RUC or DNI, totals, phone numbers, photos;
-- any text the user typed other than the validated URL.
+- buyer RUC or DNI, serie or número, totals, phone numbers, photos;
+- counts, dates or anything else that reveals spending habits (they stay in the bot's database);
+- raw OCR text, LLM text, or any text the user typed.
 
-This keeps the repo safe even if it becomes public.
+Gap issues go only to the private ops repo. These rules hold anyway, so a leaked issue reveals nothing about the owner's spending.

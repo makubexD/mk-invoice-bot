@@ -1,6 +1,6 @@
 # 07 · Foundation review (2026-11-10)
 
-Done while Jarvis was briefly scoped into this repo (D22, later superseded by D39). Result: **D38, patterns only.** No third-party code is copied. Patterns PT-1, PT-2, PT-4 and PT-8 also apply to mk-invoice-bot; the full list applies to Jarvis.
+Done while Jarvis was briefly scoped into this repo (D22, later superseded by D39). Result: **D38, patterns only.** No third-party code is copied. Patterns PT-1, PT-2, PT-4 and PT-8 also apply to mk-invoice-bot; the full list applies to Jarvis. In the bot's backlog they land in S1.7 (PT-1), S2.7 (PT-2), S2.8 (PT-4) and S1.6 (PT-8).
 
 ## Candidates
 
