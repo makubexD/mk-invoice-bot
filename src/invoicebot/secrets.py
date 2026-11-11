@@ -80,7 +80,11 @@ class Secrets:
     @property
     def missing(self) -> frozenset[str]:
         """Declared keys that the store does not hold."""
-        return frozenset(key for key in self._declared if self._store._lookup(key) is None)
+        return frozenset(
+            key
+            for key in self._declared
+            if self._store._lookup(key) is None  # noqa: SLF001 - same module owns the store
+        )
 
     @property
     def enabled(self) -> bool:

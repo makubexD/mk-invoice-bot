@@ -42,10 +42,31 @@ src = ["src", "tests"]
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP", "S", "ASYNC"]
+# The lint set is the enforced part of CLAUDE.md "Design rules": naming (N),
+# simpler code (SIM, RET, C4, PIE), size and complexity limits (C90, PLR09),
+# unused arguments (ARG), dead code (ERA), no print (T20), no private access
+# across modules (SLF), imports at module top (PLC0415), pytest style (PT).
+select = [
+    "E", "F", "I", "B", "UP", "S", "ASYNC",
+    "N", "SIM", "RET", "C4", "PIE", "A",
+    "C90", "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLC0415",
+    "ARG", "ERA", "T20", "SLF", "PTH", "DTZ", "PT", "TID252", "RUF",
+]
+ignore = [
+    "N818",   # exception names state the failure (SecretMissing); no forced Error suffix
+    "RUF001", # es-PE chat messages use typographic characters on purpose
+    "PT012",  # a rollback test needs the whole `async with` block inside pytest.raises
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 6
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101"]
+"tests/**" = ["S101", "ARG", "SLF001"]
+"scripts/**" = ["T201"] # command-line tools print for the person running them
 
 [tool.mypy]
 python_version = "3.12"

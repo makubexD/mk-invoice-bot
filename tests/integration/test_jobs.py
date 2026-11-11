@@ -179,7 +179,9 @@ async def test_fail_backs_off_and_clears_the_lease(
     assert attempts == 1
     assert lease_until is None
     assert last_error == "boom"
-    assert after_now and after_a_minute and within_three_minutes
+    assert after_now
+    assert after_a_minute
+    assert within_three_minutes
 
 
 async def test_fifth_failure_parks_job_and_fails_invoice(
