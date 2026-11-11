@@ -1,0 +1,371 @@
+"""Typed pydantic models for the runtime configuration (R-9.6).
+
+Every model forbids unknown keys so a typo is caught at load time rather than
+silently ignored.
+"""
+
+from __future__ import annotations
+
+from typing import Annotated, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class Owner(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ruc: str
+    profile: str
+    timezone: str
+    language: str
+
+
+class Work(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    ruc: str
+
+
+class Profile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    whatsapp: str | None = None
+    telegram_user_id: int | None = None
+    preferred_channel: Literal["whatsapp", "telegram"] | None = None
+    flows: list[str]
+    can_send_batch: bool
+    admin: bool = False
+
+
+class ChannelTemplates(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    completion: str
+    manual_required: str
+    resume_notice: str
+    pending_user_reminder: str
+    batch_preview: str
+    admin_alert: str
+
+
+class WhatsAppChannel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["whatsapp_cloud"]
+    phone_number_id: str
+    graph_api_version: str
+    templates: ChannelTemplates
+
+
+class TelegramChannel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["telegram"]
+    enabled: bool
+
+
+type Channel = Annotated[WhatsAppChannel | TelegramChannel, Field(discriminator="kind")]
+
+
+class ValidezApi(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class Sol(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+
+
+class Padron(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    refresh_cron: str
+
+
+class Sunat(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    validez_api: ValidezApi
+    sol: Sol
+    padron: Padron
+
+
+class Ocr(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    engine: str
+    lang: str
+    timeout_s: int
+
+
+class Extraction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_image_px: int
+    ocr: Ocr
+    review_threshold: float
+    max_invoice_age_days: int
+
+
+class LlmFallback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str
+    model: str
+    max_image_px: int
+    monthly_cap_usd: float
+    flows: dict[str, bool]
+
+
+class RoutingRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    when: dict[str, list[str]]
+    flow: str
+
+
+class Routing(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    confirm_mode: Literal["auto", "always"]
+    rules: list[RoutingRule]
+    unmatched: Literal["ask", "reject"]
+
+
+class GoogleDriveSink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["google_drive"]
+    root_folder_id: str
+    path: str
+    filename: str
+    upload: list[str]
+
+
+class GoogleSheetsSink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["google_sheets"]
+    spreadsheet_id: str
+    tab: str
+    upsert_key: str
+    columns: dict[str, str]
+
+
+class OneDriveSink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["onedrive"]
+    account: str
+    path: str
+    filename: str
+    upload: list[str]
+
+
+class ExcelTemplateSink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["excel_template"]
+    template: str
+    template_sha256: str
+    allow_macros: bool
+    output: str
+    sheet: str
+    cells: dict[str, str]
+
+
+class MailerTrigger(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    modes: list[Literal["on_command", "per_invoice", "scheduled"]]
+    confirm_before_send: bool
+    min_items: int
+
+
+class MailerSink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["mailer"]
+    provider: Literal["graph", "gmail"]
+    batch_aware: bool
+    trigger: MailerTrigger
+    to: list[str]
+    cc: list[str]
+    subject: str
+    body_template: str
+    attach: list[str]
+    zip_if_over_mb: int
+
+
+type Sink = Annotated[
+    GoogleDriveSink | GoogleSheetsSink | OneDriveSink | ExcelTemplateSink | MailerSink,
+    Field(discriminator="kind"),
+]
+
+
+class Flow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    fetchers: list[str]
+    required_docs: list[str]
+    deliver_without_docs: bool
+    sinks: list[Sink]
+
+
+class EmailInbox(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["gmail", "graph"]
+    retry_schedule: list[str]
+
+
+class PaidSolver(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    provider: str
+
+
+class Captcha(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    local_ocr_attempts: int
+    ask_user_timeout_s: int
+    paid_solver: PaidSolver
+
+
+class PaidApi(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    provider: str
+
+
+class Retrieval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email_inbox: EmailInbox
+    captcha: Captcha
+    paid_api: PaidApi
+
+
+class GapsGithub(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool
+    repo: str
+    app_id: int
+    installation_id: int
+    labels: list[str]
+    daily_write_budget: int
+
+
+class Gaps(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    github: GapsGithub
+    admins: list[str]
+    teach_via_chat: bool
+    realert_days: int
+    broken_after: int
+    digest_kinds: list[str]
+    digest_cron: str
+
+
+class BackupTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    kind: str
+    path: str
+
+
+class Backup(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    cron: str
+    age_recipient: str
+    target: BackupTarget
+
+
+class RetentionDays(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    messages_payload: int
+    outbox: int
+    events: int
+    jobs: int
+
+
+class OutboxBacklog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_rows: int
+    max_age_min: int
+
+
+class SelfAlerts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    outbox_backlog: OutboxBacklog
+    disk_pct: int
+
+
+class Ops(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    backup: Backup
+    retention_days: RetentionDays
+    self_alerts: SelfAlerts
+
+
+class MediaMaxBytes(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    image: int
+    pdf: int
+    xml: int
+    zip: int
+
+
+class MediaLimits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_megapixels: int
+    max_bytes: MediaMaxBytes
+    zip_max_entries: int
+    zip_max_ratio: int
+
+
+class Limits(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_queued_per_sender: int
+    question_timeout_h: int
+    media: MediaLimits
+    heavy_concurrency: int
+    browser_idle_close_s: int
+    per_domain_min_interval_s: int
+
+
+class Config(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    owner: Owner
+    work: Work
+    profiles: dict[str, Profile]
+    channels: list[Channel]
+    sunat: Sunat
+    extraction: Extraction
+    llm_fallback: LlmFallback
+    routing: Routing
+    flows: dict[str, Flow]
+    retrieval: Retrieval
+    gaps: Gaps
+    ops: Ops
+    limits: Limits
