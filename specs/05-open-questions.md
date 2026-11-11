@@ -55,4 +55,4 @@ Until they are answered, work proceeds with the default in the last column. Q2â€
 | Q8 | Do you also need **boletas** (B-series, buyer DNI) or only **facturas** (F-series)? | Boletas often lack a buyer RUC; SOL won't list them | Facturas first, boletas best-effort |
 | Q9 | Any currency other than PEN (USD invoices)? | Parsing and Sheets formatting | PEN, USD read from XML when present |
 | Q10 | Comfortable creating a **secondary SOL user** with query-only permissions for the bot? | Security of the `sunat_sol` fetcher | Yes |
-| Q11 | Do you already have a VPS provider or a domain for Cloudflare Tunnel? | Deploy | Any 1 GB VPS, plus a free `trycloudflare` URL for dev |
+| Q11 | Do you already have a VPS provider or a domain for Cloudflare Tunnel? | Deploy | Local Docker for now (D31); later any â‰¤ 2 GB VPS, plus a free `trycloudflare` URL for dev |

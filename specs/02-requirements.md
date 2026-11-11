@@ -23,10 +23,10 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 - **R-1.4 (M)** THE SYSTEM SHALL download the media within 60 s of the webhook, because Meta's media URL expires after 5 minutes.
 - **R-1.5 (S)** WHEN a sender sends a PDF or XML document while an invoice is in `MANUAL_REQUIRED` or `CONFIRMING`, THE SYSTEM SHALL attach it to that invoice. The invoice is the one the message quotes, or the most recent open one.
 - **R-1.6 (S)** WHEN a sender sends several photos in a row, THE SYSTEM SHALL process them as independent jobs, serialized (FIFO).
-- **R-1.7 (C)** THE SYSTEM SHALL support Telegram as an alternative channel through the same port.
+- **R-1.7 (S)** THE SYSTEM SHALL support **Telegram** as a second channel through the same port (D41): allowlist by Telegram user id, webhook verified with `X-Telegram-Bot-Api-Secret-Token`, inline keyboards in place of reply buttons. Each sender profile can link one WhatsApp number and one Telegram id.
 - **R-1.8 (M)** Webhook processing SHALL be idempotent per Meta `message.id`, because Meta retries deliveries.
 
-## R-2 · Extraction (no AI)
+## R-2 · Extraction (deterministic first)
 - **R-2.1 (M)** THE SYSTEM SHALL try QR decoding first, with a cascade of zxing-cpp → WeChat QR → pyzbar on preprocessed variants (original, grayscale, upscaled, sharpened, rotated 90°/180°/270°), stopping at the first valid SUNAT payload.
 - **R-2.2 (M)** WHEN a SUNAT QR is decoded, THE SYSTEM SHALL extract: `ruc_emisor`, `tipo` (01/03/07/08), `serie`, `numero`, `igv`, `total`, `fecha_emision`, `tipo_doc_adq`, `num_doc_adq`.
 - **R-2.3 (M)** IF no valid QR is found, THE SYSTEM SHALL run OCR (OpenCV preprocessing + Tesseract `spa`) and a regex/keyword parser that extracts the same fields plus `razon_social` (header text).
@@ -41,6 +41,7 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 - **R-2.8 (S)** IF the QR contains a URL instead of data, THE SYSTEM SHALL store it as `document_url` for the fetcher.
 - **R-2.10 (S)** THE SYSTEM SHALL capture URLs printed on the receipt (OCR regex such as `consulte .* en (\S+)`) as `printed_urls`. They are hints for the gap PR (R-11.5), not fetch targets.
 - **R-2.9 (M)** Extraction accuracy target, measured on the golden dataset: ≥ 95% of invoices with a readable QR get every QR field exactly right; with OCR only, ≥ 80% of fields are right.
+- **R-2.11 (C)** IF QR, XML and OCR all fail to give the required fields, AND the `llm_fallback` adapter is enabled (off by default, D24), THE SYSTEM SHALL send the downscaled image to the configured vision LLM through a provider-neutral port, tag every returned field `source=llm` with confidence ≤ 0.5, and **always** require user confirmation (overrides `confirm_mode: auto`). Each call is logged with tokens and cost and counts against a monthly cap.
 
 ## R-3 · Routing and confirmation (no flow menu)
 - **R-3.1 (M)** THE SYSTEM SHALL pick the flow **automatically** with ordered routing rules (first match wins). The default rules are buyer RUC = owner RUC → A (BR-R01) and buyer RUC = work RUC → B (BR-R02). Rules can match on `num_doc_adq`, `tipo_doc_adq`, `ruc_emisor`, `tipo` and the sender profile, so adding a flow C later is a config change, not new code.
@@ -102,13 +103,13 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 - **R-8.2 (M)** IF any step fails irrecoverably, THE SYSTEM SHALL say which step failed and what the user can do.
 
 ## R-9 · Non-functional
-- **R-9.1 (M)** Memory: steady state ≤ 350 MB RSS, peak ≤ 800 MB on a 1 GB host, verified by a load test of 10 queued invoices.
+- **R-9.1 (M)** Memory: steady state ≤ 350 MB RSS, peak ≤ 800 MB for the `app` container (Postgres excluded, ≤ 300 MB on its own), verified by a load test of 10 queued invoices.
 - **R-9.2 (M)** Latency: acknowledgement in < 5 s. Summary (QR path) in < 20 s, (OCR path) in < 60 s, on 1 vCPU.
 - **R-9.3 (M)** WhatsApp messages per invoice: ≤ 3 in the happy path (acknowledgement, summary, completion), thanks to auto-routing; ≤ 5 with a gap question. This keeps us inside the free service-message allowance.
 - **R-9.4 (M)** Durability: a restart in any state resumes or reports the job. There are no lost invoices.
 - **R-9.5 (M)** Observability: structured JSON logs, a `/health` endpoint, and per-job step timings. Secrets are never logged.
 - **R-9.6 (M)** Configuration: one YAML file plus `.env` for secrets. Changing flows, portals or templates needs a restart at most (hot reload: C).
-- **R-9.7 (S)** Data retention: local temporary files are deleted after delivery. The SQLite record is kept. Originals live in Drive or OneDrive.
+- **R-9.7 (S)** Data retention: local temporary files are deleted after delivery. The Postgres record is kept. Originals live in Drive or OneDrive.
 - **R-9.8 (M)** Language: user-facing messages in Spanish (es-PE), code and logs in English.
 
 ## R-10 · Commands (chat)
@@ -140,3 +141,13 @@ Priority: **M** = MVP, **S** = should (v1), **C** = could (later).
 - **R-11.9 (M)** WHEN the deployed config changes (a pull from the default branch, then a hot reload of `portals.yaml`, `parsing_rules.yaml` and routing), THE SYSTEM SHALL re-evaluate open gaps. For each gap that is now fixed, it SHALL re-enqueue the linked invoices (`MANUAL_REQUIRED`/`PENDING_AUTH` → `FETCHING_DOCS`/`DELIVERING`) and tell their senders.
 - **R-11.10 (M)** GitHub access SHALL use a credential scoped to **this repository only**, with Issues, Pull requests and Contents (write) permissions. The daily budget for GitHub writes is ≤ 20 operations. Failures to reach GitHub SHALL NOT affect invoice processing; they are retried from the outbox.
 - **R-11.11 (S)** IF GitHub is disabled or unreachable for more than 24 h, THE SYSTEM SHALL still alert the admin on WhatsApp, so the alert path never depends only on GitHub.
+
+## R-12 · Integration contract (D39, constitution P10)
+Consumers (Jarvis, n8n, future apps) integrate only through this surface. The bot works fully without any consumer.
+- **R-12.1 (S)** THE SYSTEM SHALL expose a versioned REST API (`/api/v1`, OpenAPI published) to list and get invoices, filtered by date, flow, issuer and state, and to read spend summaries by period, flow and issuer.
+- **R-12.2 (S)** THE SYSTEM SHALL expose an **MCP server** (streamable HTTP) with read tools (`list_invoices`, `get_invoice`, `spend_summary`, `pending_manual`, `list_gaps`) and write tools (`reprocess_invoice`, `cancel_invoice`, `attach_document`). Write tools go through the same state machine and business rules as chat commands.
+- **R-12.3 (S)** Every API and MCP client SHALL authenticate with a **scoped token** (`read`, `write`), stored hashed and revocable. A missing or invalid token gets 401; the read scope is the default.
+- **R-12.4 (S)** WHEN an invoice reaches `DELIVERED`, `MANUAL_REQUIRED`, `PENDING_USER` or `FAILED`, or a gap is raised or closed, THE SYSTEM SHALL POST a versioned event (`invoice.delivered`, `invoice.manual_required`, `invoice.pending_user`, `invoice.failed`, `gap.raised`, `gap.closed`) to every configured subscriber, signed with HMAC-SHA256, through the outbox with retries. The existing `n8n_hook` sink becomes one subscriber of this mechanism.
+- **R-12.5 (S)** Events and API responses SHALL include only invoice data and ids, never secrets, OAuth tokens or raw credentials.
+- **R-12.6 (C)** A breaking change to the API, MCP tools or event schema SHALL ship as a new version, with the previous version kept for at least one release.
+- **R-12.7 (M)** The bot SHALL NOT import, call or require any consumer for its core flows. An unreachable subscriber only delays its own events.

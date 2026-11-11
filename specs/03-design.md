@@ -3,23 +3,25 @@
 ## 1. Architecture overview
 
 ```
- WhatsApp Cloud API ──HTTPS──► Cloudflare Tunnel ──► app (single Python process, asyncio)
+ WhatsApp Cloud API / Telegram ──HTTPS──► Cloudflare Tunnel ──► app (single Python process, asyncio) ◄── Postgres
                                                       │
    ┌──────────────────────────────────────────────────┼─────────────────────────────────────┐
    │ channels/        ← port: Channel  (whatsapp, telegram)                                  │
    │ api/webhook      → verify signature → dedupe msg.id → persist → enqueue → 200 OK        │
-   │ queue/           SQLite-backed job queue (lease + retry + backoff)                      │
+   │ api/             REST /api/v1 (OpenAPI) + MCP server (streamable HTTP), scoped tokens   │
+   │ queue/           Postgres job queue (SKIP LOCKED, lease + retry + backoff)              │
    │ worker/          1 async worker loop; HEAVY semaphore = 1 (OCR / browser)               │
    │ pipeline/        state machine per invoice (see §4)                                     │
    │   routing/       ordered rules → flow id (no menu unless unmatched, see §12)            │
    │   rules/         business-rule catalog BR-* → state + es-PE message (spec 06)           │
-   │   extract/       qr.py → ocr.py → parse.py → validate.py   (+ padron lookup)            │
+   │   extract/       qr → ocr → parse → validate (+ padron) → llm_fallback (off by default) │
    │   sunat/         validez API client (token cache)                                       │
    │   fetchers/      chain: qr_url → portal_registry → email_inbox → sunat_sol → paid → manual│
-   │   sinks/         google_drive, google_sheets, onedrive, excel_template, mailer, n8n_hook│
+   │   sinks/         google_drive, google_sheets, onedrive, excel_template, mailer          │
    │ flows/           declarative YAML: which fetchers, which sinks, batching, templates     │
    │ scheduler/       tiny cron (asyncio) for scheduled batches + housekeeping               │
-   │ store/           SQLite (WAL): messages, invoices, jobs, batches, files, kv cache       │
+   │ store/           Postgres: messages, invoices, jobs, batches, files, events, kv cache   │
+   │ events/          signed event webhooks to subscribers (Jarvis, n8n, …) via the outbox   │
    │ gaps/            gap service → outbox → GitHub REST (issue + draft PR) + admin WhatsApp │
    └─────────────────────────────────────────────────────────────────────────────────────────┘
          ▲ on demand only: chromium-headless-shell (Playwright), tesseract (subprocess)
@@ -33,16 +35,18 @@
 - **Registry:** portals and flows.
 - **Rules engine (ordered predicates, first match):** routing.
 - **Observer/outbox:** gap events fan out to GitHub and admin alerts without blocking the pipeline.
-- **Outbox:** outgoing WhatsApp messages are persisted, then sent, so they're retry-safe.
+- **Outbox:** outgoing chat messages, GitHub calls and event webhooks are persisted, then sent, so they're retry-safe.
+- **Published contract (P10):** REST, MCP and events are the only way other systems (Jarvis, n8n) reach the bot. The bot never calls into them except to deliver events.
 
-## 2. Tech stack (chosen for a 1 GB RAM host)
+## 2. Tech stack (chosen for a ≤ 2 GB RAM host)
 | Concern | Choice | Why |
 |---|---|---|
 | Language | Python 3.12, `uv` | Best OCR, QR, openpyxl and Playwright ecosystem |
-| HTTP server | Starlette + uvicorn (1 worker, `--loop uvloop`) | ~40 MB, async |
+| HTTP server | FastAPI (on Starlette) + uvicorn (1 worker, `--loop uvloop`) | Async; OpenAPI for the REST contract (R-12.1) at little extra cost |
+| MCP server | Official `mcp` Python SDK, streamable HTTP, mounted in the same app | R-12.2; no extra process |
 | Models / config | pydantic v2 + `pydantic-settings`, YAML | Validation of config and extracted data |
 | HTTP client | `httpx` (one shared AsyncClient, HTTP/2 off, pooled) | Thin REST to Meta, Google, Graph and SUNAT; avoids the heavy `google-api-python-client` |
-| DB / queue / cache | SQLite WAL via `aiosqlite` | Zero extra processes |
+| DB / queue / cache | **Postgres 16** via `psycopg` 3 (async, small pool); Alembic with plain-SQL migrations | D40: safe concurrent writes, remote querying for the API, queue via `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` to wake the worker |
 | QR | `zxing-cpp`, `opencv-contrib-python-headless` (wechat_qrcode), `pyzbar` | Cascade |
 | OCR | Tesseract 5 + `spa` (apt), invoked as a subprocess | Memory is freed when it exits |
 | Images | OpenCV headless; downscale long side to ≤ 2000 px; `cv2.IMREAD_REDUCED_*` when huge | Bounded memory |
@@ -50,14 +54,15 @@
 | Excel | `openpyxl` (keep formatting; `keep_vba` for .xlsm) | Graph Excel API is unsupported on personal OneDrive |
 | XML | `lxml` with UBL 2.1 XPaths (ported from Greenter) | Fast, small |
 | Auth | Google OAuth refresh token (manual HTTP), `msal` token cache for Graph | |
-| Padrón RUC | SQLite table `padron(ruc INTEGER PRIMARY KEY, name, estado, condicion) WITHOUT ROWID`, refreshed weekly by streaming the ZIP (no full load in RAM) | ~O(log n) lookup, ~0 RAM |
-| Deploy | Docker Compose: `app` (mem_limit 850m) + `cloudflared`; 2 GB swapfile on host | |
-| n8n | **Optional** `sinks/n8n_hook` (POST JSON to an n8n webhook) | See below |
+| Padrón RUC | Postgres table `padron(ruc bigint PRIMARY KEY, razon_social, estado, condicion)`, refreshed weekly by streaming the ZIP into `COPY` on a staging table, then swapping | Indexed lookup, ~0 app RAM |
+| LLM fallback | Optional adapter behind an `LLMExtractor` port; thin `httpx` call to an OpenAI-compatible endpoint (DeepSeek by default). The provider must support image input: verify when E3b starts | D24, R-2.11 |
+| Deploy | Docker Compose: `app` (mem_limit 900m) + `postgres` (mem_limit 300m, `shared_buffers=64MB`) + `cloudflared`; 1–2 GB swapfile on host. Local dev uses the same Compose file (D31) | |
+| n8n | **Optional** event subscriber (R-12.4) | See below |
 
 ### Note on n8n (open question Q1)
-You chose "code + n8n". On 1 GB, n8n (250–450 MB resident) **plus** a Chromium fetch (≈300 MB) plus OCR can exceed the budget.
+You chose "code + n8n". On a small host, n8n (250–450 MB resident) **plus** a Chromium fetch (≈300 MB) plus OCR can exceed the budget.
 
-**Design decision:** the Python core implements every adapter natively, through thin REST calls. n8n is an **optional sink**: any flow can add `n8n_hook` to hand the confirmed invoice JSON and file URLs to an n8n workflow.
+**Design decision:** the Python core implements every adapter natively, through thin REST calls. n8n, like Jarvis, is an **optional event subscriber** (R-12.4): it receives the signed `invoice.delivered` event with the invoice JSON and file URLs, and can call back through the REST API.
 
 Enable it when:
 - a. the host has ≥ 2 GB, or
@@ -65,7 +70,7 @@ Enable it when:
 
 You keep visual customization when you want it, and the core never depends on it.
 
-## 3. Data model (SQLite)
+## 3. Data model (Postgres)
 ```
 messages(id TEXT PK /*meta msg id*/, sender, kind, received_at, payload_json)            -- idempotency
 invoices(id INTEGER PK, sender, flow_id, state, natural_key TEXT UNIQUE NULL,
@@ -80,10 +85,13 @@ fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason, ms, at)      
 outbox(id PK, channel /*whatsapp|github*/, to, payload_json, state, attempts, created_at) -- outbox pattern
 gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|ignored*/,
      hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL, pr_url NULL)
-invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint)) WITHOUT ROWID
-taught_links(ruc_emisor INTEGER PK, url, sender, at) WITHOUT ROWID                       -- R-11.4
-kv(key PK, value, expires_at)                                                            -- token cache etc.
-padron(ruc INTEGER PK, razon_social, estado, condicion) WITHOUT ROWID
+invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint))
+taught_links(ruc_emisor bigint PK, url, sender, at)                                      -- R-11.4
+kv(key PK, value, expires_at)                                         -- UNLOGGED; token cache etc.
+padron(ruc bigint PK, razon_social, estado, condicion)
+api_tokens(id PK, name, token_hash, scopes text[], created_at, last_used_at, revoked_at)   -- R-12.3
+event_subscribers(id PK, name, url, secret_ref, event_types text[], active)              -- R-12.4
+events(id PK, type, version, invoice_id NULL, payload_json, created_at)                   -- delivered via outbox
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
@@ -101,7 +109,7 @@ RECEIVED ─► EXTRACTING ─► ROUTING ──(rule matched & all fields ok, c
    VALIDATING (estadoCp=2, BR-V02) ─► CONFIRM_INVALID ─(user: continue)─► FETCHING_DOCS
    any ─► CANCELLED (/cancelar, BR-R05, BR-E05) ;  transient error ─► retry w/ exp. backoff (max 5) ─► FAILED
 ```
-- Each transition is a single SQLite transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain *why* an invoice is where it is.
+- Each transition is a single Postgres transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain *why* an invoice is where it is.
 - With `confirm_mode: auto`, the "Editar" and "Cancelar" buttons from the summary are accepted in any state before `DELIVERING`. An edit re-enters `ROUTING`.
 
 ## 5. Extraction pipeline detail
@@ -183,44 +191,50 @@ Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, 
   - Block fonts, media and analytics with route interception.
 - **Lazy imports:** heavy modules (cv2, playwright, openpyxl, lxml, jinja2) are imported inside the functions that need them. Idle RSS stays at about 60 MB.
 - **Bounded queues:** at most 20 queued jobs per sender. Back-pressure message: "estoy procesando N facturas, te aviso".
-- **SQLite:** `journal_mode=WAL`, `synchronous=NORMAL`, `cache_size=-8000` (8 MB), `mmap_size=64MB`, indices on `invoices(state)`, `jobs(run_after)`, `invoices(natural_key)`.
+- **Postgres:** small footprint (`shared_buffers=64MB`, `max_connections=20`, app pool of 5), indices on `invoices(state)`, `jobs(run_after)`, `invoices(natural_key)`. The worker sleeps on `LISTEN jobs` instead of polling.
 - **Files:** stream downloads to `/data/tmp/{invoice_id}/`, using SHA-256 for dedup of identical photos. Purge after `DONE`, plus a nightly housekeeping cron.
-- **Padrón import:** stream-unzip, parse line by line, `executemany` in chunks of 50k inside one transaction. Peak RAM stays under 50 MB.
+- **Padrón import:** stream-unzip, parse line by line, and stream into `COPY padron_staging`, then swap tables in one transaction. Peak RAM stays under 50 MB.
 - **Measure, don't guess:** a `scripts/memprofile.py` runs the golden set and records peak RSS per step (`psutil`). CI fails if the peak is over 800 MB (R-9.1).
 
 ## 9. Security
 - Webhook: HMAC SHA-256 check with the app secret. Verify-token handshake on GET.
 - Allowlist: `senders:` in config, mapped to a profile (allowed flows, permissions such as `can_send_batch`, admin).
 - Secrets in `.env` (root-only permissions). Optional `sops` + `age` for encrypted-at-rest files in the repo. The token caches (`msal`, Google refresh token) live in `/data/secrets/` with mode 600.
+- Telegram: webhook secret token (`X-Telegram-Bot-Api-Secret-Token`) checked on every call; allowlist by user id.
+- API and MCP: bearer tokens stored as hashes, scopes `read`/`write`, revocable (R-12.3). Event webhooks are signed with HMAC-SHA256 per subscriber.
+- A missing secret fails closed: an empty token or secret disables the endpoint, it never skips the check.
 - SOL: secondary user with only the query options. Credentials are never sent to paid APIs unless that adapter is explicitly enabled.
 - The scraper honors per-domain rate limits (≥ 10 s between requests to the same portal), uses a realistic UA, and makes no parallel requests.
 
 ## 10. Repository layout (planned)
 ```
-invoice-bot/
+mk-invoice-bot/
   specs/                 # this spec set
   config/                example.yaml, portals.yaml, parsing_rules.yaml, issuers.yaml
   src/invoicebot/
-    app.py               # Starlette app, routes, lifespan
+    app.py               # FastAPI app, routes, lifespan
+    api/{rest,mcp,auth}.py  # public contract (R-12)
+    events/{schema,publisher}.py
     settings.py
     channels/{base,whatsapp,telegram}.py
-    store/{db,migrations,repo}.py
+    store/{db,repo}.py   # migrations/ holds Alembic plain-SQL revisions
     queue/{jobs,worker,scheduler}.py
     pipeline/{states,machine,messages_es}.py
     routing/router.py    # ordered rules → flow id
     rules/catalog.py     # BR-* ids → (state, message key); parity test vs specs/06
     gaps/{service,github,alerts,stubs}.py
-    extract/{image,qr,ocr,parse,validate,padron,ubl}.py
+    extract/{image,qr,ocr,parse,validate,padron,ubl,llm_fallback}.py
     sunat/{validez,sol}.py
     fetchers/{base,qr_url,portal_registry,email_inbox,sunat_sol,paid_api,manual}.py
     fetchers/portals/{generic_form,...}.py
-    sinks/{base,google_drive,google_sheets,onedrive,excel_template,mailer_gmail,mailer_graph,n8n_hook}.py
+    sinks/{base,google_drive,google_sheets,onedrive,excel_template,mailer_gmail,mailer_graph}.py
     auth/{google_oauth,msal_cache}.py
     browser/pool.py
   scripts/{auth_google.py,auth_microsoft.py,import_padron.py,memprofile.py,check_config.py}
   .github/workflows/{ci.yml,gap-watch.yml}
   .github/ISSUE_TEMPLATE/gap.md
   tests/{unit,integration,golden/{images,expected}}/
+  migrations/
   deploy/{Dockerfile,docker-compose.yml,cloudflared.yml}
 ```
 
@@ -284,3 +298,17 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
   4. After a reload, `GapService.reevaluate()` checks each open gap against the new registry, marks the fixed ones, and re-enqueues the linked invoices.
 - **Credential:** a fine-grained personal access token (D17) limited to this repo, with Issues, Pull requests and Contents (write). It is stored in `.env` as `GITHUB_TOKEN`; its expiry date is stored too, for BR-D05.
 - **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.
+
+## 14. Integration contract (D39, P10, R-12)
+```
+                ┌──────────── mk-invoice-bot ────────────┐
+ Jarvis / n8n ──┤ REST /api/v1  (read, write scopes)      │
+ future apps  ──┤ MCP  /mcp     (same scopes, same rules) │
+                │ events ──HMAC POST──► subscribers ──────┼──► Jarvis / n8n
+                └─────────────────────────────────────────┘
+```
+- **Dependency direction:** consumers depend on the bot's published contract. The bot depends on no consumer. An unreachable subscriber only delays its own events (outbox retries).
+- **Same rules everywhere:** a write through REST or MCP (`reprocess_invoice`, `cancel_invoice`, `attach_document`) goes through the same state machine and business rules as the chat command, and is recorded with the client token name.
+- **Event envelope:** `{id, type, version, occurred_at, invoice: {id, natural_key, flow_id, state, totals…}, links: {api, files}}`. File links point to the sinks (Drive or OneDrive), never to bot-local paths.
+- **Versioning:** `/api/v1`, MCP tool names stay stable, and events carry `version`. A breaking change creates v2 and keeps v1 for at least one release (R-12.6).
+- **What Jarvis adds (outside this repo):** natural-language questions over invoices (MCP read tools), reminders from `invoice.manual_required` and `gap.raised`, and fetching documents through the owner's workstation. None of it is needed for the bot to work.

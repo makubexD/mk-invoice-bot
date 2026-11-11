@@ -30,6 +30,10 @@ Anything bigger gets split before work starts.
 | **M3 · Portals** | E10 | A seeded portal downloads XML/PDF automatically (captcha included). A merged gap PR auto-resumes stuck invoices |
 | **M4 · Flow B** | E11 | 3 work invoices → `/enviar` → one email with PDFs, XMLs and the filled Excel |
 | **M5 · Ops** | E12 | Memory budget enforced in CI, backups, runbook |
+| **M6 · Contract & channels** | E13, E14 | Telegram works like WhatsApp; Jarvis or n8n can read invoices over MCP/REST and receives signed events |
+| *(optional)* | E3b | Vision-LLM fallback, off by default |
+
+**MVP = M1 to M5 (flows A and B, D32).** M6 is v1.1. Each milestone is a checkpoint you can test with real invoices.
 
 ---
 
@@ -42,9 +46,9 @@ Anything bigger gets split before work starts.
 | S0.4 | Manual check: can SOL "Consulta de comprobantes" download the XML of **received** invoices? | S | Yes/no plus screenshots | R-5.2 |
 | S0.5 | Manual check: does the SUNAT validez API answer for a *work* invoice (a different buyer RUC)? | S | Works or not | R-4.1 |
 | S0.6 | List the top 10–20 issuers (RUC, link, fields, captcha type) → seed `portals.yaml` | S | File committed | R-5.8 |
-| S0.7 | Meta app, test number and payment method; webhook through Cloudflare Tunnel | S | An echo bot receives an image | R-1.x |
+| S0.7 | Meta app, a **dedicated** number (a Cloud API number can't stay on the normal WhatsApp app) and a payment method; webhook through a local Cloudflare quick tunnel (D31) | S | An echo bot running in local Docker receives an image | R-1.x |
 | S0.8 | Entra app; device-code login with the personal **and** work accounts | S | Learn whether the work tenant allows consent (Q2) | R-7.1 |
-| S0.9 | Memory spike: Chromium headless-shell plus one page on a 1 GB VM | S | Peak RSS measured | R-9.1 |
+| S0.9 | Memory spike: Chromium headless-shell plus one page, with Postgres running, under a 2 GB Docker memory limit | S | Peak RSS measured | R-9.1 |
 | S0.10 | Create the fine-grained GitHub token (this repo only: Issues, PRs, Contents) and the `gap` labels | S | The token can open an issue on the repo | R-11.10 |
 
 ## E1 · Foundation
@@ -52,8 +56,8 @@ Anything bigger gets split before work starts.
 - *As the developer, I want a scaffolded repo with uv, ruff, mypy, pytest, pre-commit and a Dockerfile, so that every later story starts from green.*
 - **AC:**
   - `GET /health` returns 200.
-  - The Docker image builds.
-  - Idle RSS is < 80 MB.
+  - The Docker image builds, and `docker compose up` starts `app` + `postgres` locally.
+  - Idle RSS of `app` is < 80 MB.
   - Pre-commit runs ruff and mypy.
 
 **S1.2 · Typed config + `check_config.py`** · M · Reqs R-9.6, R-11.6 · Deps S1.1
@@ -64,17 +68,19 @@ Anything bigger gets split before work starts.
   - `{owner.ruc}` placeholders are resolved.
   - `check_config.py` exits ≠ 0 on an invalid config **or** on any portal with `status: todo|broken`, and lists them.
 
-**S1.3 · SQLite store + migrations** · S · Reqs R-9.4 · Deps S1.1
-- *As the system, I want a WAL SQLite schema with versioned migrations, so that state survives restarts.*
+**S1.3 · Postgres store + migrations** · S · Reqs R-9.4 · Deps S1.1
+- *As the system, I want a Postgres schema with versioned Alembic migrations, so that state survives restarts.*
 - **AC:**
   - All the spec 03 §3 tables exist.
-  - Migrations are idempotent.
-  - The pragmas are applied.
+  - `alembic upgrade head` runs on an empty DB and is a no-op on a migrated one; `downgrade -1` works for the latest revision.
+  - Tests run against a real Postgres container, not SQLite.
 
 **S1.4 · Job queue with lease and backoff** · M · Reqs R-9.4 · Deps S1.3
 - *As the system, I want durable jobs with leases and exponential backoff, so that a crash never loses work.*
 - **AC:**
+  - Jobs are claimed with `FOR UPDATE SKIP LOCKED`; two workers never take the same job.
   - A killed worker's job is re-leased after `lease_until`.
+  - The worker wakes on `LISTEN/NOTIFY` and doesn't busy-poll.
   - After 5 failures the job goes to `FAILED`.
   - `HEAVY` semaphore = 1.
 
@@ -83,7 +89,7 @@ Anything bigger gets split before work starts.
 - **AC:**
   - The outbox row is written in the same transaction as the state change.
   - Its sender retries with backoff.
-  - It supports both the `whatsapp` and `github` channels.
+  - It supports the `whatsapp`, `telegram`, `github` and `event` channels.
 
 **S1.6 · CI workflow** · S · Reqs R-11.6 · Deps S1.2
 - *As the owner, I want CI on every push and PR, so that a red build signals that something needs fixing.*
@@ -311,8 +317,31 @@ Anything bigger gets split before work starts.
 | ID | Story | Size | Key AC | Reqs |
 |---|---|---|---|---|
 | S12.1 | `memprofile.py` + latency report in CI | M | CI fails if peak > 800 MB or latency targets are missed | R-9.1, R-9.2 |
-| S12.2 | Deploy: compose + cloudflared + swapfile + systemd pull timer | M | A fresh VPS is running in < 30 min following the runbook | R-11.9 |
-| S12.3 | Nightly backups of SQLite and config to Drive or OneDrive | S | Restore tested | — |
+| S12.2 | Deploy: compose (app + postgres + cloudflared) + swapfile; **CI-gated** deploy with migrations, health check and rollback (D37) | M | A fresh VPS is running in < 30 min following the runbook; a failing health check rolls back | R-11.9 |
+| S12.3 | Nightly encrypted `pg_dump` + config backup off-site (Drive, OneDrive or object storage) | S | Restore into an empty Postgres tested | — |
 | S12.4 | Housekeeping (temp purge, stale jobs, padrón refresh) | S | Disk stays bounded | R-9.7 |
 | S12.5 | Runbook (re-auth tokens, add a portal, rotate secrets, handle a gap PR) | S | Reviewed by the owner | — |
-| S12.6 | Optional: Telegram channel, n8n hook sink, paid API and captcha adapters | M each | Off by default | R-1.7 |
+| S12.6 | Optional: paid CPE API and captcha-solver adapters | M each | Off by default | R-5.2 |
+| S12.7 | **Last step (D27):** on the owner's word, make the GitHub repo private and confirm the deploy still pulls | S | Repo private; deploy green | — |
+
+## E3b · LLM fallback extraction (optional, off by default)
+| ID | Story | Size | Key AC | Reqs |
+|---|---|---|---|---|
+| S3b.1 | `LLMExtractor` port + OpenAI-compatible adapter (DeepSeek default); spike: does the provider accept images? | M | Off by default; runs only after QR, XML and OCR fail; fields tagged `source=llm`, confidence ≤ 0.5; always forces confirmation | R-2.11 |
+| S3b.2 | Usage log and monthly cap | S | Each call records tokens and cost; above the cap the adapter is skipped with a clear message | R-2.11 |
+
+## E13 · Integration contract (v1.1)
+| ID | Story | Size | Key AC | Reqs |
+|---|---|---|---|---|
+| S13.1 | API tokens: create, list and revoke (CLI), hashed storage, `read`/`write` scopes | S | 401 without a token; a read token can't call write endpoints | R-12.3 |
+| S13.2 | REST `/api/v1`: invoices list/get, spend summary | M | OpenAPI published; filters by date, flow, issuer, state | R-12.1 |
+| S13.3 | MCP server: read tools | M | An MCP client (e.g. Claude Code or Jarvis) lists and queries invoices with a read token | R-12.2 |
+| S13.4 | MCP and REST write tools through the state machine | M | `reprocess`, `cancel` and `attach_document` behave exactly like the chat commands, with the same BR ids; the token name is recorded | R-12.2 |
+| S13.5 | Event publisher: subscribers, HMAC signing, outbox retries | M | A test subscriber receives `invoice.delivered` with a valid signature; a down subscriber doesn't block the pipeline | R-12.4, R-12.5 |
+| S13.6 | Contract tests: OpenAPI snapshot, MCP tool schemas, event schema | S | CI fails on an unversioned breaking change | R-12.6 |
+
+## E14 · Telegram channel (v1.1)
+| ID | Story | Size | Key AC | Reqs |
+|---|---|---|---|---|
+| S14.1 | Telegram adapter on the `Channel` port: webhook with secret token, photos and documents, inline keyboards | M | The same conversation tests that pass on the fake channel pass on Telegram fixtures | R-1.7 |
+| S14.2 | Sender profiles link one WhatsApp number and one Telegram id | S | An invoice started on one channel can be queried with `/estado` on the other | R-1.7 |
