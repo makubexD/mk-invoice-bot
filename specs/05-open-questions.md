@@ -28,6 +28,7 @@
 | D23 | Hosting: **~4 GB RAM, ~US$10–25/mo**. Supersedes D7 and P1/P2's $0 and 1 GB limits. n8n, Langfuse and Redis are deferred until a measured need |
 | D24 | LLM in the invoice pipeline: **fallback only**. QR → XML → OCR stay first; a vision LLM runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms. Amends P3 |
 | D25 | Non-owner senders: **invoice intake only**. Memory, tools and general chat are owner-only |
+| D26 | Jarvis is built **in this repository**, with Jarvis core + `modules/invoices/`. Candidate projects are not forked as separate repos; only copied code (subject to its license) or patterns come in. Repo rename is optional and still open |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
