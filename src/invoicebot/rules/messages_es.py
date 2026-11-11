@@ -8,6 +8,9 @@ compares each entry with the spec row it came from.
 Keys are rule IDs for a rule's primary message. A row that carries a second
 message for a different recipient adds a ``_<role>`` suffix
 (``_admin``, ``_owner`` or ``_sender``); the primary is the sender's message.
+
+``STATE_DESC`` holds the user-facing name of each invoice state, used for
+BR-S02's ``{state_desc}``.
 """
 
 MESSAGES: dict[str, str] = {
@@ -107,8 +110,36 @@ MESSAGES: dict[str, str] = {
         "Dejé el comprobante #{id} en pendientes porque no tuve respuesta. "
         "Retómalo cuando quieras con /pendientes."
     ),
+    "BR-S09": "📥 Recibido. Estoy leyendo tu comprobante #{id}.",
     "BR-O01": "📮 Hay {n} mensajes sin enviar (el más antiguo de hace {age}).",
     "BR-O02": "💾 El disco está al {pct}%.",
     "BR-O03": "🔑 El token de {channel} no funciona. Renuévalo.",
     "BR-O04": "🗄️ Falló la copia de seguridad de anoche ({reason_desc}).",
 }
+
+STATE_DESC: dict[str, str] = {
+    "RECEIVED": "recibido",
+    "EXTRACTING": "en lectura",
+    "EXTRACT_FAILED": "esperando una mejor foto",
+    "ROUTING": "en clasificación",
+    "CONFIRMING": "esperando tu confirmación",
+    "VALIDATING": "en validación",
+    "CONFIRM_INVALID": "esperando tu decisión",
+    "FETCHING_DOCS": "buscando sus archivos",
+    "WAITING_CAPTCHA": "esperando un captcha",
+    "MANUAL_REQUIRED": "esperando sus archivos",
+    "PENDING_USER": "pendiente de tu respuesta",
+    "PENDING_AUTH": "esperando una autorización",
+    "DELIVERING": "en entrega",
+    "BATCHED": "en el lote",
+    "DONE": "terminado",
+    "CANCELLED": "cancelado",
+    "FAILED": "con error",
+}
+
+_UNKNOWN_STATE_DESC = "en otro estado"
+
+
+def state_desc(state: str) -> str:
+    """Return the es-PE description of an invoice state for BR-S02's ``{state_desc}``."""
+    return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)

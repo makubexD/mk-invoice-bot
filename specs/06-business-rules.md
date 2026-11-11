@@ -89,6 +89,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-S06 | A sender teaches a portal link (BR-F02 answer or `/portal`) | Stored as `proposed`; used only after the owner approves | Owner: `🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?` [Aprobar] [Rechazar]. Sender: `Gracias. Lo revisará el administrador antes de usarlo.` |
 | BR-S07 | A command names an invoice id that doesn't exist or belongs to another profile (sender not admin) | No change | `No encontré el comprobante #{id}.` |
 | BR-S08 | A question isn't answered within `question_timeout` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
+| BR-S09 | An allowlisted sender sends a photo and it is queued (R-1.1) | Invoice created in `RECEIVED`; job enqueued | `📥 Recibido. Estoy leyendo tu comprobante #{id}.` |
 
 ### Operations (O) · admin-only
 | ID | Condition | Result | Chat message (admin) |
