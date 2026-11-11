@@ -121,6 +121,50 @@ What rollback **does not** do:
 
 If no previous tag is recorded, the failure is reported and nothing is restarted.
 
+## WhatsApp channel
+
+The app serves `/health` only until `CONFIG_DIR` holds both `config.yaml` and
+`secrets.age`. With both present it mounts `/webhook/whatsapp` and starts the job
+worker and the outbox sender. Downloaded media goes to the `appdata` volume at
+`/data`.
+
+The channel needs three secrets in the encrypted file (never in the environment
+or `.env`; startup refuses secret-looking variables, R-9.9):
+
+| Key | What it is |
+|---|---|
+| `whatsapp_token` | Graph API access token of the business number |
+| `whatsapp_app_secret` | Meta app secret, used to check `X-Hub-Signature-256` |
+| `whatsapp_verify_token` | Generate with `openssl rand -hex 32`; Meta echoes it in the handshake |
+
+If any of them is missing the webhook is not mounted and one error is logged.
+
+Encrypt the file with `age` and keep its identity beside it as
+`age-identity.txt` (the Compose defaults; change `SECRETS_PATH` or
+`AGE_IDENTITY_PATH` to move them):
+
+```sh
+age-keygen -o config/age-identity.txt
+chmod 600 config/age-identity.txt
+age -r "$(age-keygen -y config/age-identity.txt)" -o config/secrets.age secrets.yaml
+shred -u secrets.yaml
+```
+
+### Local trials through a Cloudflare quick tunnel (D31)
+
+Meta needs a public HTTPS URL. For a local trial, a quick tunnel gives one with
+no account and no open port:
+
+```sh
+cloudflared tunnel --url http://localhost:8080
+```
+
+It prints a `https://<random>.trycloudflare.com` URL. In the Meta app's WhatsApp
+configuration set the callback URL to `<that URL>/webhook/whatsapp` and the
+verify token to the value of `whatsapp_verify_token`, then subscribe to the
+`messages` field. The URL changes every time the tunnel restarts, so update the
+callback each time; quick tunnels are for trials only.
+
 ## Config-only mode
 
 The app reloads its config on `SIGHUP`, so a config change does not need a new

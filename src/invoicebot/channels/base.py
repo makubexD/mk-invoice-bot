@@ -41,7 +41,17 @@ class InboundMessage(BaseModel):
     text: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
     reply_to_external_id: str | None = None
+    button_id: str | None = None
     received_at: datetime
+
+
+class Button(BaseModel):
+    """A reply button or list row: the id the channel echoes back and its label."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    id: str
+    title: str
 
 
 class OutboundMessage(BaseModel):
@@ -54,7 +64,7 @@ class OutboundMessage(BaseModel):
     profile_id: str
     rule_id: str | None = None
     text: str
-    buttons: list[str] = Field(default_factory=list)
+    buttons: list[Button] = Field(default_factory=list)
     template: str | None = None
 
 

@@ -22,3 +22,9 @@ htmlcov/
 !.env.example
 *.age.key
 /data/
+
+# Runtime config and secrets: real values never enter the repo (R-9.9).
+config/config.yaml
+config/secrets.age
+config/age-identity.txt
+secrets.yaml

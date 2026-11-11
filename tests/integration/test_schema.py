@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TABLES = {
     "api_tokens",
     "batches",
+    "channel_windows",
     "event_subscribers",
     "events",
     "fetch_attempts",
