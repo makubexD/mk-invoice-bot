@@ -6,10 +6,13 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: localhost/invoicebot-app:dev
+    image: ${APP_IMAGE:-localhost/invoicebot-app:dev}
+    restart: unless-stopped
     mem_limit: 900m
     environment:
       DATABASE_URL: postgresql://invoicebot:invoicebot@postgres:5432/invoicebot
+    volumes:
+      - ${CONFIG_DIR:-../config}:/app/runtime-config:ro
     ports:
       - "8080:8080"
     depends_on:

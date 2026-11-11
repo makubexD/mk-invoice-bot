@@ -26,6 +26,15 @@ RUN groupadd --gid 10001 bot \
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 
+# Migration and config tooling available at runtime: `alembic upgrade head` and
+# `python scripts/check_config.py <path>` run inside the image. Owned by root,
+# readable by the bot user.
+COPY alembic.ini ./
+COPY migrations ./migrations
+COPY scripts ./scripts
+COPY config/example.yaml ./config/example.yaml
+RUN chmod -R a+rX /app/alembic.ini /app/migrations /app/scripts /app/config
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 

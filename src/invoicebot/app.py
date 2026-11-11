@@ -1,6 +1,9 @@
 """FastAPI application and health endpoint."""
 
+import asyncio
+import logging
 import os
+import signal
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
@@ -10,6 +13,8 @@ from fastapi.responses import JSONResponse
 
 from invoicebot.store.db import create_pool, ping
 
+logger = logging.getLogger(__name__)
+
 DbPing = Callable[[], Awaitable[bool]]
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 
@@ -17,6 +22,11 @@ Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 async def _no_db_ping() -> bool:
     """Database ping used when DATABASE_URL is not configured."""
     return False
+
+
+def _log_config_reload_request() -> None:
+    """Acknowledge SIGHUP; the actual config reload arrives in a later phase."""
+    logger.info("config reload requested (SIGHUP)")
 
 
 @asynccontextmanager
@@ -28,9 +38,21 @@ async def _database_lifespan(app: FastAPI) -> AsyncIterator[None]:
         # Do not block startup when the database is down; /health reports it.
         await pool.open(wait=False)
         app.state.db_ping = partial(ping, pool)
+
+    loop = asyncio.get_running_loop()
+    sighup_installed = False
+    try:
+        loop.add_signal_handler(signal.SIGHUP, _log_config_reload_request)
+        sighup_installed = True
+    except (NotImplementedError, RuntimeError, ValueError):
+        # Platforms or threads without signal support still start normally.
+        pass
+
     try:
         yield
     finally:
+        if sighup_installed:
+            loop.remove_signal_handler(signal.SIGHUP)
         if pool is not None:
             await pool.close()
 
