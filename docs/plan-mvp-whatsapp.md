@@ -165,7 +165,7 @@ Test: `uv run pytest -q tests/unit/test_whatsapp_media.py`
 
 ## Step 8: Invoice, file and window stores `[worker]`
 
-Files: `migrations/versions/0004_channel_windows.py`, `src/invoicebot/store/invoices.py`, `tests/integration/test_invoices_store.py`.
+Files: `migrations/versions/0004_channel_windows.py`, `src/invoicebot/store/invoices.py`, `tests/integration/test_invoices_store.py`, `tests/integration/test_schema.py` (only: add `"channel_windows"` to `EXPECTED_TABLES`; spec 03 §3 lists the table).
 
 - Migration `0004` (revises `0003`, expand only): `CREATE TABLE channel_windows (channel TEXT NOT NULL, recipient TEXT NOT NULL, last_inbound_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (channel, recipient))`. `recipient` is the profile id. Downgrade drops the table.
 - `store/invoices.py`, every function taking the caller's `conn` and never committing:

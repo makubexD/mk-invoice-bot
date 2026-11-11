@@ -106,6 +106,8 @@ padron(ruc bigint PK, razon_social, estado, condicion)
 api_tokens(id PK, name, token_hash, scopes text[], created_at, last_used_at, revoked_at)   -- R-12.3
 event_subscribers(id PK, name, url, secret_ref, event_types text[], active)              -- R-12.4
 events(id PK, type, version, invoice_id NULL, payload_json, created_at)                   -- delivered via outbox
+channel_windows(channel, recipient /*profile id*/, last_inbound_at,
+                PRIMARY KEY (channel, recipient))   -- WhatsApp 24 h service window (R-1.10)
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
