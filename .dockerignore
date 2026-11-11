@@ -12,3 +12,6 @@ specs
 *.age.key
 data
 .github
+.claude
+.sigil
+CLAUDE.md

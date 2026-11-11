@@ -16,11 +16,12 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from invoicebot.queue.retry import backoff_minutes
+
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 5
 MAX_CRASHES = 2
-MAX_BACKOFF_MINUTES = 60
 
 #: Reason recorded when the crash-loop guard parks a job (R-1.11, BR-S03).
 CRASH_LOOP_ERROR = "worker died twice on the same job"
@@ -36,16 +37,6 @@ class Job:
     attempts: int
     crashes: int
     lease_until: datetime
-
-
-def backoff_minutes(attempts: int) -> int:
-    """Return the retry delay in minutes for the *attempts*-th failure.
-
-    The delay doubles each attempt (2, 4, 8, 16, 32 minutes) up to a cap of
-    ``MAX_BACKOFF_MINUTES`` (R-9.4).
-    """
-    delay = 1 << attempts  # 2**attempts, as a plain int
-    return delay if delay < MAX_BACKOFF_MINUTES else MAX_BACKOFF_MINUTES
 
 
 async def _fail_invoice(conn: AsyncConnection[Any], invoice_id: int, reason: str) -> None:

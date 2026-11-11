@@ -86,9 +86,8 @@ def test_step_timer_logs_failure_and_reraises(log_stream: io.StringIO) -> None:
     configure_logging(stream=log_stream)
     log = logging.getLogger("invoicebot.timer")
 
-    with pytest.raises(RuntimeError, match="boom"):
-        with step_timer("parse", logger=log):
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError, match="boom"), step_timer("parse", logger=log):
+        raise RuntimeError("boom")
 
     record = _records(log_stream)[-1]
     assert record["event"] == "step failed"

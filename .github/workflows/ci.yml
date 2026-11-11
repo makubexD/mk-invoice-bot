@@ -57,7 +57,7 @@ jobs:
         run: uv run lint-imports
 
       - name: Pytest
-        run: uv run pytest -q
+        run: uv run pytest -q --cov --cov-fail-under=90
 
       - name: Check config (pull request)
         if: github.event_name == 'pull_request'

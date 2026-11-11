@@ -160,7 +160,7 @@ def find_problems(root: Path) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     """Check the fixture tree and return 1 when a problem is found."""
     parser = argparse.ArgumentParser(description="Check test fixtures for EXIF data and real-looking RUCs.")
-    parser.add_argument("root", nargs="?", type=Path, default=Path("."), help="repository root (default: .)")
+    parser.add_argument("root", nargs="?", type=Path, default=Path(), help="repository root (default: .)")
     args = parser.parse_args(argv)
     problems = find_problems(args.root)
     for problem in problems:

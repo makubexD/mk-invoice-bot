@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(config_path)
         portals = load_portals(portals_path)
-    except Exception as exc:  # noqa: BLE001 - the CLI reports any load/validation error
+    except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

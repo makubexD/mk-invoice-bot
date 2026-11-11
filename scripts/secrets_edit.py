@@ -13,6 +13,7 @@ errors and Ctrl-C.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shlex
 import subprocess
@@ -46,7 +47,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         secrets = _decrypt(args.path, identity)
         _edit(args.path, secrets, recipient)
-    except Exception as exc:  # noqa: BLE001 - the CLI reports any failure as exit code 1
+    except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
@@ -116,7 +117,7 @@ def _write_encrypted(destination: Path, secrets: dict[str, str], recipient: Any)
             handle.write(ciphertext)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_path, destination)
+        temp_path.replace(destination)
     finally:
         temp_path.unlink(missing_ok=True)
 
@@ -133,10 +134,8 @@ def _shred(path: Path) -> None:
     except OSError:
         pass
     finally:
-        try:
+        with contextlib.suppress(OSError):
             path.unlink(missing_ok=True)
-        except OSError:
-            pass
 
 
 if __name__ == "__main__":

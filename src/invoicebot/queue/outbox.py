@@ -17,13 +17,12 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 from psycopg.types.json import Json
 
+from invoicebot.queue.retry import backoff_minutes, describe_error
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 8
-MAX_BACKOFF_MINUTES = 60
-MAX_ERROR_CHARS = 500
 VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event"})
 
 
@@ -41,15 +40,6 @@ class OutboxRow:
 
 #: A coroutine that delivers one outbox row; raising means the send failed.
 Transport = Callable[[OutboxRow], Awaitable[None]]
-
-
-def backoff_minutes(attempts: int) -> int:
-    """Return the retry delay in minutes after the *attempts*-th failure.
-
-    The delay doubles each attempt (2, 4, 8, ...) up to ``MAX_BACKOFF_MINUTES``.
-    """
-    delay = 1 << attempts  # 2**attempts, as a plain int
-    return delay if delay < MAX_BACKOFF_MINUTES else MAX_BACKOFF_MINUTES
 
 
 async def add(
@@ -143,7 +133,7 @@ class OutboxSender:
         try:
             await transport(row)
         except Exception as exc:  # CancelledError is a BaseException and propagates
-            return f"{type(exc).__name__}: {exc}"[:MAX_ERROR_CHARS]
+            return describe_error(exc)
         return None
 
     async def _record_failure(

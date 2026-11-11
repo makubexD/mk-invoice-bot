@@ -222,7 +222,7 @@ async def test_unknown_channel_is_rejected_at_add(
     """R-1.8: add rejects a channel outside the four known ones before touching the database."""
     async with db_pool.connection() as conn:
         await _clear_outbox(conn)
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="unknown outbox channel"):
             await add(conn, "email", "owner@example.test", {"text": "hola"})
         cur = await conn.execute("SELECT count(*) FROM outbox")
         row = await cur.fetchone()

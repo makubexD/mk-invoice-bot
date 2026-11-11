@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -15,13 +14,13 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 
 
 @pytest.fixture(scope="module")
-def cfg() -> Iterator[Config]:
-    yield load_config(EXAMPLE)
+def cfg() -> Config:
+    return load_config(EXAMPLE)
 
 
 @pytest.fixture(scope="module")
-def index(cfg: Config) -> Iterator[ProfileIndex]:
-    yield ProfileIndex.from_config(cfg)
+def index(cfg: Config) -> ProfileIndex:
+    return ProfileIndex.from_config(cfg)
 
 
 def test_same_profile_on_both_channels(index: ProfileIndex) -> None:
