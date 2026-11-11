@@ -41,6 +41,7 @@ class InboundMessage(BaseModel):
     text: str = ""
     attachments: list[Attachment] = Field(default_factory=list)
     reply_to_external_id: str | None = None
+    button_id: str | None = None
     received_at: datetime
 
 
