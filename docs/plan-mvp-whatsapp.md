@@ -173,7 +173,7 @@ Files: `migrations/versions/0004_channel_windows.py`, `src/invoicebot/store/invo
   - `get_state(conn, invoice_id: int) -> tuple[str, str] | None`: `(state, profile_id)`.
   - `set_state(conn, invoice_id: int, state: str, *, rule_id: str | None = None, error: str | None = None) -> None`: also sets `updated_at = now()`.
   - `count_active_jobs(conn, profile_id: str) -> int`: jobs joined to invoices of that profile whose `run_after` is not `infinity`.
-  - `add_file(conn, invoice_id, kind, *, local_path: str | None, remote_ref: str | None, sha256: str, size: int) -> int`.
+  - `add_file(conn, invoice_id, record: FileRecord) -> int`, where `FileRecord` is a frozen dataclass with `kind`, `local_path: str | None`, `remote_ref: str | None`, `sha256: str`, `size: int` (keeps the call within the six-argument cap).
   - `touch_window(conn, channel: ChannelName, profile_id: str, at: datetime) -> None`: upsert keeping the greatest `last_inbound_at`.
   - `window_open(conn, channel: ChannelName, profile_id: str) -> bool`: true when `last_inbound_at > now() - interval '24 hours'`.
 
@@ -221,7 +221,7 @@ Files: `src/invoicebot/pipeline/handlers.py`, `src/invoicebot/pipeline/replies.p
 - `handlers.py`: `make_download_handler(pool, client: WhatsAppClient, data_dir: Path, limits: MediaLimits) -> Handler` for the job step `download_media`:
   - Reads the invoice's message (`messages.invoice_id = job.invoice_id`, oldest first) and takes the first attachment from `payload_json`.
   - Calls `download_media(..., dest_root=data_dir / "tmp")` with no transaction open.
-  - Success: in one transaction, `add_file(kind, local_path, remote_ref=media_ref, sha256, size)`. The invoice stays in `RECEIVED`; the extraction phase adds the next job.
+  - Success: in one transaction, `add_file(conn, invoice_id, FileRecord(kind, local_path, media_ref, sha256, size))` from `store/invoices.py`. The invoice stays in `RECEIVED`; the extraction phase adds the next job.
   - `MediaRejected`: in one transaction, `set_state(invoice, "CANCELLED", rule_id="BR-E07")` and an outbox message BR-E07 with `reason_desc` (`too_large` "es demasiado grande", `too_many_pixels` "la imagen es demasiado grande", `unsupported_type` "el tipo de archivo no es compatible", `zip_entries` and `zip_ratio` "el archivo comprimido no es válido") and `max_mb` from the kind's byte cap. The handler returns normally, so the job is completed, not retried.
   - Any other exception propagates, so the queue retries with backoff.
 - `replies.py`: `async resolve_reply(conn, msg: InboundMessage, valid_states: Mapping[str, frozenset[str]]) -> tuple[int, str] | None`:
