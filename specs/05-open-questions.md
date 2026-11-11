@@ -24,23 +24,22 @@
 | D19 | Gap PRs are completed by the **owner**; tagging `@claude` on the issue is optional help (Q15) |
 | D20 | The VPS **pulls `main` every 10 min** and hot-reloads the config, so merged fixes go live and stuck invoices resume automatically (Q16) |
 | D21 | `confirm_mode: auto`: no tap needed when everything reads cleanly; Editar/Cancelar stay available (Q17) |
-| D22 | **Jarvis pivot (2026-11-10):** Jarvis (`_Others/Request.md`) is the platform: infra, memory, agent, tools, interfaces. The invoice pipeline is its **first purpose and domain module**, made smarter by Jarvis's memory and agent. Supersedes the invoice-only scope; constitution to be amended |
-| D23 | Hosting: **~4 GB RAM, ~US$10–25/mo**. Supersedes D7 and P1/P2's $0 and 1 GB limits. n8n, Langfuse and Redis are deferred until a measured need |
-| D24 | LLM in the invoice pipeline: **fallback only**. QR → XML → OCR stay first; a vision LLM runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms. Amends P3 |
-| D25 | Non-owner senders: **invoice intake only**. Memory, tools and general chat are owner-only |
-| D26 | Jarvis is built **in this repository**, with Jarvis core + `modules/invoices/`. Candidate projects are not forked as separate repos; only copied code (subject to its license) or patterns come in |
+| D22 | ~~Jarvis as the platform with invoices as its module~~ → **superseded by D39** the same day |
+| D23 | ~~4 GB host~~ → **moved to Jarvis.** The bot alone targets ≤ 2 GB (constitution P1) |
+| D24 | LLM in the invoice pipeline: **fallback only, off by default**. QR → XML → OCR stay first; a vision LLM (provider-neutral port, DeepSeek by default) runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms |
+| D25 | ~~Non-owner senders get intake only~~ → **moved to Jarvis.** In the bot, every allowlisted sender only does invoice intake anyway |
+| D26 | ~~Jarvis built in this repo~~ → **superseded by D39** |
 | D27 | Repo renamed to **`mk-invoice-bot`**. It stays **public during development**; making it private is the **last step** of the plan, on the owner's word. Until then no real RUCs, phone numbers, personal data or secrets in git. Amends D16 |
-| D28 | Foundation: **review the NilesAI and Chasqui code first**, then decide between copying code (license applies) and taking patterns only |
-| D29 | Agent runtime: **Pydantic AI**, with long-running work as our own persisted states in Postgres. LangGraph is not adopted |
-| D30 | LLM: **DeepSeek from day one** (dev and prod), behind a provider-agnostic interface switchable by config. The Claude subscription builds the code via Claude Code but is never the app's runtime LLM (consumer terms). Dev uses test data only |
-| D31 | Hosting during development: **local Docker Compose**, with free tools (e.g. a Cloudflare quick tunnel for the Meta webhook). The VPS is chosen later; nothing in the code may assume a provider (12-factor config, everything in containers) |
-| D32 | MVP = **full invoice spec, flows A and B**, on the Jarvis core |
-| D33 | Background jobs and scheduling: **Postgres only** (SKIP LOCKED queue). No Redis until a measured need |
-| D34 | Workstation: **Tailscale + an outbound workstation agent** that offers only allowlisted tools. Nothing on the PC is exposed publicly |
-| D35 | Dashboard (after the MVP): **server-rendered in Python** (FastAPI + Jinja + HTMX). Next.js only if it outgrows this |
-| D36 | Observability: **own LLM usage table in Postgres + OpenTelemetry**. Langfuse/Logfire can be plugged in later without code changes |
+| D28–D30 | Foundation review, Pydantic AI, DeepSeek as the agent LLM → **moved to Jarvis** (see the jarvis repo). Spec 07 stays here for the patterns that also apply to the bot |
+| D31 | Development runs in **local Docker Compose** with free tools (e.g. a Cloudflare quick tunnel for the Meta webhook). The VPS is chosen later; nothing may assume a provider |
+| D32 | MVP = **full invoice spec, flows A and B**, delivered through internal checkpoints (foundation → flow A → flow B) |
+| D33 | Background jobs and scheduling: **Postgres only** (SKIP LOCKED queue). No Redis |
+| D34–D36 | Workstation connector, dashboard, LLM observability → **moved to Jarvis** |
 | D37 | Deploys: **CI-gated**. Only green commits deploy, with migrations, a health check and automatic rollback. Config hot-reload stays. Supersedes D20 |
-| D38 | Foundation: **clean core in this repo, patterns only.** NilesAI and Chasqui were reviewed and neither is copied; patterns PT-1 to PT-8 are re-implemented (spec 07) |
+| D38 | Foundation: **clean code, patterns only** (spec 07). PT-1, PT-2, PT-4 and PT-8 apply to the bot |
+| D39 | **Two repos, contract only (2026-11-10).** mk-invoice-bot is standalone; Jarvis is a separate repo. They integrate only through the bot's REST API, MCP server and signed event webhooks. No shared code and no shared database; the bot never depends on Jarvis (constitution P10) |
+| D40 | Bot database: **Postgres** (replaces SQLite in P2 and spec 03) |
+| D41 | Channels: the bot owns the **WhatsApp** number and also supports **Telegram** (R-1.7 is raised from C to S). Jarvis uses its own Telegram bot |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.

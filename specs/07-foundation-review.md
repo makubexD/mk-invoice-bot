@@ -1,6 +1,6 @@
 # 07 · Foundation review (2026-11-10)
 
-Decision D28 asked for a code review of the candidate base projects before choosing between copying code and taking patterns only. Result: **D38: clean core in this repo, patterns only.** No third-party code is copied.
+Done while Jarvis was briefly scoped into this repo (D22, later superseded by D39). Result: **D38, patterns only.** No third-party code is copied. Patterns PT-1, PT-2, PT-4 and PT-8 also apply to mk-invoice-bot; the full list applies to Jarvis.
 
 ## Candidates
 
