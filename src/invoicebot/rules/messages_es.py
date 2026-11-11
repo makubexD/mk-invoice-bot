@@ -140,6 +140,16 @@ STATE_DESC: dict[str, str] = {
 _UNKNOWN_STATE_DESC = "en otro estado"
 
 
+#: BR-E07's ``{reason_desc}`` per media rejection reason (R-1.11).
+REJECTION_DESC: dict[str, str] = {
+    "too_large": "es demasiado grande",
+    "too_many_pixels": "la imagen es demasiado grande",
+    "unsupported_type": "el tipo de archivo no es compatible",
+    "zip_entries": "el archivo comprimido no es válido",
+    "zip_ratio": "el archivo comprimido no es válido",
+}
+
+
 def state_desc(state: str) -> str:
     """Return the es-PE description of an invoice state for BR-S02's ``{state_desc}``."""
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
