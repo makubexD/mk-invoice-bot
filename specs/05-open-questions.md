@@ -28,7 +28,14 @@
 | D23 | Hosting: **~4 GB RAM, ~US$10–25/mo**. Supersedes D7 and P1/P2's $0 and 1 GB limits. n8n, Langfuse and Redis are deferred until a measured need |
 | D24 | LLM in the invoice pipeline: **fallback only**. QR → XML → OCR stay first; a vision LLM runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms. Amends P3 |
 | D25 | Non-owner senders: **invoice intake only**. Memory, tools and general chat are owner-only |
-| D26 | Jarvis is built **in this repository**, with Jarvis core + `modules/invoices/`. Candidate projects are not forked as separate repos; only copied code (subject to its license) or patterns come in. Repo rename is optional and still open |
+| D26 | Jarvis is built **in this repository**, with Jarvis core + `modules/invoices/`. Candidate projects are not forked as separate repos; only copied code (subject to its license) or patterns come in |
+| D27 | Repo renamed to **`mk-invoice-bot`**. It stays **public during development**; making it private is the **last step** of the plan, on the owner's word. Until then no real RUCs, phone numbers, personal data or secrets in git. Amends D16 |
+| D28 | Foundation: **review the NilesAI and Chasqui code first**, then decide between copying code (license applies) and taking patterns only |
+| D29 | Agent runtime: **Pydantic AI**, with long-running work as our own persisted states in Postgres. LangGraph is not adopted |
+| D30 | LLM: **DeepSeek from day one** (dev and prod), behind a provider-agnostic interface switchable by config. The Claude subscription builds the code via Claude Code but is never the app's runtime LLM (consumer terms). Dev uses test data only |
+| D31 | Hosting during development: **local Docker Compose**, with free tools (e.g. a Cloudflare quick tunnel for the Meta webhook). The VPS is chosen later; nothing in the code may assume a provider (12-factor config, everything in containers) |
+| D32 | MVP = **full invoice spec, flows A and B**, on the Jarvis core |
+| D33 | Background jobs and scheduling: **Postgres only** (SKIP LOCKED queue). No Redis until a measured need |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
