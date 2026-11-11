@@ -35,6 +35,9 @@ COPY scripts ./scripts
 COPY config/example.yaml ./config/example.yaml
 RUN chmod -R a+rX /app/alembic.ini /app/migrations /app/scripts /app/config
 
+# Media and work files. A new named volume copies this owner, so the bot can write.
+RUN mkdir -p /data && chown bot:bot /data
+
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 

@@ -1,4 +1,9 @@
-"""FastAPI application and health endpoint."""
+"""FastAPI application: the health endpoint and the runtime wiring at startup.
+
+With no config or secrets file the app serves ``/health`` only. With both, the
+lifespan loads them, mounts the WhatsApp webhook and runs the job worker and
+the outbox sender as supervised background tasks until shutdown.
+"""
 
 import asyncio
 import logging
@@ -8,15 +13,38 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
 
+import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
-from invoicebot.store.db import create_pool, ping
+from invoicebot.api.webhook import WebhookDeps, make_router
+from invoicebot.channels.profiles import ProfileIndex
+from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
+from invoicebot.channels.whatsapp.transport import make_transport
+from invoicebot.config.loader import load_config
+from invoicebot.config.models import Config, WhatsAppChannel
+from invoicebot.logging import configure_logging
+from invoicebot.pipeline.handlers import make_download_handler
+from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.queue.outbox import OutboxSender
+from invoicebot.queue.worker import Worker
+from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
+from invoicebot.settings import Settings
+from invoicebot.store.db import Pool, create_pool, ping
 
 logger = logging.getLogger(__name__)
 
 DbPing = Callable[[], Awaitable[bool]]
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
+TaskFactory = Callable[[], Awaitable[None]]
+
+#: Secrets the WhatsApp channel declares (R-9.10).
+WHATSAPP_ADAPTER = "whatsapp"
+WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token"})
+#: Pause between two outbox passes.
+OUTBOX_INTERVAL_S = 2.0
+#: Pause before a background task that died is started again.
+RESTART_DELAY_S = 5.0
 
 
 async def _no_db_ping() -> bool:
@@ -30,10 +58,10 @@ def _log_config_reload_request() -> None:
 
 
 @asynccontextmanager
-async def _database_lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Open the pool from DATABASE_URL at startup and close it on shutdown."""
-    dsn = os.environ.get("DATABASE_URL")
-    pool = create_pool(dsn) if dsn else None
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Open the pool, install SIGHUP and run the runtime until shutdown."""
+    settings = Settings()
+    pool = create_pool(settings.database_url) if settings.database_url else None
     if pool is not None:
         # Do not block startup when the database is down; /health reports it.
         await pool.open(wait=False)
@@ -49,12 +77,111 @@ async def _database_lifespan(app: FastAPI) -> AsyncIterator[None]:
         pass
 
     try:
-        yield
+        async with _runtime(app, settings, pool):
+            yield
     finally:
         if sighup_installed:
             loop.remove_signal_handler(signal.SIGHUP)
         if pool is not None:
             await pool.close()
+
+
+@asynccontextmanager
+async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> AsyncIterator[None]:
+    """Wire the WhatsApp channel when config, secrets and a database are present."""
+    if not settings.runtime_files_present():
+        logger.warning("no config or secrets file: serving /health only")
+        yield
+        return
+    if pool is None:
+        logger.error("DATABASE_URL is not set: serving /health only")
+        yield
+        return
+    assert_no_plain_secrets(os.environ)
+    cfg = load_config(settings.config_path)
+    store = _load_secrets(settings)
+    configure_logging(store.values())
+    secrets = store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
+    channel = _whatsapp_channel(cfg)
+    if channel is None or not secrets.enabled:
+        # Fail closed: without its secrets or config the webhook is not mounted.
+        logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing) or ["channel config"])
+        yield
+        return
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http:
+        client = WhatsAppClient(
+            http,
+            phone_number_id=channel.phone_number_id,
+            graph_api_version=channel.graph_api_version,
+            token=secrets.get("whatsapp_token"),
+        )
+        app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
+        worker = Worker(
+            pool,
+            {DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media)},
+        )
+        numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
+        sender = OutboxSender(
+            pool,
+            {WHATSAPP_ADAPTER: make_transport(client, pool, numbers=numbers, templates=channel.templates)},
+        )
+        async with _background({"worker": worker.run, "outbox": partial(_send_forever, sender)}):
+            yield
+
+
+def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
+    """Collect what the webhook routes need from the config and the channel's secrets."""
+    return WebhookDeps(
+        pool=pool,
+        index=ProfileIndex.from_config(cfg),
+        owner_profile=cfg.owner.profile,
+        admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
+        app_secret=secrets.get("whatsapp_app_secret"),
+        verify_token=secrets.get("whatsapp_verify_token"),
+        max_queued_per_sender=cfg.limits.max_queued_per_sender,
+    )
+
+
+def _load_secrets(settings: Settings) -> SecretStore:
+    """Decrypt the secrets file, failing fast when the identity is not configured."""
+    if settings.secrets_path is None or settings.age_identity_path is None:
+        raise ValueError("SECRETS_PATH and AGE_IDENTITY_PATH must both be set")
+    return SecretStore.load(settings.secrets_path, settings.age_identity_path)
+
+
+def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
+    """Return the configured WhatsApp channel, if any."""
+    return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
+
+
+async def _send_forever(sender: OutboxSender) -> None:
+    """Deliver due outbox rows every ``OUTBOX_INTERVAL_S`` seconds."""
+    while True:
+        await sender.send_pending()
+        await asyncio.sleep(OUTBOX_INTERVAL_S)
+
+
+@asynccontextmanager
+async def _background(factories: dict[str, TaskFactory]) -> AsyncIterator[None]:
+    """Run each factory as a supervised task; cancel and await them all on exit."""
+    async with asyncio.TaskGroup() as group:
+        tasks = [group.create_task(_supervise(name, factory)) for name, factory in factories.items()]
+        try:
+            yield
+        finally:
+            for task in tasks:
+                task.cancel()
+
+
+async def _supervise(name: str, factory: TaskFactory) -> None:
+    """Run ``factory`` until cancelled, restarting it after a failure or return."""
+    while True:
+        try:
+            await factory()
+            logger.error("background task %s returned; restarting", name)
+        except Exception:  # top-level boundary: log, wait, restart
+            logger.exception("background task %s died; restarting", name)
+        await asyncio.sleep(RESTART_DELAY_S)
 
 
 def create_app(db_ping: DbPing, *, lifespan: Lifespan | None = None) -> FastAPI:
@@ -76,4 +203,4 @@ def create_app(db_ping: DbPing, *, lifespan: Lifespan | None = None) -> FastAPI:
     return app
 
 
-app = create_app(_no_db_ping, lifespan=_database_lifespan)
+app = create_app(_no_db_ping, lifespan=lifespan)
