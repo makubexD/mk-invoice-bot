@@ -24,6 +24,10 @@
 | D19 | Gap PRs are completed by the **owner**; tagging `@claude` on the issue is optional help (Q15) |
 | D20 | The VPS **pulls `main` every 10 min** and hot-reloads the config, so merged fixes go live and stuck invoices resume automatically (Q16) |
 | D21 | `confirm_mode: auto`: no tap needed when everything reads cleanly; Editar/Cancelar stay available (Q17) |
+| D22 | **Jarvis pivot (2026-11-10):** Jarvis (`_Others/Request.md`) is the platform: infra, memory, agent, tools, interfaces. The invoice pipeline is its **first purpose and domain module**, made smarter by Jarvis's memory and agent. Supersedes the invoice-only scope; constitution to be amended |
+| D23 | Hosting: **~4 GB RAM, ~US$10–25/mo**. Supersedes D7 and P1/P2's $0 and 1 GB limits. n8n, Langfuse and Redis are deferred until a measured need |
+| D24 | LLM in the invoice pipeline: **fallback only**. QR → XML → OCR stay first; a vision LLM runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms. Amends P3 |
+| D25 | Non-owner senders: **invoice intake only**. Memory, tools and general chat are owner-only |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
