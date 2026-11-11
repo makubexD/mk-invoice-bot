@@ -40,6 +40,7 @@
 | D35 | Dashboard (after the MVP): **server-rendered in Python** (FastAPI + Jinja + HTMX). Next.js only if it outgrows this |
 | D36 | Observability: **own LLM usage table in Postgres + OpenTelemetry**. Langfuse/Logfire can be plugged in later without code changes |
 | D37 | Deploys: **CI-gated**. Only green commits deploy, with migrations, a health check and automatic rollback. Config hot-reload stays. Supersedes D20 |
+| D38 | Foundation: **clean core in this repo, patterns only.** NilesAI and Chasqui were reviewed and neither is copied; patterns PT-1 to PT-8 are re-implemented (spec 07) |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
