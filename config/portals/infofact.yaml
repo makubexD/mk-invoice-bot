@@ -1,0 +1,5 @@
+url: "https://www.infofactperu.pe/consulta"
+adapter: generic_form
+captcha: none
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: RUC del emisor, tipo, numero de serie, importe total. Not submitted yet."

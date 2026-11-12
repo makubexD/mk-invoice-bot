@@ -14,11 +14,10 @@ BR-S02's ``{state_desc}``.
 """
 
 MESSAGES: dict[str, str] = {
-    "BR-R01": "🏢 Mi empresa → Google",
-    "BR-R02": "💼 Trabajo → Microsoft",
+    "BR-R01": "➡️ {flow.label}",
+    "BR-R02": "➡️ {flow.label}",
     "BR-R03": (
-        "Este comprobante está a nombre de {buyer_desc}, que no es tu empresa ni "
-        "tu trabajo. ¿Dónde lo registro?"
+        "Este comprobante está a nombre de {buyer_desc}. ¿En qué flujo lo registro?"
     ),
     "BR-R04": (
         "No pude leer bien el RUC del cliente ({num_doc_adq}?). Lo registro en {flow.label}. ¿Correcto?"
@@ -28,9 +27,11 @@ MESSAGES: dict[str, str] = {
         "Pídele al administrador que te habilite."
     ),
     "BR-R07": (
-        "Este comprobante está a nombre de {buyer_desc}. Solo registro comprobantes "
-        "de tu empresa o de tu trabajo, así que no lo proceso."
+        "Este comprobante está a nombre de {buyer_desc}, que no corresponde a ninguno "
+        "de tus flujos, así que no lo proceso."
     ),
+    "BR-R08": "Este comprobante es {tipo_desc}, y {flow.label} solo acepta {accepted_desc}. No lo proceso.",
+    "BR-R09": "¿De qué local es esta factura de {razon_social}?",
     "BR-E01": (
         "No pude leer este comprobante. Envíame una foto más cerca y con buena luz, "
         "o escribe los datos así:\n"
@@ -45,7 +46,11 @@ MESSAGES: dict[str, str] = {
     "BR-E05": "Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.",
     "BR-E07": (
         "No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) "
-        "o el PDF/XML del comprobante, de hasta {max_mb} MB."
+        "o el PDF del comprobante, de hasta {max_mb} MB."
+    ),
+    "BR-E09": (
+        "Revisa estos datos antes de seguir: {fields_desc}. Si están bien, confírmalos; "
+        "si no, corrígelos así: campo=valor."
     ),
     "BR-E08": (
         "No pude leer este comprobante. Envíame una foto más cerca y con buena luz, "
@@ -77,8 +82,9 @@ MESSAGES: dict[str, str] = {
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
         "{fetcher_lines}\n"
-        "Puedes enviarme el PDF/XML aquí y lo completo. {gap_line}"
+        "Puedes enviarme {manual_docs_desc} aquí y lo completo. {gap_line}"
     ),
+    "BR-F11": "• {comercio}: no tiene portal; pídele los archivos al comercio",
     "BR-D01": (
         "Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar."
     ),
@@ -87,10 +93,32 @@ MESSAGES: dict[str, str] = {
         "No pude llenar la plantilla de Excel (configuración incompleta). "
         "Ya avisé para corregirlo; reintento automáticamente."
     ),
-    "BR-D03": "No pude enviar el correo del lote #{batch}. Reintenta con /enviar.",
+    "BR-D03": "No pude preparar el correo de {serie}-{numero}. Reintenta con /reprocesar {id}.",
     "BR-D04": "No hay comprobantes pendientes de envío.",
     "BR-D05": (
         "🔑 La GitHub App no puede abrir issues en {repo} ({reason_desc}). Revisa la instalación o la clave."
+    ),
+    "BR-D06": "Esta factura es de S/ {total} y el tope es S/ {cap}: se reembolsarán S/ {cap}. ¿Continúo?",
+    "BR-D07": (
+        "✅ Archivada en {folder}. El correo está listo ({modes_desc}); "
+        "cuando lo envíes, avísame con el botón."
+    ),
+    "BR-D08": "👍 Marcada como enviada.",
+    "BR-D09": "Recibí {received_desc}. Aún falta {missing_desc} para completar {serie}-{numero}.",
+    "BR-D10": "✅ Archivada en {folder} y enviada por correo.",
+    "BR-D11": "⚠️ El correo de {serie}-{numero} no está confirmado. ¿Cómo lo envío?",
+    "BR-D13": "✅ Archivada en {folder}. El correo salió por tu regla de Outlook.",
+    "BR-D12": (
+        "💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. "
+        "Saldrá cuando la enciendas."
+    ),
+    "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
+    "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
+    "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?",
+    "BR-P03": (
+        "Ninguna combinación de facturas enviadas suma S/ {monto}. Pendientes de pago:\n"
+        "{invoice_lines}\n"
+        "Indícalas así: /pagado {fecha} #12 #14"
     ),
     "BR-S01": ("Estoy procesando {n} comprobantes tuyos. Envíame este de nuevo cuando te avise que terminé."),
     "BR-S02": "Ese botón ya no aplica: el comprobante #{id} ya está {state_desc}.",

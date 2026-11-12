@@ -1,0 +1,5 @@
+url: "https://apisunat.com/buscar"
+adapter: generic_form
+captcha: none
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: RUC del emisor, tipo, serie, numero, tipo and number of the buyer's document. Not submitted yet."

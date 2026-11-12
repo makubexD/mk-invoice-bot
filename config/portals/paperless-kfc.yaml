@@ -1,0 +1,5 @@
+url: "https://asp402r.paperless.com.pe/DTEKentucky/"
+adapter: generic_form
+captcha: recaptcha
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: tipo, folio (serie-correlativo), fecha DD-MM-AAAA, monto total. reCAPTCHA checkbox: in two tries on 2026-11-12 it passed once and challenged once, so it is not reliable."

@@ -1,0 +1,7 @@
+ruc: "20100123330"
+razon_social: "DELOSI S.A."
+tipo: restaurante
+brands:
+  - comercio: KFC
+portal: paperless-kfc
+notes: "persona jurídica (RUC 20); this company runs several restaurant brands, add each with its serie_prefix when one appears"

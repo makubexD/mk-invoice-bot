@@ -1,0 +1,7 @@
+ruc: "20609850931"
+razon_social: "INVERSIONES NERI'S E.I.R.L."
+tipo: restaurante
+brands:
+  - comercio: Umari
+portal: null  # page unknown: the owner provides it (S0.6); until then PORTAL_MISSING
+notes: "persona jurídica (RUC 20)"

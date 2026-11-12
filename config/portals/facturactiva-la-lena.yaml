@@ -1,0 +1,5 @@
+url: "https://comprobantes.facturactiva.com/LA-LENA/visorComprobantes"
+adapter: generic_form
+captcha: none
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: tipo, serie, correlativo, fecha, monto total. A real lookup on 2026-11-12 returned PDF, XML and CDR buttons."
