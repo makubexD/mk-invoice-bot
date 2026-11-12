@@ -24,4 +24,4 @@ The project uses **spec-driven development**. The specs below are the source of 
 | 7 | [specs/07-foundation-review.md](specs/07-foundation-review.md) | Review of existing open-source agents; patterns reused (no code copied) |
 | – | [config/example.yaml](config/example.yaml) | Shape of the user-editable configuration |
 
-Status: **planning**. No code yet.
+Status: **in development**. Phases 1 and 2 (foundation, WhatsApp) are done; see [docs/plan-mvp.md](docs/plan-mvp.md).

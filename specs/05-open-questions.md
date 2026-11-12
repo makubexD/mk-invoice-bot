@@ -1,6 +1,6 @@
 # 05 · Open questions and decisions
 
-## Decided (Q&A on 2026-10-13, 2026-10-23 and 2026-11-10)
+## Decided (Q&A on 2026-10-13, 2026-10-23, 2026-11-10 and 2026-11-12)
 | # | Decision |
 |---|---|
 | D1 | Country: **Peru (SUNAT)** |
@@ -11,7 +11,7 @@
 | D6 | Flow B: buyer is the employer's RUC; **no SUNAT access** → portals, then email, then manual |
 | D7 | Hosting: ~~**1 GB RAM VPS**~~ → superseded by D42 (2 GB). Still highly optimized (see constitution P2) |
 | D8 | Build style: **code first + n8n**. ~~Revised by the 1 GB constraint: n8n is an optional sink (Q1)~~ → n8n is an optional **event subscriber** (R-12.4, D39), run off the bot's host unless memprofile shows headroom on the 2 GB host (D42, Q1) |
-| D9 | Flow B email: **all three trigger modes** (per invoice, on command, scheduled), configurable and combinable. *MVP ships `on_command` only; the other two are post-MVP (spec 04)* |
+| D9 | Flow B email: **all three trigger modes** (per invoice, on command, scheduled), configurable and combinable. *MVP ships `on_command` only; the other two are post-MVP (spec 04)* *Amended by D49: `per_invoice` is the MVP mode; `on_command` and `scheduled` are post-MVP.* |
 | D10 | Flow B Excel: **existing template, update specific cells** |
 | D11 | When every fallback fails → **MANUAL_REQUIRED** and the user is told what is missing |
 | D12 | Unknown, DNI or empty buyer → **ask then, and only then**, with buttons Mi empresa / Trabajo / Cancelar |
@@ -21,7 +21,7 @@
 | D16 | ~~GitHub repo is **private**~~ → amended by D27 (public during development). The real config (RUCs, phone numbers) lives only on the VPS, never in git (Q12) |
 | D17 | ~~Bot GitHub credential: **fine-grained personal access token**, this repo only (Issues, PRs, Contents); expiry warning 14 days before (Q13)~~ → superseded by D45 |
 | D18 | Admin alerts go **only to the owner's number** (Q14) |
-| D19 | Gaps are fixed by the **owner**; tagging `@claude` on the issue is optional help (Q15). With D44 there are no bot PRs in the MVP |
+| D19 | Gaps are fixed by the **owner**; tagging `@claude` on the issue is optional help (Q15). With D44 there are no bot PRs in the MVP *D52 adds a PR from a template as the last v1 step (S16.2).* |
 | D20 | ~~The VPS **pulls `main` every 10 min** and hot-reloads the config, so merged fixes go live and stuck invoices resume automatically (Q16)~~ → superseded by D37 and D46 |
 | D21 | `confirm_mode: auto`: no tap needed when everything reads cleanly; Editar/Cancelar stay available (Q17) |
 | D22 | ~~Jarvis as the platform with invoices as its module~~ → **superseded by D39** the same day |
@@ -29,10 +29,10 @@
 | D24 | LLM in the invoice pipeline: **fallback only, off by default**. QR → XML → OCR stay first; a vision LLM (provider-neutral port, DeepSeek by default) runs only when they fail, tagged `source=llm` with low confidence, and the user always confirms. *Amended by D43:* **per-flow opt-in, never flow B by default**, and LLM output is re-checked by the R-2.4 validators |
 | D25 | ~~Non-owner senders get intake only~~ → **moved to Jarvis.** In the bot, every allowlisted sender only does invoice intake anyway |
 | D26 | ~~Jarvis built in this repo~~ → **superseded by D39** |
-| D27 | Repo renamed to **`mk-invoice-bot`**. It stays **public during development**; making it private is the **last step** of the plan, on the owner's word. Until then no real RUCs, phone numbers, personal data or secrets in git. Amends D16 |
+| D27 | Repo renamed to **`mk-invoice-bot`**. It stays **public during development**; making it private is the **last step** of the plan, on the owner's word. Until then no real RUCs, phone numbers, personal data or secrets in git. Amends D16 *Amended by D47: the store directory's RUCs are committed, by the owner's decision.* |
 | D28–D30 | Foundation review, Pydantic AI, DeepSeek as the agent LLM → **moved to Jarvis** (see the jarvis repo). Spec 07 stays here for the patterns that also apply to the bot |
 | D31 | Development runs in **local Docker Compose** with free tools (e.g. a Cloudflare quick tunnel for the Meta webhook). The VPS is chosen later; nothing may assume a provider |
-| D32 | MVP = **full invoice spec, flows A and B**, delivered through internal checkpoints (foundation → flow A → flow B) |
+| D32 | MVP = **full invoice spec, flows A and B**, delivered through internal checkpoints (foundation → flow A → flow B) *Order amended by D52: flow B before flow A.* |
 | D33 | Background jobs and scheduling: **Postgres only** (SKIP LOCKED queue). No Redis |
 | D34–D36 | Workstation connector, dashboard, LLM observability → **moved to Jarvis** |
 | D37 | Deploys: **CI-gated**. Only green commits deploy, with migrations, a health check and automatic rollback. Config hot-reload stays. Supersedes D20 |
@@ -43,21 +43,59 @@
 | D42 | Hosting target (2026-11-10): **2 GB RAM, about US$10–12/month**, e.g. DigitalOcean, Vultr or Lightsail in US East (prices verified 2026-11-10). Hetzner US is no longer the cheap option. Supersedes D7; updates constitution P1, Q1 and Q11 |
 | D43 | LLM fallback provider: **DeepSeek `deepseek-flash`** (accepts images), **enabled per flow**, and **always off for flow B**: work invoices never go to DeepSeek. Reason: DeepSeek's policy allows training on API input and stores data in the PRC. The provider stays switchable by config. Amends D24 and R-2.11 |
 | D44 | Gaps in the MVP: a **chat alert to the owner** plus an **issue in a separate private ops repo** (`gaps.github.repo`, placeholder `owner/mk-invoice-bot-ops`). **No automatic draft PRs, YAML stubs or `gap-watch` in the MVP**; they become post-MVP stories (spec 04 E16), to be reconsidered after the main repo goes private (D27). The owner fixes gaps (D19). Amends D13 and D14 |
-| D45 | GitHub identity: a **GitHub App** installed only on the ops repo (later also on the main repo, if bot PRs return), using short-lived installation tokens. MVP permissions: **Issues only**; no Workflows or Contents permission. Supersedes D17 |
+| D45 | GitHub identity: a **GitHub App** installed only on the ops repo (later also on the main repo, if bot PRs return), using short-lived installation tokens. MVP permissions: **Issues only**; no Workflows or Contents permission. Supersedes D17 *Amended by D52: at the end of development the App also gets Contents and Pull requests on the private main repo, for S16.2 only.* |
 | D46 | Deploy: **one path**. A green CI run on `main` deploys code and config: image build, `pg_dump`, migrations, health check, and automatic rollback to the previous image. On the VPS the process only reloads config on `SIGHUP`. The 10-minute `git pull` timer and `deploy.config_pull` are removed. Refines D37; D20 stays superseded |
+| D47 | **Store directory:** `config/stores/<ruc>.yaml` (legal name, type, brands with `comercio` and `serie_prefix`, portal key, notes) plus shared `config/portals/<key>.yaml` (url, adapter, fields, captcha, downloads, status), committed in the repo by the owner's decision, including persons with a business (RUC 10). CI accepts a RUC only as a store file's own `ruc:`. Replaces the single `portals.yaml` (R-5.8). Amends D27 |
+| D48 | **Flow B mirrors the owner's reimbursement folders** (analysis of the 35 invoices of 2026, 2026-11-12): one folder per invoice, `{YYYY}-{MM}-Support_{seq}_{comercio}`. `MM` is zero-padded from now on; the older 2026 folders keep `2026-7`. `seq` is the next free number in the invoice's month, never renumbered. The folder holds the Excel, PDF and XML only; the photo stays with the bot. Status suffixes are `_Sent` and `_PAID_{dd}_{mm}___{payment total}`, and paid folders move into the year folder at once (R-7.1, R-7.2, R-7.11) |
+| D49 | **Flow B delivery without work-tenant consent:** personal OneDrive is the main copy; a laptop mirror script fills the work folder until IT allows `onedrive_work`. One email per invoice (`per_invoice` in the MVP; `on_command` is post-MVP). Mail modes: `dry_run` by default (nothing leaves the server during development); `forward_to_self` and `eml_draft` both on; `graph_work` once allowed. The owner's phone is company-managed (Intune, Android), so sharing from WhatsApp into Outlook is not relied on. Answers Q2 and Q3 |
+| D50 | **Flow B Excel:** one file per invoice (answers Q4). Reason `Support release` and description `Cena en {comercio}` by default, editable in chat. Amounts come from the XML, because the template's 18% IGV formula is wrong for restaurants at the reduced rate. Cap S/ 50 per invoice: above it, warn and wait for confirmation (BR-D06). Both PDF and XML are required (confirms Q7) *Amended by D58: a PDF sent by the owner for a stuck invoice is enough.* |
+| D51 | **Sent and paid:** a batch is `sent` when the owner taps [Ya lo envié] (assisted modes) or Graph accepts it. `/pagado dd/mm monto` matches sent, unpaid invoices; several matches are shown as buttons (BR-P01 to BR-P03) |
+| D52 | **Phase order:** extraction → routing → portals → **flow B** → flow A → ops, because the owner's focus is the work flow. Gaps stay issue + chat alert in the MVP (D44); a PR from a template, red until reviewed, comes at the end of development (S16.2) |
+| D53 | **Flows are config.** A flow is defined only by config: routing by buyer and type, `accepted_tipos`, fetchers, required docs, storage, mail and templates. Flow B accepts facturas only; a future flow may accept boletas. Adding a flow never touches the pipeline or another flow (R-3.1, BR-R08) |
+| D54 | **Golden set and accuracy:** CI runs a committed synthetic set drawn by a generator script; the R-2.9 target is measured locally on the private real set (new receipt photos from now on, each with its official XML), and the numbers are recorded in `specs/spikes/accuracy.md` |
+| D55 | **Phase 3 scope:** the hardened UBL parser (S7.3, S7.7) moves into phase 3; the padrón import is run by hand there, its weekly refresh comes with S12.4; required fields are `ruc_emisor`, `tipo`, `serie`, `numero`, `fecha_emision`, `total` (R-2.13). Flow B sends one completion message with the [Ya lo envié] button (BR-D07) |
+| D56 | **Real test set:** any receipt photographed for the bot counts, from any flow, once paired with its official XML; the photos come from the owner's chat with the bot. The spikes run from 10 pairs; phase 3 is done on the synthetic set plus a provisional report, and "≥ 30 real pairs meet R-2.9" is checked before v1 goes live (M7) |
+| D57 | **XML is read lightly:** only to check it is the right invoice (R-5.6) and to take its amounts (R-2.7). No signature checks in the MVP; BR-F10 and XMLDSig are post-MVP. Hardened parsing stays (R-2.12) |
+| D58 | **Inputs:** a photo or a PDF starts an invoice; XML is not an input. For a stuck invoice the sender may send the PDF, and flow B then completes without the XML (BR-D09). Flow B photos are deleted once the email is sent. Amends D50 and Q7 *Amended by D66: per-flow `manual_uploads`; flow B accepts the PDF and the XML for a stuck invoice.* |
+| D59 | **Config split:** `config/stores/` and `config/portals/` come from git through CI; one private `config.yaml` with real values lives only on the VPS and is merged at start and on reload (R-9.6) |
+| D60 | **Backups** go encrypted to the owner's personal OneDrive, so the personal Microsoft login (S11.1) is built in the portals phase; the Chromium memory spike (S0.9) is in that phase too |
+| D61 | **Without tenant consent** the HR email goes by `inbox_rule` (the bot mails the owner's work inbox and an Outlook rule forwards it to HR, copying the bot as confirmation), with `laptop_outlook` (a laptop agent sending through Outlook classic) as backup and manual forward or the laptop draft as last resort. Only one automatic mode sends; a missing confirmation asks the owner. The laptop agent also mirrors folders into the work OneDrive. The owner has Outlook classic, can create rules, and the laptop is on most workdays; S0.11 verifies the rest *Amended by D67: the rule is trusted; no copy back to the bot.* |
+| D62 | **Interface:** chat only in v1; no native mobile app (it couldn't use the work apps' sign-in on a managed phone); a small mobile web page for claims after v1 (E17). Sharing from WhatsApp into the work apps on the phone is tested (S0.11) and dropped if Intune blocks it |
+| D63 | **Accounts:** the bot sends and reads mail only through its own dedicated Outlook.com mailbox; the owner's personal account is used for OneDrive only; one token cache per account |
+| D64 | **Thin slice first** (2026-11-12, after a full review): `read` (QR + checks + summary) → `fetch` (one real store, La Leña) → `file-b` (folder, Excel, email to a test inbox) → `widen-b` → `read-more` (OCR, PDF input, padrón, generator, SUNAT validation) → `flow-a` → `ops`. The first end-to-end result is M3. Amends D52 and D55 |
+| D65 | **"Not found yet" is retried:** a portal that doesn't have the invoice yet is retried at 1 h, 6 h, 24 h and 72 h (per-portal config) before the chain moves on |
+| D66 | **Manual uploads are per flow** (`manual_uploads`): flow B takes the PDF and the XML for a stuck invoice, because the employer asks for both; other flows set their own. An XML never starts an invoice. Amends D58 |
+| D67 | **The Outlook rule is trusted:** the batch is `sent` when the bot's email reaches the owner's inbox; the message has a [No llegó] button; nothing is re-sent unless the owner asks. No copy back to the bot and no `Mail.Read`. Amends D61 |
+| D68 | **MVP mail:** sent through Graph from the owner's personal account to the owner's own test inbox, never to HR. Sender account and recipients are config, so the work paths plug in later without code changes |
+| D69 | **Subject:** exactly `Support release dd/mm/yyyy` (the invoice date); nothing else is added to it |
+| D70 | **Other reasons:** `motivo=` / `descripcion=` as the photo's caption, or later as a reply, which regenerates the Excel until the email is sent |
+| D71 | **Excel method:** only the mapped cells are patched inside the `.xlsx`. Tested on the real template: an openpyxl load-and-save drops its 3 drawn shapes and custom metadata and leaves the total without a value |
+| D72 | **Go-live:** a one-time import registers the claims that are sent but unpaid, so numbering and `/pagado` work from day one |
+| D73 | **Store sites** (checked 2026-11-12, `specs/spikes/portals.md`): La Leña's works with no captcha and gives PDF and XML; two more show no captcha; one has an image captcha; four sites have reCAPTCHA. A store with no site is `portal: manual`. A store whose page is unknown raises the usual `PORTAL_MISSING` issue |
+| D74 | **IT:** decided after the S0.11 live tests; the CTO document stays unsent until then. The bot never uses another publisher's app id (R-7.9) |
+| D75 | **Technical defaults:** flow-only data lives in `invoices.flow_data_json`; laptop jobs are HMAC-signed; a question with more than 3 choices uses a list message; the host's private config overrides the git-tracked defaults and the merged result is validated |
+| D76 | **`http` for a named portal:** a portal file may set `allow_http: true`; the request guard then allows `http` to that portal's host only. Used for La Lucha's lookup site. The lookup data travels unencrypted, as when the owner uses the site by hand |
+| D77 | **Interim test set:** until real photos exist, the owner's 2026 invoice PDFs are rendered to images and distorted (blur, tilt, uneven light, low resolution) by a throwaway script. The set stays private, outside git. It is used for the QR spike now and to tune OCR in `read-more`; every number from it is labelled interim, because a rendered PDF is cleaner than a photographed receipt. Real photos replace it, and only they count for R-2.9 (D56). The S0.11 live tests run before `widen-b`, not earlier |
+| D78 | **Image reading runs in a helper process** started per photo; it loads the image libraries, prints the reading as JSON and exits. Reasons: lint forbids imports inside functions, memory returns to the system, and a malformed image can't crash the bot. Replaces the lazy-import tactic of spec 03 §8 for extraction |
+| D79 | **Non-standard QR payloads are repaired:** when the document-type part is not a document type, `tipo` comes from the serie's first letter; when the buyer-type part is empty, it comes from the buyer number's length. Seen in 6 of the owner's 35 invoices of 2026 (three stores). Inferred fields are marked and shown in the summary |
+| D80 | **In the `read` phase a doubtful value is a warning line in the summary** and the invoice goes on; the confirm-and-edit step (BR-E03, BR-E09) arrives with reply handling in `widen-b`. `lxml` stays the XML reader, by the owner's choice |
 
 ## Open (needed before or during Phase 0)
-Until they are answered, work proceeds with the default in the last column. Q2–Q5 still need real input (accounts, recipients, template file, inbox) before E11 and S9.5.
+Until they are answered, work proceeds with the default in the last column. Q5 still needs real input before S11.9 (the inbox fallback, now in flow B). Q2, Q3, Q4 and Q7 were answered on 2026-11-12 (D49, D50).
 | # | Question | Why it matters | Default if unanswered |
 |---|---|---|---|
 | Q1 | The host is 2 GB (D42). n8n stays an *optional event subscriber*: run it on another machine, or on the bot's host only after memprofile shows headroom during a Chromium fetch? | RAM budget | Core in Python, n8n off on the bot's host |
-| Q2 | Microsoft accounts: is your personal account outlook.com/hotmail (MSA)? Does your work tenant allow consenting to a third-party app? Should the bot write to your **personal** OneDrive and share that folder with your work account, or should the work account share a folder with your personal one? | Determines auth and folder location | Personal MSA OneDrive, folder shared with work |
-| Q3 | Email for flow B: which provider sends it (Outlook personal through Graph, or Gmail), and who receives it (to and cc)? | Mailer config | Graph from the personal account |
-| Q4 | Can you share the **Excel template** (cells to fill, sheet name, .xlsx or .xlsm, formulas, and whether a batch means one file per invoice or one file with many)? | Cell mapping; batch format | One file per invoice |
 | Q5 | Which email do you give restaurants and stores for the electronic invoice? Can the bot read that inbox (Gmail or Outlook)? A **dedicated mailbox** for invoices is preferred, so the bot's read scope doesn't cover your personal mail (R-6.5) | The `email_inbox` fetcher is a strong free fallback, especially for flow B | A dedicated Gmail mailbox, read-only scope |
 | Q6 | Google Sheet columns and Drive folder structure for flow A: keep the proposed defaults, or do you have an existing sheet? | Sheets mapping; an existing sheet needs the broader `spreadsheets` scope, a bot-created one only `drive.file` (R-6.5) | Proposed defaults, bot-created sheet |
-| Q7 | Required docs per flow: should flow B still deliver if only the PDF *or* only the XML is found? | Delivery rule | Both are required for B, XML for A |
 | Q8 | Do you also need **boletas** (B-series, buyer DNI) or only **facturas** (F-series)? | Boletas often lack a buyer RUC; SOL won't list them | Facturas first, boletas best-effort |
 | Q9 | Any currency other than PEN (USD invoices)? | Parsing and Sheets formatting | PEN, USD read from XML when present |
 | Q10 | Comfortable creating a **secondary SOL user** with query-only permissions for the bot? | Security of the `sunat_sol` fetcher | Yes |
 | Q11 | Which VPS provider (2 GB, about US$10–12/month, D42: DigitalOcean, Vultr or Lightsail in US East), and do you have a domain on Cloudflare? A named tunnel needs one; the quick tunnel's hostname changes on every run, so it is for dev only | Deploy | Local Docker for now (D31) with a quick tunnel; a named tunnel on the owner's domain for the VPS |
+
+## Answered on 2026-11-12
+| # | Question | Answer |
+|---|---|---|
+| Q2 | Microsoft accounts: is your personal account outlook.com/hotmail (MSA)? Does your work tenant allow consenting to a third-party app? Should the bot write to your **personal** OneDrive and share that folder with your work account, or should the work account share a folder with your personal one? | D49 |
+| Q3 | Email for flow B: which provider sends it (Outlook personal through Graph, or Gmail), and who receives it (to and cc)? | D49 |
+| Q4 | Can you share the **Excel template** (cells to fill, sheet name, .xlsx or .xlsm, formulas, and whether a batch means one file per invoice or one file with many)? | D50 |
+| Q7 | Required docs per flow: should flow B still deliver if only the PDF *or* only the XML is found? | D50 |

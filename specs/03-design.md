@@ -54,8 +54,8 @@
 | OCR | Tesseract 5 + `spa` (apt), invoked as a subprocess | Memory is freed when it exits |
 | Images | OpenCV headless; downscale long side to ≤ 2000 px; `cv2.IMREAD_REDUCED_*` when huge | Bounded memory |
 | Browser | Playwright + `chromium-headless-shell`, launched per fetch batch, closed after 60 s idle | Never resident |
-| Excel | `openpyxl` (keep formatting; `keep_vba` for .xlsm only with explicit opt-in); template SHA-256 pinned in config | Graph Excel API is unsupported on personal OneDrive; R-7.10 |
-| XML | `lxml` with UBL 2.1 XPaths (ported from Greenter), parser with `resolve_entities=False`, `no_network=True`, `load_dtd=False`; `DOCTYPE` rejected; 2 MB cap. XMLDSig verified with `signxml` | Fast, small; R-2.12 |
+| Excel | The mapped cells are patched inside the `.xlsx` package (stdlib `zipfile` + `lxml` on the sheet XML); every other part is copied unchanged; template SHA-256 pinned in config. `openpyxl` only reads (for tests and the config check) | A test on the owner's real template (2026-11-12) showed an openpyxl load-and-save drops its 3 drawn shapes, its custom metadata and the cached value of the total; Graph's Excel API is unsupported on personal OneDrive; R-7.4, R-7.10 |
+| XML | `lxml` with UBL 2.1 XPaths (ported from Greenter), parser with `resolve_entities=False`, `no_network=True`, `load_dtd=False`; `DOCTYPE` rejected; 2 MB cap. No signature checks in the MVP (D57) | Fast, small; R-2.12 |
 | Auth | Google OAuth refresh token (manual HTTP), `msal` token cache for Graph | |
 | Padrón RUC | Postgres table `padron(ruc bigint PRIMARY KEY, razon_social, estado, condicion)`, refreshed weekly by streaming the ZIP into `COPY` on a staging table, then swapping. SUNAT updates the ZIP daily; it is ~395 MB, so a weekly refresh costs ~1.6 GB/month of bandwidth and needs ~0.4 GB of free disk while it streams (see §8) | Indexed lookup, ~0 app RAM |
 | LLM fallback | Optional adapter behind an `LLMExtractor` port; thin `httpx` call to an OpenAI-compatible endpoint. Default **DeepSeek `deepseek-flash`** (accepts images, ~1,024 tokens per image), **per-flow opt-in, never flow B** (D43). Usage recorded in `llm_usage` | D24, D43, R-2.11 |
@@ -84,11 +84,14 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
          ruc_emisor, tipo, serie, numero, fecha, moneda, base, igv, total,
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
          sunat_status_json, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,
+         flow_data_json /*data only this invoice's flow uses: folder ref and seq, comercio, claimed amount, reason overrides (D75)*/,
+         payment_id NULL /*R-7.12*/,
          error, created_at, updated_at)
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
-      remote_ref NULL, sha256, size, xml_trust NULL /*signed|sol|hint*/, created_at)
+      remote_ref NULL, sha256, size, xml_trust NULL /*post-MVP, D57*/, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_error) -- queue
-batches(id PK, flow_id, state /*open|sending|sent|failed*/, opened_at, sent_at, email_ref)
+batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
+payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason /*enum code*/, ms, at) -- R-5.7
 outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo or subscriber*/,
        payload_json, template NULL, state /*pending|sent|dead*/, attempts, created_at,
@@ -110,6 +113,8 @@ channel_windows(channel, recipient /*profile id*/, last_inbound_at,
                 PRIMARY KEY (channel, recipient))   -- WhatsApp 24 h service window (R-1.10)
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
+
+`flow_data_json`, `payment_id`, the `payments` table, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `flow-b` phase; merged revisions are not edited.
 
 - **Profiles** (people) live in config, not in a table: each links one WhatsApp number and one Telegram user id (R-1.9). `profile_id` is the config key.
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
@@ -137,13 +142,15 @@ Side states and exits (each row names the rule that causes it):
 | EXTRACT_FAILED, CONFIRMING, CONFIRM_INVALID | No answer within `question_timeout` (BR-S08) | PENDING_USER (the waiting state is stored in `waiting_state`) |
 | PENDING_USER | The user answers the pending question, directly or from `/pendientes` | the stored waiting state |
 | WAITING_CAPTCHA | The user answers / times out (BR-F05) | FETCHING_DOCS (same fetcher / next fetcher) |
+| FETCHING_DOCS | A portal says the invoice doesn't exist yet (D65) | stays FETCHING_DOCS ("esperando al portal"); retried on the portal's schedule, then the next fetcher |
 | FETCHING_DOCS | The chain ends in `manual` (BR-F07) | MANUAL_REQUIRED |
 | MANUAL_REQUIRED | The user sends the files (R-1.5) / a linked gap is fixed (R-11.9) | DELIVERING / FETCHING_DOCS |
 | DELIVERING | A token expired or was revoked (BR-D01) | PENDING_AUTH, then DELIVERING after re-auth |
 | DELIVERING | The Excel template is missing, invalid or its hash doesn't match (BR-D02) | MANUAL_REQUIRED |
-| DELIVERING (flow B) | Every sink done; added to the open batch | BATCHED |
-| BATCHED | The batch is sent | DONE (files purged, `invoice.delivered`) |
-| BATCHED | The batch email fails after retries (BR-D03) | stays BATCHED; the batch goes `failed`; retry with `/enviar` |
+| ROUTING (flow B) | Total above `reimbursement_cap` (BR-D06) | CONFIRMING |
+| DELIVERING (flow B) | Every sink done; added to its batch (a batch of one with `per_invoice`, R-7.5) | BATCHED |
+| BATCHED | The batch is `sent` (R-7.8): Graph accepted the email, the laptop wrote its receipt, or the sender tapped [Ya lo envié] | DONE (files purged, `invoice.delivered`) |
+| BATCHED | The email can't be prepared or sent after retries (BR-D03) | stays BATCHED; the batch goes `failed`; `/reprocesar <id>` retries it |
 | any non-terminal | `/cancelar`, BR-E05 | CANCELLED |
 | any | A transient error 5 times, or the worker dies twice on the same job (BR-S03) | FAILED |
 | FAILED | `/reprocesar <id>` | FETCHING_DOCS |
@@ -151,6 +158,7 @@ Side states and exits (each row names the rule that causes it):
 Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
 
 - Each transition is a single Postgres transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain *why* an invoice is where it is.
+- **Payment** is not an invoice state. A `DONE` flow B invoice gets `payment_id` from `/pagado` (R-7.12), and the folder rename and move run as jobs (R-7.11).
 - With `confirm_mode: auto`, the "Editar" and "Cancelar" buttons from the summary are accepted in any state before `DELIVERING`. An edit re-enters `ROUTING`. A button pressed later gets BR-S02.
 
 ## 5. Extraction pipeline detail
@@ -164,8 +172,8 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
    3. If nothing: WeChat detector (its models are ~1 MB, loaded lazily).
    4. If nothing: pyzbar on the binarized image, then on rotations.
 3. **QR parse:**
-   - Split on `|`, strip, and map by position.
-   - Validate the RUC check digit, `tipo ∈ {01,03,07,08,12…}`, the serie regex, decimals, and the date (`yyyy-mm-dd` per RS 114-2019 Anexo VI; `dd/mm/yyyy` tolerated).
+   - Split on `|`, strip, and map by position. Real payloads have 9 to 11 parts; a payload whose document-type or buyer-type part is wrong or empty is repaired from the serie letter and the buyer number (D79).
+   - Validate the RUC check digit, `tipo` in `extraction.supported_tipos`, the serie regex, decimals, and the date (`yyyy-mm-dd` per RS 114-2019 Anexo VI; `dd/mm/yyyy` tolerated).
    - A payload starting with `http` becomes `document_url`.
 4. **OCR fallback** (subprocess `tesseract - - -l spa --psm 4 --oem 1`, 30 s timeout):
    - Preprocess: 4-point perspective warp → deskew → CLAHE → adaptive Gaussian threshold → morphological open.
@@ -176,14 +184,18 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
      - date formats
      - `(IMPORTE\s+)?TOTAL(\s+A\s+PAGAR)?\s*:?\s*S/?\.?\s*([\d.,]+)`
      - `IGV`, `OP\.?\s*GRAVADA`
+     - `RECARGO|SERVICIO`, `ICBPER`, `DESCUENTO` (R-2.14)
    - The first 11-digit RUC with a valid check digit near the header is the issuer; the second one is the buyer.
-5. **Enrich:**
+5. **XML and PDF:**
+   - **XML** (the downloaded file, and the golden set's expected values): a light, hardened UBL read (`extract/ubl.py`, R-2.12) of the match fields and the amounts (R-2.7, D57). No signature checks in the MVP. Built in phase 3 (S7.3, S7.7 moved, D55).
+   - **PDF input** (D58): the text layer and QR first (`extract/pdf.py`); a PDF without text is rendered (page 1) and goes through steps 2–4.
+6. **Enrich:**
    - Padrón lookup gives `razon_social`, `estado` and `condicion`.
-   - Optional: a `config/issuers.yaml` alias table gives a friendly name (for example, "Tanta Larcomar").
-6. **Score:**
+   - `comercio` is not resolved here: a flow that needs it (flow B's folder name) looks it up in the store directory after routing, and asks BR-R09 then if the brand is ambiguous (R-7.1).
+7. **Score:**
    - Per-field confidence: QR = 1.0, padrón = 1.0, OCR scaled by the Tesseract word confidence and by cross-checks.
    - The overall status is `ok` when every required field has confidence ≥ 0.8, otherwise `needs_review`. Uncertain fields are highlighted in the summary.
-7. **LLM fallback** (D43, R-2.11), only when steps 2–4 miss required fields **and** `llm_fallback` is enabled for the flow (never flow B) **and** the monthly cap isn't reached:
+8. **LLM fallback** (D43, R-2.11), only when steps 2–4 miss required fields **and** `llm_fallback` is enabled for the flow (never flow B) **and** the monthly cap isn't reached:
    - Send the image downscaled to ≤ 1024 px on the long side (about one image-token block), with no other invoice data.
    - Parse the JSON answer into fields with `source=llm`, confidence ≤ 0.5, and run them through the same validators (R-2.4). A field that fails is dropped, not kept as text.
    - Record tokens and cost in `llm_usage`. At the cap, skip with BR-E08.
@@ -198,24 +210,35 @@ Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, 
 
 Default order for flow A: `qr_url → portal_registry → sunat_sol → email_inbox → manual`. When a fetcher fails for good, the chain moves to the **next** fetcher (R-5.1).
 
-**Portal registry** (`config/portals.yaml`):
+**Store directory** (D47, R-5.8): two folders of small files in the repo, `config/stores/` and `config/portals/`. The examples below use a synthetic RUC.
 ```yaml
-- key: nubefact
-  match: { ruc: ["20xxxxxxxxx", "..."], url_contains: ["nubefact"] }
-  adapter: generic_form                 # or python: invoicebot.fetchers.portals.nubefact:Adapter (only this package is allowed)
-  url: "https://.../buscar"
-  fields:                               # CSS selector -> expression
-    "#ruc": "{ruc_emisor}"
-    "#tipo": { select: "{tipo}" }
-    "#serie": "{serie}"
-    "#numero": "{numero}"
-    "#fecha": "{fecha:%d/%m/%Y}"
-    "#total": "{total:.2f}"
-  captcha: { image: "#captchaImg", input: "#captcha", solver: [tesseract, user] }
-  submit: "#btnBuscar"
-  downloads: { xml: "a:has-text('XML')", pdf: "a:has-text('PDF')" }
+# stores/20000000001.yaml: one file per issuer RUC
+ruc: "20000000001"
+razon_social: "EJEMPLO RESTAURANTES S.A.C."
+tipo: restaurante
+brands:                                 # one RUC can run several brands
+  - comercio: LaLena                    # short name used in folder names
+    serie_prefix: [F014, F011]          # picks the brand; no match and several brands -> one-tap question
+portal: nubefact                        # key of a file in portals/
+notes: ""
 ```
-- **Seeding the registry:** you supply a list of frequent issuers (RUC → link), which matches what you described ("in parallel we are going to define…"). New issuers default to the next fetcher. A link taught in chat is used only after the owner approves it (R-10.2).
+```yaml
+# portals/nubefact.yaml: one file per portal site, shared by all its stores
+adapter: generic_form                   # or python: invoicebot.fetchers.portals.nubefact:Adapter (only this package is allowed)
+url: "https://.../buscar"
+fields:                                 # CSS selector -> expression
+  "#ruc": "{ruc_emisor}"
+  "#tipo": { select: "{tipo}" }
+  "#serie": "{serie}"
+  "#numero": "{numero}"
+  "#fecha": "{fecha:%d/%m/%Y}"
+  "#total": "{total:.2f}"
+captcha: { kind: image, image: "#captchaImg", input: "#captcha", solver: [tesseract, user] }   # none | image | recaptcha
+submit: "#btnBuscar"
+downloads: { xml: "a:has-text('XML')", pdf: "a:has-text('PDF')" }
+status: active                          # active | todo | broken
+```
+- **Seeding the directory:** the owner supplies each store's page, fields and captcha; RUC, legal name and short name are pre-filled from the owner's past invoices (S0.6). New issuers default to the next fetcher. A link taught in chat is used only after the owner approves it (R-10.2).
 - **`sunat_sol` (flow A):**
   - Playwright login with the secondary SOL user, navigate to "Consulta de comprobantes de pago", query by issuer, serie and número, download the XML.
   - SOL credentials are typed only when `page.url` matches the SUNAT origins hard-coded in source (R-9.10).
@@ -223,26 +246,61 @@ Default order for flow A: `qr_url → portal_registry → sunat_sol → email_in
   - **To validate manually in Phase 0 (S0.4, still a blocker):** that this menu actually offers the XML for received invoices. SIRE Compras returns rows, not XML, so it can't replace this fetcher.
 - **`email_inbox`:**
   - Gmail query `has:attachment (filename:xml OR filename:pdf) "{serie}-{numero}" newer_than:30d`. Graph `$search` equivalent on Outlook. A dedicated invoice mailbox is preferred (R-6.5).
-  - Validate the XML (R-2.12: signature and signer RUC) and match it against the invoice (R-5.6).
+  - Parse the XML with the hardened parser (R-2.12) and match it against the invoice (R-5.6).
   - Retry schedule: +5 min, +1 h, +6 h, +24 h, because issuers send asynchronously. Each retry is a scheduled job, so nothing waits in the worker; meanwhile the invoice stays in `FETCHING_DOCS` with "esperando correo". After the last retry fails, the chain moves to the **next fetcher** (with the default order, `manual`).
-- **XML handling (R-2.12):** every XML is parsed with the hardened parser (§2). XML from SOL is trusted by origin; XML from email or a user upload is authoritative only when its XMLDSig verifies and the signer's RUC equals `ruc_emisor`, otherwise it is stored as a hint (BR-F10).
-- **Request guard (R-5.10):** one module, `net/guard.py`, used by `httpx` (a custom transport) and by Chromium (route interception): `https` only, DNS resolved once and the connection pinned to a public IP, private/loopback/link-local/CGNAT ranges blocked, every redirect re-checked, `file:`/`data:` blocked. The browser container's network allows internet egress only. A block returns an enum reason (BR-F08).
+- **XML handling (R-2.12, D57):** every XML, whatever its source, is parsed with the hardened parser (§2) and accepted only if it matches the invoice (R-5.6). Signature checks and BR-F10 are post-MVP.
+- **Not found yet (D65):** a portal's "no such invoice" is a scheduled retry (`retry_schedule`, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
+- **Request guard (R-5.10):** one module, `net/guard.py`, used by `httpx` (a custom transport) and by Chromium (route interception): `https` only (or `http` to the host of a portal whose file sets `allow_http`, D76), DNS resolved once and the connection pinned to a public IP, private/loopback/link-local/CGNAT ranges blocked, every redirect re-checked, `file:`/`data:` blocked. The browser container's network allows internet egress only. A block returns an enum reason (BR-F08).
 - **`manual`:** marks the state and composes the message listing the failed fetchers and reasons.
 
 ## 7. Sinks and flows (declarative)
 `config/example.yaml` shows the full shape. Key ideas:
-- A flow lists `fetchers` (ordered), `required_docs`, and `sinks` (ordered). Some sinks are `batch_aware`.
+- **Flows are config (D53).** A flow lists `accepted_tipos`, `fetchers` (ordered), `required_docs`, and `sinks` (ordered); routing rules pick it by buyer and type. A new flow, sink or mail mode is a new config entry or a new module behind an existing port, registered in one mapping; no `if flow == …` in the pipeline. Some sinks are `batch_aware`.
 - A sink receives a `DeliveryContext` (invoice, files, previous sink outputs such as Drive links) and returns refs that later sinks or the final message can use.
 - Template expressions use a tiny safe formatter (`str.format_map` with a restricted namespace plus formatting filters), not full Jinja, to save memory. Jinja is used only for email bodies, and imported lazily.
 - **Formula injection (R-6.6, R-7.10):** Sheets writes use `valueInputOption=RAW`; Excel text cells are written as strings; any text starting with `= + - @`, tab or carriage return gets a leading `'`. The Excel template's SHA-256 is pinned in config.
-- **Flow B batches:** `DELIVERING` uploads the files and fills the Excel, then the invoice is `BATCHED` in the open batch. The MVP sends a batch only `on_command` (`/enviar`); `per_invoice` and `scheduled` are post-MVP. When the batch is `sent`, its invoices become `DONE`.
+- **Flow B (D48, D49, D61–D71):** `DELIVERING` builds the invoice's folder, patches the Excel and stores the PDF and XML on each storage target, then prepares the email through the first configured mail mode. Each invoice is a batch of one. The batch is `prepared` until R-7.8 says it is `sent`; then the invoice is `DONE` and a job renames the folder `_Sent`. `/pagado` later renames it `_PAID_…` and moves it into the year folder. The target config (placeholders; `config/example.yaml` moves to this shape in the `file-b` phase):
+```yaml
+work_microsoft:
+  label: "Trabajo (Microsoft)"
+  accepted_tipos: ["01"]                 # facturas only (BR-R08)
+  fetchers: [qr_url, portal_registry, email_inbox, manual]
+  required_docs: [pdf, xml]
+  manual_uploads: [pdf, xml]             # what the sender may send for a stuck invoice (R-1.5)
+  llm_allowed: false
+  reimbursement: { cap: 50.00, track_payments: true }   # BR-D06, /pagado
+  sinks:
+    - kind: onedrive_folder
+      targets: [onedrive_personal]       # later: onedrive_work
+      root: "/Reembolsos"
+      folder: "{fecha:%Y}-{fecha:%m}-Support_{seq}_{comercio}"
+      files: { pdf: "{profile.legal_name}.pdf", xml: "{profile.legal_name}.xml" }
+      on_sent: { suffix: "_Sent" }
+      on_paid: { suffix: "_PAID_{paid:%d_%m}___{payment_total}", move_to: "{fecha:%Y}" }
+    - kind: excel_template
+      template: "/Reembolsos/_plantilla/Formato de reembolsos.xlsx"
+      template_sha256: "<pinned>"
+      output: "Formato de reembolsos.xlsx"
+      sheet: "Template"
+      cells: { C13: "{motivo}", B16: "{fecha:%d/%m/%Y}", C16: "{descripcion}", E16: "{serie}-{numero}",
+               F16: "{base}", G16: "{igv}", H16: "{service_charge}", I16: "{total}" }
+      defaults: { motivo: "Support release", descripcion: "Cena en {comercio}" }
+    - kind: mailer
+      trigger: per_invoice
+      modes: [graph]                     # MVP. Later, by config: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
+      account: personal                  # personal | bot | work (one token cache each)
+      to: ["me@example.com"]             # MVP: the owner's test inbox; HR's address only in the host's private config
+      subject: "Support release {fecha:%d/%m/%Y}"
+      body: "Hola,\nAdjunto los documentos solicitados para el reembolso."
+      attach: [excel_template, pdf, xml]
+```
 
 ## 8. Resource budget and efficiency tactics
 - **One uvicorn worker.** CPU work (OpenCV) runs in `asyncio.to_thread`, guarded by `HEAVY = asyncio.Semaphore(1)`. Tesseract and Chromium run as subprocesses, so their memory is returned to the OS when they exit.
 - **Browser lifecycle:** `BrowserPool(max=1, idle_close=60s)` with one context per fetch.
   - Launch flags: `--disable-dev-shm-usage --no-zygote --renderer-process-limit=1 --disable-gpu --blink-settings=imagesEnabled=false` (images are re-enabled only for captcha pages).
   - Block fonts, media and analytics with route interception.
-- **Lazy imports:** heavy modules (cv2, playwright, openpyxl, lxml, jinja2) are imported inside the functions that need them. Idle RSS stays at about 60 MB.
+- **Heavy libraries stay out of the bot process:** image reading runs in a helper process per photo (`python -m invoicebot.extract`, D78), like Tesseract and Chromium, so `cv2` and `zxingcpp` are never imported by the app and their memory returns to the system. The same rule applies to any later heavy library (Playwright, the OCR preprocessing). Idle RSS target: about 60 MB, to be measured in `ops` (S12.1).
 - **Bounded queues:** at most 20 queued jobs per sender profile. Over the limit, the new message is stored but not enqueued, and the sender gets BR-S01.
 - **Postgres:** small footprint (`shared_buffers=64MB`, `max_connections=20`, app pool of 5), indices on `invoices(state)`, `jobs(run_after)`, `invoices(natural_key)`. The worker sleeps on `LISTEN jobs` instead of polling.
 - **Files:** stream downloads to `/data/tmp/{invoice_id}/`, using SHA-256 for dedup of identical photos. Purge after `DONE` (flow B: only once the batch is `sent`, never while `BATCHED`), plus a nightly housekeeping cron.
@@ -261,7 +319,7 @@ Default order for flow A: `qr_url → portal_registry → sunat_sol → email_in
 - **Untrusted input:** outbound fetches go through the request guard (§6, R-5.10); XML through the hardened parser (R-2.12); sheet and Excel writes are formula-safe (§7); GitHub issue text is built from typed fields only (§13, R-11.12).
 - **Logs (R-9.16):** a redaction filter masks every loaded secret and the Telegram bot token (which appears in API URLs); a test proves it.
 - **Commands (R-10.1):** a command acts only on the sender profile's own invoices unless the sender is an admin; an unknown or foreign id gets the same answer (BR-S07).
-- **CI (R-9.17):** gitleaks, pip-audit and bandit; no `pull_request_target`; no self-hosted runners; fork PR runs need approval; `yaml.safe_load` everywhere. While the repo is public, CI rejects images with EXIF data and any valid RUC not on the synthetic allowlist.
+- **CI (R-9.17):** gitleaks, pip-audit and bandit; no `pull_request_target`; no self-hosted runners; fork PR runs need approval; `yaml.safe_load` everywhere. While the repo is public, CI rejects images with EXIF data and any valid RUC not on the synthetic allowlist. A store file's own RUC is the one exception (D47).
 - **OAuth (R-6.5, R-7.9):** Google `drive.file` (+ `spreadsheets` only for an existing sheet); the OAuth app in production status. Microsoft: minimal Graph scopes; device code first, auth-code + PKCE loopback when the tenant blocks device code.
 - The scraper honors per-domain rate limits (≥ 10 s between requests to the same portal), uses a realistic UA, and makes no parallel requests.
 
@@ -269,7 +327,7 @@ Default order for flow A: `qr_url → portal_registry → sunat_sol → email_in
 ```
 mk-invoice-bot/
   specs/                 # this spec set
-  config/                example.yaml, portals.yaml, parsing_rules.yaml, issuers.yaml
+  config/                example.yaml, parsing_rules.yaml, stores/, portals/ (D47)
   src/invoicebot/
     app.py               # FastAPI app, routes, lifespan
     api/{rest,mcp,auth}.py  # public contract (R-12)
@@ -286,7 +344,7 @@ mk-invoice-bot/
     net/guard.py         # outbound request guard (R-5.10)
     secrets/loader.py    # age / systemd-creds, per-adapter scoping (R-9.9, R-9.10)
     ops/{backup,health,selfcheck}.py
-    extract/{image,qr,ocr,parse,validate,padron,ubl,xmlsig,llm_fallback}.py
+    extract/{image,qr,ocr,parse,validate,padron,ubl,pdf,llm_fallback}.py
     sunat/{validez,sol}.py
     fetchers/{base,qr_url,portal_registry,email_inbox,sunat_sol,paid_api,manual}.py
     fetchers/portals/{generic_form,...}.py
@@ -303,7 +361,7 @@ mk-invoice-bot/
 ## 11. Testing strategy
 - **Unit tests:**
   - QR payload parser (variants), RUC check digit, regex rules (table-driven), UBL parser, state machine transitions, cell-mapping formatter, batch strategies.
-- **Golden set:** ≥ 30 photos with `expected.json`, run in CI. It reports per-field accuracy against R-2.9. While the repo is public (D27) the committed set is synthetic or anonymised; CI rejects images with EXIF data and any valid RUC not on the synthetic allowlist (R-9.17). Real photos stay outside git until the repo is private.
+- **Golden set (D54):** two sets with the same `expected.json` format, one file per image: the required fields (R-2.13), the buyer, `base`, `igv`, `service_charge`, `icbper`, `discounts`, `has_qr`, and `razon_social`. The **committed** set (`tests/golden/{images,expected}/`, ≥ 10) is drawn by a generator script with synthetic RUCs (S3.9) and runs in CI as a regression check. The **private** set (the owner's photos, each with its official XML as the source of `expected.json`, ≥ 30) stays outside git and is measured locally against R-2.9; the result goes to `specs/spikes/accuracy.md`.
 - **Contract tests:**
   - Recorded fixtures (VCR-style) for Meta, Google, Graph and SUNAT.
   - Fake channel for end-to-end conversation tests.
@@ -344,7 +402,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **Owner alert (chat):** `🧩 Falta configurar: {kind_desc} — {subject}. Issue: {issue_url}`. Sent once per fingerprint per `realert_days`; "digest" kinds are batched into one daily message. It goes to each `admins` profile on its preferred channel. On WhatsApp it is a free-form service message inside the 24 h window, and the approved **utility template** `admin_alert` outside it (R-1.10).
 - **Credential (D45):** a **GitHub App** installed only on the ops repo, with the **Issues** permission only. The bot signs a JWT with the App's private key (from the encrypted secrets file) and exchanges it for a short-lived installation token, cached in `kv` until shortly before it expires. Failure to get a token (key revoked, App uninstalled, permission missing) raises BR-D05.
 - **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.
-- **Post-MVP (D44, spec 04 E16):** draft PRs with a `portals.yaml` stub, the `gap-watch` workflow, and bot-made `status: broken` flips. If they return, the App gets Contents and Pull requests on the main repo, YAML is written with a serializer plus a parse-back equality check, and nothing is pushed to the default branch.
+- **End of development (S16.2, D52):** once the main repo is private, a `PORTAL_MISSING` gap also opens a PR that adds `config/stores/<ruc>.yaml` and `config/portals/<key>.yaml` from templates with `status: todo`, so CI stays red until the owner completes it. The App gets Contents and Pull requests on the main repo for this only; YAML is written with a serializer plus a parse-back equality check, and nothing is pushed to the default branch. **Post-MVP (D44, E16):** the `gap-watch` workflow and bot-made `status: broken` flips.
 
 ## 14. Integration contract (D39, P10, R-12)
 ```
@@ -367,7 +425,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **One deploy path (D46):** a green CI run on `main` triggers `deploy.yml`:
   1. build and push the image;
   2. `pg_dump` the database (encrypted, R-9.11) before migrating;
-  3. copy the config (`config/*.yaml`, never secrets) to the host;
+  3. copy the git-tracked config (`config/stores/`, `config/portals/`, `parsing_rules.yaml`; never secrets) to the host. The host's private `config.yaml` (D59) is never touched by a deploy; at start and on reload its keys override the git-tracked defaults, and the merged result is validated as a whole;
   4. run migrations, start the new image, and check `/health`;
   5. on failure, roll back to the previous image (migrations are expand/contract, so the previous image still works, R-9.13).
   - When only config changed, the deploy copies it and sends `SIGHUP`; the app validates it before swapping it in (R-9.6), then `GapService.reevaluate()` resumes the affected invoices (R-11.9).
@@ -377,3 +435,23 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **Health (R-9.14):** `/health` runs `SELECT 1` and returns 503 when the DB is unreachable. An external uptime check (any free monitor) polls it through the tunnel.
 - **Self-alerts (R-9.14):** a scheduler job checks every 5 minutes for failed jobs (BR-S03), outbox backlog (BR-O01), disk usage (BR-O02) and channel token problems (BR-O03), and alerts the owner on the preferred channel. Each alert is rate-limited per condition.
 - **Postgres down (R-9.15):** the webhook can't persist, so it returns 503 and does not acknowledge. Meta and Telegram retry, so no message is lost while the outage is shorter than their retry window. Documented in the runbook.
+
+## 16. Flow B delivery without work-tenant consent (D61, D63)
+
+The work tenant may never approve the bot's app. Everything signed in to the work account lives on the owner's devices, so the bot reaches it indirectly:
+
+```
+            personal OneDrive (owner's MSA, Graph)                       work account (no consent)
+ bot ──► folders + _outbox/<job>.json ──sync──► laptop agent ──► work OneDrive folder (synced client)
+  │                                    ◄─sync── _outbox/receipts/        └──► Outlook classic (COM) ──► HR
+  │
+  └──► bot mailbox (Outlook.com, Graph) ──email──► owner's work inbox ──Outlook rule──► HR
+                    ▲                                                     └─► copy back to the bot mailbox (confirmation)
+```
+
+- **Accounts:** the owner's personal Microsoft account (OneDrive only), a dedicated Outlook.com mailbox for the bot (sends and reads only its own mail), and the work account only if consent ever comes (`graph_work`, `onedrive_work`). One MSAL token cache each, in the encrypted store.
+- **`inbox_rule`** is always on and needs no laptop. Its rule is documented in the runbook: *from* the bot mailbox, *subject starts with* `Support release` → *forward to* HR. The forward can't be observed (auto-forwards don't appear in Sent Items, and Microsoft 365 usually blocks auto-forwarding to outside addresses, so a copy back to the bot is not relied on): the rule is trusted, and the sender has a [No llegó] button (D67).
+- **`laptop_outlook`** sends a clean email (no `RV:`), but only while the laptop is on. Job and receipt files are JSON (`{"job_id", "invoice_id", "to", "subject", "body", "attachments": [paths inside the invoice folder], "hmac"}`); the agent rejects a job whose HMAC doesn't verify or whose attachments leave the folder (R-7.14).
+- **No double sending:** one automatic mode sends; another mode is used only when the sender asks (BR-D11).
+- **Why not a mobile app:** Android never lets one app use another app's sign-in, and Intune's app protection treats a custom app like WhatsApp when it hands files to Outlook or OneDrive. A native app would need the same tenant consent to send as the owner. The laptop is the one place where "already signed in" can be used (the OneDrive sync folder and Outlook classic's COM interface).
+- **To verify (S0.11):** the rule's forward to an internal address works; mail from the bot's Outlook.com mailbox with three attachments reaches the work inbox and not Junk; Outlook classic sends through COM without a security prompt and the script is allowed to run; the work OneDrive client uploads files a script writes; a work folder shared with the personal account can (or can't) be listed through Graph with the personal sign-in (expected: can't, so the laptop agent stays the route); WhatsApp → Outlook/OneDrive sharing on the managed phone (expected: blocked).
