@@ -267,3 +267,35 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
         return _NO_BUYER_DESC
     template = BUYER_DESC.get(tipo_doc, _OTHER_BUYER_DESC)
     return template.format(num=num_doc)
+
+
+# --- Fetch texts (docs/plan-mvp-fetch.md step 14) ------------------------------------------
+# These are not spec 06 rows, so they stay outside MESSAGES and the parity test does not
+# see them. The copy is pending the owner's review.
+
+#: Status line while a portal has not published the invoice yet (D65).
+FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar más tarde."
+#: One BR-F07 bullet for a fetcher whose last reason has no BR-F text of its own.
+FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
+#: es-PE names of the fetchers, used in BR-F07's bullets.
+FETCHER_DESC: dict[str, str] = {
+    "qr_url": "Enlace del QR",
+    "portal_registry": "Portal del comercio",
+    "sunat_sol": "SUNAT",
+    "email_inbox": "Correo",
+}
+#: es-PE names of the required document kinds, used in BR-F07's ``{manual_docs_desc}``.
+DOC_DESC: dict[str, str] = {"pdf": "el PDF", "xml": "el XML"}
+
+
+def fetcher_desc(name: str) -> str:
+    """Return the es-PE name of a fetcher for BR-F07's bullets."""
+    return FETCHER_DESC.get(name, name)
+
+
+def docs_desc(kinds: Sequence[str]) -> str:
+    """Return BR-F07's ``{manual_docs_desc}``: "el PDF", "el PDF y el XML"."""
+    words = [DOC_DESC.get(kind, kind) for kind in kinds]
+    if len(words) < 2:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} y {words[-1]}"
