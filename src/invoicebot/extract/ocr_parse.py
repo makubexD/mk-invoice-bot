@@ -145,14 +145,38 @@ def _read_serie_numero(
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> tuple[Field | None, Field | None]:
-    """Return the first serie and numero read, the serie repaired for common OCR letters."""
-    match = rules.serie_numero.search(searched)
-    if match is None:
+    """Return the first letter serie, else the first four-digit serie (R-2.3).
+
+    A candidate whose repaired serie fails :func:`check_serie` is skipped, numero included.
+    A letter serie outranks a four-digit one, which is usually an address or a date. A letter
+    serie needs a digit after its letter, so a word such as ``BASE`` is not one.
+    """
+    fallback: tuple[re.Match[str], str] | None = None
+    for match in rules.serie_numero.finditer(searched):
+        serie = _fix_serie(match.group("serie").upper())
+        if not check_serie(serie):
+            continue
+        if serie[:1].isalpha() and any(char.isdigit() for char in serie[1:]):
+            return _serie_numero_fields(match, serie, spans)
+        if serie.isdigit() and fallback is None:
+            fallback = (match, serie)
+    if fallback is None:
         return None, None
-    serie = _fix_serie(match.group("serie").upper())
-    serie_field = _ocr_field(serie, _confidence(spans, *match.span("serie"))) if check_serie(serie) else None
+    match, serie = fallback
+    return _serie_numero_fields(match, serie, spans)
+
+
+def _serie_numero_fields(
+    match: re.Match[str],
+    serie: str,
+    spans: tuple[_WordSpan, ...],
+) -> tuple[Field, Field]:
+    """Return the serie and numero fields for one accepted serie-numero match."""
     numero = canonical_numero(match.group("numero"))
-    return serie_field, _ocr_field(numero, _confidence(spans, *match.span("numero")))
+    return (
+        _ocr_field(serie, _confidence(spans, *match.span("serie"))),
+        _ocr_field(numero, _confidence(spans, *match.span("numero"))),
+    )
 
 
 def _fix_serie(serie: str) -> str:

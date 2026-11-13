@@ -7,10 +7,10 @@ ruc:   # in order: keyword-anchored first, then a bare 11-digit RUC
 tipo:
   "01": ['FACTURA\s+(?:DE\s+VENTA\s+)?ELECTR[OÓ0]NICA']
   "03": ['BOLETA\s+(?:DE\s+VENTA\s+)?ELECTR[OÓ0]NICA']
-serie_numero: '(?<![A-Z0-9])(?P<serie>[FBE][A-Z0-9]{3}|\d{4})\s*[-–—]\s*(?P<numero>\d{1,8})(?!\d)'
+serie_numero: '(?<![A-Z0-9])(?P<serie>[FBE][A-Z0-9]{3}|\d{4})\s*[-–—]\s*(?P<numero>\d{1,8})(?!\d)(?![-/]\d)'
 date: '(?<!\d)(?P<value>\d{2}[/-]\d{2}[/-]\d{4}|\d{4}-\d{2}-\d{2})(?!\d)'
 amount_gap: '[^\d\n]{0,25}(?:\d+(?:[.,]\d+)?\s*%[^\d\n]{0,25})?'
-amount_value: 'S?/?\.?\s*(?P<value>\d{1,3}(?:[.,\s]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)'
+amount_value: 'S?/?\.?\s*(?P<value>\d{1,3}(?:[.,\x20]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)'
 amounts:   # field -> keywords; the first keyword (in list order) with a match wins
   total:
     - 'IMPORTE\s+TOTAL'

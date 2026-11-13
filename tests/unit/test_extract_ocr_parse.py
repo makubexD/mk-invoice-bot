@@ -124,6 +124,41 @@ def test_parse_ocr_serie_letter_o_is_read_as_zero(rules: ParsingRules) -> None:
     assert (fields["serie"], fields["numero"]) == ("F001", "123")
 
 
+@pytest.mark.parametrize(
+    ("lines", "numero"),
+    [
+        pytest.param(
+            ("AV. JAVIER PRADO ESTE 4200 - 302 SURCO", "FACTURA ELECTRONICA", "F001-123"),
+            "123",
+            id="address-before-serie",
+        ),
+        pytest.param(("FECHA: 2026-11-10", "F001-123"), "123", id="iso-date-before-serie"),
+        pytest.param(("BASE-12 F001-9",), "9", id="word-before-serie"),
+    ],
+)
+def test_parse_ocr_serie_numero_skips_number_like_noise(
+    rules: ParsingRules, lines: tuple[str, ...], numero: str
+) -> None:
+    """R-2.3: a dash-joined number or word before the printed serie is not read as serie-numero."""
+    fields = _fields(_ocr(*lines), rules)
+
+    assert (fields["serie"], fields["numero"]) == ("F001", numero)
+
+
+def test_parse_ocr_four_digit_serie_is_read_without_a_letter_serie(rules: ParsingRules) -> None:
+    """R-2.3: a four-digit serie is still read when no letter serie is printed."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", "0001-123"), rules)
+
+    assert (fields["serie"], fields["numero"]) == ("0001", "123")
+
+
+def test_parse_ocr_alphanumeric_letter_serie_outranks_an_address(rules: ParsingRules) -> None:
+    """R-2.4: a valid letter serie with letters after the first, such as FA01, is still a letter serie."""
+    fields = _fields(_ocr("JR. PUNO 1050 - 201", "FA01-55"), rules)
+
+    assert (fields["serie"], fields["numero"]) == ("FA01", "55")
+
+
 def test_parse_ocr_document_without_total_has_no_total_field(rules: ParsingRules) -> None:
     """R-2.13: a document that never prints a total gives no total field."""
     fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", "FACTURA ELECTRÓNICA", "F001-123"), rules)
@@ -239,6 +274,23 @@ def test_parse_ocr_dash_date_becomes_iso(rules: ParsingRules) -> None:
     fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", "Fecha: 13-11-2026"), rules)
 
     assert fields["fecha_emision"] == "2026-11-13"
+
+
+@pytest.mark.parametrize(
+    ("lines", "field", "misread"),
+    [
+        pytest.param(("TOTAL ITEMS 3", "125.50"), "total", "3125.50", id="total-across-lines"),
+        pytest.param(("IGV 18", "100.00"), "igv", "18100.00", id="igv-across-lines"),
+    ],
+)
+def test_parse_ocr_amount_does_not_join_across_lines(
+    rules: ParsingRules, lines: tuple[str, ...], field: str, misread: str
+) -> None:
+    """R-2.14: a space in the thousands group never spans a line break."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", *lines), rules)
+
+    assert field not in fields
+    assert fields.get(field) != misread
 
 
 def test_parse_ocr_serie_without_type_keyword_infers_tipo(rules: ParsingRules) -> None:
