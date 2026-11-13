@@ -80,11 +80,13 @@ Files: `src/invoicebot/config/models.py`, `src/invoicebot/config/loader.py`, `te
 
 - Replace `Portal` and `PortalMatch` with the directory shape (spec 03 §6):
   - `Store`: `ruc` (11 digits), `razon_social`, `tipo`, `brands` (each `comercio` and an optional `serie_prefix` list), `portal: str | None` (a key, `manual`, or `null`), `notes`.
-  - `Portal`: `key` (set from the file name), `adapter`, `url`, `status` (`active | todo | broken`), `fields`, `captcha`, `submit`, `downloads`, `not_found: str | None`, `allow_http: bool = False`, `retry_schedule: list[str]` with the D65 default. Each `retry_schedule` entry must match `^\d+[mhd]$`.
+  - `Portal`: `key` (set from the file name), `adapter`, `url`, `status` (`active | todo | broken`), `fields`, `captcha` (`"none"` or the existing image-captcha model, default `"none"`), `submit`, `downloads`, `not_found: str | None`, `tipo_labels: dict[str, str]` (SUNAT tipo → the site's label, default empty), `allow_http: bool = False`, `retry_schedule: list[str]` with the D65 default, `notes`. Each `retry_schedule` entry must match `^\d+[mhd]$`.
+  - A `fields` value is a template string (typed into the field) or a mapping with exactly one key (step 3 found these on La Leña's site): `select: <template>` (a native `<select>`), `pick: <option selector template>` (click the field, then the option), or `calendar: {cell: <cell selector template>, prev: <selector>}` (click the field, step back with `prev` until `cell` shows, click it). Frozen pydantic models, `extra="forbid"`.
   - `StoreDirectory`: frozen; `stores: dict[str, Store]` keyed by RUC, `portals: dict[str, Portal]` keyed by key.
 - `load_directory(config_dir: Path) -> StoreDirectory` reads `config_dir/stores/*.yaml` and `config_dir/portals/*.yaml` with `yaml.safe_load`. It raises `ValueError` naming the file when a store's `ruc` differs from its file name or a file's root is not a mapping. Remove `load_portals`.
 - Tests, each citing R-5.8:
-  - the repo's own `config/` loads, and the La Leña store resolves to the `facturactiva-la-lena` portal;
+  - the repo's own `config/` loads, and the La Leña store resolves to the `facturactiva-la-lena` portal, whose `#tipoComprobante` field is a `pick` and `#fecha` a `calendar`;
+  - a field mapping with both `pick` and `select` → validation error;
   - a store file whose `ruc` differs from its name → `ValueError`;
   - a portal with no `retry_schedule` gets `["1h", "6h", "24h", "72h"]`;
   - a `retry_schedule` entry `"2w"` → validation error;
@@ -148,14 +150,15 @@ Test: `uv run pytest -q tests/unit/test_fetchers_chain.py`
 
 Files: `src/invoicebot/fetchers/browser/__init__.py`, `src/invoicebot/fetchers/browser/form.py`, `tests/integration/test_browser_form.py`.
 
-- `render_fields(fields, invoice: FetchInvoice) -> list[FieldAction]`: each value is a template over `ruc_emisor`, `tipo`, `serie`, `numero`, `fecha`, `total` with a format spec (`{fecha:%d/%m/%Y}`, `{total:.2f}`, `{numero}`), or `{select: "<template>"}` for a `<select>`. Use `string.Formatter` with only those names; an unknown name or attribute access (`{x.y}`, `{x[0]}`) raises `ValueError`.
+- `render_fields(portal, invoice: FetchInvoice) -> list[FieldAction]`: every template (a plain value, `select`, `pick`, and `calendar.cell`) is rendered over `ruc_emisor`, `tipo`, `tipo_label` (from `portal.tipo_labels`), `serie`, `numero`, `fecha`, `total` with a format spec (`{fecha:%Y-%m-%d}`, `{total:.2f}`, `{numero}`). Use `string.Formatter` with only those names; an unknown name, attribute access (`{x.y}`, `{x[0]}`) or a tipo with no label raises `ValueError`.
 - `async fill_and_download(page, portal, invoice, out_dir, max_bytes) -> FetchResult`:
-  - goes to `portal.url`, fills each field, clicks `submit`;
+  - goes to `portal.url` and performs each action: type (`fill`), `select` (`select_option`), `pick` (click the field, then the option), `calendar` (click the field; click `prev` until `cell` exists, at most 24 times; click the cell); then clicks `submit`. A `ValueError` from `render_fields` or a calendar that never shows the cell → `technical`;
   - waits for either a download control or `not_found`, up to the page timeout; `not_found` → `not_found_yet`;
   - clicks each `downloads` control under `page.expect_download()` and saves it to `out_dir/<kind>`, refusing a file over its `max_bytes` kind limit (`technical`);
   - a missing control or a Playwright timeout → `technical` / `timeout`; never raises for these.
 - Integration tests serve synthetic HTML (a form, a results page with PDF and XML links, a "no encontrado" page) through `page.route(...).fulfill` in a launched headless shell (R-5.8):
-  - the fields render as the portal file says (`fecha` as `dd/mm/yyyy`, `total` with two decimals, a `select`);
+  - the fields render and are set as the portal file says: `total` with two decimals, a native `select`, a `pick` on a JS dropdown (a `div` list shown on click), and a `calendar` on a JS month widget that opens on the current month and needs two `prev` clicks to show the invoice's day (the test page's script records the values it received);
+  - a tipo with no `tipo_labels` entry → `technical`;
   - a match downloads both files with their sizes and SHA-256;
   - the not-found page → `not_found_yet`;
   - a page with no XML control → `technical`;
