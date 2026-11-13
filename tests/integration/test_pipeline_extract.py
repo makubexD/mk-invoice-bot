@@ -7,8 +7,10 @@ test (R-2.1, R-2.13, BR-E01, BR-E02, BR-E05, R-9.4). The database is real Postgr
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
+import signal
 import sys
 from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
@@ -75,6 +77,25 @@ CONFIRMING_PAYLOAD = (
 )
 EXPIRED_TIMEOUT_S = 0.001  # far below any decode, so the helper always times out
 SLOW_HELPER_SCRIPT = "import time; time.sleep(30)"
+#: A helper that starts a sleeping grandchild, records its pid, then sleeps (R-9.2).
+#: The grandchild must not hold the helper's stdout pipe, or ``communicate`` alone
+#: would keep the handler waiting until the grandchild exits.
+TREE_HELPER_SCRIPT = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen(\n"
+    "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+    "    stdout=subprocess.DEVNULL,\n"
+    "    stderr=subprocess.DEVNULL,\n"
+    ")\n"
+    "with open(sys.argv[1], 'w') as pid_file:\n"
+    "    pid_file.write(str(child.pid))\n"
+    "time.sleep(30)\n"
+)
+#: Long enough for the grandchild to start, short enough to keep the test quick.
+TREE_TIMEOUT_S = 2.0
+#: How long a killed grandchild may take to be reparented and reaped by init.
+GRANDCHILD_GONE_TIMEOUT_S = 3.0
+GRANDCHILD_POLL_S = 0.05
 CHILD_START_TIMEOUT_S = 10
 SIGKILL_EXIT_CODE = -9
 
@@ -503,6 +524,7 @@ async def test_cancelling_the_handler_leaves_no_helper_process(
             SLOW_HELPER_SCRIPT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=_kwargs.get("start_new_session", False),
         )
         children.append(child)
         started.set()
@@ -523,6 +545,49 @@ async def test_cancelling_the_handler_leaves_no_helper_process(
     assert [child.returncode for child in children] == [SIGKILL_EXIT_CODE]
     with pytest.raises(ProcessLookupError):
         os.kill(children[0].pid, 0)
+
+
+async def test_timeout_kills_a_helper_and_the_child_it_started(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.2: a helper that started a child is killed on timeout and the child is gone too."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"tree{PNG}"))
+    pid_file = tmp_path / "grandchild.pid"
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _tree_exec(*_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        return await real_exec(
+            sys.executable,
+            "-c",
+            TREE_HELPER_SCRIPT,
+            str(pid_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=kwargs.get("start_new_session", False),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _tree_exec)
+    grandchild_pid: int | None = None
+    try:
+        await _run_handler(db_pool, invoice_id, helper_timeout_s=TREE_TIMEOUT_S)
+        assert pid_file.exists()
+        grandchild_pid = int(pid_file.read_text())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + GRANDCHILD_GONE_TIMEOUT_S
+        while True:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            if loop.time() >= deadline:
+                pytest.fail(f"grandchild {grandchild_pid} outlived the helper")
+            await asyncio.sleep(GRANDCHILD_POLL_S)
+    finally:
+        if grandchild_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
 
 
 async def test_malformed_helper_output_drops_the_pydantic_cause() -> None:

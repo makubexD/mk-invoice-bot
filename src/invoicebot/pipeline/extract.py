@@ -10,8 +10,10 @@ outbox message commit in one transaction (CLAUDE.md "Database").
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Sequence
@@ -133,8 +135,9 @@ async def _run_helper(
 
     The helper receives the photo caps, the OCR config and ``rules_path`` as arguments. It
     runs with a minimal environment and an import path that does not include the working
-    directory, and it is killed and reaped on every exit — timeout, crash or cancellation —
-    so no decode process outlives its job (R-9.2).
+    directory, and its whole process group is killed and reaped on every exit — timeout,
+    crash or cancellation — so no decode process or child it started outlives its job
+    (R-9.2).
 
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
@@ -145,6 +148,8 @@ async def _run_helper(
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         # Cap the pixels OpenCV may decode, so a decompression bomb is refused early (R-1.11).
         "OPENCV_IO_MAX_IMAGE_PIXELS": str(media.max_megapixels * PIXELS_PER_MEGAPIXEL),
+        # One Tesseract thread per job on the 2 GB host.
+        "OMP_THREAD_LIMIT": "1",
     }
     async with HEAVY:
         process = await asyncio.create_subprocess_exec(
@@ -163,13 +168,16 @@ async def _run_helper(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            start_new_session=True,
         )
         try:
             async with asyncio.timeout(extraction_cfg.helper_timeout_s):
                 stdout, _ = await process.communicate()
         finally:
+            # Kill the group in every case, so a child of a helper that already exited dies too.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             if process.returncode is None:
-                process.kill()
                 await process.wait()
     if process.returncode != 0:
         raise RuntimeError(f"extract helper exited with code {process.returncode}")
