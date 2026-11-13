@@ -3,8 +3,9 @@
 The fetch handler starts this module as ``python -m invoicebot.fetchers.browser`` and writes
 one JSON request to stdin: the portal, the invoice fields, the output folder, the media size
 limits and the page timeout. The helper launches Chromium's headless shell with spec 03 §8's
-flags, intercepts every request with the guard, fills the form and downloads the invoice's
-files, then prints exactly one JSON line: ``{"reason": <code>, "files": [...]}``. Playwright
+flags behind its guard proxy, so every hop is checked, drops unneeded resources with the
+route guard, fills the form and downloads the invoice's files, then prints exactly one JSON
+line: ``{"reason": <code>, "files": [...]}``. Playwright
 and Chromium live only in this process and exit with it, so the bot never holds them while
 idle (R-9.1). Nothing from the page is printed, and every unexpected error becomes
 ``technical`` with exit code 0; stderr gets only the exception's class name (R-9.16).
@@ -16,6 +17,7 @@ import asyncio
 import logging
 import resource
 import sys
+from typing import Any
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright
@@ -24,6 +26,7 @@ from invoicebot.config.models import MediaMaxBytes, Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
+from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.fetchers.browser.routing import RouteGuard, SystemResolver
 from invoicebot.net.guard import GuardReason
 
@@ -90,17 +93,20 @@ def _limit_resources(max_bytes: MediaMaxBytes) -> None:
 
 
 async def _run_browser(request: HelperRequest) -> None:
-    """Launch Chromium, run the fetch through the guard and print the result (S10.1)."""
+    """Launch Chromium behind the guard proxy and print the result (S10.1)."""
     portal = request.portal
-    guard = RouteGuard(
-        _http_hosts(portal),
-        SystemResolver(),
-        allow_images=_allow_images(portal),
-    )
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True, args=_launch_args(portal))
+    guard = RouteGuard(allow_images=_allow_images(portal))
+    async with (
+        async_playwright() as playwright,
+        GuardProxy(
+            _http_hosts(portal),
+            SystemResolver(),
+            idle_timeout_s=request.page_timeout_ms / 1000,
+        ) as proxy,
+    ):
+        browser = await playwright.chromium.launch(**_launch_options(portal, proxy.port))
         try:
-            context = await browser.new_context(accept_downloads=True)
+            context = await browser.new_context(accept_downloads=True, service_workers="block")
             context.set_default_timeout(request.page_timeout_ms)
             await context.route("**/*", guard.on_route)
             page = await context.new_page()
@@ -109,8 +115,7 @@ async def _run_browser(request: HelperRequest) -> None:
             )
         finally:
             await browser.close()
-    result = _guarded_result(result, guard.first_block)
-    _emit(_output(result))
+    _emit(_output(_guarded_result(result, proxy.first_block)))
 
 
 def _guarded_result(result: FetchResult, first_block: GuardReason | None) -> FetchResult:
@@ -129,6 +134,19 @@ def _launch_args(portal: Portal) -> list[str]:
     if portal.captcha == "none":
         args.append(IMAGES_OFF)
     return args
+
+
+def _launch_options(portal: Portal, proxy_port: int) -> dict[str, Any]:
+    """Chromium's launch keyword arguments, with every connection through the proxy.
+
+    Playwright already adds ``--proxy-bypass-list=<-loopback>`` for a launch proxy, so
+    loopback goes through the proxy too; passing that flag again would duplicate it.
+    """
+    return {
+        "headless": True,
+        "args": _launch_args(portal),
+        "proxy": {"server": f"http://127.0.0.1:{proxy_port}"},
+    }
 
 
 def _http_hosts(portal: Portal) -> frozenset[str]:

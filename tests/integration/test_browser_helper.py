@@ -21,10 +21,6 @@ class _FakeRequest:
         self.url = url
         self.resource_type = resource_type
 
-    def is_navigation_request(self) -> bool:
-        """A document request is a navigation; everything else is a sub-resource."""
-        return self.resource_type == "document"
-
 
 class _FakeRoute:
     """A route that remembers whether it was aborted or continued."""
@@ -43,119 +39,61 @@ class _FakeRoute:
         self.continued = True
 
 
-class _FakeResolver:
-    """A resolver with fixed answers per host."""
-
-    def __init__(self, answers: dict[str, list[str]]) -> None:
-        self._answers = answers
-
-    async def resolve(self, host: str) -> list[str]:
-        """Return the canned addresses for ``host``."""
-        return self._answers.get(host, [])
-
-
-async def test_route_guard_blocks_loopback_http_as_private_address() -> None:
-    """R-5.10: a request to a loopback host is aborted with private_address."""
-    guard = RouteGuard(
-        frozenset({"127.0.0.1"}),
-        _FakeResolver({"127.0.0.1": ["127.0.0.1"]}),
-        allow_images=True,
-    )
-    route = _FakeRoute("http://127.0.0.1/", "document")
-
-    await guard.on_route(route)
-
-    assert route.aborted_with == "blockedbyclient"
-    assert guard.first_block is GuardReason.PRIVATE_ADDRESS
-
-
-async def test_route_guard_blocks_private_https_address() -> None:
-    """R-5.10: an https host resolving to a private address is aborted as private_address."""
-    guard = RouteGuard(
-        frozenset(),
-        _FakeResolver({"internal.test": ["10.0.0.1"]}),
-        allow_images=False,
-    )
-    route = _FakeRoute("https://internal.test/", "document")
-
-    await guard.on_route(route)
-
-    assert route.aborted_with == "blockedbyclient"
-    assert guard.first_block is GuardReason.PRIVATE_ADDRESS
-
-
-async def test_route_guard_blocks_file_scheme() -> None:
-    """R-5.10: a file: URL is aborted as scheme_blocked."""
-    guard = RouteGuard(frozenset(), _FakeResolver({}), allow_images=False)
-    route = _FakeRoute("file:///etc/passwd", "document")
-
-    await guard.on_route(route)
-
-    assert route.aborted_with == "blockedbyclient"
-    assert guard.first_block is GuardReason.SCHEME_BLOCKED
-
-
-async def test_route_guard_aborts_font_without_recording_a_reason() -> None:
-    """R-5.10: a font request is dropped without counting as a guard block."""
-    guard = RouteGuard(frozenset(), _FakeResolver({}), allow_images=False)
+async def test_route_guard_aborts_font_without_recording_a_result() -> None:
+    """R-5.10: a font request is dropped, leaving the fetch result untouched."""
+    guard = RouteGuard(allow_images=False)
     route = _FakeRoute("https://cdn.example/font.woff2", "font")
 
     await guard.on_route(route)
 
     assert route.aborted_with == "blockedbyclient"
-    assert guard.first_block is None
+    assert not route.continued
 
 
-async def test_route_guard_continues_a_public_https_request() -> None:
-    """R-5.10: a public https request is allowed through."""
-    guard = RouteGuard(
-        frozenset(),
-        _FakeResolver({"example.com": ["93.184.216.34"]}),
-        allow_images=False,
-    )
+async def test_route_guard_aborts_a_file_url() -> None:
+    """R-5.10: a file: URL never reaches the proxy, so the guard aborts it."""
+    guard = RouteGuard(allow_images=False)
+    route = _FakeRoute("file:///etc/passwd", "document")
+
+    await guard.on_route(route)
+
+    assert route.aborted_with == "blockedbyclient"
+    assert not route.continued
+
+
+async def test_route_guard_continues_a_network_request() -> None:
+    """R-5.10: an http or https request is left to the guard proxy."""
+    guard = RouteGuard(allow_images=False)
     route = _FakeRoute("https://example.com/", "document")
 
     await guard.on_route(route)
 
     assert route.continued
     assert route.aborted_with is None
-    assert guard.first_block is None
 
 
-async def test_blocked_sub_resource_on_a_not_found_page_keeps_not_found_yet() -> None:
-    """R-5.10: a blocked sub-resource is aborted but leaves a not-found result as it was."""
-    guard = RouteGuard(
-        frozenset(),
-        _FakeResolver({"cdn.example": ["10.0.0.1"]}),
-        allow_images=False,
-    )
-    route = _FakeRoute("https://cdn.example/script.js", "script")
-
-    await guard.on_route(route)
-
-    assert route.aborted_with == "blockedbyclient"
-    assert guard.first_block is None
+def test_guarded_result_keeps_not_found_yet_when_blocked() -> None:
+    """R-5.10: a block with a not-found result keeps not_found_yet."""
     not_found = FetchResult(reason=FetchReason.NOT_FOUND_YET, files=(), portal_key="synthetic")
-    assert _guarded_result(not_found, guard.first_block) is not_found
+
+    assert _guarded_result(not_found, GuardReason.PRIVATE_ADDRESS) is not_found
 
 
-async def test_blocked_navigation_with_a_technical_result_gives_guard_blocked() -> None:
-    """R-5.10: a blocked navigation turns a technical result into guard_blocked."""
-    guard = RouteGuard(
-        frozenset(),
-        _FakeResolver({"internal.test": ["10.0.0.1"]}),
-        allow_images=False,
-    )
-    route = _FakeRoute("https://internal.test/", "document")
-
-    await guard.on_route(route)
-
-    assert guard.first_block is GuardReason.PRIVATE_ADDRESS
+def test_guarded_result_promotes_a_blocked_technical_result() -> None:
+    """R-5.10: a block with a technical result gives guard_blocked."""
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
-    promoted = _guarded_result(technical, guard.first_block)
+
+    promoted = _guarded_result(technical, GuardReason.PRIVATE_ADDRESS)
 
     assert promoted.reason is FetchReason.GUARD_BLOCKED
     assert promoted.portal_key == "synthetic"
+
+
+def test_guarded_result_keeps_technical_without_a_block() -> None:
+    """R-5.10: a technical result without a block stays technical."""
+    technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
+
+    assert _guarded_result(technical, None) is technical
 
 
 def _request(out_dir: Path) -> dict[str, Any]:
@@ -164,7 +102,7 @@ def _request(out_dir: Path) -> dict[str, Any]:
         "portal": {
             "key": "synthetic",
             "adapter": "generic_form",
-            "url": "http://127.0.0.1:1/",
+            "url": "http://127.0.0.1:8080/",
             "status": "active",
             "fields": {"#ruc": "{ruc_emisor}"},
             "submit": "#buscar",

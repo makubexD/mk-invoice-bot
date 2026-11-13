@@ -4,14 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
+from dataclasses import dataclass
 
 import pytest_asyncio
+from playwright.async_api import Browser, async_playwright
 
+from invoicebot.config.models import Portal
+from invoicebot.fetchers.base import FetchReason, FetchResult
+from invoicebot.fetchers.browser.__main__ import _guarded_result, _launch_options
 from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.net.guard import GuardReason
 
 _HEAD_END = b"\r\n\r\n"
 _IDLE_TIMEOUT_S = 30
+_START_HOST = "start.test"
+_EVIL_HOST = "evil.test"
+_ALLOWED_ADDRESS = "127.0.0.1"
+_REFUSED_ADDRESS = "127.0.0.2"
 
 
 class _FakeResolver:
@@ -192,3 +201,146 @@ async def test_head_over_16_kib_is_bad_request() -> None:
             writer.close()
             await writer.wait_closed()
     assert response.startswith(b"HTTP/1.1 400")
+
+
+def _refuse_evil(addresses: Iterable[str]) -> GuardReason | None:
+    """Allow the start page's loopback and refuse the evil host's second loopback."""
+    return GuardReason.PRIVATE_ADDRESS if _REFUSED_ADDRESS in addresses else None
+
+
+def _portal() -> Portal:
+    """A minimal portal; only the launch flags depend on it here."""
+    return Portal(key="synthetic", adapter="generic_form")
+
+
+@dataclass
+class _EvilSite:
+    """The server on the refused address, counting every connection it receives."""
+
+    port: int
+    hits: int = 0
+
+
+@pytest_asyncio.fixture
+async def evil_site() -> AsyncIterator[_EvilSite]:
+    """A page server on 127.0.0.2 that must never be reached."""
+    site = _EvilSite(port=0)
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        site.hits += 1
+        writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, _REFUSED_ADDRESS, 0)
+    site.port = server.sockets[0].getsockname()[1]
+    try:
+        yield site
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest_asyncio.fixture
+async def start_site(evil_site: _EvilSite) -> AsyncIterator[int]:
+    """A page on 127.0.0.1: ``/`` redirects to evil, any other path opens a WebSocket to it."""
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            head = await reader.readuntil(_HEAD_END)
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
+            writer.close()
+            await writer.wait_closed()
+            return
+        path = head.split(b"\r\n", 1)[0].split(b" ")[1]
+        if path == b"/":
+            response = (
+                "HTTP/1.1 302 Found\r\n"
+                f"Location: http://{_EVIL_HOST}:{evil_site.port}/\r\n"
+                "Content-Length: 0\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode()
+        else:
+            page = f"<script>new WebSocket('ws://{_EVIL_HOST}:{evil_site.port}/');</script>"
+            body = page.encode()
+            response = (
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/html\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                "Connection: close\r\n\r\n"
+            ).encode() + body
+        writer.write(response)
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle, _ALLOWED_ADDRESS, 0)
+    try:
+        yield server.sockets[0].getsockname()[1]
+    finally:
+        server.close()
+        await server.wait_closed()
+
+
+@pytest_asyncio.fixture
+async def browser_proxy() -> AsyncIterator[GuardProxy]:
+    """A guard proxy that lets start.test through and refuses evil.test."""
+    resolver = _FakeResolver({_START_HOST: [_ALLOWED_ADDRESS], _EVIL_HOST: [_REFUSED_ADDRESS]})
+    async with GuardProxy(
+        frozenset({_START_HOST, _EVIL_HOST}),
+        resolver,
+        idle_timeout_s=_IDLE_TIMEOUT_S,
+        check_addresses=_refuse_evil,
+    ) as proxy:
+        yield proxy
+
+
+@pytest_asyncio.fixture
+async def browser(browser_proxy: GuardProxy) -> AsyncIterator[Browser]:
+    """A headless Chromium launched with the helper's options through the proxy."""
+    async with async_playwright() as playwright:
+        launched = await playwright.chromium.launch(**_launch_options(_portal(), browser_proxy.port))
+        try:
+            yield launched
+        finally:
+            await launched.close()
+
+
+async def _wait_until_blocked(proxy: GuardProxy) -> None:
+    """Wait up to five seconds for the WebSocket handshake to be refused."""
+    for _ in range(100):
+        if proxy.first_block is not None:
+            return
+        await asyncio.sleep(0.05)
+
+
+async def test_redirect_to_a_refused_address_never_reaches_it(
+    browser: Browser, browser_proxy: GuardProxy, start_site: int, evil_site: _EvilSite
+) -> None:
+    """R-5.10: a 302 to a host the proxy refuses never reaches that host."""
+    page = await browser.new_page()
+    try:
+        await page.goto(f"http://{_START_HOST}:{start_site}/")
+    finally:
+        await page.close()
+
+    assert evil_site.hits == 0
+    assert browser_proxy.first_block is GuardReason.PRIVATE_ADDRESS
+    technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
+    assert _guarded_result(technical, browser_proxy.first_block).reason is FetchReason.GUARD_BLOCKED
+
+
+async def test_websocket_to_a_refused_address_is_blocked(
+    browser: Browser, browser_proxy: GuardProxy, start_site: int, evil_site: _EvilSite
+) -> None:
+    """R-5.10: a page's WebSocket to a refused address never reaches the host."""
+    page = await browser.new_page()
+    try:
+        await page.goto(f"http://{_START_HOST}:{start_site}/ws")
+        await _wait_until_blocked(browser_proxy)
+    finally:
+        await page.close()
+
+    assert evil_site.hits == 0
+    assert browser_proxy.first_block is not None
