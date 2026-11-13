@@ -100,6 +100,7 @@ class Ocr(BaseModel):
 
     engine: str
     lang: str
+    psm: int = Field(ge=0, le=13)
     timeout_s: int = Field(gt=0)
 
 

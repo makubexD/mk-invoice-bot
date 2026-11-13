@@ -53,7 +53,7 @@ sunat:
 
 extraction:
   max_image_px: 2000
-  ocr: { engine: tesseract, lang: spa, timeout_s: 30 }
+  ocr: { engine: tesseract, lang: spa, psm: 4, timeout_s: 30 }
   review_threshold: 0.8
   max_invoice_age_days: 365
   igv_rates: ["0.18", "0.105", "0.10"]   # strings, so no float rounding reaches Decimal (Ley 31556 reduced rates)

@@ -73,7 +73,7 @@ def _config(*, helper_timeout_s: float = HELPER_TIMEOUT_S) -> Extraction:
     """Return the extraction config the handler runs with."""
     return Extraction(
         max_image_px=2000,
-        ocr=Ocr(engine="tesseract", lang="spa", timeout_s=30),
+        ocr=Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=30),
         review_threshold=0.8,
         max_invoice_age_days=365,
         igv_rates=[Decimal("0.18"), Decimal("0.105"), Decimal("0.10")],
