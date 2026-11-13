@@ -6,7 +6,8 @@ no network access, and a ``DOCTYPE``, a UTF-16 or UTF-32 byte-order mark (where 
 scan for ``DOCTYPE`` would not see it) or a document over 2 MB is rejected before lxml sees it.
 A single-byte declared encoding such as ISO-8859-1, common in SUNAT XML, is read. Elements
 are found by local name, so the namespace prefix does not matter. A namespace declaration
-libxml2 rejects for a backslash URI, seen in real SUNAT XML, is dropped on a retry.
+libxml2 rejects for a backslash URI, seen in real SUNAT XML, is dropped on a retry, but only
+inside the root start tag, which is found in a bounded prefix of the document.
 """
 
 from __future__ import annotations
@@ -24,10 +25,27 @@ DOCTYPE_MARKER = b"<!doctype"
 # A UTF-16 LE BOM also starts a UTF-32 LE document; UTF-32 BE needs its own entry.
 REJECTED_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
 INVOICE_ROOT = "Invoice"
+# The repair reads only this much of a document: enough for an XML declaration and the root
+# start tag, and small enough that a crafted prefix cannot stall the scan.
+ROOT_TAG_SCAN_BYTES = 16 * 1024
+# Bounds on the pieces of a namespace declaration, so a crafted attribute cannot make the
+# pattern backtrack over a long run of backslashes.
+MAX_NAMESPACE_NAME_BYTES = 256
+MAX_NAMESPACE_URI_BYTES = 1024
+XML_NAME_START_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_:")
 # libxml2 refuses a namespace URI containing a backslash, as in the two real SUNAT XMLs
 # that declare ``xmlns:schemaLocation="..\x.xsd"`` (S0.2 finding 4). Such a declaration is
 # dropped only after the parser has rejected the document for that reason (R-2.12).
-BACKSLASH_NAMESPACE_DECLARATION = re.compile(rb"""xmlns:[^\s=<>"']+=(?:"[^"]*\\[^"]*"|'[^']*\\[^']*')""")
+BACKSLASH_NAMESPACE_DECLARATION = re.compile(
+    rb"""xmlns:[^\s=<>"']{0,%d}=(?:"[^"]{0,%d}\\[^"]{0,%d}"|'[^']{0,%d}\\[^']{0,%d}')"""
+    % (
+        MAX_NAMESPACE_NAME_BYTES,
+        MAX_NAMESPACE_URI_BYTES,
+        MAX_NAMESPACE_URI_BYTES,
+        MAX_NAMESPACE_URI_BYTES,
+        MAX_NAMESPACE_URI_BYTES,
+    )
+)
 AMOUNT_ELEMENTS = (
     ("base", "LineExtensionAmount"),
     ("service_charge", "ChargeTotalAmount"),
@@ -90,7 +108,54 @@ def _parse_root(data: bytes) -> etree._Element:
     except etree.XMLSyntaxError:
         if not _only_invalid_namespace_uris(parser.error_log):
             raise
-        return etree.fromstring(BACKSLASH_NAMESPACE_DECLARATION.sub(b"", data), _hardened_parser())
+        return etree.fromstring(_without_backslash_namespace_declarations(data), _hardened_parser())
+
+
+def _without_backslash_namespace_declarations(data: bytes) -> bytes:
+    """Drop backslash ``xmlns:`` declarations from the root start tag only (R-2.12).
+
+    The start tag is located in a prefix bounded by ``ROOT_TAG_SCAN_BYTES``. When the
+    prefix holds no complete start tag the document is returned unchanged, so the original
+    parse error stands. Element text and the rest of the document are never rewritten.
+    """
+    start_tag = _root_start_tag(data)
+    if start_tag is None:
+        return data
+    start, end = start_tag
+    repaired = BACKSLASH_NAMESPACE_DECLARATION.sub(b"", data[start:end])
+    return data[:start] + repaired + data[end:]
+
+
+def _root_start_tag(data: bytes) -> tuple[int, int] | None:
+    """Return the bounds of the root element's start tag in the bounded prefix, if complete.
+
+    The XML declaration, comments and processing instructions before the root are skipped;
+    the root start tag is the first ``<`` followed by a name character, up to the first
+    ``>``. ``None`` means the prefix did not hold a complete start tag, so nothing is
+    repaired.
+    """
+    prefix = data[:ROOT_TAG_SCAN_BYTES]
+    position = 0
+    while position < len(prefix):
+        opening = prefix.find(b"<", position)
+        if opening == -1:
+            return None
+        if prefix.startswith(b"<!--", opening):
+            comment_end = prefix.find(b"-->", opening + 4)
+            if comment_end == -1:
+                return None
+            position = comment_end + 3
+        elif prefix.startswith(b"<?", opening):
+            instruction_end = prefix.find(b"?>", opening + 2)
+            if instruction_end == -1:
+                return None
+            position = instruction_end + 2
+        elif opening + 1 < len(prefix) and prefix[opening + 1] in XML_NAME_START_BYTES:
+            tag_end = prefix.find(b">", opening + 1)
+            return None if tag_end == -1 else (opening, tag_end + 1)
+        else:
+            position = opening + 1
+    return None
 
 
 def _hardened_parser() -> etree.XMLParser:
