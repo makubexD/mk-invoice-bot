@@ -181,8 +181,10 @@ Test: `uv run pytest -q tests/unit/test_extract_validate.py tests/integration/te
 
 ## Step 9: The helper reads both and merges `[worker]`
 
-Files: `src/invoicebot/extract/__main__.py`, `src/invoicebot/pipeline/extract.py`, `config/example.yaml`.
+Files: `src/invoicebot/extract/__main__.py`, `src/invoicebot/pipeline/extract.py`, `config/example.yaml`, `src/invoicebot/app.py`, `tests/integration/conftest.py`, and the three test files below.
 
+- The rules path is `config/parsing_rules.yaml` beside the loaded `config.yaml`: `app.py` passes `settings.config_path.parent / "parsing_rules.yaml"` to `make_extract_handler` as a new `rules_path` argument; tests pass the repo's `config/parsing_rules.yaml`.
+- Run as two sub-steps: (a) the wiring, with existing tests still green; (b) the new test cases.
 - The helper loads the image once. It runs the QR cascade, then preprocessing and `read_text` and `parse_ocr`, then `merge`. It prints the merged reading.
 - The helper takes the OCR config as arguments: lang, psm, timeout, and the rules path.
 - The helper result reports `decoder` for the QR and a new `ocr: bool` for whether OCR returned text. `_log_outcome` logs both, never a value (R-9.16).
