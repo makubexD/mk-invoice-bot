@@ -25,6 +25,7 @@ from invoicebot.store.invoices import (
     get_file_path,
     get_state,
     has_file,
+    load_flow,
     load_invoice_head,
     load_reading,
     save_reading,
@@ -130,6 +131,19 @@ async def test_set_flow_stores_the_flow(
         row = await cur.fetchone()
 
     assert row == ("personal_google",)
+
+
+async def test_load_flow_is_none_before_routing_and_the_flow_after(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.1: load_flow returns None until set_flow stores the routed flow."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        before = await load_flow(conn, invoice_id)
+        await set_flow(conn, invoice_id, "personal_google")
+        after = await load_flow(conn, invoice_id)
+
+    assert (before, after) == (None, "personal_google")
 
 
 async def test_set_state_records_state_rule_and_error(
