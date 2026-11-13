@@ -9,6 +9,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 #: Positions in a SUNAT QR payload.
 _ISSUER, _SERIE, _NUMERO, _TOTAL, _BUYER = 0, 2, 3, 5, 8
+#: Words printed on the OCR photo; no log record may carry them (R-9.16).
+_OCR_WORDS = ("FACTURA", "ELECTRONICA", "IMPORTE", "emision")
 
 
 def _secrets_of(payload: str) -> list[str]:
@@ -36,6 +38,25 @@ async def test_read_conversations_log_no_extracted_value(
         (record.name, secret)
         for record in caplog.records
         for secret in _secrets_of(payload)
+        if secret in _record_text(record)
+    ]
+    assert leaks == []
+
+
+async def test_ocr_conversation_logs_no_ocr_word(
+    read_conversation: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-9.16: the extraction log on the OCR path carries no RUC, amount or OCR word."""
+    caplog.set_level(logging.DEBUG)
+
+    _, payload = await read_conversation(False, printed=True)
+
+    extract_records = [record for record in caplog.records if getattr(record, "step", None) == "extract"]
+    assert any(getattr(record, "ocr", None) is True for record in extract_records)
+    leaks = [
+        (record.name, secret)
+        for record in caplog.records
+        for secret in (*_secrets_of(payload), *_OCR_WORDS)
         if secret in _record_text(record)
     ]
     assert leaks == []
