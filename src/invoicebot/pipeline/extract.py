@@ -22,6 +22,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from invoicebot.channels.base import AttachmentKind, ChannelName, OutboundMessage
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
+from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.helper import run_helper
@@ -64,8 +65,8 @@ class _HelperResult(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     reading: dict[str, Any] | None
-    variant: str | None
-    decoder: str | None
+    variant: QrVariant | None
+    decoder: QrDecoder | None
     ocr: bool
     error: Literal["unreadable"] | None
 

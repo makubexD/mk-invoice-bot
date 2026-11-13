@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Final, cast
 
 import cv2
 import numpy as np
@@ -18,10 +19,11 @@ import zxingcpp
 
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.image import variants
+from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.qr_payload import parse_qr_payload
 
-ZXING_DECODER = "zxing"
-OPENCV_DECODER = "opencv"
+ZXING_DECODER: Final[QrDecoder] = "zxing"
+OPENCV_DECODER: Final[QrDecoder] = "opencv"
 ZXING_FORMATS = zxingcpp.BarcodeFormats((zxingcpp.BarcodeFormat.QRCode, zxingcpp.BarcodeFormat.PDF417))
 
 
@@ -30,8 +32,8 @@ class QrHit:
     """The first invoice QR that decoded, with the variant and decoder that found it."""
 
     reading: Reading
-    variant: str
-    decoder: str
+    variant: QrVariant
+    decoder: QrDecoder
 
 
 def read_invoice_qr(gray: np.ndarray) -> QrHit | None:
@@ -47,7 +49,11 @@ def read_invoice_qr(gray: np.ndarray) -> QrHit | None:
                 reading = parse_qr_payload(text)
                 if reading is None:
                     continue
-                hit = QrHit(reading=reading, variant=variant_name, decoder=decoder_name)
+                hit = QrHit(
+                    reading=reading,
+                    variant=cast(QrVariant, variant_name),
+                    decoder=decoder_name,
+                )
                 if reading.document_url is None:
                     return hit
                 if url_hit is None:
@@ -55,7 +61,9 @@ def read_invoice_qr(gray: np.ndarray) -> QrHit | None:
     return url_hit
 
 
-def _decoded_texts(detector: cv2.QRCodeDetector, image: np.ndarray) -> Iterator[tuple[str, tuple[str, ...]]]:
+def _decoded_texts(
+    detector: cv2.QRCodeDetector, image: np.ndarray
+) -> Iterator[tuple[QrDecoder, tuple[str, ...]]]:
     """Yield each decoder's texts lazily, so a zxing hit skips OpenCV for that variant."""
     yield ZXING_DECODER, _decode_zxing(image)
     yield OPENCV_DECODER, _decode_opencv(detector, image)
