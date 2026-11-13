@@ -270,3 +270,18 @@ def test_matches_invoice_rejects_a_field_missing_from_both_readings() -> None:
 def test_parse_invoice_xml_iso_8859_1_declaration_reads_like_utf8() -> None:
     """R-5.6: an ISO-8859-1 invoice, common in SUNAT XML, reads the same as its UTF-8 form."""
     assert parse_invoice_xml(ISO_8859_1_INVOICE_XML) == parse_invoice_xml(_invoice_xml().encode("utf-8"))
+
+
+def test_parse_invoice_xml_ignores_a_backslash_schema_location_namespace() -> None:
+    """R-2.12: a root namespace whose value is a relative Windows path is ignored."""
+    without = _invoice_xml()
+    with_schema_location = without.replace(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"',
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"\n'
+        '         xmlns:schemaLocation="..\\x.xsd"',
+    )
+    assert with_schema_location != without
+
+    reading = parse_invoice_xml(with_schema_location.encode())
+
+    assert reading == parse_invoice_xml(without.encode())
