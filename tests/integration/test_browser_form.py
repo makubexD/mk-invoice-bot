@@ -333,6 +333,21 @@ async def test_oversized_xml_is_technical_and_leaves_no_files(page: Page, tmp_pa
     assert await asyncio.to_thread(_files_in, tmp_path) == []
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"#tipo": PickField(pick="#tipo-list .opt[title='{serie}']")},
+        {"#fecha": CalendarField(calendar=CalendarSpec(cell=".day[title='{serie}']", prev="#prev"))},
+    ],
+)
+def test_render_fields_rejects_an_ocr_field_in_a_selector(fields: dict[str, object]) -> None:
+    """R-5.10: a pick or calendar selector may name only tipo_label and fecha."""
+    portal = _portal(fields=fields)
+
+    with pytest.raises(ValueError, match="serie"):
+        render_fields(portal, _invoice())
+
+
 def test_render_fields_rejects_attribute_access() -> None:
     """R-5.8: a template with attribute access is rejected, naming the template."""
     portal = _portal(fields={"#fecha": "{fecha.year}"})

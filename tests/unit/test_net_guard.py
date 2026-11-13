@@ -62,6 +62,19 @@ def test_check_addresses(addresses: tuple[str, ...], expected: GuardReason | Non
     assert check_addresses(addresses) == expected
 
 
+@pytest.mark.parametrize(
+    ("address", "expected"),
+    [
+        ("64:ff9b::7f00:1", GuardReason.PRIVATE_ADDRESS),
+        ("2002:7f00:1::", GuardReason.PRIVATE_ADDRESS),
+        ("64:ff9b::808:808", None),
+    ],
+)
+def test_check_addresses_checks_the_embedded_ipv4(address: str, expected: GuardReason | None) -> None:
+    """R-5.10: a NAT64 or 6to4 address is checked through the IPv4 it embeds."""
+    assert check_addresses((address,)) == expected
+
+
 async def test_resolve_and_check_refuses_any_private_answer() -> None:
     """BR-F08: a host answering one public and one private address is refused (DNS rebinding)."""
     address, reason = await resolve_and_check("portal.example", FakeResolver([PUBLIC_ADDRESS, "10.0.0.1"]))

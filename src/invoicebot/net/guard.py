@@ -14,6 +14,9 @@ from urllib.parse import urlsplit
 
 #: Carrier-grade NAT; not ``is_private`` but unreachable from the public internet.
 CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
+#: NAT64; the last 32 bits are the IPv4 address the request would really reach.
+NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+_IPV4_MASK = 0xFFFFFFFF
 #: Schemes that may reach the network at all; everything else is blocked outright.
 NETWORK_SCHEMES = frozenset({"http", "https"})
 
@@ -77,8 +80,10 @@ async def resolve_and_check(host: str, resolver: Resolver) -> tuple[str, GuardRe
 
 
 def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = _embedded_ipv4(address)
+        if embedded is not None:
+            address = embedded
     return (
         address.is_private
         or address.is_loopback
@@ -88,3 +93,18 @@ def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or address.is_unspecified
         or address in CGNAT_NETWORK
     )
+
+
+def _embedded_ipv4(address: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """The IPv4 address an IPv6 transition address wraps, or ``None``.
+
+    Covers IPv4-mapped, 6to4 (``sixtofour``) and NAT64, whose last 32 bits hold the
+    IPv4 address the request really reaches.
+    """
+    if address.ipv4_mapped is not None:
+        return address.ipv4_mapped
+    if address.sixtofour is not None:
+        return address.sixtofour
+    if address in NAT64_NETWORK:
+        return ipaddress.IPv4Address(int(address) & _IPV4_MASK)
+    return None

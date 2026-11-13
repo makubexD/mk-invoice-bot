@@ -30,6 +30,8 @@ type DownloadKind = Literal["pdf", "xml"]
 
 _FORMATTER = string.Formatter()
 _ALLOWED_NAMES = frozenset({"ruc_emisor", "tipo", "tipo_label", "serie", "numero", "fecha", "total"})
+#: Only config and date values may build a selector; OCR fields must never reach one.
+_SELECTOR_NAMES = frozenset({"tipo_label", "fecha"})
 _CALENDAR_STEPS = 24
 _CHUNK_SIZE = 1024 * 1024
 #: A download named for the other kind is a stray from an earlier click: La Leña's PDF
@@ -60,9 +62,10 @@ def render_fields(portal: Portal, invoice: FetchInvoice) -> list[FieldAction]:
     """Render every portal field template into an action, in the file's order.
 
     Raises:
-        ValueError: a template names a value outside the invoice fields, uses
-            attribute or item access, or needs ``tipo_label`` for a tipo the
-            portal has no label for.
+        ValueError: a template names a value it may not use (a pick or calendar
+            selector may name only ``tipo_label`` and ``fecha``), uses attribute
+            or item access, or needs ``tipo_label`` for a tipo the portal has no
+            label for.
     """
     values = _values(portal, invoice)
     actions: list[FieldAction] = []
@@ -70,13 +73,13 @@ def render_fields(portal: Portal, invoice: FetchInvoice) -> list[FieldAction]:
         if isinstance(field, SelectField):
             actions.append(FieldAction(selector, "select", _render(field.select, values)))
         elif isinstance(field, PickField):
-            actions.append(FieldAction(selector, "pick", _render(field.pick, values)))
+            actions.append(FieldAction(selector, "pick", _render(field.pick, values, _SELECTOR_NAMES)))
         elif isinstance(field, CalendarField):
             actions.append(
                 FieldAction(
                     selector,
                     "calendar",
-                    _render(field.calendar.cell, values),
+                    _render(field.calendar.cell, values, _SELECTOR_NAMES),
                     prev=field.calendar.prev,
                 )
             )
@@ -270,9 +273,13 @@ def _values(portal: Portal, invoice: FetchInvoice) -> dict[str, object]:
     return values
 
 
-def _render(template: str, values: dict[str, object]) -> str:
+def _render(
+    template: str,
+    values: dict[str, object],
+    allowed: frozenset[str] = _ALLOWED_NAMES,
+) -> str:
     """Render one template, rejecting names the portal may not use."""
-    _check_template(template, template)
+    _check_template(template, template, allowed)
     try:
         return _FORMATTER.vformat(template, (), values)
     except KeyError:
@@ -281,10 +288,10 @@ def _render(template: str, values: dict[str, object]) -> str:
         ) from None
 
 
-def _check_template(template: str, source: str) -> None:
+def _check_template(template: str, source: str, allowed: frozenset[str] = _ALLOWED_NAMES) -> None:
     """Reject a template (or a nested format spec) that names a disallowed value."""
     for _, field_name, format_spec, _ in _FORMATTER.parse(template):
-        if field_name is not None and field_name not in _ALLOWED_NAMES:
+        if field_name is not None and field_name not in allowed:
             raise ValueError(f"portal field template {source!r} names disallowed field {field_name!r}")
         if format_spec is not None:
-            _check_template(format_spec, source)
+            _check_template(format_spec, source, allowed)
