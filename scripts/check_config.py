@@ -41,7 +41,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 
-    problems = run_checks(cfg, list(directory.portals.values()), pr_mode=args.pr)
+    problems = run_checks(cfg, directory, pr_mode=args.pr)
     for problem in problems:
         print(f"{problem.code} {problem.path}: {problem.message}")
     return 1 if any(problem.blocking for problem in problems) else 0
