@@ -25,6 +25,9 @@ dependencies = [
     "playwright==1.64.1",
 ]
 
+[project.scripts]
+invoicebot = "invoicebot.cli:run"
+
 [dependency-groups]
 dev = [
     "pytest>=8.3",
