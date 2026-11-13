@@ -211,7 +211,7 @@ The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 
 
 ## 6. Fetcher chain
 Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, files[], reason)`. `reason` is an enum code, never response text. The `FetchContext` gives access to:
-- the shared browser (lazy),
+- the browser, which runs in a helper process per fetch (D82),
 - `ask_user(image, prompt, timeout)` for captchas,
 - the HTTP client, wrapped by the request guard (R-5.10),
 - **only the secrets the adapter declares** (R-9.10).
@@ -257,7 +257,9 @@ status: active                          # active | todo | broken
   - Parse the XML with the hardened parser (R-2.12) and match it against the invoice (R-5.6).
   - Retry schedule: +5 min, +1 h, +6 h, +24 h, because issuers send asynchronously. Each retry is a scheduled job, so nothing waits in the worker; meanwhile the invoice stays in `FETCHING_DOCS` with "esperando correo". After the last retry fails, the chain moves to the **next fetcher** (with the default order, `manual`).
 - **XML handling (R-2.12, D57):** every XML, whatever its source, is parsed with the hardened parser (§2) and accepted only if it matches the invoice (R-5.6). Signature checks and BR-F10 are post-MVP.
-- **Not found yet (D65):** a portal's "no such invoice" is a scheduled retry (`retry_schedule`, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
+- **Not found yet (D65):** a portal's "no such invoice" (its file's `not_found` selector) is a scheduled retry (`retry_schedule` in the portal file, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
+- **Chain position (D82):** read from the invoice's `fetch_attempts`, not stored: an `ok` attempt ends the chain, a final failure moves to the next fetcher, and `not_found_yet` attempts up to the length of `retry_schedule` mean wait. A fetcher not built yet is skipped.
+- **Portal file keys beyond the example above** (found on La Leña's site, `specs/spikes/portals.md`): `not_found`; `tipo_labels` (SUNAT tipo → the site's label, as `{tipo_label}`); `allow_http` (D76); `retry_schedule`; and two field kinds besides text and `select`: `pick: <option selector>` (click the field, then the option) and `calendar: {cell, prev}` (a read-only date picker: step back with `prev` until `cell` shows). `captcha: none` is the default.
 - **Request guard (R-5.10):** one module, `net/guard.py`, used by `httpx` (a custom transport) and by Chromium (route interception): `https` only (or `http` to the host of a portal whose file sets `allow_http`, D76), DNS resolved once and the connection pinned to a public IP, private/loopback/link-local/CGNAT ranges blocked, every redirect re-checked, `file:`/`data:` blocked. The browser container's network allows internet egress only. A block returns an enum reason (BR-F08).
 - **`manual`:** marks the state and composes the message listing the failed fetchers and reasons.
 
@@ -305,7 +307,7 @@ work_microsoft:
 
 ## 8. Resource budget and efficiency tactics
 - **One uvicorn worker.** CPU work (OpenCV) runs in `asyncio.to_thread`, guarded by `HEAVY = asyncio.Semaphore(1)`. Tesseract and Chromium run as subprocesses, so their memory is returned to the OS when they exit.
-- **Browser lifecycle:** `BrowserPool(max=1, idle_close=60s)` with one context per fetch.
+- **Browser lifecycle (D82):** no `BrowserPool`. Each fetch starts `python -m invoicebot.fetchers.browser`, which launches Chromium's headless shell with one context and exits with it, so Chromium is never resident while idle (S0.9: 224 MB peak, about 4 s cold start).
   - Launch flags: `--disable-dev-shm-usage --no-zygote --renderer-process-limit=1 --disable-gpu --blink-settings=imagesEnabled=false` (images are re-enabled only for captcha pages).
   - Block fonts, media and analytics with route interception.
 - **Heavy libraries stay out of the bot process:** image reading runs in a helper process per photo (`python -m invoicebot.extract`, D78), like Tesseract and Chromium, so `cv2` and `zxingcpp` are never imported by the app and their memory returns to the system. The same rule applies to any later heavy library (Playwright, the OCR preprocessing). Idle RSS target: about 60 MB, to be measured in `ops` (S12.1).
