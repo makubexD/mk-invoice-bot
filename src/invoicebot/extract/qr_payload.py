@@ -28,13 +28,20 @@ DNI_LENGTH = 8
 DOCUMENT_TYPE_BY_SERIE_LETTER = {"F": "01", "B": "03"}
 ISO_DATE_PATTERN = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 DMY_DATE_PATTERN = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})")
+AMOUNT_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
+QR_SERIE_SHAPE = re.compile(r"[A-Z0-9]{1,4}")
+NUMERO_PATTERN = re.compile(r"[0-9]{1,8}")
+TIPO_DOC_ADQ_PATTERN = re.compile(r"[0-9A-Z]")
+NUM_DOC_ADQ_PATTERN = re.compile(r"[0-9A-Z]{1,15}")
 
 
 def parse_qr_payload(text: str) -> Reading | None:
     """Return the reading carried by ``text``, or ``None`` when it is not a SUNAT payload.
 
-    Never raises: a shorter payload, a non-numeric RUC, an unparseable date or amount, and a
-    non-finite amount all return ``None``.
+    Never raises: a shorter payload, a non-numeric RUC, a serie or numero of the wrong shape, an
+    unparseable date or amount, and an amount with more than ten integer digits or two decimals
+    all return ``None``. Buyer fields of the wrong shape are dropped, and an invalid buyer type
+    is inferred from a valid buyer number.
     """
     stripped = text.strip()
     if stripped.startswith(URL_PREFIXES):
@@ -45,7 +52,11 @@ def parse_qr_payload(text: str) -> Reading | None:
         return None
 
     ruc_emisor, tipo_text, serie, numero, igv_text, total_text, fecha_text = parts[:REQUIRED_PART_COUNT]
-    if not _is_issuer_ruc(ruc_emisor) or not serie or not numero:
+    if (
+        not _is_issuer_ruc(ruc_emisor)
+        or QR_SERIE_SHAPE.fullmatch(serie) is None
+        or NUMERO_PATTERN.fullmatch(numero) is None
+    ):
         return None
     fecha = _parse_date(fecha_text)
     igv = _parse_amount(igv_text)
@@ -95,11 +106,13 @@ def _document_type(tipo_text: str, serie: str) -> Field | None:
 def _buyer_fields(parts: list[str]) -> dict[str, Field]:
     """Return the buyer fields, inferring the type from the number when that part is empty (D79)."""
     tipo_text = parts[TIPO_DOC_ADQ_INDEX] if len(parts) > TIPO_DOC_ADQ_INDEX else ""
-    num_doc = parts[NUM_DOC_ADQ_INDEX] if len(parts) > NUM_DOC_ADQ_INDEX else ""
+    num_text = parts[NUM_DOC_ADQ_INDEX] if len(parts) > NUM_DOC_ADQ_INDEX else ""
+    tipo_doc = tipo_text if TIPO_DOC_ADQ_PATTERN.fullmatch(tipo_text) else ""
+    num_doc = num_text if NUM_DOC_ADQ_PATTERN.fullmatch(num_text) else ""
 
     fields: dict[str, Field] = {}
-    if tipo_text:
-        fields["tipo_doc_adq"] = _field(tipo_text)
+    if tipo_doc:
+        fields["tipo_doc_adq"] = _field(tipo_doc)
     else:
         inferred = _infer_buyer_type(num_doc)
         if inferred is not None:
@@ -135,5 +148,7 @@ def _parse_date(text: str) -> str | None:
 
 
 def _parse_amount(text: str) -> Decimal | None:
-    """Return ``text`` as a finite decimal, accepting a comma or a dot, or ``None``."""
+    """Return ``text`` as a finite decimal with at most two decimals, or ``None``."""
+    if AMOUNT_PATTERN.fullmatch(text) is None:
+        return None
     return finite_decimal(text.replace(",", "."))

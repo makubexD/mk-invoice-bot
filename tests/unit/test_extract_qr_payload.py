@@ -86,8 +86,8 @@ VALID_PAYLOADS = [
     ),
     pytest.param(
         f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|-|-",
-        _fields({"tipo_doc_adq": ("-", FULL), "num_doc_adq": "-"}),
-        id="dash-buyer",
+        _fields({"tipo_doc_adq": None, "num_doc_adq": None}),
+        id="dash-buyer-dropped",
     ),
     pytest.param(
         f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|",
@@ -173,6 +173,31 @@ VALID_PAYLOADS = [
         _fields(),
         id="dmy-date-and-comma-decimals",
     ),
+    pytest.param(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|1234567890.99|2026-11-13|6|{SYNTHETIC_RUC}",
+        _fields({"total": "1234567890.99"}),
+        id="ten-integer-digit-total",
+    ),
+    pytest.param(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|12,50|2026-11-13|6|{SYNTHETIC_RUC}",
+        _fields({"total": "12.50"}),
+        id="comma-total-becomes-dot",
+    ),
+    pytest.param(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|DNI|{DNI}",
+        _fields({"tipo_doc_adq": ("1", INFERRED), "num_doc_adq": DNI}),
+        id="invalid-buyer-type-inferred-from-dni",
+    ),
+    pytest.param(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|6|1234567\n8",
+        _fields({"num_doc_adq": None}),
+        id="buyer-number-with-newline-dropped",
+    ),
+    pytest.param(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|6|1234567890123456",
+        _fields({"num_doc_adq": None}),
+        id="sixteen-char-buyer-number-dropped",
+    ),
 ]
 
 
@@ -228,6 +253,16 @@ BROKEN_PAYLOADS = [
     pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-13-01", id="impossible-iso-date"),
     pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|13/11/26", id="two-digit-year"),
     pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|not-a-date", id="letters-as-date"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|1e13|49.90|2026-11-13", id="exponent-igv"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|99999999999.99|2026-11-13", id="overflowing-total"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|-5|2026-11-13", id="negative-total"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|1_000|2026-11-13", id="underscore-total"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|12.345|2026-11-13", id="three-decimal-total"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90\x00|2026-11-13", id="nul-in-total"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F0001|15160|7.36|49.90|2026-11-13", id="five-char-serie"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F00\n1|15160|7.36|49.90|2026-11-13", id="newline-in-serie"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|123456789|7.36|49.90|2026-11-13", id="nine-digit-numero"),
+    pytest.param(f"{SYNTHETIC_RUC}|01|F001|12a|7.36|49.90|2026-11-13", id="letters-in-numero"),
 ]
 
 
