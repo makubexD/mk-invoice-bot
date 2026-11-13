@@ -26,7 +26,11 @@ class CompiledRule:
 
 @dataclass(frozen=True)
 class RouteResult:
-    """The flow chosen for an invoice and the rule id that decided it (R-3.1, R-11.1)."""
+    """The flow a rule matched and the rule id that decided it (R-3.1, R-11.1).
+
+    ``flow`` is ``None`` only when no rule matched. Under BR-R05 and BR-R08 it is the
+    flow that was refused, because their messages name it; the caller acts on ``rule``.
+    """
 
     flow: str | None
     rule: str
@@ -62,10 +66,10 @@ def route(
     if matched is None:
         return RouteResult(flow=None, rule="BR-R03" if unmatched == "ask" else "BR-R07")
     if matched.flow not in profile_flows:
-        return RouteResult(flow=None, rule="BR-R05")
+        return RouteResult(flow=matched.flow, rule="BR-R05")
     tipo = reading.fields.get("tipo")
     if tipo is None or tipo.value not in flows[matched.flow].accepted_tipos:
-        return RouteResult(flow=None, rule="BR-R08")
+        return RouteResult(flow=matched.flow, rule="BR-R08")
     return RouteResult(flow=matched.flow, rule=matched.id)
 
 

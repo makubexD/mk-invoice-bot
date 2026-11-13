@@ -10,13 +10,16 @@ message for a different recipient adds a ``_<role>`` suffix
 (``_admin``, ``_owner`` or ``_sender``); the primary is the sender's message.
 
 ``STATE_DESC`` holds the user-facing name of each invoice state, used for
-BR-S02's ``{state_desc}``.
+BR-S02's ``{state_desc}``. The routed-invoice summary and the ``*_desc`` helpers build
+the placeholders spec 06 §1 describes in prose.
 """
+
+from collections.abc import Sequence
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
     "BR-R02": "➡️ {flow.label}",
-    "BR-R03": ("Este comprobante está a nombre de {buyer_desc}. ¿En qué flujo lo registro?"),
+    "BR-R03": ("Este comprobante está a nombre {buyer_desc}. ¿En qué flujo lo registro?"),
     "BR-R04": (
         "No pude leer bien el RUC del cliente ({num_doc_adq}?). Lo registro en {flow.label}. ¿Correcto?"
     ),
@@ -25,7 +28,7 @@ MESSAGES: dict[str, str] = {
         "Pídele al administrador que te habilite."
     ),
     "BR-R07": (
-        "Este comprobante está a nombre de {buyer_desc}, que no corresponde a ninguno "
+        "Este comprobante está a nombre {buyer_desc}, que no corresponde a ninguno "
         "de tus flujos, así que no lo proceso."
     ),
     "BR-R08": "Este comprobante es {tipo_desc}, y {flow.label} solo acepta {accepted_desc}. No lo proceso.",
@@ -179,3 +182,88 @@ REJECTION_DESC: dict[str, str] = {
 def state_desc(state: str) -> str:
     """Return the es-PE description of an invoice state for BR-S02's ``{state_desc}``."""
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
+
+
+#: The routed-invoice summary (spec 06 §1 "Summary message"). ``{flow_line}`` is the
+#: matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
+SUMMARY = (
+    "🧾 {tipo_desc} {serie}-{numero} · {fecha}\nEmisor: RUC {ruc_emisor}\nTotal: S/ {total}\n{flow_line}"
+)
+#: Summary line naming the fields repaired from the QR payload (D79).
+SUMMARY_INFERRED = "ℹ️ Deducido del comprobante: {fields_desc}"
+#: Summary line naming the doubtful fields; the invoice still goes on in this phase (D80).
+SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
+#: How the summary writes ``{fecha}``.
+SUMMARY_DATE_FORMAT = "%d/%m/%Y"
+
+#: ``{tipo_desc}`` in the summary, per SUNAT document type.
+TIPO_DESC: dict[str, str] = {
+    "01": "Factura",
+    "03": "Boleta",
+    "07": "Nota de crédito",
+    "08": "Nota de débito",
+}
+#: ``{accepted_desc}`` words for BR-R08, per document type.
+TIPO_PLURAL_DESC: dict[str, str] = {
+    "01": "facturas",
+    "03": "boletas",
+    "07": "notas de crédito",
+    "08": "notas de débito",
+}
+#: ``{tipo_desc}`` for a type outside :data:`TIPO_DESC` (BR-E05).
+_OTHER_TIPO_DESC = "otro tipo de documento (código {tipo})"
+
+#: ``{fields_desc}`` names, per field.
+FIELD_DESC: dict[str, str] = {
+    "ruc_emisor": "RUC del emisor",
+    "tipo": "tipo de comprobante",
+    "serie": "serie",
+    "numero": "número",
+    "fecha_emision": "fecha",
+    "total": "total",
+    "igv": "IGV",
+    "tipo_doc_adq": "tipo de documento del cliente",
+    "num_doc_adq": "documento del cliente",
+}
+
+#: ``{buyer_desc}`` per SUNAT buyer document type (catálogo 06: 6 = RUC, 1 = DNI).
+BUYER_DESC: dict[str, str] = {
+    "6": "del RUC {num}",
+    "1": "del DNI {num}",
+}
+_OTHER_BUYER_DESC = "del documento {num}"
+_NO_BUYER_DESC = "de ningún cliente (boleta sin datos)"
+
+
+def tipo_phrase(tipo: str) -> str:
+    """Return ``{tipo_desc}`` for a sentence, as in BR-R08 and BR-E05 ("una boleta").
+
+    Every supported type is a feminine noun, so the article is always "una".
+    """
+    desc = TIPO_DESC.get(tipo)
+    return _OTHER_TIPO_DESC.format(tipo=tipo) if desc is None else f"una {desc.lower()}"
+
+
+def tipos_desc(tipos: Sequence[str]) -> str:
+    """Return BR-R08's ``{accepted_desc}``: "facturas", "facturas y boletas"."""
+    words = [TIPO_PLURAL_DESC.get(tipo, tipo) for tipo in tipos]
+    if len(words) < 2:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} y {words[-1]}"
+
+
+def fields_desc(names: Sequence[str]) -> str:
+    """Return ``{fields_desc}``: the fields' es-PE names, comma separated."""
+    return ", ".join(FIELD_DESC.get(name, name) for name in names)
+
+
+def buyer_desc(tipo_doc: str, num_doc: str) -> str:
+    """Return ``{buyer_desc}`` for BR-R03 and BR-R07.
+
+    shortcut: the spec adds the buyer's razón social after a RUC; that needs the padrón,
+    which arrives in ``read-more``.
+    """
+    if not num_doc:
+        return _NO_BUYER_DESC
+    template = BUYER_DESC.get(tipo_doc, _OTHER_BUYER_DESC)
+    return template.format(num=num_doc)

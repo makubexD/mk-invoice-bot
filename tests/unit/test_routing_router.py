@@ -169,10 +169,10 @@ def test_route_unmatched_buyer_returns_the_configured_rule(
 
 
 def test_route_flow_outside_profile_is_rejected() -> None:
-    """BR-R05: a flow the sender's profile does not allow is not used."""
+    """BR-R05: a flow the sender's profile does not allow is refused, and named for the message."""
     result = _route(_reading(num_doc_adq=WORK_RUC), profile_flows=[FLOW_A])
 
-    assert result == RouteResult(flow=None, rule="BR-R05")
+    assert result == RouteResult(flow=FLOW_B, rule="BR-R05")
 
 
 def test_route_tipo_outside_accepted_tipos_is_rejected() -> None:
@@ -181,4 +181,4 @@ def test_route_tipo_outside_accepted_tipos_is_rejected() -> None:
 
     result = _route(reading, profile_flows=[FLOW_B])
 
-    assert result == RouteResult(flow=None, rule="BR-R08")
+    assert result == RouteResult(flow=FLOW_B, rule="BR-R08")

@@ -27,7 +27,7 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import get_file_path, get_state, save_reading, set_state
 
@@ -234,7 +234,7 @@ def _message(rule_id: RuleId, reading: Reading | None) -> str:
     if rule_id == RULE_BAD_RUC:
         return MESSAGES[rule_id].format(ruc=_field_value(reading, "ruc_emisor"))
     if rule_id == RULE_UNSUPPORTED_TIPO:
-        return MESSAGES[rule_id].format(tipo_desc=_field_value(reading, "tipo"))
+        return MESSAGES[rule_id].format(tipo_desc=tipo_phrase(_field_value(reading, "tipo")))
     return MESSAGES[rule_id]
 
 
