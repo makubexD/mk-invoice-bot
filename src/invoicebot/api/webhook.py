@@ -41,6 +41,7 @@ class WebhookDeps:
     admin_profiles: frozenset[str]
     app_secret: str
     verify_token: str
+    sender_hash_key: str
     max_queued_per_sender: int
 
 
@@ -76,6 +77,7 @@ def make_router(deps: WebhookDeps) -> APIRouter:
             deps.index,
             owner_profile=deps.owner_profile,
             admin_profiles=deps.admin_profiles,
+            sender_hash_key=deps.sender_hash_key,
         )
         for digest in dict.fromkeys(parsed.unknown_senders):
             logger.info("ignored sender %s", digest)
