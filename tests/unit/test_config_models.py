@@ -62,6 +62,16 @@ def test_accepted_tipos_outside_supported_tipos_fails_naming_flow(tmp_path: Path
         load_config(path)
 
 
+def test_routing_rule_with_unknown_flow_fails_naming_it(tmp_path: Path) -> None:
+    """R-3.1: a routing rule that names a flow missing from flows fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["routing"]["rules"][0]["flow"] = "no_such_flow"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="no_such_flow"):
+        load_config(path)
+
+
 def test_placeholder_resolves() -> None:
     """R-9.6: config placeholders such as {owner.ruc} resolve before validation."""
     cfg = load_config(EXAMPLE)

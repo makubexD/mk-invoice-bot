@@ -389,6 +389,14 @@ class Config(BaseModel):
                 )
         return self
 
+    @model_validator(mode="after")
+    def _routing_rules_name_known_flows(self) -> Self:
+        """R-3.1: a routing rule may only send invoices to a configured flow."""
+        for index, rule in enumerate(self.routing.rules):
+            if rule.flow not in self.flows:
+                raise ValueError(f"routing.rules[{index}] ({rule.id}) names unknown flow '{rule.flow}'")
+        return self
+
 
 class PortalMatch(BaseModel):
     """Issuer match rules for a portal registry entry (R-5.8)."""
