@@ -128,7 +128,7 @@ The app serves `/health` only until `CONFIG_DIR` holds both `config.yaml` and
 worker and the outbox sender. Downloaded media goes to the `appdata` volume at
 `/data`.
 
-The channel needs three secrets in the encrypted file (never in the environment
+The channel needs four secrets in the encrypted file (never in the environment
 or `.env`; startup refuses secret-looking variables, R-9.9):
 
 | Key | What it is |
@@ -136,6 +136,7 @@ or `.env`; startup refuses secret-looking variables, R-9.9):
 | `whatsapp_token` | Graph API access token of the business number |
 | `whatsapp_app_secret` | Meta app secret, used to check `X-Hub-Signature-256` |
 | `whatsapp_verify_token` | Generate with `openssl rand -hex 32`; Meta echoes it in the handshake |
+| `sender_hash_key` | Generate with `openssl rand -hex 32`; keys the hash under which unknown senders are logged (R-9.12). Changing it changes every logged digest |
 
 If any of them is missing the webhook is not mounted and one error is logged.
 
