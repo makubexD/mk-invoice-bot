@@ -5,12 +5,15 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 
 from psycopg import AsyncConnection
+from psycopg.types.json import Jsonb
 
 from invoicebot.channels.base import AttachmentKind, ChannelName
+from invoicebot.extract.fields import Field, Reading, finite_decimal
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -154,3 +157,118 @@ async def window_open(conn: AsyncConnection[Any], channel: ChannelName, profile_
     )
     row = await cur.fetchone()
     return row is not None and bool(row[0])
+
+
+async def save_reading(conn: AsyncConnection[Any], invoice_id: int, reading: Reading) -> None:
+    """Write a reading's typed columns and keep the whole reading in fields_json (R-2.6).
+
+    Amounts go through :func:`finite_decimal`, so an amount that is not a finite number is
+    stored as NULL and stays visible in ``fields_json``. A ``fecha_emision`` that is not an
+    ISO date is likewise NULL in the typed column (D80): the doubtful value is carried by
+    the reading, not rejected here.
+    """
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET ruc_emisor = %s,
+            tipo = %s,
+            serie = %s,
+            numero = %s,
+            fecha = %s,
+            igv = %s,
+            total = %s,
+            ruc_adq = %s,
+            fields_json = %s
+        WHERE id = %s
+        """,
+        (
+            _ruc_emisor(reading),
+            _field_value(reading, "tipo"),
+            _field_value(reading, "serie"),
+            _field_value(reading, "numero"),
+            _fecha(reading),
+            _amount(reading, "igv"),
+            _amount(reading, "total"),
+            _field_value(reading, "num_doc_adq"),
+            Jsonb(_reading_json(reading)),
+            invoice_id,
+        ),
+    )
+
+
+async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading | None:
+    """Return the reading stored for invoice_id, or None when it has none (R-2.6)."""
+    cur = await conn.execute("SELECT fields_json FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    payload: dict[str, Any] = row[0]
+    stored_fields: dict[str, dict[str, Any]] = payload["fields"]
+    fields = {
+        name: Field(
+            value=str(raw["value"]),
+            source=raw["source"],
+            confidence=float(raw["confidence"]),
+        )
+        for name, raw in stored_fields.items()
+    }
+    document_url = payload.get("document_url")
+    return Reading(fields=fields, document_url=None if document_url is None else str(document_url))
+
+
+async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: AttachmentKind) -> str | None:
+    """Return the local path of the invoice's first file of ``kind``, or None."""
+    cur = await conn.execute(
+        """
+        SELECT local_path
+        FROM files
+        WHERE invoice_id = %s AND kind = %s
+        ORDER BY id
+        LIMIT 1
+        """,
+        (invoice_id, kind),
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
+def _field_value(reading: Reading, name: str) -> str | None:
+    """Return the reading's value for ``name``, or None when the field is missing."""
+    field = reading.fields.get(name)
+    return None if field is None else field.value
+
+
+def _amount(reading: Reading, name: str) -> Decimal | None:
+    """Return the reading's amount field as a finite Decimal, or None (R-2.6)."""
+    value = _field_value(reading, name)
+    return None if value is None else finite_decimal(value)
+
+
+def _fecha(reading: Reading) -> date | None:
+    """Return the issuing date as a date, or None when the field is missing or not ISO."""
+    value = _field_value(reading, "fecha_emision")
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _ruc_emisor(reading: Reading) -> int | None:
+    """Return the issuer RUC as the BIGINT column stores it, or None when missing."""
+    value = _field_value(reading, "ruc_emisor")
+    return None if value is None else int(value)
+
+
+def _reading_json(reading: Reading) -> dict[str, Any]:
+    """Return the whole reading as JSON: one value/source/confidence object per field."""
+    return {
+        "fields": {
+            name: {"value": field.value, "source": field.source, "confidence": field.confidence}
+            for name, field in reading.fields.items()
+        },
+        "document_url": reading.document_url,
+    }

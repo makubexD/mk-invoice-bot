@@ -4,7 +4,7 @@
 step with its pool, channel client, data directory and media limits injected.
 The download itself runs with no transaction open; only its outcome is
 recorded, in one transaction, so the state change and the outbox message (or
-the file row) commit together.
+the file row and its ``extract`` job) commit together.
 """
 
 from pathlib import Path
@@ -15,12 +15,14 @@ from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import download_media
 from invoicebot.config.models import MediaLimits
 from invoicebot.queue import outbox
-from invoicebot.queue.jobs import Job
+from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
+#: Job step that reads the downloaded photo (S3.11).
+EXTRACT_STEP = "extract"
 #: Rule that cancels media over a cap or of an unsupported type (BR-E07).
 RULE_MEDIA_REJECTED = "BR-E07"
 #: Bytes in a megabyte, for BR-E07's ``{max_mb}``.
@@ -36,9 +38,10 @@ def make_download_handler(
 ) -> Handler:
     """Build the handler that downloads an invoice's first attachment (R-1.4).
 
-    A successful download stores a ``files`` row and leaves the invoice in
-    ``RECEIVED``; an invoice that already has a file is left untouched, so a
-    retried job never downloads it twice. ``MediaRejected`` cancels the invoice
+    A successful download stores a ``files`` row, enqueues the ``extract`` step
+    in the same transaction and leaves the invoice in ``RECEIVED``; an invoice
+    that already has a file is left untouched, so a retried job neither
+    downloads nor enqueues it twice. ``MediaRejected`` cancels the invoice
     with BR-E07 and replies to the sender; the handler returns normally, so the
     job completes rather than retrying. Any other exception propagates for the
     queue to retry.
@@ -70,6 +73,7 @@ def make_download_handler(
         )
         async with pool.connection() as conn, conn.transaction():
             await add_file(conn, job.invoice_id, record)
+            await enqueue(conn, job.invoice_id, EXTRACT_STEP)
 
     return handle
 

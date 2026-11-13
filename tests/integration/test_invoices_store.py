@@ -2,6 +2,8 @@
 
 import asyncio
 import os
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -12,14 +14,18 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
+from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
 from invoicebot.store.invoices import (
     FileRecord,
     add_file,
     count_active_jobs,
     create_invoice,
+    get_file_path,
     get_state,
     has_file,
+    load_reading,
+    save_reading,
     set_state,
     touch_window,
     window_open,
@@ -31,6 +37,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CHANNEL: ChannelName = "whatsapp"
 #: An id no invoice can have, because the identity starts at 1.
 UNKNOWN_INVOICE_ID = 2_147_483_647
+#: From tests/synthetic_rucs.txt; no real RUC may appear here.
+SYNTHETIC_RUC = "20000000001"
+#: An eight-digit DNI the buyer field carries; too short to be mistaken for a RUC.
+BUYER_DNI = "12345678"
+#: The issuing date of the synthetic invoice, as a date column returns it.
+ISSUED_ON = date(2026, 11, 13)
 
 
 def _run_alembic(url: str, revision: str, *, downgrade: bool = False) -> None:
@@ -59,6 +71,23 @@ async def _has_table(pool: AsyncConnectionPool[AsyncConnection[Any]], name: str)
         )
         row = await cur.fetchone()
     return row is not None and bool(row[0])
+
+
+def _reading() -> Reading:
+    """Return a complete reading whose fields differ in source and confidence."""
+    return Reading(
+        fields={
+            "ruc_emisor": Field(value=SYNTHETIC_RUC, source="qr", confidence=1.0),
+            "tipo": Field(value="01", source="qr", confidence=1.0),
+            "serie": Field(value="F001", source="qr", confidence=1.0),
+            "numero": Field(value="15160", source="xml", confidence=0.9),
+            "fecha_emision": Field(value="2026-11-13", source="qr", confidence=1.0),
+            "igv": Field(value="7.36", source="xml", confidence=0.8),
+            "total": Field(value="49.90", source="qr", confidence=1.0),
+            "num_doc_adq": Field(value=BUYER_DNI, source="qr", confidence=1.0),
+        },
+        document_url=None,
+    )
 
 
 async def test_create_invoice_returns_id_and_state(
@@ -187,6 +216,89 @@ async def test_touch_window_keeps_the_newest_time(
             "DELETE FROM channel_windows WHERE channel = %s AND recipient = ANY(%s)",
             (CHANNEL, ["yo", "asistente", "desconocido"]),
         )
+
+
+async def test_reading_round_trips_through_fields_json(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-2.6: save_reading then load_reading keeps every value, source and confidence."""
+    reading = _reading()
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await save_reading(conn, invoice_id, reading)
+        loaded = await load_reading(conn, invoice_id)
+
+    assert loaded == reading
+
+
+async def test_save_reading_writes_the_typed_columns(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-2.6: the typed columns carry the RUC, buyer number, date and Decimal amounts."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await save_reading(conn, invoice_id, _reading())
+        cur = await conn.execute(
+            """
+            SELECT ruc_emisor, tipo, serie, numero, fecha, igv, total, ruc_adq
+            FROM invoices
+            WHERE id = %s
+            """,
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+
+    assert row == (
+        int(SYNTHETIC_RUC),
+        "01",
+        "F001",
+        "15160",
+        ISSUED_ON,
+        Decimal("7.36"),
+        Decimal("49.90"),
+        BUYER_DNI,
+    )
+
+
+async def test_load_reading_is_none_before_a_reading_is_saved(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-2.6: an invoice with no reading, or an unknown id, loads as None."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        unsaved = await load_reading(conn, invoice_id)
+        missing = await load_reading(conn, UNKNOWN_INVOICE_ID)
+
+    assert unsaved is None
+    assert missing is None
+
+
+async def test_get_file_path_returns_the_first_path_of_a_kind(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.4: get_file_path returns the stored path of the kind, and None when there is none."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await add_file(
+            conn,
+            invoice_id,
+            FileRecord(kind="photo", local_path="data/photo.jpg", remote_ref=None, sha256="a" * 64, size=1),
+        )
+        await add_file(
+            conn,
+            invoice_id,
+            FileRecord(kind="xml", local_path="data/invoice.xml", remote_ref=None, sha256="b" * 64, size=2),
+        )
+        photo = await get_file_path(conn, invoice_id, "photo")
+        xml = await get_file_path(conn, invoice_id, "xml")
+        absent_kind = await get_file_path(conn, invoice_id, "pdf")
+        unknown_invoice = await get_file_path(conn, UNKNOWN_INVOICE_ID, "photo")
+
+    assert photo == "data/photo.jpg"
+    assert xml == "data/invoice.xml"
+    assert absent_kind is None
+    assert unknown_invoice is None
 
 
 async def test_migration_0004_downgrades_to_0003_and_upgrades_again(
