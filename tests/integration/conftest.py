@@ -181,7 +181,9 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             await add_file(conn, invoice_id, record)
             extract_job = await enqueue(conn, invoice_id, EXTRACT_STEP)
 
-        await make_extract_handler(db_pool, cfg.extraction)(_job(extract_job, invoice_id, EXTRACT_STEP))
+        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media)(
+            _job(extract_job, invoice_id, EXTRACT_STEP)
+        )
         async with db_pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, ROUTE_STEP)

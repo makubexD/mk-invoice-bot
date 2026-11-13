@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
+import sys
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -20,10 +22,10 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.config.models import Extraction, Ocr
+from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
-from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.extract import ROUTE_STEP, _parse_result, make_extract_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
@@ -53,6 +55,18 @@ QR_LEFT = 100
 PNG = ".png"
 HELPER_TIMEOUT_S = 30
 EXPIRED_TIMEOUT_S = 0
+SLOW_HELPER_SCRIPT = "import time; time.sleep(30)"
+CHILD_START_TIMEOUT_S = 10
+SIGKILL_EXIT_CODE = -9
+
+
+#: The media limits of config/example.yaml (R-1.11).
+MEDIA = MediaLimits(
+    max_megapixels=40,
+    max_bytes=MediaMaxBytes(image=10_485_760, pdf=10_485_760, xml=2_097_152, zip=20_971_520),
+    zip_max_entries=20,
+    zip_max_ratio=50,
+)
 
 
 def _config(*, helper_timeout_s: int = HELPER_TIMEOUT_S) -> Extraction:
@@ -135,7 +149,7 @@ async def _run_handler(
     helper_timeout_s: int = HELPER_TIMEOUT_S,
 ) -> None:
     """Run the extract handler once for invoice_id."""
-    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s))(_job(invoice_id))
+    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA)(_job(invoice_id))
 
 
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -326,3 +340,84 @@ async def _outbox_count(pool: AsyncConnectionPool[AsyncConnection[Any]], profile
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def test_pdf_only_invoice_fails_with_br_e01_without_raising(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.11, BR-E01: an invoice whose only file is a PDF ends in EXTRACT_FAILED with BR-E01."""
+    profile_id = f"profile-{uuid4().hex}"
+    pdf_path = tmp_path / "invoice.pdf"
+    data = b"%PDF-1.4 synthetic"
+    pdf_path.write_bytes(data)
+    record = FileRecord(
+        kind="pdf",
+        local_path=str(pdf_path),
+        remote_ref=None,
+        sha256=hashlib.sha256(data).hexdigest(),
+        size=len(data),
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await add_file(conn, invoice_id, record)
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+
+    assert (state, rule_id) == ("EXTRACT_FAILED", "BR-E01")
+    assert route_jobs == 0
+    assert len(messages) == 1
+    assert "No pude leer este comprobante" in messages[0]
+
+
+async def test_cancelling_the_handler_leaves_no_helper_process(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.2: cancelling the handler while the helper runs kills and reaps the helper."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"cancel{PNG}"))
+    started = asyncio.Event()
+    children: list[asyncio.subprocess.Process] = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _slow_exec(*_args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+        child = await real_exec(
+            sys.executable,
+            "-c",
+            SLOW_HELPER_SCRIPT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        children.append(child)
+        started.set()
+        return child
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _slow_exec)
+    task = asyncio.create_task(_run_handler(db_pool, invoice_id))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=CHILD_START_TIMEOUT_S)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    assert [child.returncode for child in children] == [SIGKILL_EXIT_CODE]
+    with pytest.raises(ProcessLookupError):
+        os.kill(children[0].pid, 0)
+
+
+async def test_malformed_helper_output_drops_the_pydantic_cause() -> None:
+    """R-9.16: malformed output raises RuntimeError without the pydantic text that quotes values."""
+    with pytest.raises(RuntimeError, match="malformed JSON") as caught:
+        _parse_result(b'{"reading": {"fields": {"ruc_emisor": {"value": "20000000001"}}}}')
+
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

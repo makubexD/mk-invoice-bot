@@ -126,7 +126,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             pool,
             {
                 DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
-                EXTRACT_STEP: make_extract_handler(pool, cfg.extraction),
+                EXTRACT_STEP: make_extract_handler(pool, cfg.extraction, cfg.limits.media),
                 ROUTE_STEP: make_route_handler(pool, cfg, rules),
             },
         )
