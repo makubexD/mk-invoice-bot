@@ -1,8 +1,9 @@
 """Job handler that routes a read invoice and sends its summary (S4.2, R-3.1, R-3.4).
 
 :func:`make_route_handler` builds the handler of the ``route`` job step. A routed invoice
-stores its flow, gets one summary and waits in ``FETCHING_DOCS``; a refused one is
-cancelled with the rule's message. The state change and the outbox row commit together.
+stores its flow, gets one summary, queues its ``fetch`` job and waits in ``FETCHING_DOCS``;
+a refused one is cancelled with the rule's message. The state change, the fetch job and
+the outbox row commit together.
 """
 
 from __future__ import annotations
@@ -19,8 +20,9 @@ from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
+from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.queue import outbox
-from invoicebot.queue.jobs import Job
+from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
     REFUSALS,
@@ -50,7 +52,7 @@ logger = logging.getLogger(__name__)
 
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
 ROUTING_STATE = "ROUTING"
-#: Where a routed invoice waits; the ``fetch`` phase adds its next job.
+#: Where a routed invoice waits; its ``fetch`` job is queued with this state change.
 ROUTED_STATE = "FETCHING_DOCS"
 DATE_FIELD = "fecha_emision"
 
@@ -59,9 +61,9 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
     """Build the handler that routes an invoice in ``ROUTING`` (S4.2).
 
     A matched flow is stored with its rule id, the summary goes to the sender and the
-    invoice moves to ``FETCHING_DOCS`` with no job. BR-R05, BR-R07 and BR-R08 cancel it
-    with their message. A missing reading or an unknown profile raises, so the queue
-    retries.
+    invoice moves to ``FETCHING_DOCS`` with its ``fetch`` job queued. BR-R05, BR-R07 and
+    BR-R08 cancel it with their message. A missing reading or an unknown profile raises,
+    so the queue retries.
     """
 
     async def handle(job: Job) -> None:
@@ -94,6 +96,7 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
             async with pool.connection() as conn, conn.transaction():
                 await set_flow(conn, job.invoice_id, cast(str, result.flow))
                 await set_state(conn, job.invoice_id, ROUTED_STATE, rule_id=rule_id)
+                await enqueue(conn, job.invoice_id, FETCH_STEP)
                 await _reply(conn, invoice, rule_id, text)
         logger.info(
             "step done",

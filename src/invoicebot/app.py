@@ -21,11 +21,13 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.transport import make_transport
-from invoicebot.config.loader import load_config
+from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import Config, WhatsAppChannel
 from invoicebot.extract.parsing_rules import load_rules
+from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.logging import configure_logging
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.route import make_route_handler
@@ -105,6 +107,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         return
     assert_no_plain_secrets(os.environ)
     cfg = load_config(settings.config_path)
+    directory = load_directory(settings.config_path.parent)
     # Fail fast: a missing or invalid rules file stops startup (S3.6).
     load_rules(settings.parsing_rules_path)
     rules = compile_rules(cfg.routing)
@@ -125,6 +128,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             token=secrets.get("whatsapp_token"),
         )
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
+        registry = {
+            "portal_registry": PortalFetcher(
+                directory, cfg.limits.media.max_bytes, cfg.extraction.helper_timeout_s
+            )
+        }
         worker = Worker(
             pool,
             {
@@ -136,6 +144,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                     settings.parsing_rules_path,
                 ),
                 ROUTE_STEP: make_route_handler(pool, cfg, rules),
+                FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
             },
         )
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
