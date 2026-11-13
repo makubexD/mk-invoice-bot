@@ -40,8 +40,14 @@ def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
 
 
 def _merged_field(name: str, ocr_field: Field, qr_field: Field) -> Field:
-    """Return the OCR field, confirmed at full confidence or flagged as a conflict (D81)."""
+    """Return the OCR field, confirmed at full confidence or flagged as a conflict (D81, R-2.6).
+
+    When both readers inferred the field, their agreement is not independent evidence: it stays
+    ``inferred`` at the OCR confidence rather than reaching full confidence.
+    """
     if _same_value(name, ocr_field.value, qr_field.value):
+        if ocr_field.flag == "inferred" and qr_field.flag == "inferred":
+            return ocr_field
         return replace(ocr_field, confidence=FULL_CONFIDENCE, flag=None)
     return replace(ocr_field, flag="conflict")
 

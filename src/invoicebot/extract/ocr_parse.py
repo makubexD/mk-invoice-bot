@@ -119,7 +119,7 @@ def _add_rucs(
     if len(found) > 1:
         value, confidence = found[1]
         fields["num_doc_adq"] = _ocr_field(value, confidence)
-        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, confidence)
+        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, confidence, flag="inferred")
 
 
 def _ruc_matches(

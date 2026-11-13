@@ -182,6 +182,7 @@ def test_parse_ocr_two_valid_rucs_read_issuer_and_buyer(rules: ParsingRules) -> 
     assert fields["ruc_emisor"].value == SYNTHETIC_RUC
     assert fields["num_doc_adq"].value == SYNTHETIC_RUC_OTHER
     assert fields["tipo_doc_adq"].value == "6"
+    assert fields["tipo_doc_adq"].flag == "inferred"
     assert fields["tipo_doc_adq"].confidence == fields["num_doc_adq"].confidence
 
 

@@ -84,6 +84,14 @@ def test_merge_takes_document_url_from_the_qr() -> None:
     assert merged.fields == {"total": ocr_field}
 
 
+def test_merge_keeps_tipo_inferred_when_both_readers_inferred_it() -> None:
+    """R-2.6: an OCR and a QR `tipo` both inferred and equal stay inferred at the OCR confidence."""
+    ocr_field = _ocr_field("01", flag="inferred")
+    merged = merge(_reading({"tipo": ocr_field}), _reading({"tipo": _qr_field("01", flag="inferred")}))
+
+    assert merged.fields["tipo"] == ocr_field
+
+
 def test_merge_confirms_an_inferred_qr_tipo() -> None:
     """D81: an inferred QR `tipo` equal to the OCR `tipo` reaches 1.0 with no flag."""
     merged = merge(
