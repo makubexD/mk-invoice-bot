@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from playwright.async_api import Download, Page
 from playwright.async_api import Error as PlaywrightError
-from playwright.async_api import Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from invoicebot.config.models import (
@@ -32,6 +32,9 @@ _FORMATTER = string.Formatter()
 _ALLOWED_NAMES = frozenset({"ruc_emisor", "tipo", "tipo_label", "serie", "numero", "fecha", "total"})
 _CALENDAR_STEPS = 24
 _CHUNK_SIZE = 1024 * 1024
+#: A download named for the other kind is a stray from an earlier click: La Leña's PDF
+#: button fires its download twice, and the second landed in the XML slot (2026-11-13).
+_OTHER_KIND_SUFFIX = {"pdf": ".xml", "xml": ".pdf"}
 
 
 @dataclass(frozen=True)
@@ -205,8 +208,16 @@ async def _download_one(
     max_bytes: MediaMaxBytes,
     saved: list[Path],
 ) -> FetchedFile:
-    """Click one download control, save the file, and reject it if it is too big."""
-    async with page.expect_download() as info:
+    """Click one download control, save the file, and reject it if it is too big.
+
+    A download whose name carries the other kind's suffix is skipped, so a late duplicate
+    of the previous click is never saved as this kind.
+    """
+
+    def is_this_kind(download: Download) -> bool:
+        return Path(download.suggested_filename).suffix.lower() != _OTHER_KIND_SUFFIX[kind]
+
+    async with page.expect_download(predicate=is_this_kind) as info:
         await page.locator(selector).click()
     download = await info.value
     path = out_dir / kind

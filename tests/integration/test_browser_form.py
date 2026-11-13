@@ -41,6 +41,14 @@ _RESULTS = {
     "no_xml": '<a id="pdf" href="/files/doc.pdf">PDF</a>',
     "not_found": '<div id="nf">No encontrado</div>',
     "large_xml": '<a id="pdf" href="/files/doc.pdf">PDF</a><a id="xml" href="/files/doc.xml">XML</a>',
+    # The XML control first fires a stray PDF download, as La Leña's doubled PDF event does.
+    "stray_pdf": (
+        '<a id="pdf" href="/files/doc.pdf">PDF</a>'
+        '<button id="xml" type="button" onclick="'
+        "const get = (href) => { const a = document.createElement('a'); a.href = href; a.click(); };"
+        "get('/files/doc.pdf'); setTimeout(() => get('/files/doc.xml'), 300);"
+        '">XML</button>'
+    ),
 }
 
 _FORM_HTML = """<!doctype html>
@@ -278,6 +286,18 @@ async def test_match_downloads_pdf_and_xml(page: Page, tmp_path: Path) -> None:
         assert file.path == tmp_path / file.kind
         assert file.size == len(body)
         assert file.sha256 == hashlib.sha256(body).hexdigest()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stray_pdf_download_is_not_saved_as_xml(page: Page, tmp_path: Path) -> None:
+    """R-5.8: a PDF download that lands while the XML is awaited is skipped, not saved as XML."""
+    await _serve(page, "stray_pdf")
+
+    result = await fill_and_download(page, _portal(), _invoice(), tmp_path, MAX_BYTES)
+
+    assert result.reason is FetchReason.OK
+    xml = next(file for file in result.files if file.kind == "xml")
+    assert xml.sha256 == hashlib.sha256(XML_BYTES).hexdigest()
 
 
 @pytest.mark.asyncio(loop_scope="session")
