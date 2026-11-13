@@ -53,7 +53,7 @@ Files: `specs/05-open-questions.md`, `specs/02-requirements.md`, `specs/03-desig
   - R-2.1 and R-2.3: OCR runs on every photo, and the QR is tried alongside it.
   - R-2.6: a field may carry a flag, `inferred` or `conflict`.
   - R-9.2: one summary budget of 60 s. The QR-only budget of 20 s goes, because every photo now runs OCR.
-- Spec 03 §5: reorder to load → QR cascade and OCR → merge (D81) → score.
+- Spec 03 §5: reorder to load → QR cascade and OCR → merge (D81) → score. Step 4's preprocessing becomes the one S0.3 chose (`specs/spikes/ocr.md`): deskew → CLAHE → adaptive Gaussian threshold, with no perspective warp.
 - Spec 04: move S0.3, S3.5, S3.6 and S3.7 to the new phase `ocr`, and narrow M5's milestone to PDFs, the padrón and the accuracy report.
 - Roadmap: add row 3b `ocr` before `fetch`, and update the carried-over items.
 
@@ -118,6 +118,7 @@ Files: `config/parsing_rules.yaml` (new), `src/invoicebot/extract/ocr_parse.py` 
 - The rules file holds the keyword-anchored regexes of spec 03 §5 step 4, plus the printed-URL regex (R-2.10).
 - `parse_ocr(text: OcrText, rules) -> Reading` returns fields with `source="ocr"`. Each field's confidence is the mean confidence of the words its match covers.
 - The first valid-check-digit RUC near the header is the issuer and the next one is the buyer. `tipo` comes from `FACTURA` or `BOLETA ELECTRÓNICA`. Amounts go through the QR parser's amount shape.
+- The serie's last three characters map `O Q D` to `0` and `I L` to `1` before validation (S0.3 finding 1).
 - It also reads `base`, `service_charge`, `icbper` and `discounts` when they are printed (R-2.14). `printed_urls` is reduced to `https://host/path` and capped at 3.
 - Rules load once through a function that takes the path; there is no module-level state.
 - `scripts/check_config.py` validates the file. Add that check to `config/checks.py` if it fits there; otherwise say so.
@@ -128,6 +129,7 @@ Test cases (each an `OcrText` built from synthetic lines; parametrize):
 | ------------------------------------------------------------------ | --------------------------------------------- |
 | R-2.3: a factura with all required fields                          | the six fields with `source="ocr"`            |
 | R-2.3: a boleta with `B001-123`                                    | `tipo` `03`, serie `B001`, numero `123`       |
+| S0.3: `FOO1-123` read with letter O for the digits                 | serie `F001`, numero `123`                    |
 | R-2.13: a total missing                                            | no `total` field                              |
 | R-2.4: an invalid-check-digit 11-digit number before the valid RUC | the valid one is the issuer                   |
 | R-2.4: two valid RUCs                                              | the first is the issuer, the second the buyer |
