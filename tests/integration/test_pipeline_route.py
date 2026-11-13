@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
-from invoicebot.extract.fields import Field, Reading
+from invoicebot.extract.fields import Field, Flag, Reading
 from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
@@ -49,8 +49,8 @@ def _config(profile_id: str, template: str) -> Config:
     return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles[template]}})
 
 
-def _field(value: str, confidence: float = 1.0) -> Field:
-    return Field(value=value, source="qr", confidence=confidence)
+def _field(value: str, confidence: float = 1.0, flag: Flag | None = None) -> Field:
+    return Field(value=value, source="qr", confidence=confidence, flag=flag)
 
 
 def _reading(
@@ -58,13 +58,13 @@ def _reading(
     *,
     buyer: str = WORK_RUC,
     tipo: str = FACTURA,
-    tipo_confidence: float = 1.0,
+    tipo_flag: Flag | None = None,
 ) -> Reading:
     """Build a QR reading of a factura to ``buyer``."""
     return Reading(
         fields={
             "ruc_emisor": _field(OWNER_RUC),
-            "tipo": _field(tipo, tipo_confidence),
+            "tipo": _field(tipo, flag=tipo_flag),
             "serie": _field("F001"),
             "numero": _field("15160"),
             "igv": _field("7.61"),
@@ -234,12 +234,28 @@ async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
 
 async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
     """D79: a tipo repaired from the serie letter is named on the summary's "Deducido" line."""
-    reading = _reading(await _today(db_pool), tipo_confidence=INFERRED_CONFIDENCE)
+    reading = _reading(await _today(db_pool), tipo_flag="inferred")
 
     row, texts = await _route_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert texts[0].splitlines()[-1] == "ℹ️ Deducido del comprobante: tipo de comprobante"
+
+
+async def test_low_confidence_without_flag_is_not_named(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-R04: a field read at confidence 0.9 with no flag gets no "Deducido" line."""
+    base = _reading(await _today(db_pool))
+    reading = Reading(
+        fields={**base.fields, "tipo": _field(FACTURA, INFERRED_CONFIDENCE)},
+        document_url=None,
+    )
+
+    row, texts = await _route_one(db_pool, reading)
+
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert "Deducido" not in texts[0]
 
 
 async def test_second_run_changes_nothing(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:

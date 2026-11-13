@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast, get_args
 
 Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
+Flag = Literal["inferred", "conflict"]
 
 REQUIRED = ("ruc_emisor", "tipo", "serie", "numero", "fecha_emision", "total")
 
@@ -23,16 +24,23 @@ FULL_CONFIDENCE = 1.0
 #: The shapes the JSON form of a reading has; both are closed (R-2.6).
 _READING_KEYS = frozenset({"fields", "document_url"})
 _FIELD_KEYS = frozenset({"value", "source", "confidence"})
+_FIELD_KEYS_WITH_FLAG = _FIELD_KEYS | {"flag"}
 _SOURCES = frozenset(get_args(Source))
+_FLAGS = frozenset(get_args(Flag))
 
 
 @dataclass(frozen=True)
 class Field:
-    """One extracted value with where it came from and how sure the reader was (R-2.6)."""
+    """One extracted value, its origin and confidence, and why it may need review (R-2.6, D79, D81).
+
+    ``flag`` is ``"inferred"`` when a reader derived the value instead of reading it, and
+    ``"conflict"`` when readers disagree; ``None`` means the reader found it as printed.
+    """
 
     value: str
     source: Source
     confidence: float
+    flag: Flag | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +79,12 @@ def reading_to_json(reading: Reading) -> dict[str, Any]:
     """Render a reading as the JSON object the helper and ``fields_json`` carry (R-2.6)."""
     return {
         "fields": {
-            name: {"value": field.value, "source": field.source, "confidence": field.confidence}
+            name: {
+                "value": field.value,
+                "source": field.source,
+                "confidence": field.confidence,
+                "flag": field.flag,
+            }
             for name, field in reading.fields.items()
         },
         "document_url": reading.document_url,
@@ -102,18 +115,25 @@ def _field_from_json(name: object, raw: object) -> Field:
     """Return one field from its JSON object, validating its name, shape and values (R-2.6)."""
     if not isinstance(name, str):
         raise ValueError("reading field name must be a string")
-    if not isinstance(raw, dict) or set(raw) != _FIELD_KEYS:
-        raise ValueError(f"field {name!r} must be an object with exactly value, source and confidence")
+    if not isinstance(raw, dict) or frozenset(raw) not in (_FIELD_KEYS, _FIELD_KEYS_WITH_FLAG):
+        raise ValueError(
+            f"field {name!r} must be an object with exactly value, source and confidence, and optionally flag"
+        )
     value = raw["value"]
     source = raw["source"]
     confidence = _confidence(raw["confidence"])
+    flag = raw.get("flag")
     if not isinstance(value, str):
         raise ValueError(f"field {name!r} value must be a string")
     if not isinstance(source, str) or source not in _SOURCES:
         raise ValueError(f"field {name!r} source must be one of {sorted(_SOURCES)}")
     if confidence is None:
         raise ValueError(f"field {name!r} confidence must be a finite number from 0 to 1")
-    return Field(value=value, source=cast(Source, source), confidence=confidence)
+    if flag is not None and (not isinstance(flag, str) or flag not in _FLAGS):
+        raise ValueError(f"field {name!r} flag must be one of {sorted(_FLAGS)} or null")
+    return Field(
+        value=value, source=cast(Source, source), confidence=confidence, flag=cast(Flag | None, flag)
+    )
 
 
 def _confidence(value: object) -> float | None:

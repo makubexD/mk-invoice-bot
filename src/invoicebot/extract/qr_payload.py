@@ -13,7 +13,7 @@ import re
 from datetime import date
 from decimal import Decimal
 
-from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
+from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Flag, Reading, finite_decimal
 from invoicebot.extract.validate import is_valid_ruc
 
 PIPE = "|"
@@ -78,9 +78,9 @@ def parse_qr_payload(text: str) -> Reading | None:
     return Reading(fields=fields, document_url=None)
 
 
-def _field(value: str, confidence: float = FULL_CONFIDENCE) -> Field:
-    """Return a QR-sourced field with the given confidence."""
-    return Field(value=value, source="qr", confidence=confidence)
+def _field(value: str, confidence: float = FULL_CONFIDENCE, flag: Flag | None = None) -> Field:
+    """Return a QR-sourced field with the given confidence and flag."""
+    return Field(value=value, source="qr", confidence=confidence, flag=flag)
 
 
 def _is_issuer_ruc(text: str) -> bool:
@@ -99,7 +99,7 @@ def _document_type(tipo_text: str, serie: str) -> Field | None:
     inferred = DOCUMENT_TYPE_BY_SERIE_LETTER.get(serie[:1])
     if inferred is None:
         return None
-    return _field(inferred, INFERRED_CONFIDENCE)
+    return _field(inferred, INFERRED_CONFIDENCE, flag="inferred")
 
 
 def _buyer_fields(parts: list[str]) -> dict[str, Field]:
@@ -115,7 +115,7 @@ def _buyer_fields(parts: list[str]) -> dict[str, Field]:
     else:
         inferred = _infer_buyer_type(num_doc)
         if inferred is not None:
-            fields["tipo_doc_adq"] = _field(inferred, INFERRED_CONFIDENCE)
+            fields["tipo_doc_adq"] = _field(inferred, INFERRED_CONFIDENCE, flag="inferred")
     if num_doc:
         fields["num_doc_adq"] = _field(num_doc)
     return fields

@@ -215,6 +215,14 @@ def test_parse_qr_payload_maps_parts_by_position(
     assert all(field.source == "qr" for field in reading.fields.values())
 
 
+def test_inferred_tipo_carries_the_inferred_flag() -> None:
+    """D79: a tipo inferred from the serie letter is flagged inferred."""
+    reading = parse_qr_payload(f"{SYNTHETIC_RUC}|6|F001|15160|7.36|49.90|2026-11-13")
+
+    assert reading is not None
+    assert reading.fields["tipo"].flag == "inferred"
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_url"),
     [
