@@ -33,6 +33,7 @@ MEDIA_MAX_BYTES = MediaMaxBytes(
     xml=2 * 1024 * 1024,
     zip=20 * 1024 * 1024,
 )
+SMALL_PDF_MAX_BYTES = MEDIA_MAX_BYTES.model_copy(update={"pdf": 8})
 
 #: A fake helper: it reads the request, writes chosen files and prints one result line.
 #: The Playwright module is never imported, so the test needs no browser (R-5.6).
@@ -104,6 +105,15 @@ elif MODE == "match":
         write("xml", "invoice.xml", xml_bytes()),
         write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic"),
     ])
+elif MODE == "undersize":
+    pdf = write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic")
+    pdf["size"] = 1
+    report("ok", [write("xml", "invoice.xml", xml_bytes()), pdf])
+elif MODE == "oversized":
+    report("ok", [
+        write("xml", "invoice.xml", xml_bytes()),
+        write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic"),
+    ])
 elif MODE == "other":
     report("ok", [
         write("xml", "invoice.xml", xml_bytes("999")),
@@ -165,13 +175,19 @@ def _invoice(ruc: str = SYNTHETIC_RUC) -> FetchInvoice:
     )
 
 
-def _fetcher(tmp_path: Path, mode: str, *, helper_timeout_s: float = HELPER_TIMEOUT_S) -> PortalFetcher:
+def _fetcher(
+    tmp_path: Path,
+    mode: str,
+    *,
+    helper_timeout_s: float = HELPER_TIMEOUT_S,
+    max_bytes: MediaMaxBytes = MEDIA_MAX_BYTES,
+) -> PortalFetcher:
     """Return a fetcher whose helper is the fake script in its ``mode``."""
     script = tmp_path / "helper.py"
     script.write_text(HELPER_SCRIPT, encoding="utf-8")
     return PortalFetcher(
         _directory(),
-        MEDIA_MAX_BYTES,
+        max_bytes,
         helper_timeout_s,
         helper_command=(sys.executable, str(script), mode),
     )
@@ -191,6 +207,30 @@ async def test_fetch_matching_xml_and_pdf_is_ok(tmp_path: Path) -> None:
         assert file.path == out_dir / name
         assert file.size == len(content)
         assert file.sha256 == hashlib.sha256(content).hexdigest()
+
+
+async def test_fetch_helper_undersized_pdf_reports_the_real_size(tmp_path: Path) -> None:
+    """R-5.6: a helper reporting a smaller PDF size than the file on disk gets the real size."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "undersize").fetch(_invoice(), out_dir)
+
+    assert result.reason is FetchReason.OK
+    pdf = next(file for file in result.files if file.kind == "pdf")
+    content = (out_dir / PDF_NAME).read_bytes()
+    assert pdf.path == out_dir / PDF_NAME
+    assert pdf.size == len(content)
+
+
+async def test_fetch_oversized_pdf_is_technical_and_removes_files(tmp_path: Path) -> None:
+    """R-5.6: a PDF above max_bytes.pdf is technical and leaves no files in out_dir."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "oversized", max_bytes=SMALL_PDF_MAX_BYTES).fetch(_invoice(), out_dir)
+
+    assert result.reason is FetchReason.TECHNICAL
+    assert result.files == ()
+    assert list(out_dir.iterdir()) == []
 
 
 async def test_fetch_xml_for_another_numero_is_mismatch_and_removes_files(

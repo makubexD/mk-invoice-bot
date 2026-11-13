@@ -2,8 +2,9 @@
 
 The fetcher finds the issuer's portal in the store directory and runs the browser helper
 in its own process for one fetch. The helper downloads the files; this module checks that
-every file it reports lies inside the output directory, then reads the XML and matches it
-against the invoice (R-5.6, BR-F06, BR-F09). A failed fetch removes the downloaded files.
+every file it reports lies inside the output directory and under its kind's byte limit, then
+reads the XML and matches it against the invoice (R-5.6, BR-F06, BR-F09). A failed fetch
+removes the downloaded files.
 """
 
 from __future__ import annotations
@@ -121,7 +122,9 @@ def _result_from(
     if reason is not FetchReason.OK:
         _delete_inside(output.files, root)
         return FetchResult(reason, (), key)
-    files = tuple(FetchedFile(file.kind, file.path, file.size, file.sha256) for file in output.files)
+    files = tuple(
+        FetchedFile(file.kind, file.path, file.path.stat().st_size, file.sha256) for file in output.files
+    )
     return FetchResult(FetchReason.OK, files, key)
 
 
@@ -134,18 +137,34 @@ def _validate_files(
     """Return why the helper's files are unusable, or ``OK`` when they carry a matching XML."""
     if not all(_inside(file.path, root) for file in files):
         return FetchReason.TECHNICAL
+    for file in files:
+        reason = _too_large(file, max_bytes)
+        if reason is not None:
+            return reason
     xml = next((file for file in files if file.kind == "xml"), None)
     if xml is None:
         return FetchReason.MISSING_DOCS
-    reason = _xml_reason(xml, invoice, max_bytes)
+    reason = _xml_reason(xml, invoice)
     return FetchReason.OK if reason is None else reason
 
 
-def _xml_reason(xml: HelperFile, invoice: FetchInvoice, max_bytes: MediaMaxBytes) -> FetchReason | None:
+def _too_large(file: HelperFile, max_bytes: MediaMaxBytes) -> FetchReason | None:
+    """Return the reason for a file over its kind's limit, or ``None`` (R-5.6).
+
+    The size checked is the bot's own stat of the file on disk, never the helper's report.
+    """
+    try:
+        size = file.path.stat().st_size
+    except OSError:
+        return FetchReason.TECHNICAL
+    if size <= getattr(max_bytes, file.kind):
+        return None
+    return FetchReason.TECHNICAL if file.kind == "pdf" else FetchReason.XML_INVALID
+
+
+def _xml_reason(xml: HelperFile, invoice: FetchInvoice) -> FetchReason | None:
     """Return the XML's failure reason, or ``None`` when it matches the invoice (R-5.6, BR-F09)."""
     try:
-        if xml.path.stat().st_size > max_bytes.xml:
-            return FetchReason.XML_INVALID
         data = xml.path.read_bytes()
     except OSError:
         return FetchReason.TECHNICAL
