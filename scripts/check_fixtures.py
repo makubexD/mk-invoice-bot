@@ -3,13 +3,14 @@
 
 Usage: ``check_fixtures.py [root]`` (default root: the current directory).
 
-Images under ``tests/`` must not contain EXIF metadata. Any standalone 11-digit
-number in a text file under ``tests/`` or ``config/`` whose SUNAT check digit is
-valid must be listed in ``tests/synthetic_rucs.txt``; that allowlist is the only
-place synthetic RUC-like values may appear. The one exception is the store
-directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may contain its own RUC,
-and only that one. Exits 1 and prints one line per
-problem, 0 when the fixtures are clean.
+Images must not contain EXIF metadata. Any standalone 11-digit number in a tracked
+text file whose SUNAT check digit is valid must be listed in
+``tests/synthetic_rucs.txt``; that allowlist is the only place synthetic RUC-like
+values may appear. ``uv.lock`` and binary files are skipped. The one exception is
+the store directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may contain its own
+RUC, and only that one. Files come from ``git ls-files``; outside a git checkout
+the root is walked instead. Exits 1 and prints one line per problem, 0 when the
+fixtures are clean.
 """
 
 from __future__ import annotations
@@ -17,14 +18,19 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shutil
+import subprocess
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
+from invoicebot.extract.validate import is_valid_ruc
+
 IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp", ".tif", ".tiff", ".heic"})
 SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
+SKIP_NAMES = frozenset({"uv.lock"})
+BINARY_PROBE_BYTES = 8192
 RUC_RE = re.compile(r"(?<![0-9])[0-9]{11}(?![0-9])")
-RUC_WEIGHTS = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
 ALLOWLIST_RELATIVE = Path("tests") / "synthetic_rucs.txt"
 STORES_RELATIVE = Path("config") / "stores"
 
@@ -97,19 +103,6 @@ def has_exif(path: Path) -> bool:
     return False
 
 
-def is_valid_ruc(text: str) -> bool:
-    """Return whether ``text`` is an 11-digit number with a valid SUNAT check digit."""
-    if len(text) != 11 or not text.isascii() or not text.isdigit():
-        return False
-    total = sum(int(digit) * weight for digit, weight in zip(text[:10], RUC_WEIGHTS, strict=True))
-    check = 11 - (total % 11)
-    if check == 10:
-        check = 0
-    elif check == 11:
-        check = 1
-    return check == int(text[10])
-
-
 def _load_allowlist(path: Path) -> set[str]:
     """Read the one-value-per-line synthetic RUC allowlist, ignoring comments."""
     if not path.is_file():
@@ -129,15 +122,38 @@ def _own_store_ruc(path: Path, stores_dir: Path) -> str | None:
     return None
 
 
+def _git_tracked_files(root: Path) -> list[Path] | None:
+    """Return the files git tracks under ``root``, or ``None`` outside a git checkout."""
+    git = shutil.which("git")
+    if git is None:
+        return None
+    try:
+        result = subprocess.run(  # noqa: S603 - fixed argv, no untrusted input
+            [git, "ls-files", "-z"], cwd=root, capture_output=True, check=False
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    names = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
+    return [root / name for name in names if name]
+
+
+def _walk_files(root: Path) -> Iterator[Path]:
+    """Yield every file under ``root``, pruning skipped directories."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(name for name in dirnames if name not in SKIP_DIRS)
+        for filename in sorted(filenames):
+            yield Path(dirpath) / filename
+
+
 def _iter_scanned_files(root: Path) -> Iterator[Path]:
-    """Yield files under ``root/tests`` and ``root/config``, pruning skipped dirs."""
-    for base in (root / "tests", root / "config"):
-        if not base.is_dir():
-            continue
-        for dirpath, dirnames, filenames in os.walk(base):
-            dirnames[:] = sorted(name for name in dirnames if name not in SKIP_DIRS)
-            for filename in sorted(filenames):
-                yield Path(dirpath) / filename
+    """Yield the tracked files under ``root``, walking the tree when git is unavailable."""
+    tracked = _git_tracked_files(root)
+    if tracked is None:
+        yield from _walk_files(root)
+        return
+    yield from (path for path in tracked if path.is_file())
 
 
 def find_problems(root: Path) -> list[str]:
@@ -148,14 +164,19 @@ def find_problems(root: Path) -> list[str]:
     problems: list[str] = []
     for path in _iter_scanned_files(root):
         relative = path.relative_to(root).as_posix()
+        if path.name in SKIP_NAMES:
+            continue
         if path.suffix.lower() in IMAGE_SUFFIXES:
             if has_exif(path):
                 problems.append(f"{relative}: image contains EXIF metadata")
             continue
         if path == allowlist_path:
             continue
+        data = path.read_bytes()
+        if b"\x00" in data[:BINARY_PROBE_BYTES]:
+            continue
         try:
-            text = path.read_bytes().decode("utf-8")
+            text = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
         own_ruc = _own_store_ruc(path, stores_dir)

@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
 from types import ModuleType
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "check_fixtures.py"
+GIT = shutil.which("git")
+assert GIT is not None, "git is required to test the ls-files scan"
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
@@ -48,6 +52,14 @@ def _fixture_tree(tmp_path: Path) -> tuple[Path, Path]:
     tests_dir.mkdir()
     (tmp_path / "config").mkdir()
     return tmp_path, tests_dir
+
+
+def _git_tree(tmp_path: Path, tracked: str) -> None:
+    """Initialise a git checkout in ``tmp_path`` and track the already-written ``tracked`` file."""
+    for args in (("init", "-q"), ("add", tracked)):
+        subprocess.run(  # noqa: S603 - fixed git argv, no untrusted input
+            [GIT, *args], cwd=tmp_path, check=True, capture_output=True
+        )
 
 
 def _jpeg(*, exif: bool) -> bytes:
@@ -162,6 +174,58 @@ def test_bad_check_digit_passes(tmp_path: Path) -> None:
     (tests_dir / "notes.txt").write_text(f"phone: {bad_value}\n", encoding="utf-8")
 
     assert check_fixtures.find_problems(tmp_path) == []
+
+
+def test_ruc_in_docs_fails(tmp_path: Path) -> None:
+    """R-9.17: a valid-check-digit RUC in a tracked text file under docs/ is reported."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    value = _synthetic_ruc(6)
+    (docs / "x.md").write_text(f"RUC: {value}\n", encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "docs/x.md" in problems[0]
+    assert value in problems[0]
+
+
+def test_ruc_in_specs_spike_fails(tmp_path: Path) -> None:
+    """R-9.17: a valid-check-digit RUC in a tracked text file under specs/spikes/ is reported."""
+    spikes = tmp_path / "specs" / "spikes"
+    spikes.mkdir(parents=True)
+    value = _synthetic_ruc(6)
+    (spikes / "y.md").write_text(f"RUC: {value}\n", encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "specs/spikes/y.md" in problems[0]
+    assert value in problems[0]
+
+
+def test_ruc_in_uv_lock_passes(tmp_path: Path) -> None:
+    """R-9.17: uv.lock is skipped, so hash fragments that look like RUCs are not reported."""
+    value = _synthetic_ruc(6)
+    (tmp_path / "uv.lock").write_text(f'hash = "{value}"\n', encoding="utf-8")
+
+    assert check_fixtures.find_problems(tmp_path) == []
+
+
+def test_git_checkout_scans_tracked_files_only(tmp_path: Path) -> None:
+    """R-9.17: inside a git checkout only files from git ls-files are scanned."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    tracked, untracked = _synthetic_ruc(6), _synthetic_ruc(7)
+    (docs / "tracked.md").write_text(f"RUC: {tracked}\n", encoding="utf-8")
+    _git_tree(tmp_path, "docs/tracked.md")
+    (docs / "untracked.md").write_text(f"RUC: {untracked}\n", encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "docs/tracked.md" in problems[0]
+    assert tracked in problems[0]
 
 
 def test_is_valid_ruc_hand_computed_example() -> None:
