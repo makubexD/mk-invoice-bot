@@ -50,6 +50,8 @@ WHATSAPP_SECRETS = frozenset(
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
+#: Parsing rules that sit beside the loaded config file (S3.6).
+PARSING_RULES_FILE = "parsing_rules.yaml"
 
 
 async def _no_db_ping() -> bool:
@@ -126,7 +128,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             pool,
             {
                 DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
-                EXTRACT_STEP: make_extract_handler(pool, cfg.extraction, cfg.limits.media),
+                EXTRACT_STEP: make_extract_handler(
+                    pool,
+                    cfg.extraction,
+                    cfg.limits.media,
+                    settings.config_path.parent / PARSING_RULES_FILE,
+                ),
                 ROUTE_STEP: make_route_handler(pool, cfg, rules),
             },
         )

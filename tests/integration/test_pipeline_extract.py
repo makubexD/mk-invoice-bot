@@ -48,6 +48,7 @@ UNSUPPORTED_TIPO_PAYLOAD = (
     f"{SYNTHETIC_RUC}|{UNSUPPORTED_TIPO}|{SERIE}|{NUMERO}|{IGV}|{TOTAL}|{FECHA}|6|{SYNTHETIC_RUC}"
 )
 WHITE = 255
+RULES_PATH = Path(__file__).resolve().parents[2] / "config" / "parsing_rules.yaml"
 CANVAS = 800  # height and width, in pixels
 QR_SCALE = 6
 QR_TOP = 100
@@ -149,7 +150,9 @@ async def _run_handler(
     helper_timeout_s: float = HELPER_TIMEOUT_S,
 ) -> None:
     """Run the extract handler once for invoice_id."""
-    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA)(_job(invoice_id))
+    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA, RULES_PATH)(
+        _job(invoice_id)
+    )
 
 
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:

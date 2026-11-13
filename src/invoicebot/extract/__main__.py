@@ -1,13 +1,16 @@
 """Extract helper process: read one invoice photo and print one JSON line (D78).
 
-The extract handler starts this module as ``python -m invoicebot.extract <photo> <max_px> <max_bytes>``.
-It loads the photo and reads its SUNAT QR, then writes exactly one JSON object to stdout:
-``{"reading": {...} | null, "variant": ..., "decoder": ..., "error": null | "unreadable"}``.
-OpenCV and zxing live here and are released when the process exits (D78). Nothing else is
-printed: stderr is discarded by the handler because it could carry decoded text (R-9.16).
-A path that cannot be read exits non-zero, so the caller raises and the queue retries. The
-process caps its own address space, CPU time and file writes before it decodes anything, and
-an input above the byte cap prints the same "unreadable" result as an undecodable image.
+The extract handler starts this module as ``python -m invoicebot.extract <photo> <max_px>
+<max_bytes> <engine> <lang> <psm> <timeout_s> <rules_path>``. It loads the photo once, reads its
+SUNAT QR, reads its text with Tesseract and parses the fields with the configured rules, then
+merges both readings (D81). It writes exactly one JSON object to stdout:
+``{"reading": {...} | null, "variant": ..., "decoder": ..., "ocr": bool, "error": null |
+"unreadable"}``, where ``ocr`` says whether Tesseract returned text. OpenCV, Tesseract and
+zxing live here and are released when the process exits (D78). Nothing else is printed: stderr
+is discarded by the handler because it could carry decoded text (R-9.16). A path or rules file
+that cannot be read exits non-zero, so the caller raises and the queue retries. The process caps
+its own address space, CPU time and file writes before it decodes anything, and an input above
+the byte cap prints the same "unreadable" result as an undecodable image.
 """
 
 from __future__ import annotations
@@ -18,12 +21,20 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from invoicebot.config.models import Ocr
 from invoicebot.extract.fields import reading_to_json
 from invoicebot.extract.image import ImageUnreadable, load_gray
+from invoicebot.extract.merge import merge
+from invoicebot.extract.ocr import preprocess, read_text
+from invoicebot.extract.ocr_parse import load_rules, parse_ocr
 from invoicebot.extract.qr import read_invoice_qr
 
 #: Exit code for a missing file or a bad invocation; the handler retries these (R-9.4).
 EXIT_FAILURE = 1
+#: Photo, pixel cap, byte cap, OCR engine, language, PSM, timeout and rules path.
+ARGUMENT_COUNT = 8
 #: The helper's value for "there is no reading to return" (BR-E01).
 UNREADABLE = "unreadable"
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
@@ -48,43 +59,49 @@ def main(argv: list[str] | None = None) -> int:
     """Read the photo named by ``argv`` and print the helper result (R-2.1, R-2.13)."""
     _limit_resources()
     args = sys.argv[1:] if argv is None else argv
-    if len(args) != 3:
+    if len(args) != ARGUMENT_COUNT:
         return EXIT_FAILURE
     try:
         max_px = int(args[1])
         max_bytes = int(args[2])
+        ocr_cfg = Ocr(engine=args[3], lang=args[4], psm=int(args[5]), timeout_s=int(args[6]))
+        rules = load_rules(Path(args[7]))
         photo = Path(args[0])
         if photo.stat().st_size > max_bytes:
-            _emit(_unreadable())
+            _emit(_unreadable(ocr=False))
             return 0
         data = photo.read_bytes()
-    except (OSError, ValueError):
+    except (OSError, ValueError, yaml.YAMLError):
         return EXIT_FAILURE
 
     try:
         gray = load_gray(data, max_px)
     except ImageUnreadable:
-        _emit(_unreadable())
+        _emit(_unreadable(ocr=False))
         return 0
 
     hit = read_invoice_qr(gray)
-    if hit is None:
-        _emit(_unreadable())
+    text = read_text(preprocess(gray), ocr_cfg)
+    ocr_reading = None if text is None else parse_ocr(text, rules).reading
+    reading = merge(ocr_reading, None if hit is None else hit.reading)
+    if not reading.fields:
+        _emit(_unreadable(ocr=text is not None))
         return 0
     _emit(
         {
-            "reading": reading_to_json(hit.reading),
-            "variant": hit.variant,
-            "decoder": hit.decoder,
+            "reading": reading_to_json(reading),
+            "variant": None if hit is None else hit.variant,
+            "decoder": None if hit is None else hit.decoder,
+            "ocr": text is not None,
             "error": None,
         }
     )
     return 0
 
 
-def _unreadable() -> dict[str, Any]:
-    """Return the result for a photo where no SUNAT reading was found."""
-    return {"reading": None, "variant": None, "decoder": None, "error": UNREADABLE}
+def _unreadable(*, ocr: bool) -> dict[str, Any]:
+    """Return the result for a photo where neither reader found a field."""
+    return {"reading": None, "variant": None, "decoder": None, "ocr": ocr, "error": UNREADABLE}
 
 
 def _emit(payload: dict[str, Any]) -> None:

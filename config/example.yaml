@@ -58,7 +58,7 @@ extraction:
   max_invoice_age_days: 365
   igv_rates: ["0.18", "0.105", "0.10"]   # strings, so no float rounding reaches Decimal (Ley 31556 reduced rates)
   supported_tipos: ["01", "03", "07", "08"]
-  helper_timeout_s: 30                   # the QR helper is killed after this (D78)
+  helper_timeout_s: 50                   # covers OCR (30 s) plus the QR cascade within R-9.2's 60 s
 
 # Vision-LLM fallback (R-2.11, D43). Runs only after QR, XML and OCR fail, only for flows
 # set to true here. Output is re-checked by the R-2.4 validators and always needs confirmation.

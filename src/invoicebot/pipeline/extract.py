@@ -1,9 +1,9 @@
 """Job handler that reads one invoice photo in a helper process (S3.11, R-2.1).
 
-:func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding
-runs in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
-never loads OpenCV or zxing and their memory returns when the helper exits (D78). The
-helper's one JSON line is validated before use. The outcome's state change, next job and
+:func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding and
+OCR run in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
+never loads OpenCV, zxing or Tesseract and their memory returns when the helper exits (D78).
+The helper's one JSON line is validated before use. The outcome's state change, next job and
 outbox message commit in one transaction (CLAUDE.md "Database").
 """
 
@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -63,20 +64,23 @@ class _HelperResult(BaseModel):
     reading: dict[str, Any] | None
     variant: str | None
     decoder: str | None
+    ocr: bool
     error: Literal["unreadable"] | None
 
 
-def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLimits) -> Handler:
+def make_extract_handler(
+    pool: Pool, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+) -> Handler:
     """Build the handler that reads an invoice's photo and queues its routing (S3.11).
 
-    The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with
-    no photo file — a PDF or XML attachment until read-more ships — ends with BR-E01 and a
-    message asking for a photo or typed data. A photo it cannot read, a required field it
-    does not find, a bad issuer RUC and an unsupported document type end the invoice with
-    BR-E01, BR-E02 or BR-E05 and a message to the sender. A reading that passes them is
-    stored and the invoice moves to ``ROUTING`` with a ``route`` job. A helper that exits
-    non-zero for any other reason raises, so the queue retries and, after its limit, fails
-    the invoice with BR-S03.
+    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with. The handler
+    acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no photo file —
+    a PDF or XML attachment until read-more ships — ends with BR-E01 and a message asking for a
+    photo or typed data. A photo it cannot read, a required field it does not find, a bad
+    issuer RUC and an unsupported document type end the invoice with BR-E01, BR-E02 or BR-E05
+    and a message to the sender. A reading that passes them is stored and the invoice moves to
+    ``ROUTING`` with a ``route`` job. A helper that exits non-zero for any other reason raises,
+    so the queue retries and, after its limit, fails the invoice with BR-S03.
     """
 
     async def handle(job: Job) -> None:
@@ -99,7 +103,7 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
             await set_state(conn, job.invoice_id, "EXTRACTING")
 
         try:
-            result = await _run_helper(path, extraction_cfg, media)
+            result = await _run_helper(path, extraction_cfg, media, rules_path)
         except TimeoutError:
             await _finish(pool, job.invoice_id, channel, profile_id, RULE_UNREADABLE, None)
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
@@ -122,12 +126,15 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
     return handle
 
 
-async def _run_helper(path: str, extraction_cfg: Extraction, media: MediaLimits) -> _HelperResult:
+async def _run_helper(
+    path: str, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+) -> _HelperResult:
     """Run the extract helper under the heavy slot and return its validated result.
 
-    The helper runs with a minimal environment and an import path that does not include
-    the working directory, and it is killed and reaped on every exit — timeout, crash or
-    cancellation — so no decode process outlives its job (R-9.2).
+    The helper receives the photo caps, the OCR config and ``rules_path`` as arguments. It
+    runs with a minimal environment and an import path that does not include the working
+    directory, and it is killed and reaped on every exit — timeout, crash or cancellation —
+    so no decode process outlives its job (R-9.2).
 
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
@@ -148,6 +155,11 @@ async def _run_helper(path: str, extraction_cfg: Extraction, media: MediaLimits)
             path,
             str(extraction_cfg.max_image_px),
             str(media.max_bytes.image),
+            extraction_cfg.ocr.engine,
+            extraction_cfg.ocr.lang,
+            str(extraction_cfg.ocr.psm),
+            str(extraction_cfg.ocr.timeout_s),
+            str(rules_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
@@ -230,7 +242,7 @@ def _log_outcome(
     rule_id: RuleId | None,
     started: float,
 ) -> None:
-    """Log ids, the decoder that hit and the timing; never an extracted value (R-9.16)."""
+    """Log ids, the decoder, whether OCR ran and the timing; never an extracted value (R-9.16)."""
     logger.info(
         "step done",
         extra={
@@ -238,6 +250,7 @@ def _log_outcome(
             "invoice_id": invoice_id,
             "variant": None if result is None else result.variant,
             "decoder": None if result is None else result.decoder,
+            "ocr": None if result is None else result.ocr,
             "rule_id": rule_id,
             "duration_ms": int((time.perf_counter() - started) * 1000),
         },

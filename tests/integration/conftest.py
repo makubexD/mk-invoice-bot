@@ -100,6 +100,7 @@ SERIE = "F001"
 NUMERO = "15160"
 TOTAL = "49.90"
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
+PARSING_RULES_PATH = REPO_ROOT / "config" / "parsing_rules.yaml"
 _WHITE = 255
 _CANVAS_PX = 800
 _QR_SCALE = 6
@@ -181,7 +182,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             await add_file(conn, invoice_id, record)
             extract_job = await enqueue(conn, invoice_id, EXTRACT_STEP)
 
-        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media)(
+        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media, PARSING_RULES_PATH)(
             _job(extract_job, invoice_id, EXTRACT_STEP)
         )
         async with db_pool.connection() as conn:
