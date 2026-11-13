@@ -18,14 +18,17 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
 from invoicebot.store.invoices import (
     FileRecord,
+    InvoiceHead,
     add_file,
     count_active_jobs,
     create_invoice,
     get_file_path,
     get_state,
     has_file,
+    load_invoice_head,
     load_reading,
     save_reading,
+    set_flow,
     set_state,
     touch_window,
     window_open,
@@ -101,6 +104,32 @@ async def test_create_invoice_returns_id_and_state(
 
     assert state == ("RECEIVED", "yo")
     assert missing is None
+
+
+async def test_load_invoice_head_returns_the_row_or_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.1: load_invoice_head returns the state, profile and channel; an unknown id is None."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        head = await load_invoice_head(conn, invoice_id)
+        missing = await load_invoice_head(conn, UNKNOWN_INVOICE_ID)
+
+    assert head == InvoiceHead(state="RECEIVED", profile_id="yo", origin_channel=CHANNEL)
+    assert missing is None
+
+
+async def test_set_flow_stores_the_flow(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.1: set_flow stores the flow the invoice was routed to."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_flow(conn, invoice_id, "personal_google")
+        cur = await conn.execute("SELECT flow_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+
+    assert row == ("personal_google",)
 
 
 async def test_set_state_records_state_rule_and_error(

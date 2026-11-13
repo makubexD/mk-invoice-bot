@@ -6,7 +6,7 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
@@ -27,6 +27,15 @@ class FileRecord:
     remote_ref: str | None
     sha256: str
     size: int
+
+
+@dataclass(frozen=True)
+class InvoiceHead:
+    """The invoice columns the pipeline handlers act on (R-1.1)."""
+
+    state: str
+    profile_id: str
+    origin_channel: ChannelName
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -52,6 +61,27 @@ async def get_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, s
     if row is None:
         return None
     return str(row[0]), str(row[1])
+
+
+async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> InvoiceHead | None:
+    """Return the invoice's state, profile and channel, or None when it does not exist."""
+    cur = await conn.execute(
+        "SELECT state, profile_id, origin_channel FROM invoices WHERE id = %s",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return InvoiceHead(
+        state=str(row[0]),
+        profile_id=str(row[1]),
+        origin_channel=cast(ChannelName, row[2]),
+    )
+
+
+async def set_flow(conn: AsyncConnection[Any], invoice_id: int, flow: str) -> None:
+    """Store the flow the invoice was routed to (R-3.1)."""
+    await conn.execute("UPDATE invoices SET flow_id = %s WHERE id = %s", (flow, invoice_id))
 
 
 async def set_state(

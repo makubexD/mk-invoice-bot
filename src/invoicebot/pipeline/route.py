@@ -9,13 +9,12 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
 from datetime import date
 from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import ChannelName, OutboundMessage
+from invoicebot.channels.base import OutboundMessage
 from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
@@ -46,7 +45,7 @@ from invoicebot.rules.messages_es import (
     tipos_desc,
 )
 from invoicebot.store.db import Pool
-from invoicebot.store.invoices import load_reading, set_state
+from invoicebot.store.invoices import InvoiceHead, load_invoice_head, load_reading, set_flow, set_state
 
 logger = logging.getLogger(__name__)
 
@@ -55,15 +54,6 @@ ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; the ``fetch`` phase adds its next job.
 ROUTED_STATE = "FETCHING_DOCS"
 DATE_FIELD = "fecha_emision"
-
-
-@dataclass(frozen=True)
-class _Invoice:
-    """What the handler needs from the invoice row."""
-
-    state: str
-    profile_id: str
-    channel: ChannelName
 
 
 def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...]) -> Handler:
@@ -78,7 +68,7 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
     async def handle(job: Job) -> None:
         started = time.perf_counter()
         async with pool.connection() as conn:
-            invoice = await _load_invoice(conn, job.invoice_id)
+            invoice = await load_invoice_head(conn, job.invoice_id)
             if invoice is None or invoice.state != ROUTING_STATE:
                 return
             reading = await load_reading(conn, job.invoice_id)
@@ -103,7 +93,7 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
             # shortcut: the summary has no [Editar] / [Cancelar] buttons until S4.5 and S4.9.
             text = _summary(reading, flow, rule_id, today, cfg.extraction)
             async with pool.connection() as conn, conn.transaction():
-                await _set_flow(conn, job.invoice_id, cast(str, result.flow))
+                await set_flow(conn, job.invoice_id, cast(str, result.flow))
                 await set_state(conn, job.invoice_id, ROUTED_STATE, rule_id=rule_id)
                 await _reply(conn, invoice, rule_id, text)
         logger.info(
@@ -119,18 +109,6 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
     return handle
 
 
-async def _load_invoice(conn: AsyncConnection[Any], invoice_id: int) -> _Invoice | None:
-    """Return the invoice's state, profile and origin channel, or None when it is gone."""
-    cur = await conn.execute(
-        "SELECT state, profile_id, origin_channel FROM invoices WHERE id = %s",
-        (invoice_id,),
-    )
-    row = await cur.fetchone()
-    if row is None:
-        return None
-    return _Invoice(state=str(row[0]), profile_id=str(row[1]), channel=cast(ChannelName, row[2]))
-
-
 async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
     """Return today's date in the owner's timezone, from the database clock."""
     cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
@@ -140,21 +118,16 @@ async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
     return cast(date, row[0])
 
 
-async def _set_flow(conn: AsyncConnection[Any], invoice_id: int, flow_id: str) -> None:
-    """Store the flow the invoice was routed to (R-3.1)."""
-    await conn.execute("UPDATE invoices SET flow_id = %s WHERE id = %s", (flow_id, invoice_id))
-
-
-async def _reply(conn: AsyncConnection[Any], invoice: _Invoice, rule_id: str, text: str) -> None:
+async def _reply(conn: AsyncConnection[Any], invoice: InvoiceHead, rule_id: str, text: str) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
     message = OutboundMessage(
-        channel=invoice.channel,
+        channel=invoice.origin_channel,
         recipient=invoice.profile_id,
         profile_id=invoice.profile_id,
         rule_id=rule_id,
         text=text,
     )
-    await outbox.add(conn, invoice.channel, invoice.profile_id, message.model_dump(mode="json"))
+    await outbox.add(conn, invoice.origin_channel, invoice.profile_id, message.model_dump(mode="json"))
 
 
 def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:

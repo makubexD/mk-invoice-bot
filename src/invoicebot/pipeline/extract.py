@@ -15,9 +15,8 @@ import os
 import sys
 import time
 from collections.abc import Sequence
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
-from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind, ChannelName, OutboundMessage
@@ -30,7 +29,7 @@ from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
 from invoicebot.store.db import Pool
-from invoicebot.store.invoices import get_file_path, get_state, save_reading, set_state
+from invoicebot.store.invoices import get_file_path, load_invoice_head, save_reading, set_state
 
 #: BR-E07 counts megapixels; OpenCV's decode cap counts pixels.
 PIXELS_PER_MEGAPIXEL = 1_000_000
@@ -83,12 +82,12 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
     async def handle(job: Job) -> None:
         started = time.perf_counter()
         async with pool.connection() as conn:
-            invoice = await get_state(conn, job.invoice_id)
-            if invoice is None or invoice[0] not in ACTIVE_STATES:
+            invoice = await load_invoice_head(conn, job.invoice_id)
+            if invoice is None or invoice.state not in ACTIVE_STATES:
                 return
-            _, profile_id = invoice
             path = await get_file_path(conn, job.invoice_id, PHOTO_KIND)
-            channel = await _origin_channel(conn, job.invoice_id)
+            profile_id = invoice.profile_id
+            channel = invoice.origin_channel
         if path is None:
             # shortcut: PDF and XML input arrive in read-more; until then a non-photo
             # file asks for a photo or typed data (BR-E01).
@@ -121,15 +120,6 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
         _log_outcome(job.invoice_id, result, None, started)
 
     return handle
-
-
-async def _origin_channel(conn: AsyncConnection[Any], invoice_id: int) -> ChannelName:
-    """Return the channel the invoice arrived on, which its replies use."""
-    cur = await conn.execute("SELECT origin_channel FROM invoices WHERE id = %s", (invoice_id,))
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError(f"invoice {invoice_id} disappeared")
-    return cast(ChannelName, row[0])
 
 
 async def _run_helper(path: str, extraction_cfg: Extraction, media: MediaLimits) -> _HelperResult:
