@@ -99,7 +99,7 @@ source_modules =
 forbidden_modules =
     playwright
 ignore_imports =
-    invoicebot.fetchers.browser.** -> playwright.**
-    invoicebot.fetchers.browser -> playwright.**
+    invoicebot.fetchers.browser.** -> playwright
+    invoicebot.fetchers.browser -> playwright
 # The browser helper lands in a later step of plan-mvp-fetch; until then the ignores match nothing.
 unmatched_ignore_imports_alerting = none
