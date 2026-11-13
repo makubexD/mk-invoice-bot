@@ -11,10 +11,12 @@ Roadmap: `docs/plan-mvp.md` row 4. This plan fixes the findings from the `fetch`
 
 ## Step 1: A duplicate fetch job does not fetch twice (R-5.1, D65) `[worker]`
 
-Files: `src/invoicebot/pipeline/fetch.py`, `src/invoicebot/store/fetch_attempts.py`, `tests/integration/test_pipeline_fetch.py`.
+Files: `src/invoicebot/pipeline/fetch.py`, `src/invoicebot/queue/jobs.py`, `tests/integration/test_pipeline_fetch.py`.
 
-- The worker deletes a job after the handler commits, so a crash in between delivers it again. In the handler's write transaction, lock the invoice's attempts (`SELECT … FOR UPDATE` on the invoice row through a store function) and compare the attempt count with the count the decision was made on; when it changed, write nothing and return.
-- Test (R-5.1): running the same `fetch` job twice records one attempt and leaves one queued `fetch` job.
+- The worker deletes a job after the handler commits, so a crash in between delivers it again. Comparing attempt counts does not catch that: the redelivered job reads the attempts after the first commit. What does: a non-`ok` run enqueues the next `fetch` job, so a job is stale once a newer job (higher `id`) for the same invoice and step exists. (`ok`, done and exhausted runs change the state, which the handler already checks.)
+- `queue/jobs.py`: `is_superseded(conn, job) -> bool` locks the job's own row (`SELECT … FOR UPDATE`, no error when the row is gone) and returns whether a job with the same `invoice_id` and `step` and a higher `id` exists. Caller's transaction, never commits.
+- `pipeline/fetch.py`: the handler calls it in its read block and returns before fetching when true; `_run` calls it again first thing in its write transaction (two runs of one job serialize on the row lock) and, when true, writes nothing and returns.
+- Tests (R-5.1): running the same `fetch` job twice with a fetcher that answers `not_found_yet` calls the fetcher once, records one attempt and leaves exactly one `fetch` job besides the original; `is_superseded` is false for the only job of an invoice and true once a newer one for the same step exists.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_fetch.py`
 
