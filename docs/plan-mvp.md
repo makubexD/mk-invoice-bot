@@ -59,6 +59,14 @@ Each item goes into the named phase's plan.
 - **`read-more`:** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
 - **Known, accepted:** the helper's process group is killed once more after the helper exits, by the old process ID; a reused ID could be hit in that window, which is very small.
 
+## Carried over from the `fetch` review
+
+Each item goes into the named phase's plan.
+
+- **`ops` gate (before live fetching on a shared host):** Chromium runs with `--no-sandbox`, Playwright's default. Enable `chromium_sandbox=True` with user namespaces, or run the browser helper as its own uid or container.
+- **`ops`:** a test that kills the browser helper mid-fetch and then finds no `chrome-headless-shell` process left. Playwright starts the browser detached, so the helper's process group may not hold it.
+- **`ops`:** a hostile page can start many downloads into Playwright's artifacts folder before the page timeout. Cap that folder or the helper's disk.
+
 ## Moved by the `fetch` plan (D82)
 
 - S7.6's `httpx` transport and the `document_url` allowlist go to `widen-b` with S7.2.
