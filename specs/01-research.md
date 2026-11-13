@@ -31,7 +31,7 @@ Facts marked **(verified 2026-11-10)** come from a later check. Older text that 
   - Tesseract 5 `spa`.
   - PaddleOCR is more accurate but needs 1–2 GB of RAM, which **rules it out on a 1 GB host**. *(2026-11-10: the host is now 2 GB, superseded by D42. PaddleOCR is still out, since it would not fit beside a Chromium fetch.)*
 - **Validation:**
-  - RUC check digit: weights `5,4,3,2,7,6,5,4,3,2`, `r = 11 − (Σ mod 11)`, where 10 → 0 and 11 → 1. Verified on RUC 20131312955.
+  - RUC check digit: weights `5,4,3,2,7,6,5,4,3,2`, `r = 11 − (Σ mod 11)`, where 10 → 0 and 11 → 1. Verified on synthetic RUC 20000000001 (tests/synthetic_rucs.txt).
   - IGV of 18% cross-check (10.5% for some restaurants under Ley 31556, *verify*).
   - SUNAT validity API.
 

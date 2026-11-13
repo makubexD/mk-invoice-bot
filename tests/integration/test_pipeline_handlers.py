@@ -24,7 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
-from invoicebot.pipeline.handlers import make_download_handler
+from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import Job
@@ -170,6 +170,37 @@ async def _files(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[Any,
     return list(await cur.fetchall())
 
 
+async def _job_count(conn: AsyncConnection[Any], invoice_id: int, step: str) -> int:
+    """Return how many jobs of ``step`` the invoice has."""
+    cur = await conn.execute(
+        "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = %s",
+        (invoice_id, step),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _run_download(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    invoice_id: int,
+    body: bytes,
+) -> None:
+    """Run the download handler for invoice_id, serving ``body`` from a fake Meta."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == GRAPH_HOST:
+            return httpx.Response(
+                200,
+                json={"url": MEDIA_URL, "mime_type": PNG_MIME, "file_size": len(body)},
+            )
+        return httpx.Response(200, content=body)
+
+    async with _make_client(handler) as client:
+        await make_download_handler(pool, client, tmp_path, _limits())(_job(invoice_id))
+
+
 async def _outbox_rows(conn: AsyncConnection[Any], to: str, rule_id: str) -> list[tuple[str, str]]:
     """Return ``(state, text)`` of the outbox rows for ``to`` under ``rule_id``."""
     cur = await conn.execute(
@@ -250,6 +281,34 @@ async def test_second_download_run_stores_one_file_and_sends_no_request(
     assert requests_after_first_run == 2
     assert len(requests) == requests_after_first_run
     assert len(files) == 1
+
+
+async def test_download_enqueues_exactly_one_extract_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.4: a stored photo queues exactly one extract job for the invoice."""
+    invoice_id = await _queue_photo(db_pool, _profile(), f"ref-{uuid4().hex}")
+    await _run_download(db_pool, tmp_path, invoice_id, _png_header(2000, 1500) + b"\x00" * 50)
+
+    async with db_pool.connection() as conn:
+        extract_jobs = await _job_count(conn, invoice_id, EXTRACT_STEP)
+
+    assert extract_jobs == 1
+
+
+async def test_retried_download_enqueues_no_second_extract_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.4: running the download again on an invoice with a file adds no extract job."""
+    invoice_id = await _queue_photo(db_pool, _profile(), f"ref-{uuid4().hex}")
+    body = _png_header(2000, 1500) + b"\x00" * 50
+    await _run_download(db_pool, tmp_path, invoice_id, body)
+    await _run_download(db_pool, tmp_path, invoice_id, body)
+
+    async with db_pool.connection() as conn:
+        extract_jobs = await _job_count(conn, invoice_id, EXTRACT_STEP)
+
+    assert extract_jobs == 1
 
 
 async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(

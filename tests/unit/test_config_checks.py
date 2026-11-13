@@ -70,6 +70,19 @@ def test_invalid_config_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[st
     assert "bogus" in capsys.readouterr().err
 
 
+def test_routing_rule_id_outside_catalog_fails(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """R-11.1: every routing rule id must exist in the business-rule catalog."""
+    config_path = _config_dir(tmp_path)
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    document["routing"]["rules"][0]["id"] = "BR-R99"
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    assert check_config.main([str(config_path)]) == 1
+    output = capsys.readouterr().out
+    assert "ROUTING_RULE_UNKNOWN" in output
+    assert "BR-R99" in output
+
+
 def test_todo_and_broken_portals_block_only_in_pr_mode() -> None:
     """R-11.6: todo/broken portals are blocking on pull requests and reported on main."""
     cfg = load_config(EXAMPLE)

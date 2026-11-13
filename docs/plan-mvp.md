@@ -6,7 +6,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | --- | ------------------------------ | --------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------- |
 | 1   | `foundation` (done 2026-11-11) | E1 (S1.1–S1.10, S5.1, S12.2)                        | part of M1 | Nothing                                                                                  |
 | 2   | `whatsapp` (done 2026-11-11)   | E2 (incl. S2.7–S2.9 window and templates)           | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                            |
-| 3   | `read`                         | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2 | M1 | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR) |
+| 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2 | M1 | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR) |
 | 4   | `fetch`                        | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9 | M2 | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`) |
 | 5   | `file-b`                       | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16 | M3 | Entra app for the personal account; the Excel template on the host; a test inbox |
 | 6   | `widen-b`                      | rest of E4 and E5; S7.2, S7.4, S7.5; E8 (MVP part); S10.3, S10.4, S10.7, S10.10; S11.9, S11.11, S11.12, S11.14, S11.15, S11.17; E15 | M4 | S0.6 (remaining store pages), S0.8, S0.10, S0.11; Q5 (inbox for the email fallback); the bot's Outlook.com mailbox |
@@ -33,6 +33,17 @@ Each item goes into the named phase's plan.
 
 Rules for every phase plan: steps of one concern in at most about 3 files, each with its own test command; tests cite requirement and rule IDs; no real RUCs, phone numbers or photos in git (D27).
 
+## Carried over from the `read` review
+
+Each item goes into the named phase's plan.
+
+- **Next (owner, 2026-11-13): D81, OCR as the primary reader.** The QR spike reads 50 % of real WhatsApp photos (`specs/spikes/qr.md`), far below S3.3's 95 %. The owner chose OCR on every photo, with the QR only confirming or filling fields. D81 is recorded in spec 05 and its plan written before `fetch` starts; it changes R-2.3, spec 03 §extract and the R-9.2 budget, and pulls S0.3, S3.5 and S3.6 forward from `read-more`.
+- **D81 plan:** the QR payload repairs the spike found (date with time, label before the RUC, word buyer type; the decimal comma is already read), and the XML fix for a `schemaLocation` namespace with a relative Windows path (2 of 10 real XMLs fail as `malformed`).
+- **D81 plan:** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
+- **`fetch`:** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
+- **`fetch`:** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared.
+- **`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.
+
 ## Known drift between code and specs
 
 The specs run ahead of the code in these places; each has a named story that closes it.
@@ -41,7 +52,6 @@ The specs run ahead of the code in these places; each has a named story that clo
 - `config/example.yaml` still shows flow B with `on_command`, `/enviar` and `can_send_batch`, and has no `extraction.igv_rates`, `accepted_tipos`, `reimbursement_cap` or mail modes: `read` adds `igv_rates` and `supported_tipos`, `file-b` adds the rest (target shape in spec 03 §7).
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
-- `scripts/check_fixtures.py` scans only `tests/` and `config/`; S3.12 makes it scan every tracked file (R-9.17).
 - The `files.kind` check has no `eml` or `manifest`: the flow-b migration adds them.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global. The flow config rework in `file-b` replaces them with per-flow settings (D53).
 

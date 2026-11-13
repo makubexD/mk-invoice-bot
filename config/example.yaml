@@ -56,6 +56,9 @@ extraction:
   ocr: { engine: tesseract, lang: spa, timeout_s: 30 }
   review_threshold: 0.8
   max_invoice_age_days: 365
+  igv_rates: ["0.18", "0.105", "0.10"]   # strings, so no float rounding reaches Decimal (Ley 31556 reduced rates)
+  supported_tipos: ["01", "03", "07", "08"]
+  helper_timeout_s: 30                   # the QR helper is killed after this (D78)
 
 # Vision-LLM fallback (R-2.11, D43). Runs only after QR, XML and OCR fail, only for flows
 # set to true here. Output is re-checked by the R-2.4 validators and always needs confirmation.
@@ -79,7 +82,8 @@ routing:
     - id: BR-R02
       when: { num_doc_adq: ["{work.ruc}"] }
       flow: work_microsoft
-    # Example for later: a second company, or route by issuer
+    # Example for later: a second company, or route by issuer. A new rule needs its own
+    # row in specs/06-business-rules.md before it is used here (R-11.1).
     # - id: BR-R10
     #   when: { num_doc_adq: ["20ZZZZZZZZZ"] }
     #   flow: second_company
@@ -88,6 +92,7 @@ routing:
 flows:
   personal_google:
     label: "Mi empresa (Google)"
+    accepted_tipos: ["01", "03"]
     fetchers: [qr_url, portal_registry, sunat_sol, email_inbox, manual]   # a fetcher's final failure passes to the next
     required_docs: [xml]                # pdf is nice-to-have
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
@@ -118,6 +123,7 @@ flows:
 
   work_microsoft:
     label: "Trabajo (Microsoft)"
+    accepted_tipos: ["01"]              # facturas only (BR-R08)
     fetchers: [qr_url, portal_registry, email_inbox, manual]   # no sunat_sol: no access to work RUC
     required_docs: [xml, pdf]
     deliver_without_docs: false

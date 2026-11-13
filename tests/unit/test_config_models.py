@@ -40,6 +40,38 @@ def test_unknown_key_fails_naming_path(tmp_path: Path) -> None:
     assert "ops.backup.bogus" in str(excinfo.value)
 
 
+def test_empty_igv_rates_fails(tmp_path: Path) -> None:
+    """R-2.4: extraction.igv_rates must name at least one rate."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["igv_rates"] = []
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.igv_rates" in str(excinfo.value)
+
+
+def test_accepted_tipos_outside_supported_tipos_fails_naming_flow(tmp_path: Path) -> None:
+    """R-3.1: a flow may only accept tipos listed in extraction.supported_tipos."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["accepted_tipos"] = ["01", "09"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="work_microsoft"):
+        load_config(path)
+
+
+def test_routing_rule_with_unknown_flow_fails_naming_it(tmp_path: Path) -> None:
+    """R-3.1: a routing rule that names a flow missing from flows fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["routing"]["rules"][0]["flow"] = "no_such_flow"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="no_such_flow"):
+        load_config(path)
+
+
 def test_placeholder_resolves() -> None:
     """R-9.6: config placeholders such as {owner.ruc} resolve before validation."""
     cfg = load_config(EXAMPLE)
@@ -65,3 +97,51 @@ def test_yaml_tag_is_refused(tmp_path: Path) -> None:
 
     with pytest.raises(yaml.YAMLError):
         load_config(path)
+
+
+def test_zero_helper_timeout_fails(tmp_path: Path) -> None:
+    """R-9.2: extraction.helper_timeout_s must be a positive timeout."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["helper_timeout_s"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.helper_timeout_s" in str(excinfo.value)
+
+
+def test_zero_max_image_px_fails(tmp_path: Path) -> None:
+    """R-9.6: extraction.max_image_px must be a positive pixel bound."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["max_image_px"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.max_image_px" in str(excinfo.value)
+
+
+def test_review_threshold_above_one_fails(tmp_path: Path) -> None:
+    """R-9.6: extraction.review_threshold is a confidence fraction in [0, 1]."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["review_threshold"] = 1.5
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.review_threshold" in str(excinfo.value)
+
+
+def test_routing_rule_with_unknown_when_key_fails(tmp_path: Path) -> None:
+    """R-3.1: a routing rule may only match on the reading fields the router knows."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["routing"]["rules"][0]["when"] = {"num_doc_adq_": ["20XXXXXXXXX"]}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "routing.rules.0.when" in str(excinfo.value)

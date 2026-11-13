@@ -29,7 +29,7 @@ from datetime import UTC, datetime
 from typing import Any, TextIO
 
 #: Event fields copied from ``extra=`` onto the JSON object, in output order.
-EXTRA_FIELDS = ("invoice_id", "job_id", "step", "rule_id", "duration_ms")
+EXTRA_FIELDS = ("invoice_id", "job_id", "step", "rule_id", "duration_ms", "variant", "decoder")
 
 #: Replacement for a configured secret value (R-9.16).
 REDACTED = "***"

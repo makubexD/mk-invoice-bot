@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from invoicebot.config.models import Config, Portal
+from invoicebot.rules import RULES
 
 PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
 _PYTHON_ADAPTER_PREFIX = "python:"
@@ -30,6 +31,7 @@ def run_checks(cfg: Config, portals: list[Portal], *, pr_mode: bool) -> list[Pro
     for index, portal in enumerate(portals):
         problems.extend(_portal_problems(index, portal, pr_mode=pr_mode))
     problems.extend(_llm_fallback_problems(cfg))
+    problems.extend(_routing_problems(cfg))
     return problems
 
 
@@ -78,6 +80,26 @@ def _adapter_problem(index: int, portal: Portal) -> Problem | None:
             blocking=True,
         )
     return None
+
+
+def _routing_problems(cfg: Config) -> list[Problem]:
+    # R-11.1: the invoice records the id of the rule that routed it, so every
+    # routing rule must have its row in the business-rule catalog (spec 06).
+    problems: list[Problem] = []
+    for index, rule in enumerate(cfg.routing.rules):
+        if rule.id not in RULES:
+            problems.append(
+                Problem(
+                    code="ROUTING_RULE_UNKNOWN",
+                    path=f"routing.rules[{index}].id",
+                    message=(
+                        f"routing rule id '{rule.id}' is not in the business-rule catalog; "
+                        "add its row to specs/06-business-rules.md first (R-11.1)"
+                    ),
+                    blocking=True,
+                )
+            )
+    return problems
 
 
 def _llm_fallback_problems(cfg: Config) -> list[Problem]:
