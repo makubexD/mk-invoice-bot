@@ -241,6 +241,75 @@ Files: `specs/spikes/ocr.md`.
 
 Done when the numbers are committed.
 
+## Step 12: Ship the parsing rules and load them at startup `[worker]`
+
+Finish review (code review, High). Files: `src/invoicebot/settings.py`, `src/invoicebot/app.py`, `deploy/Dockerfile`.
+
+- The rules belong to the code, not to the operator's config folder. `Settings` gains `parsing_rules_path: Path = Path("/app/config/parsing_rules.yaml")`; the Dockerfile copies `config/parsing_rules.yaml` there, next to `example.yaml`.
+- `app.py` passes `settings.parsing_rules_path` to `make_extract_handler` (drop `PARSING_RULES_FILE`), and calls `load_rules` once in `_runtime` before the worker starts, so a missing or bad file stops startup (fail fast).
+- Test: `uv run pytest -q tests/integration/test_conversation_fake.py tests/unit/test_settings.py` (add a settings default case if that file exists; otherwise the run covers it).
+
+## Step 13: OCR failures never crash the helper `[worker]`
+
+Finish review (code review High, security Medium). Files: `src/invoicebot/extract/ocr.py`, `src/invoicebot/extract/ocr_parse.py`, `tests/unit/test_extract_ocr.py`, `tests/unit/test_extract_ocr_parse.py`.
+
+| Case                                                    | Expected                  |
+| ------------------------------------------------------- | ------------------------- |
+| D81: `read_text` when the `tesseract` binary is missing | `None` (caught `OSError`) |
+| D81: `read_text` when Tesseract exits non-zero          | `None`                    |
+| D81: a TSV row whose conf or position is not a number   | the row is skipped        |
+| R-2.10: printed text `http://[x`                        | no URL, no exception      |
+
+Test: `uv run pytest -q tests/unit/test_extract_ocr.py tests/unit/test_extract_ocr_parse.py`
+
+## Step 14: One canonical numero `[worker]`
+
+Finish review (code review Medium, spike finding 9). Files: `src/invoicebot/extract/qr_payload.py`, `src/invoicebot/extract/ubl.py`, `tests/unit/test_extract_qr_payload.py`, `tests/unit/test_extract_ubl.py`.
+
+- One public helper `canonical_numero(text) -> str` (`str(int(text))`) in `qr_payload.py`, beside the shared date and amount helpers; the QR parser, the UBL reader and the OCR parser (already `str(int(...))`: switch it to the helper) all use it, so the stored `numero` does not depend on the reader.
+- Cases: QR `|00000123|` gives `numero` `123`; a UBL `F001-00000123` gives `123`.
+- Test: `uv run pytest -q tests/unit/test_extract_qr_payload.py tests/unit/test_extract_ubl.py tests/unit/test_extract_ocr_parse.py tests/unit/test_extract_merge.py`
+
+## Step 15: Amount field names in one place `[worker]`
+
+Finish review (code review Medium). Files: `src/invoicebot/extract/fields.py`, `src/invoicebot/extract/merge.py`, `src/invoicebot/extract/ocr_parse.py`, `tests/unit/test_extract_ocr_parse.py`.
+
+- `AMOUNT_FIELDS` moves to `fields.py`; `merge.py` imports it. `ParsingRules` rejects an `amounts` key outside `AMOUNT_FIELDS` and a `tipo` key outside the supported type codes it maps to.
+- Cases: an `amounts` key `totl` fails to load; a `tipo` key mapping to `99` fails to load; the shipped rules load.
+- Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py tests/unit/test_extract_merge.py`
+
+## Step 16: Receipt lines the rules misread `[worker]`
+
+Finish review (code review Medium). Files: `config/parsing_rules.yaml`, `tests/unit/test_extract_ocr_parse.py`.
+
+| Case                                   | Expected                |
+| -------------------------------------- | ----------------------- |
+| R-2.14: `I.G.V. 18.00% 9.00`           | `igv` `9.00`            |
+| R-2.14: `IGV (18%) S/ 9.00`            | `igv` `9.00`            |
+| R-2.14: `SUB-TOTAL 50.00` and no total | no `total`              |
+| R-2.14: `SERVICIO DE LAVADO 25.00`     | no `service_charge`     |
+| R-2.14: `RECARGO POR SERVICIO 5.00`    | `service_charge` `5.00` |
+
+Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py`
+
+## Step 17: Bounded namespace repair in UBL `[worker]`
+
+Finish review (security High). Files: `src/invoicebot/extract/ubl.py`, `tests/unit/test_extract_ubl.py`.
+
+- The retry strips a backslash `xmlns:` declaration only inside the root start tag, found in a bounded prefix, with bounded patterns; it never rewrites the rest of the document.
+- Cases: the schemaLocation invoice still parses; a 2 MB input of repeated `xmlns:a="\\\\…` after the root fails as malformed in under 1 s; a backslash `xmlns:` inside element text is not touched.
+- Test: `uv run pytest -q tests/unit/test_extract_ubl.py`
+
+## Step 18: No Tesseract outlives its helper `[worker]`
+
+Finish review (security Medium). Files: `src/invoicebot/pipeline/extract.py`, `tests/integration/test_pipeline_extract.py`.
+
+- Start the helper with `start_new_session=True` and kill its process group (`os.killpg`, SIGKILL) on timeout, crash or cancel. Add `OMP_THREAD_LIMIT=1` to the helper env.
+- Case: R-9.2: a helper that started a child is killed on timeout and the child is gone too.
+- Test: `uv run pytest -q tests/integration/test_pipeline_extract.py`
+
+Deferred to the roadmap: a cgroup memory cap for helper plus Tesseract on the 2 GB host; a cap on OCR text size and matches per rule; documenting `RLIMIT_FSIZE=0` for Tesseract; catching OpenCV errors in the helper as unreadable; dropping `printed_urls` until `widen-b`.
+
 ## Finish
 
 - Run `uv run pytest -q --cov` (branch coverage floor 90 %), then the lint line above.
