@@ -31,6 +31,13 @@ RUN apt-get update \
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 
+# Browser for portal fetchers (D82): Chromium's headless shell only, plus its system
+# libraries, in a shared path the bot user can read. The browser helper starts it per fetch.
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN /app/.venv/bin/playwright install --only-shell --with-deps chromium \
+    && rm -rf /var/lib/apt/lists/* \
+    && chmod -R a+rX /opt/ms-playwright
+
 # Migration and config tooling available at runtime: `alembic upgrade head` and
 # `python scripts/check_config.py <path>` run inside the image. Owned by root,
 # readable by the bot user.

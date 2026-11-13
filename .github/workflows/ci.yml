@@ -63,6 +63,9 @@ jobs:
           tesseract --version
           tesseract --list-langs | grep -qx spa
 
+      - name: Install Chromium headless shell
+        run: uv run playwright install --only-shell --with-deps chromium
+
       - name: Pytest
         run: uv run pytest -q --cov --cov-fail-under=90
 
