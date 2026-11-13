@@ -2,8 +2,10 @@
 
 Only the fields the R-5.6 match needs and the amounts of R-2.7 are read (D57). Every XML,
 whatever its source, goes through the same parser: no entity resolution, no DTD loading and
-no network access, and a ``DOCTYPE`` or a document over 2 MB is rejected before lxml sees
-it. Elements are found by local name, so the namespace prefix does not matter.
+no network access, and a ``DOCTYPE``, a UTF-16 or UTF-32 byte-order mark (where the byte
+scan for ``DOCTYPE`` would not see it) or a document over 2 MB is rejected before lxml sees it.
+A single-byte declared encoding such as ISO-8859-1, common in SUNAT XML, is read. Elements
+are found by local name, so the namespace prefix does not matter.
 """
 
 from __future__ import annotations
@@ -16,6 +18,8 @@ from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_de
 
 MAX_XML_BYTES = 2 * 1024 * 1024
 DOCTYPE_MARKER = b"<!doctype"
+# A UTF-16 LE BOM also starts a UTF-32 LE document; UTF-32 BE needs its own entry.
+REJECTED_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
 INVOICE_ROOT = "Invoice"
 AMOUNT_ELEMENTS = (
     ("base", "LineExtensionAmount"),
@@ -50,7 +54,7 @@ def parse_invoice_xml(data: bytes) -> Reading:
     """
     if len(data) > MAX_XML_BYTES:
         raise XmlRejected(XmlReason.TOO_LARGE)
-    if DOCTYPE_MARKER in data.lower():
+    if data.startswith(REJECTED_BOMS) or DOCTYPE_MARKER in data.lower():
         raise XmlRejected(XmlReason.DOCTYPE)
 
     parser = etree.XMLParser(
@@ -200,10 +204,11 @@ def _attribute(element: etree._Element, name: str) -> str | None:
 
 
 def _integer(value: str | None) -> int | None:
-    """Return ``value`` as an integer, or ``None`` when it is absent or not a number."""
-    if value is None:
+    """Return ``value`` as an integer, or ``None`` when it is absent or not a number.
+
+    Only ASCII digits count: ``int`` accepts underscores and Unicode digits, which would
+    make a different numero compare equal (R-5.6).
+    """
+    if value is None or not (value.isascii() and value.isdigit()):
         return None
-    try:
-        return int(value)
-    except ValueError:
-        return None
+    return int(value)

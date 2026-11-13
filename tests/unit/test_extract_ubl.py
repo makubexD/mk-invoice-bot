@@ -192,10 +192,16 @@ CREDIT_NOTE_XML = b"""<?xml version="1.0"?>
 </CreditNote>
 """
 
+UTF16_INVOICE_XML = _invoice_xml().encode("utf-16")
+ISO_8859_1_INVOICE_XML = (
+    _invoice_xml().replace('encoding="UTF-8"', 'encoding="ISO-8859-1"').encode("iso-8859-1")
+)
+
 REJECTED_DOCUMENTS = [
     pytest.param(XXE_XML, XmlReason.DOCTYPE, id="doctype-external-entity"),
     pytest.param(BILLION_LAUGHS_XML, XmlReason.DOCTYPE, id="billion-laughs"),
     pytest.param(b"<!doctype Invoice><Invoice/>", XmlReason.DOCTYPE, id="lowercase-doctype"),
+    pytest.param(UTF16_INVOICE_XML, XmlReason.DOCTYPE, id="utf-16-bom"),
     pytest.param(b"x" * (MAX_XML_BYTES + 1), XmlReason.TOO_LARGE, id="one-byte-over-two-megabytes"),
     pytest.param(
         b'<?xml version="1.0"?><Invoice><cbc:ID>F014-15160</cbc:ID>',
@@ -215,11 +221,25 @@ def test_parse_invoice_xml_rejects_unsafe_or_wrong_documents(data: bytes, reason
     assert excinfo.value.reason is reason
 
 
+def test_parse_invoice_xml_accepts_a_utf8_invoice() -> None:
+    """R-2.12: an invoice declared and encoded as UTF-8 still parses."""
+    reading = parse_invoice_xml(_invoice_xml().encode("utf-8"))
+
+    assert reading.value("numero") == "15160"
+
+
 def test_matches_invoice_ignores_zero_padding() -> None:
     """R-5.6: F014-15160 and F014-00015160 are the same invoice."""
     xml = parse_invoice_xml(_invoice_xml(numero="00015160").encode())
 
     assert matches_invoice(xml, _reading()) is True
+
+
+def test_matches_invoice_rejects_an_underscore_in_the_number() -> None:
+    """R-5.6: a numero with an underscore is not the same number as 15160."""
+    xml = parse_invoice_xml(_invoice_xml(numero="1_5160").encode())
+
+    assert matches_invoice(xml, _reading()) is False
 
 
 @pytest.mark.parametrize(
@@ -245,3 +265,8 @@ def test_matches_invoice_rejects_a_field_missing_from_both_readings() -> None:
     invoice = _reading(ruc_emisor=None)
 
     assert matches_invoice(xml, invoice) is False
+
+
+def test_parse_invoice_xml_iso_8859_1_declaration_reads_like_utf8() -> None:
+    """R-5.6: an ISO-8859-1 invoice, common in SUNAT XML, reads the same as its UTF-8 form."""
+    assert parse_invoice_xml(ISO_8859_1_INVOICE_XML) == parse_invoice_xml(_invoice_xml().encode("utf-8"))
