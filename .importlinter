@@ -1,5 +1,7 @@
 [importlinter]
 root_package = invoicebot
+# OpenCV and zxing are graphed so the heavy-in-helper-only contract can forbid them (D78).
+include_external_packages = True
 
 [importlinter:contract:zero-consumer]
 name = Core modules must not import consumer modules (R-12.7)
@@ -10,6 +12,8 @@ source_modules =
     invoicebot.store
     invoicebot.channels
     invoicebot.rules
+    invoicebot.extract
+    invoicebot.routing
 forbidden_modules =
     invoicebot.api
     invoicebot.events
@@ -36,3 +40,27 @@ source_modules =
 forbidden_modules =
     invoicebot.pipeline
     invoicebot.queue
+
+[importlinter:contract:pure-readers]
+name = Extract and routing are pure: no pipeline, queue, store or channel imports
+type = forbidden
+source_modules =
+    invoicebot.extract
+    invoicebot.routing
+forbidden_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
+    invoicebot.channels
+
+[importlinter:contract:heavy-in-helper-only]
+name = OpenCV and zxing load only in the extract helper process (D78)
+type = forbidden
+source_modules =
+    invoicebot.pipeline
+    invoicebot.app
+    invoicebot.routing
+    invoicebot.store
+forbidden_modules =
+    cv2
+    zxingcpp
