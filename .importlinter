@@ -14,6 +14,7 @@ source_modules =
     invoicebot.rules
     invoicebot.extract
     invoicebot.routing
+    invoicebot.net
 forbidden_modules =
     invoicebot.api
     invoicebot.events
@@ -24,6 +25,7 @@ type = forbidden
 source_modules =
     invoicebot.rules
     invoicebot.config
+    invoicebot.net
 forbidden_modules =
     invoicebot.api
     invoicebot.events
