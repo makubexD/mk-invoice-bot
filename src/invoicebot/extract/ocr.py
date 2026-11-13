@@ -9,6 +9,7 @@ process (D78).
 
 from __future__ import annotations
 
+import logging
 import math
 import subprocess
 from dataclasses import dataclass
@@ -18,6 +19,8 @@ import cv2
 import numpy as np
 
 from invoicebot.config.models import Ocr
+
+logger = logging.getLogger(__name__)
 
 TESSERACT_COMMAND = "tesseract"
 TESSERACT_STDIN = "stdin"
@@ -93,8 +96,8 @@ def preprocess(gray: np.ndarray) -> np.ndarray:
 def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
     """Run Tesseract over ``image`` and return its words, or ``None`` when OCR did not run.
 
-    A timeout or a non-zero exit is treated as "no OCR". Stderr is discarded and the text is
-    never logged (R-9.16).
+    A missing binary, a timeout or a non-zero exit is treated as "no OCR". Stderr is discarded
+    and the text is never logged (R-9.16).
     """
     encoded, buffer = cv2.imencode(PNG_FORMAT, image)
     if not encoded:
@@ -121,7 +124,11 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
         )
     except subprocess.TimeoutExpired:
         return None
+    except OSError:
+        logger.warning("tesseract could not be run")
+        return None
     if completed.returncode != 0:
+        logger.warning("tesseract exited non-zero: %s", completed.returncode)
         return None
     return parse_tsv(completed.stdout.decode(TEXT_ENCODING, errors="replace"))
 
@@ -137,8 +144,12 @@ def parse_tsv(tsv: str) -> OcrText:
         text = fields[TSV_TEXT].strip()
         if not text:
             continue
-        key = (int(fields[TSV_BLOCK]), int(fields[TSV_PARAGRAPH]), int(fields[TSV_LINE]))
-        lines.setdefault(key, []).append(OcrWord(text=text, confidence=_confidence(fields[TSV_CONFIDENCE])))
+        try:
+            key = (int(fields[TSV_BLOCK]), int(fields[TSV_PARAGRAPH]), int(fields[TSV_LINE]))
+            confidence = _confidence(fields[TSV_CONFIDENCE])
+        except ValueError:
+            continue
+        lines.setdefault(key, []).append(OcrWord(text=text, confidence=confidence))
     return OcrText(lines=tuple(tuple(words) for words in lines.values()))
 
 

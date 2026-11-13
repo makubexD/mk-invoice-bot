@@ -84,6 +84,42 @@ def test_read_text_timeout_returns_none(monkeypatch: pytest.MonkeyPatch) -> None
     assert read_text(_canvas(100, 100), OCR_CONFIG) is None
 
 
+def test_read_text_missing_tesseract_binary_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D81: a missing Tesseract binary makes ``read_text`` return ``None`` instead of raising."""
+
+    def _missing(*_args: object, **_kwargs: object) -> None:
+        raise FileNotFoundError("tesseract")
+
+    monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _missing)
+
+    assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+
+
+def test_read_text_non_zero_exit_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D81: a Tesseract run that exits non-zero makes ``read_text`` return ``None``."""
+
+    def _failed(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.CompletedProcess(args=["tesseract"], returncode=1, stdout=b"")
+
+    monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _failed)
+
+    assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+
+
 def test_parse_tsv_groups_words_and_scales_confidence() -> None:
     """R-2.6: the TSV parser keeps word rows, groups them by line and scales confidence to 0..1."""
     assert parse_tsv(TSV).lines == EXPECTED_LINES
+
+
+def test_parse_tsv_non_numeric_row_is_skipped() -> None:
+    """D81: a TSV word row whose confidence or position is not a number is skipped."""
+    tsv = "\n".join(
+        (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+            "5\t1\t1\t1\t1\t1\t60\t100\t60\t40\t96.5\tKEPT",
+            "5\t1\t1\t1\t1\t2\t60\t100\t200\t40\tnot-a-number\tDROPPED_CONF",
+            "5\t1\tx\t1\t1\t3\t60\t100\t200\t40\t88\tDROPPED_POSITION",
+        )
+    )
+
+    assert parse_tsv(tsv).lines == ((OcrWord(text="KEPT", confidence=0.965),),)

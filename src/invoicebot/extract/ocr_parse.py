@@ -238,15 +238,19 @@ def _read_printed_urls(searched: str, rules: ParsingRules) -> tuple[str, ...]:
     urls: list[str] = []
     for match in rules.printed_url.finditer(searched):
         url = _reduce_url(match.group("value"))
-        if url not in urls:
-            urls.append(url)
+        if url is None or url in urls:
+            continue
+        urls.append(url)
         if len(urls) == MAX_PRINTED_URLS:
             break
     return tuple(urls)
 
 
-def _reduce_url(value: str) -> str:
-    """Return ``value`` without its query, fragment or trailing punctuation."""
-    parts = urlsplit(value)
+def _reduce_url(value: str) -> str | None:
+    """Return ``value`` without its query, fragment or trailing punctuation, or ``None`` if malformed."""
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
     path = parts.path.rstrip(URL_TRAILING_CHARS)
     return urlunsplit((parts.scheme, parts.netloc, path, "", ""))

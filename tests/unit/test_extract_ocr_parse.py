@@ -149,6 +149,13 @@ def test_parse_ocr_printed_url_reduced_to_scheme_host_path(rules: ParsingRules) 
     assert result.printed_urls == ("https://x.example/p",)
 
 
+def test_parse_ocr_malformed_printed_url_is_dropped(rules: ParsingRules) -> None:
+    """R-2.10: printed text like ``http://[x`` yields no URL and does not raise."""
+    result = parse_ocr(_ocr(f"RUC {SYNTHETIC_RUC}", "Consulte http://[x"), rules)
+
+    assert result.printed_urls == ()
+
+
 def test_parse_ocr_low_confidence_words_lower_field_confidence(rules: ParsingRules) -> None:
     """R-2.6: a field's confidence is the mean confidence of the words its match covers."""
     text = OcrText(
