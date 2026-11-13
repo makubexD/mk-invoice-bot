@@ -11,7 +11,7 @@ import pytest
 import yaml
 
 from invoicebot.config.checks import Problem, run_checks
-from invoicebot.config.loader import load_config, load_portals
+from invoicebot.config.loader import load_config
 from invoicebot.config.models import Portal
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -40,10 +40,17 @@ def _portal(**overrides: object) -> Portal:
 def _config_dir(tmp_path: Path, *, portals: list[dict[str, object]] | None = None) -> Path:
     config_dir = tmp_path / "config"
     config_dir.mkdir()
+    (config_dir / "stores").mkdir()
     config_path = config_dir / "example.yaml"
     shutil.copy(EXAMPLE, config_path)
     if portals is not None:
-        (config_dir / "portals.yaml").write_text(yaml.safe_dump(portals, sort_keys=False), encoding="utf-8")
+        portals_dir = config_dir / "portals"
+        portals_dir.mkdir()
+        for portal in portals:
+            document = {key: value for key, value in portal.items() if key != "key"}
+            (portals_dir / f"{portal['key']}.yaml").write_text(
+                yaml.safe_dump(document, sort_keys=False), encoding="utf-8"
+            )
     return config_path
 
 
@@ -166,43 +173,6 @@ def test_work_flow_llm_fallback_allowed_with_other_provider() -> None:
     cfg.llm_fallback.provider = "openai"
 
     assert run_checks(cfg, [], pr_mode=False) == []
-
-
-def test_load_portals_missing_file_returns_empty(tmp_path: Path) -> None:
-    """R-5.8: the portal registry is optional, so a missing file is an empty list."""
-    assert load_portals(tmp_path / "portals.yaml") == []
-
-
-def test_load_portals_reads_registry(tmp_path: Path) -> None:
-    """R-5.8: portals.yaml is a YAML list validated by the Portal model."""
-    registry = tmp_path / "portals.yaml"
-    registry.write_text(
-        yaml.safe_dump(
-            [
-                {
-                    "key": "nubefact",
-                    "status": "active",
-                    "match": {"ruc": ["20XXXXXXXXX"], "url_contains": ["nubefact"]},
-                    "adapter": "generic_form",
-                    "url": "https://example.test/buscar",
-                    "fields": {"#ruc": "{ruc_emisor}", "#tipo": {"select": "{tipo}"}},
-                    "captcha": {"image": "#captchaImg", "input": "#captcha", "solver": ["tesseract", "user"]},
-                    "submit": "#btnBuscar",
-                    "downloads": {"xml": "a:has-text('XML')", "pdf": "a:has-text('PDF')"},
-                }
-            ],
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    portals = load_portals(registry)
-
-    assert len(portals) == 1
-    assert portals[0].key == "nubefact"
-    assert portals[0].fields["#tipo"] == {"select": "{tipo}"}
-    assert portals[0].captcha is not None
-    assert portals[0].captcha.solver == ["tesseract", "user"]
 
 
 def test_script_rejects_outside_adapter_on_main(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

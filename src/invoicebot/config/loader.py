@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from invoicebot.config.models import Config, Portal
+from invoicebot.config.models import Config, Portal, Store, StoreDirectory
 
 # Dotted, brace-wrapped paths without a format spec, e.g. "{owner.ruc}".
 # Single-name ({total}) and format-spec ({fecha:%Y}) tokens are runtime template
@@ -28,21 +28,35 @@ def load_config(path: str | Path) -> Config:
     return Config.model_validate(_resolve_placeholders(document))
 
 
-def load_portals(path: str | Path) -> list[Portal]:
-    """Read and validate the portal registry (R-5.8).
+def load_directory(config_dir: Path) -> StoreDirectory:
+    """Read the store directory from ``stores/`` and ``portals/`` (D47, R-5.8).
 
-    The file is optional: when it does not exist an empty registry is returned.
-    Only ``yaml.safe_load`` is used.
+    A store file is named after its RUC and a portal file after its key, so
+    both are checked against the file name. Only ``yaml.safe_load`` is used.
     """
-    registry_path = Path(path)
-    if not registry_path.exists():
-        return []
-    document = yaml.safe_load(registry_path.read_text(encoding="utf-8"))
-    if document is None:
-        return []
-    if not isinstance(document, list):
-        raise ValueError(f"portals root must be a list, got {type(document).__name__}")
-    return [Portal.model_validate(entry) for entry in document]
+    stores: dict[str, Store] = {}
+    for path in sorted((config_dir / "stores").glob("*.yaml")):
+        document = _read_mapping(path)
+        ruc = path.stem
+        if document.get("ruc") != ruc:
+            raise ValueError(f"{path}: ruc {document.get('ruc')!r} does not match the file name {ruc!r}")
+        stores[ruc] = Store.model_validate(document)
+
+    portals: dict[str, Portal] = {}
+    for path in sorted((config_dir / "portals").glob("*.yaml")):
+        document = _read_mapping(path)
+        if "key" in document:
+            raise ValueError(f"{path}: a portal file must not set 'key'; it is the file name")
+        portals[path.stem] = Portal.model_validate({"key": path.stem, **document})
+
+    return StoreDirectory(stores=stores, portals=portals)
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(document, dict):
+        raise ValueError(f"{path}: root must be a mapping, got {type(document).__name__}")
+    return document
 
 
 def _resolve_placeholders(document: dict[str, Any]) -> dict[str, Any]:
