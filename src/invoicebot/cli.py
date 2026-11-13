@@ -75,10 +75,14 @@ def _portal_test(
         parser.error("the sample's ruc_emisor has no store file")
     test_directory = directory.model_copy(
         update={
+            "portals": {
+                **directory.portals,
+                key: directory.portals[key].model_copy(update={"status": "active"}),
+            },
             "stores": {
                 **directory.stores,
                 invoice.ruc_emisor: store.model_copy(update={"portal": key}),
-            }
+            },
         }
     )
     fetcher = PortalFetcher(

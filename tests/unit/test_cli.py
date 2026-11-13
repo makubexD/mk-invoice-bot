@@ -13,6 +13,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config" / "example.yaml"
 # config/portals/facturactiva-la-lena.yaml is the only active portal; its store is 20486765454.
 PORTAL_KEY = "facturactiva-la-lena"
+# config/portals/infofact.yaml is still todo, so ``portal-test`` must activate it for the run.
+TODO_PORTAL_KEY = "infofact"
 STORE_RUC = "20486765454"
 UNKNOWN_KEY = "no-such-portal"
 TIPO = "01"
@@ -118,6 +120,23 @@ def test_portal_test_ok_exits_zero_with_two_file_lines(
     assert {line.split(" ", 1)[0] for line in file_lines} == {"pdf", "xml"}
     assert lines[0] == "reason: ok"
     assert lines[-1] == "xml matches: yes"
+
+
+def test_portal_test_todo_portal_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R-5.7: a portal whose status is todo can be tried before it goes live."""
+    monkeypatch.setenv("CONFIG_PATH", str(CONFIG_PATH))
+    sample = _write_sample(tmp_path, STORE_RUC)
+    helper = _write_helper(tmp_path)
+
+    code = main(
+        ["portal-test", TODO_PORTAL_KEY, "--sample", str(sample)],
+        helper_command=_helper_command(helper),
+    )
+
+    assert code == 0
+    assert capsys.readouterr().out.splitlines()[0] == "reason: ok"
 
 
 def test_portal_test_unknown_key_exits_two_and_names_it(
