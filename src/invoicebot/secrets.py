@@ -138,7 +138,8 @@ class SecretStore:
         return frozenset(self._values.values())
 
     def _lookup(self, key: str) -> str | None:
-        return self._values.get(key.lower())
+        # An empty value counts as missing, so an adapter fails closed instead of keying with "".
+        return self._values.get(key.lower()) or None
 
     def __repr__(self) -> str:
         return f"SecretStore(keys={len(self._values)})"

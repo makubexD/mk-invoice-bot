@@ -33,6 +33,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 APP_KEY = "synthetic-app-key"
 WRONG_KEY = "synthetic-wrong-key"
+HASH_KEY = "synthetic-hash-key"
 HANDSHAKE = "synthetic-verify-token"
 CHALLENGE = "1158201444"
 EPOCH = "1700000000"
@@ -78,6 +79,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         admin_profiles=frozenset(),
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
+        sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
     )
 
@@ -274,7 +276,8 @@ async def test_unknown_sender_is_logged_only_as_a_hash(
 
     assert response.status_code == 200
     assert await _counts(db_pool, sender.profile_id) == (0, 0, 0, 0)
-    assert f"ignored sender {sender_hash(unknown_number)}" in caplog.text
+    assert f"ignored sender {sender_hash(HASH_KEY, unknown_number)}" in caplog.text
+    assert hashlib.sha256(unknown_number.encode()).hexdigest()[:12] not in caplog.text
     assert unknown_number not in caplog.text
 
 

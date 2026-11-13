@@ -40,7 +40,9 @@ TaskFactory = Callable[[], Awaitable[None]]
 
 #: Secrets the WhatsApp channel declares (R-9.10).
 WHATSAPP_ADAPTER = "whatsapp"
-WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token"})
+WHATSAPP_SECRETS = frozenset(
+    {"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token", "sender_hash_key"}
+)
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
@@ -138,6 +140,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
+        sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
     )
 

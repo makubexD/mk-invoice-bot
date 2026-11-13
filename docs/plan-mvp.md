@@ -26,7 +26,7 @@ Order changed on 2026-11-12 (D52, D64): flow B (work, Microsoft) comes before fl
 
 Each item goes into the named phase's plan.
 
-- **`routing` (before the first live trial):** the logged sender hash is an unkeyed, truncated SHA-256 of the phone number. With only about 10^8–10^9 Peruvian mobile numbers, anyone can brute-force it back to the number. Make it an HMAC keyed with a new secret from the age store (R-1.2, R-9.12).
+- ~~**`routing` (before the first live trial):** keyed sender hash.~~ Done 2026-11-13 in `docs/plan-sender-hash.md`: HMAC-SHA256 keyed by the age-store secret `sender_hash_key`; an empty secret now counts as missing.
 - **`routing`:** an outbox row that can never succeed (a text over Meta's limit, a recipient with no WhatsApp number) is retried 8 times. Mark it dead at once. Make the template language configurable instead of the `es_PE` default.
 - **Telegram (`ops` or whenever a second channel lands):** `pipeline/handlers.py` and `pipeline/replies.py` import the WhatsApp adapter, as the plan asked. When the second channel arrives, put the download behind a per-channel media port and move the `<id>:<action>` button codec to a channel-neutral module. Check the media id against its pattern at the parse boundary, so a bad id cancels the invoice instead of being retried.
 - **`ops`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.

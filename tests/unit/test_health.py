@@ -55,6 +55,7 @@ def _write_runtime_files(directory: Path) -> None:
         "whatsapp_token": "synthetic-token-value",
         "whatsapp_app_secret": "synthetic-app-value",
         "whatsapp_verify_token": VERIFY_VALUE,
+        "sender_hash_key": "synthetic-hash-value",
     }
     plaintext = yaml.safe_dump(values).encode("utf-8")
     (directory / "secrets.age").write_bytes(pyrage.encrypt(plaintext, [identity.to_public()]))
