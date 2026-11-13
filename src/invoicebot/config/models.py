@@ -100,20 +100,20 @@ class Ocr(BaseModel):
 
     engine: str
     lang: str
-    timeout_s: int
+    timeout_s: int = Field(gt=0)
 
 
 class Extraction(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_image_px: int
+    max_image_px: int = Field(gt=0)
     ocr: Ocr
-    review_threshold: float
-    max_invoice_age_days: int
+    review_threshold: float = Field(ge=0, le=1)
+    max_invoice_age_days: int = Field(gt=0)
     # Written as strings in YAML so no float rounding reaches Decimal (R-2.4).
     igv_rates: list[Decimal] = Field(min_length=1)
     supported_tipos: list[str] = Field(min_length=1)
-    helper_timeout_s: int
+    helper_timeout_s: int = Field(gt=0)
 
 
 class LlmFallback(BaseModel):
@@ -121,16 +121,21 @@ class LlmFallback(BaseModel):
 
     provider: str
     model: str
-    max_image_px: int
+    max_image_px: int = Field(gt=0)
     monthly_cap_usd: float
     flows: dict[str, bool]
+
+
+#: The reading fields a routing rule may match on (R-3.1); ``route`` compares each
+#: ``when`` key against ``Reading.fields``.
+type RoutingField = Literal["num_doc_adq", "tipo_doc_adq", "ruc_emisor", "tipo"]
 
 
 class RoutingRule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
-    when: dict[str, list[str]]
+    when: dict[RoutingField, list[str]]
     flow: str
 
 
@@ -342,7 +347,7 @@ class MediaMaxBytes(BaseModel):
 class MediaLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    max_megapixels: int
+    max_megapixels: int = Field(gt=0)
     max_bytes: MediaMaxBytes
     zip_max_entries: int
     zip_max_ratio: int
