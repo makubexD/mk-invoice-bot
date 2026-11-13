@@ -73,3 +73,26 @@ PSM 6 is worse on the photos for every variant: 42 to 62 %, against 67 to 79 % w
 4. **Blur defeats the binarization.** Thresholding a blurred image loses strokes. On the blurred renders, `none` beats every preprocessed variant (38 % against 18 %). Real photos were not blurred enough to show it.
 5. **Two photos have no ground truth** (their QR does not decode, see S0.2). The accuracy run in step 11 needs their values from the owner, or other photos with an XML.
 6. **Time:** the chosen variant takes about 5 s of the 60 s summary budget (R-9.2) on this machine. It was not measured on the 2 GB host.
+
+## Merged accuracy (plan step 11)
+
+Run on 2026-11-13 with the real helper (`python -m invoicebot.extract`, QR cascade, the chosen preprocessing, Tesseract PSM 4, `config/parsing_rules.yaml`, then the D81 merge). The images ran one at a time, as under the heavy-work slot, on the same 8-core laptop. Truth and normalisation are as in **Method**. Aggregates only.
+
+| Set | Required fields right | All six right | `ROUTING` / BR-E01 | Median s | Max s |
+|---|---|---|---|---|---|
+| Photos with truth (4) | 24 / 24 (100 %) | 4 / 4 | 4 / 0 | 2.5 | 3.9 |
+| Photos without truth (2) | – | – | 0 / 2 | | |
+| Renders (50) | 179 / 300 (60 %) | 12 / 50 | 28 / 22 | 1.8 | 2.6 |
+
+Times include Python start-up; the photo column covers all 6 photos.
+
+**Per field on the renders:** `ruc_emisor` 25, `tipo` 41, `serie` 31, `numero` 27, `fecha_emision` 30, `total` 25 (of 50); `base` 9 / 50, `service_charge` 1 / 35.
+
+**Conflicts per field** (fields flagged `conflict`): photos `numero` 3, `igv` 1. Renders `numero` 20, `ruc_emisor` 8, `serie` 5, `total` 4, `num_doc_adq` 4, `igv` 2, `fecha_emision` 2.
+
+### Findings
+
+7. **The photo score says little about OCR.** The 4 photos with truth are the 4 whose QR decodes, and their truth is that QR. The 2 photos without a decodable QR still end in BR-E01: OCR alone did not find all six required fields on either one. R-2.9's 80 % is met only where the QR already gives the answer. It needs photos with an XML to be measured properly (finding 5).
+8. **Routing follows the QR.** 28 renders reach `ROUTING`, the same number whose QR decodes. OCR adds confirmation and the amounts the QR lacks, but on these images it does not on its own replace a missing QR.
+9. **`numero` conflicts are mostly false.** The merge compares `numero` as text, so a leading-zero difference between the printed number and the QR is flagged although both name the same invoice. That gives 3 of the 4 photo conflicts and most of the 20 on the renders. The merge should compare `numero` as an integer, as this record's **Method** does.
+10. **Time fits the budget.** The whole helper takes at most 3.9 s here, well inside `helper_timeout_s` (50 s) and R-9.2's 60 s. It was still not measured on the 2 GB host.
