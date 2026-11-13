@@ -71,7 +71,7 @@ def parse_qr_payload(text: str) -> Reading | None:
     fields: dict[str, Field] = {
         "ruc_emisor": _field(ruc_emisor),
         "serie": _field(serie),
-        "numero": _field(numero),
+        "numero": _field(canonical_numero(numero)),
         "igv": _field(str(igv)),
         "total": _field(str(total)),
         "fecha_emision": _field(fecha),
@@ -145,6 +145,11 @@ def _infer_buyer_type(num_doc: str) -> str | None:
     if len(num_doc) == DNI_LENGTH and num_doc.isascii() and num_doc.isdigit():
         return "1"
     return None
+
+
+def canonical_numero(text: str) -> str:
+    """Return the numero without leading zeros, so the stored value does not depend on the reader."""
+    return str(int(text))
 
 
 def parse_date(text: str) -> str | None:

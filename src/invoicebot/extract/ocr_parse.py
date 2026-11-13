@@ -18,6 +18,7 @@ from invoicebot.extract.ocr import OcrText
 from invoicebot.extract.parsing_rules import ParsingRules
 from invoicebot.extract.qr_payload import (
     DOCUMENT_TYPE_BY_SERIE_LETTER,
+    canonical_numero,
     parse_amount,
     parse_date,
 )
@@ -150,7 +151,7 @@ def _read_serie_numero(
         return None, None
     serie = _fix_serie(match.group("serie").upper())
     serie_field = _ocr_field(serie, _confidence(spans, *match.span("serie"))) if check_serie(serie) else None
-    numero = str(int(match.group("numero")))
+    numero = canonical_numero(match.group("numero"))
     return serie_field, _ocr_field(numero, _confidence(spans, *match.span("numero")))
 
 

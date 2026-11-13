@@ -75,9 +75,9 @@ VALID_PAYLOADS = [
         id="spaces-around-parts",
     ),
     pytest.param(
-        f"{SYNTHETIC_RUC}|01|F001|00015160|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}",
-        _fields({"numero": "00015160"}),
-        id="zero-padded-numero-kept",
+        f"{SYNTHETIC_RUC}|01|F001|00000123|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}",
+        _fields({"numero": "123"}),
+        id="zero-padded-numero-stripped",
     ),
     pytest.param(
         f"{SYNTHETIC_RUC}|03|B001|15160|7.36|49.90|2026-11-13|1|{DNI}",

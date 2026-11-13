@@ -17,6 +17,7 @@ from enum import StrEnum
 from lxml import etree  # parser hardened in parse_invoice_xml (R-2.12)
 
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
+from invoicebot.extract.qr_payload import canonical_numero
 
 MAX_XML_BYTES = 2 * 1024 * 1024
 DOCTYPE_MARKER = b"<!doctype"
@@ -189,7 +190,9 @@ def _add_id(fields: dict[str, Field], value: str | None) -> None:
     serie, separator, numero = value.partition("-")
     if separator and serie and numero:
         _add(fields, "serie", serie)
-        _add(fields, "numero", numero)
+        # A non-digit numero is kept as the XML wrote it, so only a plain number is canonicalized.
+        value = canonical_numero(numero) if numero.isascii() and numero.isdigit() else numero
+        _add(fields, "numero", value)
 
 
 def _add(fields: dict[str, Field], name: str, value: str | None) -> None:

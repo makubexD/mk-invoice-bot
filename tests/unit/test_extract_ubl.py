@@ -228,6 +228,13 @@ def test_parse_invoice_xml_accepts_a_utf8_invoice() -> None:
     assert reading.value("numero") == "15160"
 
 
+def test_parse_invoice_xml_strips_leading_zeros_from_numero() -> None:
+    """R-2.7: an ID F001-00000123 yields numero 123, the same value the other readers store."""
+    reading = parse_invoice_xml(_invoice_xml(serie="F001", numero="00000123").encode())
+
+    assert reading.value("numero") == "123"
+
+
 def test_matches_invoice_ignores_zero_padding() -> None:
     """R-5.6: F014-15160 and F014-00015160 are the same invoice."""
     xml = parse_invoice_xml(_invoice_xml(numero="00015160").encode())
