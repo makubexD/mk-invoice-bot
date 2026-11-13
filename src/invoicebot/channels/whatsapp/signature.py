@@ -2,7 +2,7 @@
 
 Meta signs every webhook POST with the app secret and proves ownership of the
 callback with a verify token, so both checks are pure functions over strings
-and never touch I/O. Sender ids are only ever logged as a short hash.
+and never touch I/O. Sender ids are only ever logged as a short keyed hash.
 """
 
 from __future__ import annotations
@@ -33,6 +33,8 @@ def verify_handshake(mode: str | None, token: str | None, expected_token: str) -
     return hmac.compare_digest(token.encode("utf-8"), expected_token.encode("utf-8"))
 
 
-def sender_hash(sender_id: str) -> str:
-    """Return the 12-character hash under which a sender id may be logged (R-1.2, R-9.12)."""
-    return hashlib.sha256(sender_id.encode("utf-8")).hexdigest()[:_HASH_LENGTH]
+def sender_hash(key: str, sender_id: str) -> str:
+    """Return the 12-character keyed hash under which a sender id may be logged (R-1.2, R-9.12)."""
+    if not key:
+        raise ValueError("sender hash key is empty")
+    return hmac.new(key.encode("utf-8"), sender_id.encode("utf-8"), hashlib.sha256).hexdigest()[:_HASH_LENGTH]

@@ -2,7 +2,7 @@
 
 The webhook body is untrusted: every entry, change and message is checked field
 by field and a malformed one is skipped rather than raised. Senders outside the
-profile index are reported only through their :func:`sender_hash` digest.
+profile index are reported only through their keyed :func:`sender_hash` digest.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ def parse_webhook(
     *,
     owner_profile: str,
     admin_profiles: frozenset[str],
+    sender_hash_key: str,
 ) -> ParsedWebhook:
     """Return the canonical messages of one webhook call, skipping malformed items (R-1.2, R-1.9)."""
     messages: list[InboundMessage] = []
@@ -69,6 +70,7 @@ def parse_webhook(
                     index,
                     owner_profile=owner_profile,
                     admin_profiles=admin_profiles,
+                    sender_hash_key=sender_hash_key,
                 )
                 if isinstance(parsed, _UnknownSender):
                     unknown_senders.append(parsed.digest)
@@ -83,6 +85,7 @@ def _parse_message(
     *,
     owner_profile: str,
     admin_profiles: frozenset[str],
+    sender_hash_key: str,
 ) -> InboundMessage | _UnknownSender | None:
     external_id = _str_field(raw, "id")
     sender_id = _str_field(raw, "from")
@@ -92,7 +95,7 @@ def _parse_message(
         return None
     profile_id = index.resolve("whatsapp", sender_id)
     if profile_id is None:
-        return _UnknownSender(digest=sender_hash(sender_id))
+        return _UnknownSender(digest=sender_hash(sender_hash_key, sender_id))
     content = _content(message_type, raw)
     if content is None:
         return None

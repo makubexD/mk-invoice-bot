@@ -19,6 +19,7 @@ EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 OWNER_NUMBER = "51999999999"
 SECOND_NUMBER = "51988888888"
 UNKNOWN_NUMBER = "51900000000"
+HASH_KEY = "synthetic-hash-key"
 EPOCH = "1700000000"
 RECEIVED_AT = datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
 
@@ -82,6 +83,7 @@ def _parse(
         index,
         owner_profile=owner_profile,
         admin_profiles=admin_profiles,
+        sender_hash_key=HASH_KEY,
     )
 
 
@@ -175,7 +177,7 @@ def test_unknown_sender_is_skipped_and_only_hashed(index: ProfileIndex) -> None:
     )
 
     assert parsed.messages == []
-    assert parsed.unknown_senders == [sender_hash(UNKNOWN_NUMBER)]
+    assert parsed.unknown_senders == [sender_hash(HASH_KEY, UNKNOWN_NUMBER)]
     assert UNKNOWN_NUMBER not in repr(parsed)
 
 
