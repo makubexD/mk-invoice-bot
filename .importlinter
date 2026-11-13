@@ -15,9 +15,20 @@ source_modules =
     invoicebot.extract
     invoicebot.routing
     invoicebot.net
+    invoicebot.fetchers
 forbidden_modules =
     invoicebot.api
     invoicebot.events
+
+[importlinter:contract:fetchers-are-low]
+name = Fetchers never import the layers that use them
+type = forbidden
+source_modules =
+    invoicebot.fetchers
+forbidden_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
 
 [importlinter:contract:leaf-packages]
 name = Rules and config are leaves: they import nothing else from the app

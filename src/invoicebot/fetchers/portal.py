@@ -21,7 +21,7 @@ from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
-from invoicebot.pipeline.helper import run_helper
+from invoicebot.helper import run_helper
 
 #: The browser helper module; ``-P`` keeps the working directory off its import path.
 DEFAULT_HELPER_COMMAND = (sys.executable, "-P", "-m", "invoicebot.fetchers.browser")

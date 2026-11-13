@@ -24,8 +24,8 @@ from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
+from invoicebot.helper import run_helper
 from invoicebot.pipeline.handlers import EXTRACT_STEP
-from invoicebot.pipeline.helper import run_helper
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
