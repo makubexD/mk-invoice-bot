@@ -113,15 +113,15 @@ Test: `uv run pytest -q tests/unit/test_extract_ocr.py tests/unit/test_config_mo
 
 ## Step 6: OCR rule parser and printed URLs (S3.6) `[worker]`
 
-Files: `config/parsing_rules.yaml` (new), `src/invoicebot/extract/ocr_parse.py` (new), `tests/unit/test_extract_ocr_parse.py` (new).
+Files: `config/parsing_rules.yaml` (new), `src/invoicebot/extract/ocr_parse.py` (new), `tests/unit/test_extract_ocr_parse.py` (new), and `src/invoicebot/extract/qr_payload.py` (its date and amount helpers become public, so both parsers share one shape).
 
 - The rules file holds the keyword-anchored regexes of spec 03 §5 step 4, plus the printed-URL regex (R-2.10).
-- `parse_ocr(text: OcrText, rules) -> Reading` returns fields with `source="ocr"`. Each field's confidence is the mean confidence of the words its match covers.
+- `parse_ocr(text: OcrText, rules) -> OcrReading` returns a `Reading` whose fields have `source="ocr"`, plus `printed_urls`. A `Reading` has no slot for the URLs, and nothing consumes them before the gap issue (`widen-b`), so they stay beside it. Each field's confidence is the mean confidence of the words its match covers.
 - The first valid-check-digit RUC near the header is the issuer and the next one is the buyer. `tipo` comes from `FACTURA` or `BOLETA ELECTRÓNICA`. Amounts go through the QR parser's amount shape.
 - The serie's last three characters map `O Q D` to `0` and `I L` to `1` before validation (S0.3 finding 1).
 - It also reads `base`, `service_charge`, `icbper` and `discounts` when they are printed (R-2.14). `printed_urls` is reduced to `https://host/path` and capped at 3.
 - Rules load once through a function that takes the path; there is no module-level state.
-- `scripts/check_config.py` validates the file. Add that check to `config/checks.py` if it fits there; otherwise say so.
+- The rules are validated when they load (a pydantic model, and every regex compiles). `scripts/check_config.py` does not check the file: `ocr_parse` depends on `extract.ocr`, which imports OpenCV, and `config/` may not import it (D78).
 
 Test cases (each an `OcrText` built from synthetic lines; parametrize):
 
