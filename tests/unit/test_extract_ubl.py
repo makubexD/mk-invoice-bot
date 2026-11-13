@@ -230,6 +230,33 @@ def test_parse_invoice_xml_accepts_a_utf8_invoice() -> None:
     assert reading.value("numero") == "15160"
 
 
+def test_parse_invoice_xml_rejects_utf16_without_a_bom() -> None:
+    """R-2.12: UTF-16 without a BOM does not start a document and is rejected as malformed."""
+    data = '<?xml version="1.0"?><Invoice/>'.encode("utf-16-le")
+
+    with pytest.raises(XmlRejected) as excinfo:
+        parse_invoice_xml(data)
+
+    assert excinfo.value.reason is XmlReason.MALFORMED
+
+
+def test_parse_invoice_xml_rejects_text_before_the_root() -> None:
+    """R-2.12: plain text before any element is rejected as malformed before lxml sees it."""
+    with pytest.raises(XmlRejected) as excinfo:
+        parse_invoice_xml(b"hello<Invoice/>")
+
+    assert excinfo.value.reason is XmlReason.MALFORMED
+
+
+def test_parse_invoice_xml_accepts_a_utf8_bom_and_leading_newline() -> None:
+    """R-2.12: a UTF-8 BOM and whitespace before a valid invoice still parse."""
+    invoice = _invoice_xml().split("\n", 1)[1].encode()
+
+    reading = parse_invoice_xml(b"\xef\xbb\xbf\n" + invoice)
+
+    assert reading.value("numero") == "15160"
+
+
 def test_parse_invoice_xml_strips_leading_zeros_from_numero() -> None:
     """R-2.7: an ID F001-00000123 yields numero 123, the same value the other readers store."""
     reading = parse_invoice_xml(_invoice_xml(serie="F001", numero="00000123").encode())

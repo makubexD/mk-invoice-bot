@@ -13,20 +13,17 @@ idle (R-9.1). Nothing from the page is printed, and every unexpected error becom
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import resource
 import sys
-from pathlib import Path
-from typing import Any
 from urllib.parse import urlsplit
 
 from playwright.async_api import async_playwright
-from pydantic import BaseModel, ConfigDict, Field
 
 from invoicebot.config.models import MediaMaxBytes, Portal
-from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
+from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.fetchers.browser.routing import RouteGuard, SystemResolver
 
 logger = logging.getLogger(__name__)
@@ -46,18 +43,6 @@ LAUNCH_ARGS: tuple[str, ...] = (
 IMAGES_OFF = "--blink-settings=imagesEnabled=false"
 
 
-class HelperRequest(BaseModel):
-    """The fetch the helper performs (D82)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    portal: Portal
-    invoice: FetchInvoice
-    out_dir: Path
-    max_bytes: MediaMaxBytes
-    page_timeout_ms: int = Field(gt=0)
-
-
 class _BadRequest(Exception):
     """The helper's stdin is not one valid request."""
 
@@ -67,14 +52,14 @@ def main() -> int:
     try:
         request = _read_request()
     except _BadRequest:
-        _emit({"reason": FetchReason.TECHNICAL.value, "files": []})
+        _emit(HelperOutput(reason=FetchReason.TECHNICAL))
         return 0
     _limit_resources(request.max_bytes)
     try:
         asyncio.run(_run_browser(request))
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
         logger.error("browser helper failed: %s", type(error).__name__)
-        _emit({"reason": FetchReason.TECHNICAL.value, "files": []})
+        _emit(HelperOutput(reason=FetchReason.TECHNICAL))
     return 0
 
 
@@ -123,7 +108,7 @@ async def _run_browser(request: HelperRequest) -> None:
             await browser.close()
     if guard.first_block is not None and not result.ok:
         result = FetchResult(reason=FetchReason.GUARD_BLOCKED, files=(), portal_key=portal.key)
-    _emit(_payload(result))
+    _emit(_output(result))
 
 
 def _launch_args(portal: Portal) -> list[str]:
@@ -147,25 +132,20 @@ def _allow_images(portal: Portal) -> bool:
     return portal.captcha != "none"
 
 
-def _payload(result: FetchResult) -> dict[str, Any]:
+def _output(result: FetchResult) -> HelperOutput:
     """The helper's output object: the reason and its files, nothing else."""
-    return {
-        "reason": result.reason.value,
-        "files": [
-            {
-                "kind": file.kind,
-                "path": str(file.path),
-                "size": file.size,
-                "sha256": file.sha256,
-            }
+    return HelperOutput(
+        reason=result.reason,
+        files=tuple(
+            HelperFile(kind=file.kind, path=file.path, size=file.size, sha256=file.sha256)
             for file in result.files
-        ],
-    }
+        ),
+    )
 
 
-def _emit(payload: dict[str, Any]) -> None:
+def _emit(output: HelperOutput) -> None:
     """Write the result as the helper's one stdout line."""
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    sys.stdout.write(output.model_dump_json() + "\n")
     sys.stdout.flush()
 
 
