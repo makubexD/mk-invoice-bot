@@ -2,8 +2,9 @@
 
 Every request Chromium makes, redirects included, goes through :class:`RouteGuard`: it
 drops resources no portal needs and runs the same URL and address checks as the HTTP
-transport (``invoicebot.net.guard``). A refused request is aborted in the browser and the
-first reason is kept so the helper can report ``guard_blocked``.
+transport (``invoicebot.net.guard``). A refused request is aborted in the browser; only a
+refused navigation keeps its reason, so a dead sub-resource cannot turn a not-found page
+into ``guard_blocked``.
 """
 
 from __future__ import annotations
@@ -38,7 +39,8 @@ class RouteGuard:
 
     Fonts, media, analytics hosts and (unless a captcha needs them) images are aborted
     without recording a reason. Every other request is checked by ``check_url`` and then
-    by ``resolve_and_check``; the first reason is kept in ``first_block`` for the caller.
+    by ``resolve_and_check``; the first refused navigation's reason is kept in
+    ``first_block`` for the caller, while a refused sub-resource is aborted unrecorded.
     """
 
     def __init__(
@@ -73,7 +75,7 @@ class RouteGuard:
         if reason is None:
             await route.continue_()
             return
-        if self.first_block is None:
+        if route.request.is_navigation_request() and self.first_block is None:
             self.first_block = reason
         await route.abort(BLOCKED_BY_CLIENT)
 

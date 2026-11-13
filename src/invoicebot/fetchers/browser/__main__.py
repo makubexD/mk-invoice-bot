@@ -25,6 +25,7 @@ from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.fetchers.browser.routing import RouteGuard, SystemResolver
+from invoicebot.net.guard import GuardReason
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,8 @@ LAUNCH_ARGS: tuple[str, ...] = (
 )
 #: Disables image loading for portals without a captcha.
 IMAGES_OFF = "--blink-settings=imagesEnabled=false"
+#: Results a blocked navigation turns into ``guard_blocked``; a not-found page keeps its reason.
+BLOCKABLE_REASONS = frozenset({FetchReason.TECHNICAL, FetchReason.TIMEOUT})
 
 
 class _BadRequest(Exception):
@@ -106,9 +109,18 @@ async def _run_browser(request: HelperRequest) -> None:
             )
         finally:
             await browser.close()
-    if guard.first_block is not None and not result.ok:
-        result = FetchResult(reason=FetchReason.GUARD_BLOCKED, files=(), portal_key=portal.key)
+    result = _guarded_result(result, guard.first_block)
     _emit(_output(result))
+
+
+def _guarded_result(result: FetchResult, first_block: GuardReason | None) -> FetchResult:
+    """Promote a technical or timeout result to ``guard_blocked`` (R-5.10).
+
+    A blocked sub-resource records no ``first_block``; a not-found page keeps its reason.
+    """
+    if first_block is None or result.reason not in BLOCKABLE_REASONS:
+        return result
+    return FetchResult(reason=FetchReason.GUARD_BLOCKED, files=(), portal_key=result.portal_key)
 
 
 def _launch_args(portal: Portal) -> list[str]:

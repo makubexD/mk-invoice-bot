@@ -8,16 +8,22 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from invoicebot.fetchers.base import FetchReason, FetchResult
+from invoicebot.fetchers.browser.__main__ import _guarded_result
 from invoicebot.fetchers.browser.routing import RouteGuard
 from invoicebot.net.guard import GuardReason
 
 
 class _FakeRequest:
-    """The two request attributes the guard reads."""
+    """The request attributes the guard reads."""
 
     def __init__(self, url: str, resource_type: str) -> None:
         self.url = url
         self.resource_type = resource_type
+
+    def is_navigation_request(self) -> bool:
+        """A document request is a navigation; everything else is a sub-resource."""
+        return self.resource_type == "document"
 
 
 class _FakeRoute:
@@ -114,6 +120,42 @@ async def test_route_guard_continues_a_public_https_request() -> None:
     assert route.continued
     assert route.aborted_with is None
     assert guard.first_block is None
+
+
+async def test_blocked_sub_resource_on_a_not_found_page_keeps_not_found_yet() -> None:
+    """R-5.10: a blocked sub-resource is aborted but leaves a not-found result as it was."""
+    guard = RouteGuard(
+        frozenset(),
+        _FakeResolver({"cdn.example": ["10.0.0.1"]}),
+        allow_images=False,
+    )
+    route = _FakeRoute("https://cdn.example/script.js", "script")
+
+    await guard.on_route(route)
+
+    assert route.aborted_with == "blockedbyclient"
+    assert guard.first_block is None
+    not_found = FetchResult(reason=FetchReason.NOT_FOUND_YET, files=(), portal_key="synthetic")
+    assert _guarded_result(not_found, guard.first_block) is not_found
+
+
+async def test_blocked_navigation_with_a_technical_result_gives_guard_blocked() -> None:
+    """R-5.10: a blocked navigation turns a technical result into guard_blocked."""
+    guard = RouteGuard(
+        frozenset(),
+        _FakeResolver({"internal.test": ["10.0.0.1"]}),
+        allow_images=False,
+    )
+    route = _FakeRoute("https://internal.test/", "document")
+
+    await guard.on_route(route)
+
+    assert guard.first_block is GuardReason.PRIVATE_ADDRESS
+    technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
+    promoted = _guarded_result(technical, guard.first_block)
+
+    assert promoted.reason is FetchReason.GUARD_BLOCKED
+    assert promoted.portal_key == "synthetic"
 
 
 def _request(out_dir: Path) -> dict[str, Any]:
