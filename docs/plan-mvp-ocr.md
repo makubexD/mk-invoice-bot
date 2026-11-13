@@ -248,6 +248,9 @@ Finish review (code review, High). Files: `src/invoicebot/settings.py`, `src/inv
 - The rules belong to the code, not to the operator's config folder. `Settings` gains `parsing_rules_path: Path = Path("/app/config/parsing_rules.yaml")`; the Dockerfile copies `config/parsing_rules.yaml` there, next to `example.yaml`.
 - `app.py` passes `settings.parsing_rules_path` to `make_extract_handler` (drop `PARSING_RULES_FILE`), and calls `load_rules` once in `_runtime` before the worker starts, so a missing or bad file stops startup (fail fast).
 - Test: `uv run pytest -q tests/integration/test_conversation_fake.py tests/unit/test_settings.py` (add a settings default case if that file exists; otherwise the run covers it).
+- Amended at run time: `ocr_parse` imports `extract.ocr`, which loads cv2, so `app.py` can't import `load_rules` from it (D78 contract). Split in two:
+  - **12a** (worker): move `_compile_rule`, `_compile_value`, `_compile_keyword`, `_compile_serie_numero`, the three `*Pattern` aliases, `ParsingRules` and `load_rules` from `extract/ocr_parse.py` into a new `extract/parsing_rules.py` that doesn't import cv2. `ocr_parse.py`, `extract/__main__.py` and `tests/unit/test_extract_ocr_parse.py` import them from there; no re-export. Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py && uv run lint-imports`.
+  - **12b** (the first worker diff, plus the following): `app.py` imports `load_rules` from `extract.parsing_rules`, and the `runtime_env` fixture in `tests/unit/test_health.py` sets `PARSING_RULES_PATH` to the repo's `config/parsing_rules.yaml`. Test: `uv run pytest -q tests/integration/test_conversation_fake.py tests/unit/test_health.py && uv run lint-imports`.
 
 ## Step 13: OCR failures never crash the helper `[worker]`
 
