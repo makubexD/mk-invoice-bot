@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal
 
 import pytest
 
+from invoicebot.config.loader import load_config
 from invoicebot.config.models import Flow, Routing, RoutingRule
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.routing.router import CompiledRule, RouteResult, compile_rules, route
+from invoicebot.rules import MESSAGES
 
 # Both values come from tests/synthetic_rucs.txt; no real RUC appears in this file.
 OWNER_RUC = "20000000001"
@@ -18,6 +21,14 @@ DNI = "12345678"
 FLOW_A = "flow_a"
 FLOW_B = "flow_b"
 FLOW_C = "flow_c"
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+
+
+@pytest.fixture(autouse=True)
+def _synthetic_rule_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give the synthetic BR-R10 rule a catalog message, as a real configured rule needs."""
+    monkeypatch.setitem(MESSAGES, "BR-R10", "➡️ {flow.label}")
 
 
 def _flow(accepted_tipos: list[str]) -> Flow:
@@ -95,6 +106,26 @@ def test_compile_rules_interns_when_values_as_frozensets() -> None:
         CompiledRule(id="BR-R10", flow=FLOW_C, when={"ruc_emisor": frozenset({OWNER_RUC})}),
     )
     assert isinstance(rules[0].when["num_doc_adq"], frozenset)
+
+
+@pytest.mark.parametrize("rule_id", ["BR-E02", "BR-R07", "BR-ZZZ"])
+def test_compile_rules_rejects_a_rule_the_router_cannot_use(rule_id: str) -> None:
+    """R-3.1: a rule with another rule's message, a router id or an unknown id fails startup."""
+    routing = Routing(
+        confirm_mode="auto",
+        unmatched="ask",
+        rules=[RoutingRule(id=rule_id, when={"num_doc_adq": [OWNER_RUC]}, flow=FLOW_A)],
+    )
+
+    with pytest.raises(ValueError, match=rf"routing rule 0 \({rule_id}\)"):
+        compile_rules(routing)
+
+
+def test_compile_rules_accepts_the_example_config_rules() -> None:
+    """R-3.1: the routing rules shipped in config/example.yaml compile at startup."""
+    rules = compile_rules(load_config(EXAMPLE).routing)
+
+    assert [rule.id for rule in rules] == ["BR-R01", "BR-R02"]
 
 
 @pytest.mark.parametrize(

@@ -24,7 +24,15 @@ from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.routing.router import CompiledRule, route
+from invoicebot.routing.router import (
+    REFUSALS,
+    RULE_ASK,
+    RULE_NOT_ALLOWED,
+    RULE_UNMATCHED,
+    RULE_WRONG_TIPO,
+    CompiledRule,
+    route,
+)
 from invoicebot.rules.messages_es import (
     MESSAGES,
     SUMMARY,
@@ -47,12 +55,6 @@ ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; the ``fetch`` phase adds its next job.
 ROUTED_STATE = "FETCHING_DOCS"
 CANCELLED_STATE = "CANCELLED"
-RULE_ASK = "BR-R03"
-RULE_NOT_ALLOWED = "BR-R05"
-RULE_UNMATCHED = "BR-R07"
-RULE_WRONG_TIPO = "BR-R08"
-#: Rules that cancel the invoice instead of routing it.
-REFUSALS = frozenset({RULE_NOT_ALLOWED, RULE_UNMATCHED, RULE_WRONG_TIPO})
 DATE_FIELD = "fecha_emision"
 
 
