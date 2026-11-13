@@ -222,7 +222,7 @@ Anything bigger gets split before work starts.
 |---|---|---|---|---|
 | S3.1 | Validators: RUC mod-11, serie regex, date bounds, total ≈ base + IGV + charges − discounts, IGV rate in `igv_rates`, `supported_tipos`; owns BR-E02, BR-E03, BR-E05 and BR-E09 | S | Table-driven tests, including check digits 10 → 0 and 11 → 1, and real-shaped cases at 18%, 10% and 10.5% with and without a service charge | R-2.4 |
 | S3.2 | SUNAT QR payload parser (pipe format, both date formats, URL payloads) | S | 20+ fixture payloads; a URL becomes `document_url` | R-2.2, R-2.8 |
-| S3.3 | QR cascade decoder (zxing → crops/upscale → WeChat → pyzbar, rotations) | M | Hit rate on the private set ≥ the S0.2 result and ≥ 95%; peak RSS logged | R-2.1 |
+| S3.3 | QR cascade decoder (zxing → crops/upscale → WeChat → pyzbar, rotations) | M | Hit rate on the private set ≥ the S0.2 result and ≥ 95%; peak RSS logged. S0.2 (2026-11-13, `specs/spikes/qr.md`): 50 % on 6 photos, so the 95 % threshold stands and is not yet met | R-2.1 |
 | S3.4 | Padrón import (streaming, run by hand: `scripts/import_padron.py`) + lookup | M | Peak RAM < 50 MB on a synthetic mini-ZIP in tests; the lookup uses the primary-key index (asserted with `EXPLAIN`); peak disk while staging and live tables coexist is measured and recorded (estimated 2–3 GB, unverified); the weekly refresh comes with S12.4 | R-2.5 |
 | S3.5 | OCR preprocessing + Tesseract subprocess with timeout | M | Warp/deskew/threshold pipeline; 30 s timeout → BR-E01 | R-2.3 |
 | S3.6 | OCR rule parser (`parsing_rules.yaml`) + printed-URL capture | M | Required-field accuracy ≥ 80% on the private set; service charge, ICBPER and discounts read when printed; `printed_urls` captured | R-2.3, R-2.10, R-2.14 |
