@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
-import subprocess
+import subprocess  # nosec B404  # runs only the fixed Tesseract argument list below
 from dataclasses import dataclass
 from typing import cast
 
@@ -115,7 +115,7 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
         TSV_CONFIG,
     ]
     try:
-        completed = subprocess.run(  # noqa: S603 - fixed argument list, no shell
+        completed = subprocess.run(  # noqa: S603  # nosec B603  # fixed argument list, no shell
             command,
             input=cast(np.ndarray, buffer).tobytes(),
             capture_output=True,
