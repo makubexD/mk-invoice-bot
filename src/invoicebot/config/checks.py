@@ -16,6 +16,7 @@ PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
 MANUAL_PORTAL = "manual"
 _PYTHON_ADAPTER_PREFIX = "python:"
 _GENERIC_FORM_ADAPTER = "generic_form"
+_URL_TEMPLATE_MARKER = "{"
 
 
 @dataclass(frozen=True)
@@ -58,10 +59,29 @@ def _portal_problems(key: str, portal: Portal, *, pr_mode: bool) -> list[Problem
     adapter_problem = _adapter_problem(key, portal)
     if adapter_problem is not None:
         problems.append(adapter_problem)
+    template_problem = _url_template_problem(key, portal)
+    if template_problem is not None:
+        problems.append(template_problem)
     incomplete_problem = _form_incomplete_problem(key, portal)
     if incomplete_problem is not None:
         problems.append(incomplete_problem)
     return problems
+
+
+def _url_template_problem(key: str, portal: Portal) -> Problem | None:
+    """R-5.8: an active portal must carry a real URL, not a template the fetcher cannot fill."""
+    # shortcut: URL templates such as {ruc_emisor} come with the first portal that needs one.
+    if portal.status != "active" or portal.url is None or _URL_TEMPLATE_MARKER not in portal.url:
+        return None
+    return Problem(
+        code="PORTAL_URL_TEMPLATE",
+        path=f"portals/{key}.yaml:url",
+        message=(
+            f"portal '{portal.key}' is active but its url is a template; "
+            "URL templates are not supported yet (R-5.8)"
+        ),
+        blocking=True,
+    )
 
 
 def _adapter_problem(key: str, portal: Portal) -> Problem | None:

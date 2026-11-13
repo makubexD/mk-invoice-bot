@@ -260,6 +260,13 @@ def test_field_mapping_with_pick_and_select_fails() -> None:
         )
 
 
+def test_portal_without_status_is_todo() -> None:
+    """R-5.8: a portal without status is todo, so a half-written file is never live."""
+    portal = Portal.model_validate({"key": "example", "adapter": "generic_form"})
+
+    assert portal.status == "todo"
+
+
 def test_store_ruc_differing_from_file_name_fails(tmp_path: Path) -> None:
     """R-5.8: a store file is named after its RUC, so a mismatch fails naming the file."""
     config_dir = tmp_path / "config"

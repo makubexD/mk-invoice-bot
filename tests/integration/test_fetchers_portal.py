@@ -159,7 +159,9 @@ def _directory() -> StoreDirectory:
             TODO_RUC: _store(TODO_RUC, "todo"),
         },
         portals={
-            "synthetic": Portal(key="synthetic", adapter="generic_form", url="https://synthetic.example/"),
+            "synthetic": Portal(
+                key="synthetic", adapter="generic_form", url="https://synthetic.example/", status="active"
+            ),
             "todo": Portal(key="todo", adapter="generic_form", url="https://todo.example/", status="todo"),
         },
     )

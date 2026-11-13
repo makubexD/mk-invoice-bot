@@ -35,6 +35,7 @@ def _portal(**overrides: object) -> Portal:
     values: dict[str, object] = {
         "key": "nubefact",
         "adapter": "generic_form",
+        "status": "active",
         "url": "https://portal.example/consulta",
         "submit": "button[type=submit]",
         "downloads": {"pdf": "button.pdf", "xml": "button.xml"},
@@ -277,6 +278,18 @@ def test_todo_generic_form_missing_fields_has_no_form_problem() -> None:
     problems = run_checks(cfg, _directory(portal), pr_mode=False)
 
     assert "PORTAL_FORM_INCOMPLETE" not in _codes(problems)
+
+
+def test_active_portal_with_url_template_is_refused() -> None:
+    """R-5.8: an active portal whose url is still a template is refused at startup."""
+    cfg = load_config(EXAMPLE)
+    portal = _portal(url="https://portal.example/{ruc_emisor}")
+
+    problems = run_checks(cfg, _directory(portal), pr_mode=False)
+
+    assert _codes(problems) == ["PORTAL_URL_TEMPLATE"]
+    assert problems[0].blocking
+    assert problems[0].path == "portals/nubefact.yaml:url"
 
 
 def test_work_flow_llm_fallback_with_deepseek_is_blocking() -> None:

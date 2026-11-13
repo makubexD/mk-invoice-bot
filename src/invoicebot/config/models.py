@@ -511,7 +511,7 @@ class Portal(BaseModel):
     key: str
     adapter: str
     url: str | None = None
-    status: Literal["active", "todo", "broken"] = "active"
+    status: Literal["active", "todo", "broken"] = "todo"
     fields: dict[str, str | SelectField | PickField | CalendarField] = Field(default_factory=dict)
     captcha: Literal["none", "image", "recaptcha"] | PortalCaptcha = "none"
     submit: str | None = None
