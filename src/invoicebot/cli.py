@@ -88,7 +88,7 @@ def _portal_test(
     fetcher = PortalFetcher(
         test_directory,
         cfg.limits.media.max_bytes,
-        cfg.extraction.helper_timeout_s,
+        cfg.retrieval.portal_timeout_s,
         helper_command=helper_command,
     )
     with tempfile.TemporaryDirectory() as tmp_dir:

@@ -277,6 +277,8 @@ class PaidApi(BaseModel):
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Sized for a portal fetch, not for OCR; extraction.helper_timeout_s covers the OCR helper.
+    portal_timeout_s: float = Field(gt=0)
     email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi

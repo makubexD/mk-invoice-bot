@@ -161,6 +161,7 @@ flows:
         zip_if_over_mb: 3
 
 retrieval:
+  portal_timeout_s: 120                 # one portal fetch, browser helper included; OCR has its own timeout
   email_inbox:
     provider: gmail                     # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
     retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher

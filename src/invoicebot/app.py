@@ -130,7 +130,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
         registry = {
             PORTAL_FETCHER: PortalFetcher(
-                directory, cfg.limits.media.max_bytes, cfg.extraction.helper_timeout_s
+                directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s
             )
         }
         worker = Worker(

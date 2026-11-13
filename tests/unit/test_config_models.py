@@ -140,6 +140,30 @@ def test_zero_helper_timeout_fails(tmp_path: Path) -> None:
     assert "extraction.helper_timeout_s" in str(excinfo.value)
 
 
+def test_missing_portal_timeout_fails(tmp_path: Path) -> None:
+    """R-5.8: retrieval.portal_timeout_s is required, so no default silently sizes a fetch."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["retrieval"]["portal_timeout_s"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "retrieval.portal_timeout_s" in str(excinfo.value)
+
+
+def test_zero_portal_timeout_fails(tmp_path: Path) -> None:
+    """R-5.8: retrieval.portal_timeout_s must be a positive timeout."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["portal_timeout_s"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "retrieval.portal_timeout_s" in str(excinfo.value)
+
+
 def test_zero_max_image_px_fails(tmp_path: Path) -> None:
     """R-9.6: extraction.max_image_px must be a positive pixel bound."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
