@@ -57,9 +57,9 @@ def parse_qr_payload(text: str) -> Reading | None:
         or NUMERO_PATTERN.fullmatch(numero) is None
     ):
         return None
-    fecha = _parse_date(fecha_text)
-    igv = _parse_amount(igv_text)
-    total = _parse_amount(total_text)
+    fecha = parse_date(fecha_text)
+    igv = parse_amount(igv_text)
+    total = parse_amount(total_text)
     if fecha is None or igv is None or total is None:
         return None
 
@@ -130,7 +130,7 @@ def _infer_buyer_type(num_doc: str) -> str | None:
     return None
 
 
-def _parse_date(text: str) -> str | None:
+def parse_date(text: str) -> str | None:
     """Return ``text`` as an ISO date string, accepting ``yyyy-mm-dd`` and ``dd/mm/yyyy``."""
     iso_match = ISO_DATE_PATTERN.fullmatch(text)
     if iso_match is not None:
@@ -146,7 +146,7 @@ def _parse_date(text: str) -> str | None:
         return None
 
 
-def _parse_amount(text: str) -> Decimal | None:
+def parse_amount(text: str) -> Decimal | None:
     """Return ``text`` as a finite decimal with at most two decimals, or ``None``."""
     if AMOUNT_PATTERN.fullmatch(text) is None:
         return None
