@@ -9,16 +9,13 @@ outbox message commit in one transaction (CLAUDE.md "Database").
 
 from __future__ import annotations
 
-import asyncio
-import contextlib
 import logging
 import os
-import signal
 import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -27,6 +24,7 @@ from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.pipeline.handlers import EXTRACT_STEP
+from invoicebot.pipeline.helper import run_helper
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
@@ -154,48 +152,22 @@ async def _run_helper(
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
     }
+    argv = [
+        sys.executable,
+        "-P",
+        "-m",
+        "invoicebot.extract",
+        path,
+        str(extraction_cfg.max_image_px),
+        str(media.max_bytes.image),
+        extraction_cfg.ocr.engine,
+        extraction_cfg.ocr.lang,
+        str(extraction_cfg.ocr.psm),
+        str(extraction_cfg.ocr.timeout_s),
+        str(rules_path),
+    ]
     async with HEAVY:
-        process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-P",
-            "-m",
-            "invoicebot.extract",
-            path,
-            str(extraction_cfg.max_image_px),
-            str(media.max_bytes.image),
-            extraction_cfg.ocr.engine,
-            extraction_cfg.ocr.lang,
-            str(extraction_cfg.ocr.psm),
-            str(extraction_cfg.ocr.timeout_s),
-            str(rules_path),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
-            env=env,
-            start_new_session=True,
-        )
-        try:
-            async with asyncio.timeout(extraction_cfg.helper_timeout_s):
-                stdout_stream = cast(asyncio.StreamReader, process.stdout)
-                chunks: list[bytes] = []
-                remaining = MAX_HELPER_OUTPUT_BYTES + 1
-                while remaining > 0:
-                    chunk = await stdout_stream.read(remaining)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                    remaining -= len(chunk)
-                stdout = b"".join(chunks)
-                if len(stdout) > MAX_HELPER_OUTPUT_BYTES:
-                    raise RuntimeError("extract helper output exceeds the cap")
-                await process.wait()
-        finally:
-            # Kill the group in every case, so a child of a helper that already exited dies too.
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            if process.returncode is None:
-                await process.wait()
-    if process.returncode != 0:
-        raise RuntimeError(f"extract helper exited with code {process.returncode}")
+        stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
     return _parse_result(stdout)
 
 
