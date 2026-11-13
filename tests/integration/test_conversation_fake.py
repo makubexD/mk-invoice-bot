@@ -1,6 +1,6 @@
 """Conversation-level integration tests delivering through the fake channel.
 
-Covers R-1.1, R-1.4, R-1.6, R-1.8, BR-S01 and BR-S02 against real Postgres,
+Covers R-1.1, R-1.4, R-1.6, R-1.8, R-2.1, R-3.4, BR-S01, BR-S02 and BR-E01 against real Postgres,
 with the outbox sender handing each message to :class:`FakeChannel`.
 """
 
@@ -160,3 +160,20 @@ async def test_fetch_media_returns_registered_paths_only(tmp_path: Path) -> None
     assert await fake.fetch_media("ref-known") == path
     with pytest.raises(KeyError, match="ref-unknown"):
         await fake.fetch_media("ref-unknown")
+
+
+async def test_qr_photo_gets_the_ack_then_the_summary(read_conversation: Any) -> None:
+    """R-2.1, R-3.4: a QR photo for the work RUC gets "Recibido", then the summary naming the work flow."""
+    fake, _ = await read_conversation(True)
+
+    assert fake.rule_ids() == ["BR-S09", "BR-R02"]
+    assert "Recibido" in fake.texts()[0]
+    assert "➡️ Trabajo (Microsoft)" in fake.texts()[1]
+
+
+async def test_blank_photo_gets_the_ack_then_br_e01(read_conversation: Any) -> None:
+    """R-2.13, BR-E01: a photo with no QR gets "Recibido", then BR-E01."""
+    fake, _ = await read_conversation(False)
+
+    assert fake.rule_ids() == ["BR-S09", "BR-E01"]
+    assert "Recibido" in fake.texts()[0]

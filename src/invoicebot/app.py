@@ -24,10 +24,13 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, WhatsAppChannel
 from invoicebot.logging import configure_logging
-from invoicebot.pipeline.handlers import make_download_handler
+from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.route import make_route_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Worker
+from invoicebot.routing.router import compile_rules
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
 from invoicebot.store.db import Pool, create_pool, ping
@@ -101,6 +104,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         return
     assert_no_plain_secrets(os.environ)
     cfg = load_config(settings.config_path)
+    rules = compile_rules(cfg.routing)
     store = _load_secrets(settings)
     configure_logging(store.values())
     secrets = store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
@@ -120,7 +124,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
         worker = Worker(
             pool,
-            {DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media)},
+            {
+                DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
+                EXTRACT_STEP: make_extract_handler(pool, cfg.extraction),
+                ROUTE_STEP: make_route_handler(pool, cfg, rules),
+            },
         )
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
