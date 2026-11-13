@@ -10,10 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date
 
-from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
-
-#: The field names whose values compare as amounts.
-AMOUNT_FIELDS = frozenset({"total", "base", "igv", "service_charge", "icbper", "discounts"})
+from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, Field, Reading, finite_decimal
 
 
 def merge(ocr: Reading | None, qr: Reading | None) -> Reading:

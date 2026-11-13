@@ -18,6 +18,9 @@ Flag = Literal["inferred", "conflict"]
 
 REQUIRED = ("ruc_emisor", "tipo", "serie", "numero", "fecha_emision", "total")
 
+#: The field names whose values compare as amounts.
+AMOUNT_FIELDS = frozenset({"total", "base", "igv", "service_charge", "icbper", "discounts"})
+
 #: Confidence of a value a reader took directly from the document (R-2.6).
 FULL_CONFIDENCE = 1.0
 

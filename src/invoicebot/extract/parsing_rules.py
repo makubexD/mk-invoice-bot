@@ -14,6 +14,12 @@ from typing import Annotated, Self
 import yaml
 from pydantic import BaseModel, BeforeValidator, ConfigDict, PrivateAttr, model_validator
 
+from invoicebot.extract.fields import AMOUNT_FIELDS
+from invoicebot.extract.qr_payload import DOCUMENT_TYPE_BY_SERIE_LETTER
+
+#: The document type codes the OCR reader can map a ``tipo`` rule to.
+DOCUMENT_TYPE_CODES = frozenset(DOCUMENT_TYPE_BY_SERIE_LETTER.values())
+
 
 def _compile_rule(value: object, required_groups: tuple[str, ...]) -> re.Pattern[str]:
     """Compile one rule pattern, raising ValueError when it breaks or lacks a named group."""
@@ -64,6 +70,17 @@ class ParsingRules(BaseModel):
     printed_url: ValuePattern
 
     _amount_patterns: dict[str, tuple[re.Pattern[str], ...]] = PrivateAttr()
+
+    @model_validator(mode="after")
+    def _check_field_names(self) -> Self:
+        """Reject an amount or document type the readers do not produce (S3.6)."""
+        unknown_amounts = sorted(name for name in self.amounts if name not in AMOUNT_FIELDS)
+        if unknown_amounts:
+            raise ValueError(f"unknown amount field(s) {', '.join(unknown_amounts)}")
+        unknown_types = sorted(code for code in self.tipo if code not in DOCUMENT_TYPE_CODES)
+        if unknown_types:
+            raise ValueError(f"unknown document type code(s) {', '.join(unknown_types)}")
+        return self
 
     @model_validator(mode="after")
     def _build_amount_patterns(self) -> Self:

@@ -61,6 +61,28 @@ def test_load_rules_pattern_without_named_group_raises(tmp_path: Path) -> None:
         load_rules(path)
 
 
+def test_load_rules_unknown_amount_field_raises(tmp_path: Path) -> None:
+    """S3.6: an amount rule under a field name the readers do not produce is rejected at load."""
+    document = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))
+    document["amounts"]["totl"] = ["TOTAL"]
+    path = tmp_path / "parsing_rules.yaml"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="totl"):
+        load_rules(path)
+
+
+def test_load_rules_unknown_document_type_raises(tmp_path: Path) -> None:
+    """S3.6: a tipo rule mapping to a document type code the OCR reader cannot produce is rejected."""
+    document = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))
+    document["tipo"]["99"] = ["NOTA DE CRÉDITO"]
+    path = tmp_path / "parsing_rules.yaml"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="99"):
+        load_rules(path)
+
+
 def test_parse_ocr_factura_reads_six_required_fields(rules: ParsingRules) -> None:
     """R-2.3: a factura with every required field reads them all with source 'ocr'."""
     text = _ocr(
