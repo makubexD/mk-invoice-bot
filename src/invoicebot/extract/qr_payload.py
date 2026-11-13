@@ -2,9 +2,11 @@
 
 The payload is pipe-separated and read by position; extra trailing parts are ignored. A payload
 that starts with ``http`` carries a URL instead of data (R-2.8). Non-standard payloads seen in the
-owner's invoices are repaired rather than rejected (D79): a document-type part that is not a
-two-digit type comes from the serie's first letter, and an empty buyer-type part comes from the
-buyer number. Inferred fields carry a lower confidence so the summary can mark them.
+owner's invoices are repaired rather than rejected (D79): a date may carry a time, a short label
+may precede the issuer RUC, a document-type part that is not a two-digit type comes from the
+serie's first letter, an empty buyer-type part comes from the buyer number, and a buyer type
+written as a word becomes its code. Inferred fields carry a lower confidence so the summary can
+mark them.
 """
 
 from __future__ import annotations
@@ -25,13 +27,15 @@ INFERRED_CONFIDENCE = 0.9
 RUC_LENGTH = 11
 DNI_LENGTH = 8
 DOCUMENT_TYPE_BY_SERIE_LETTER = {"F": "01", "B": "03"}
-ISO_DATE_PATTERN = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
+BUYER_TYPE_BY_WORD = {"RUC": "6", "DNI": "1"}
+ISO_DATE_OR_DATETIME_PATTERN = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})(?: [0-9]{2}:[0-9]{2}:[0-9]{2})?")
 DMY_DATE_PATTERN = re.compile(r"([0-9]{2})/([0-9]{2})/([0-9]{4})")
 AMOUNT_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
 QR_SERIE_SHAPE = re.compile(r"[A-Z0-9]{1,4}")
 NUMERO_PATTERN = re.compile(r"[0-9]{1,8}")
 TIPO_DOC_ADQ_PATTERN = re.compile(r"[0-9A-Z]")
 NUM_DOC_ADQ_PATTERN = re.compile(r"[0-9A-Z]{1,15}")
+PREFIXED_RUC_PATTERN = re.compile(r"[^0-9|]{1,10} - ([0-9]{11})")
 
 
 def parse_qr_payload(text: str) -> Reading | None:
@@ -50,9 +54,10 @@ def parse_qr_payload(text: str) -> Reading | None:
     if len(parts) < REQUIRED_PART_COUNT:
         return None
 
-    ruc_emisor, tipo_text, serie, numero, igv_text, total_text, fecha_text = parts[:REQUIRED_PART_COUNT]
+    ruc_text, tipo_text, serie, numero, igv_text, total_text, fecha_text = parts[:REQUIRED_PART_COUNT]
+    ruc_emisor = _issuer_ruc(ruc_text)
     if (
-        not _is_issuer_ruc(ruc_emisor)
+        ruc_emisor is None
         or QR_SERIE_SHAPE.fullmatch(serie) is None
         or NUMERO_PATTERN.fullmatch(numero) is None
     ):
@@ -92,6 +97,16 @@ def _is_issuer_ruc(text: str) -> bool:
     return len(text) == RUC_LENGTH and text.isascii() and text.isdigit()
 
 
+def _issuer_ruc(text: str) -> str | None:
+    """Return the issuer RUC, dropping a short non-numeric label printed before it (D79)."""
+    if _is_issuer_ruc(text):
+        return text
+    prefixed = PREFIXED_RUC_PATTERN.fullmatch(text)
+    if prefixed is not None and _is_issuer_ruc(prefixed.group(1)):
+        return prefixed.group(1)
+    return None
+
+
 def _document_type(tipo_text: str, serie: str) -> Field | None:
     """Return ``tipo``, inferred from the serie's first letter when the part is not two digits (D79)."""
     if len(tipo_text) == 2 and tipo_text.isascii() and tipo_text.isdigit():
@@ -103,7 +118,7 @@ def _document_type(tipo_text: str, serie: str) -> Field | None:
 
 
 def _buyer_fields(parts: list[str]) -> dict[str, Field]:
-    """Return the buyer fields, inferring the type from the number when that part is empty (D79)."""
+    """Return the buyer fields, inferring the type from a word or the number (D79)."""
     tipo_text = parts[TIPO_DOC_ADQ_INDEX] if len(parts) > TIPO_DOC_ADQ_INDEX else ""
     num_text = parts[NUM_DOC_ADQ_INDEX] if len(parts) > NUM_DOC_ADQ_INDEX else ""
     tipo_doc = tipo_text if TIPO_DOC_ADQ_PATTERN.fullmatch(tipo_text) else ""
@@ -112,6 +127,8 @@ def _buyer_fields(parts: list[str]) -> dict[str, Field]:
     fields: dict[str, Field] = {}
     if tipo_doc:
         fields["tipo_doc_adq"] = _field(tipo_doc)
+    elif (word_code := BUYER_TYPE_BY_WORD.get(tipo_text)) is not None:
+        fields["tipo_doc_adq"] = _field(word_code, INFERRED_CONFIDENCE, flag="inferred")
     else:
         inferred = _infer_buyer_type(num_doc)
         if inferred is not None:
@@ -131,8 +148,8 @@ def _infer_buyer_type(num_doc: str) -> str | None:
 
 
 def parse_date(text: str) -> str | None:
-    """Return ``text`` as an ISO date string, accepting ``yyyy-mm-dd`` and ``dd/mm/yyyy``."""
-    iso_match = ISO_DATE_PATTERN.fullmatch(text)
+    """Return ``text`` as an ISO date string, accepting ``yyyy-mm-dd``, ``dd/mm/yyyy`` and a trailing time."""
+    iso_match = ISO_DATE_OR_DATETIME_PATTERN.fullmatch(text)
     if iso_match is not None:
         year, month, day = iso_match.groups()
     else:
