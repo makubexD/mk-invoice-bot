@@ -232,6 +232,20 @@ async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     assert texts[0].splitlines()[-1] == "⚠️ Revisa: fecha"
 
 
+async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+    """D80: a summary for a reading with one conflict still routes, naming that field's label."""
+    base = _reading(await _today(db_pool))
+    reading = Reading(
+        fields={**base.fields, "numero": _field("15160", flag="conflict")},
+        document_url=None,
+    )
+
+    row, texts = await _route_one(db_pool, reading)
+
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert texts[0].splitlines()[-1] == "⚠️ Revisa: número"
+
+
 async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
     """D79: a tipo repaired from the serie letter is named on the summary's "Deducido" line."""
     reading = _reading(await _today(db_pool), tipo_flag="inferred")

@@ -90,27 +90,31 @@ def doubtful_fields(
     threshold: float,
     rates: Sequence[Decimal],
 ) -> tuple[str, ...]:
-    """Return the field names whose confidence or R-2.4 check fails, in a stable order.
+    """Return the field names that need review, in a stable order (R-2.6, S3.7, D80).
 
-    Required fields below ``threshold`` and the ``serie``/``total`` checks come first, in
-    :data:`REQUIRED` order; ``igv`` follows when it matches none of ``rates``. A ``total``
-    that is present but not a finite number is doubtful too.
+    A field is doubtful when it is carried below ``threshold``, when it is flagged
+    ``conflict`` whatever its confidence, or when its R-2.4 check fails. Required fields
+    come first in :data:`REQUIRED` order; ``igv`` follows, then the remaining doubtful
+    fields in reading order. Each name appears once.
     """
     doubtful = set(_low_confidence(reading, threshold))
+    doubtful.update(_conflicting(reading))
     doubtful.update(_failed_checks(reading, rates))
     ordered = [name for name in REQUIRED if name in doubtful]
     if "igv" in doubtful:
         ordered.append("igv")
+    ordered.extend(name for name in reading.fields if name in doubtful and name not in ordered)
     return tuple(ordered)
 
 
 def _low_confidence(reading: Reading, threshold: float) -> list[str]:
-    """Return the required fields carried by the reading below ``threshold``."""
-    return [
-        name
-        for name in REQUIRED
-        if (field := reading.fields.get(name)) is not None and field.confidence < threshold
-    ]
+    """Return the reading's fields below ``threshold``, in reading order (R-2.6)."""
+    return [name for name, field in reading.fields.items() if field.confidence < threshold]
+
+
+def _conflicting(reading: Reading) -> list[str]:
+    """Return the reading's fields flagged ``conflict``, whatever their confidence (S3.7)."""
+    return [name for name, field in reading.fields.items() if field.flag == "conflict"]
 
 
 def _failed_checks(reading: Reading, rates: Sequence[Decimal]) -> list[str]:

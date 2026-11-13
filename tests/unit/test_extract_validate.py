@@ -7,7 +7,7 @@ from decimal import Decimal
 
 import pytest
 
-from invoicebot.extract.fields import Field, Reading
+from invoicebot.extract.fields import Field, Flag, Reading, Source
 from invoicebot.extract.validate import (
     check_date,
     check_igv_rate,
@@ -44,8 +44,13 @@ def _wrong_check_digit(ruc: str) -> str:
     return ruc[:-1] + str((int(ruc[-1]) + 1) % 10)
 
 
-def _field(value: str, confidence: float = 1.0) -> Field:
-    return Field(value=value, source="qr", confidence=confidence)
+def _field(
+    value: str,
+    confidence: float = 1.0,
+    flag: Flag | None = None,
+    source: Source = "qr",
+) -> Field:
+    return Field(value=value, source=source, confidence=confidence, flag=flag)
 
 
 def _valid_fields(**overrides: Field) -> dict[str, Field]:
@@ -224,6 +229,27 @@ def test_doubtful_fields_low_confidence() -> None:
     reading = _reading(_valid_fields(numero=_field("15160", confidence=0.5)))
 
     assert doubtful_fields(reading, THRESHOLD, RATES) == ("numero",)
+
+
+def test_doubtful_fields_conflict_at_full_confidence() -> None:
+    """D80: a conflict field at confidence 1.0 is doubtful."""
+    reading = _reading(_valid_fields(base=_field("40.90", flag="conflict")))
+
+    assert doubtful_fields(reading, THRESHOLD, RATES) == ("base",)
+
+
+def test_doubtful_fields_ocr_field_below_threshold() -> None:
+    """S3.7: an OCR field at 0.5 with threshold 0.8 is doubtful, even a non-required one."""
+    reading = _reading(_valid_fields(base=_field("40.90", confidence=0.5, source="ocr")))
+
+    assert doubtful_fields(reading, THRESHOLD, RATES) == ("base",)
+
+
+def test_doubtful_fields_high_confidence_without_flag() -> None:
+    """D80: a field at 0.9 with no flag is not doubtful."""
+    reading = _reading(_valid_fields(base=_field("40.90", confidence=0.9)))
+
+    assert doubtful_fields(reading, THRESHOLD, RATES) == ()
 
 
 def test_doubtful_fields_bad_serie() -> None:
