@@ -130,7 +130,9 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
             capture_output=True,
             timeout=ocr_cfg.timeout_s,
             check=False,
-            preexec_fn=_no_file_writes,  # the helper process is single-threaded, so this is safe
+            # Safe because the helper runs cv2 single-threaded (set in extract/__main__.py), so no
+            # cv2 worker thread can hold a lock when this forks.
+            preexec_fn=_no_file_writes,
         )
     except subprocess.TimeoutExpired:
         logger.warning("tesseract timed out")

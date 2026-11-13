@@ -60,6 +60,9 @@ def _limit_resources() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Read the photo named by ``argv`` and print the helper result (R-2.1, R-2.13)."""
+    # Single-threaded cv2: a preexec_fn after fork must not meet a lock held by a cv2 worker
+    # thread, or the child deadlocks (R-9.2).
+    cv2.setNumThreads(0)
     _limit_resources()
     args = sys.argv[1:] if argv is None else argv
     if len(args) != ARGUMENT_COUNT:
