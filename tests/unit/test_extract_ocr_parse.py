@@ -212,6 +212,28 @@ def test_parse_ocr_total_from_printed_line(rules: ParsingRules, line: str, expec
         assert fields["total"] == expected
 
 
+@pytest.mark.parametrize(
+    ("line", "field", "expected"),
+    [
+        pytest.param("I.G.V. 18.00% 9.00", "igv", "9.00", id="igv-rate-before-amount"),
+        pytest.param("IGV (18%) S/ 9.00", "igv", "9.00", id="igv-rate-in-parentheses"),
+        pytest.param("SUB-TOTAL 50.00", "total", None, id="sub-total-is-not-total"),
+        pytest.param("SERVICIO DE LAVADO 25.00", "service_charge", None, id="service-line-is-not-a-charge"),
+        pytest.param("RECARGO POR SERVICIO 5.00", "service_charge", "5.00", id="recargo-is-a-charge"),
+    ],
+)
+def test_parse_ocr_amount_line_not_misread(
+    rules: ParsingRules, line: str, field: str, expected: str | None
+) -> None:
+    """R-2.14: a printed rate, sub-total or service line does not hide the amount behind it."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", line), rules)
+
+    if expected is None:
+        assert field not in fields
+    else:
+        assert fields[field] == expected
+
+
 def test_parse_ocr_dash_date_becomes_iso(rules: ParsingRules) -> None:
     """R-2.3: a dd-mm-yyyy date is read as an ISO date."""
     fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", "Fecha: 13-11-2026"), rules)
