@@ -1,0 +1,6 @@
+url: "http://comprobantes.ddns.net/webcomprobantes/formularios/frmAutentificacionEstandar.aspx"
+adapter: generic_form
+captcha: image
+allow_http: true  # D76: this site has no https
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: emisor, serie, correlativo, tipo, fecha, monto and an image captcha. Plain http, allowed for this host only (D76)."

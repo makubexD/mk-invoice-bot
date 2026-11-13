@@ -1,0 +1,5 @@
+url: "https://consulta.miwally.com"
+adapter: generic_form
+captcha: recaptcha
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks (read from its code): RUC del emisor, tipo, serie, correlativo, fecha de emision, importe total; offers PDF, XML and CDR. Uses reCAPTCHA Enterprise; the page stayed blank in an automated browser on 2026-11-12."

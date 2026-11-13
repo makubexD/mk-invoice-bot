@@ -1,0 +1,5 @@
+url: "https://idbiperu.pse.pe/{ruc_emisor}"
+adapter: generic_form
+captcha: recaptcha
+status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
+notes: "Asks: RUC del emisor, tipo, serie, numero, total. A real lookup on 2026-11-12 was stopped by a reCAPTCHA image challenge."

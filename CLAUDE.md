@@ -72,7 +72,8 @@ The goal is code that is easy to read and easy to extend. When two rules pull ap
 - **Secrets come from the age-encrypted store** through a scoped `Secrets` view, never from the environment. This
   overrides the `py-security` rule: startup rejects secret-looking environment variables (R-9.9).
 - No real RUCs, phone numbers, names or invoice photos in the repo; use the synthetic values in
-  `config/example.yaml`. Sender ids are logged only as a hash.
+  `config/example.yaml`. The one exception is the store directory: `config/stores/<ruc>.yaml` holds that store's own
+  RUC, by the owner's decision (D47), and CI allows it there only. Sender ids are logged only as a hash.
 - Everything from a channel, a portal or a file is untrusted: validate it at the boundary and cap its size before
   reading it.
 

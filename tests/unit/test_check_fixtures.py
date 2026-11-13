@@ -114,6 +114,46 @@ def test_allowlisted_ruc_passes(tmp_path: Path) -> None:
     assert check_fixtures.find_problems(tmp_path) == []
 
 
+def test_store_file_may_hold_its_own_ruc(tmp_path: Path) -> None:
+    """R-5.8, D47: config/stores/<ruc>.yaml may contain the RUC it is named after."""
+    _fixture_tree(tmp_path)
+    value = _synthetic_ruc(4)
+    stores = tmp_path / "config" / "stores"
+    stores.mkdir()
+    (stores / f"{value}.yaml").write_text(f'ruc: "{value}"\n', encoding="utf-8")
+
+    assert check_fixtures.find_problems(tmp_path) == []
+
+
+def test_store_file_with_another_ruc_fails(tmp_path: Path) -> None:
+    """R-9.17: a store file may hold only its own RUC; any other real-looking RUC still fails."""
+    _fixture_tree(tmp_path)
+    own, other = _synthetic_ruc(4), _synthetic_ruc(5)
+    stores = tmp_path / "config" / "stores"
+    stores.mkdir()
+    (stores / f"{own}.yaml").write_text(f'ruc: "{own}"\nnotes: "{other}"\n', encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert other in problems[0]
+
+
+def test_store_ruc_outside_its_file_fails(tmp_path: Path) -> None:
+    """R-9.17: a store's RUC is allowed only inside its own store file, not elsewhere in tests/ or config/."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    value = _synthetic_ruc(4)
+    stores = tmp_path / "config" / "stores"
+    stores.mkdir()
+    (stores / f"{value}.yaml").write_text(f'ruc: "{value}"\n', encoding="utf-8")
+    (tests_dir / "notes.txt").write_text(f"RUC: {value}\n", encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "tests/notes.txt" in problems[0]
+
+
 def test_bad_check_digit_passes(tmp_path: Path) -> None:
     """R-9.17: an 11-digit number with an invalid check digit is not a RUC."""
     _, tests_dir = _fixture_tree(tmp_path)

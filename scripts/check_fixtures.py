@@ -6,7 +6,9 @@ Usage: ``check_fixtures.py [root]`` (default root: the current directory).
 Images under ``tests/`` must not contain EXIF metadata. Any standalone 11-digit
 number in a text file under ``tests/`` or ``config/`` whose SUNAT check digit is
 valid must be listed in ``tests/synthetic_rucs.txt``; that allowlist is the only
-place synthetic RUC-like values may appear. Exits 1 and prints one line per
+place synthetic RUC-like values may appear. The one exception is the store
+directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may contain its own RUC,
+and only that one. Exits 1 and prints one line per
 problem, 0 when the fixtures are clean.
 """
 
@@ -24,6 +26,7 @@ SKIP_DIRS = frozenset({"__pycache__", ".venv", ".git"})
 RUC_RE = re.compile(r"(?<![0-9])[0-9]{11}(?![0-9])")
 RUC_WEIGHTS = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
 ALLOWLIST_RELATIVE = Path("tests") / "synthetic_rucs.txt"
+STORES_RELATIVE = Path("config") / "stores"
 
 
 def _jpeg_has_exif(data: bytes) -> bool:
@@ -119,6 +122,13 @@ def _load_allowlist(path: Path) -> set[str]:
     return allowed
 
 
+def _own_store_ruc(path: Path, stores_dir: Path) -> str | None:
+    """Return the RUC a store directory file is named after, or ``None`` for any other file."""
+    if path.parent == stores_dir and path.suffix == ".yaml" and is_valid_ruc(path.stem):
+        return path.stem
+    return None
+
+
 def _iter_scanned_files(root: Path) -> Iterator[Path]:
     """Yield files under ``root/tests`` and ``root/config``, pruning skipped dirs."""
     for base in (root / "tests", root / "config"):
@@ -134,6 +144,7 @@ def find_problems(root: Path) -> list[str]:
     """Return one message per EXIF-bearing image or non-allowlisted RUC (R-9.17)."""
     allowlist_path = root / ALLOWLIST_RELATIVE
     allowed = _load_allowlist(allowlist_path)
+    stores_dir = root / STORES_RELATIVE
     problems: list[str] = []
     for path in _iter_scanned_files(root):
         relative = path.relative_to(root).as_posix()
@@ -147,9 +158,10 @@ def find_problems(root: Path) -> list[str]:
             text = path.read_bytes().decode("utf-8")
         except UnicodeDecodeError:
             continue
+        own_ruc = _own_store_ruc(path, stores_dir)
         for match in RUC_RE.finditer(text):
             value = match.group()
-            if is_valid_ruc(value) and value not in allowed:
+            if is_valid_ruc(value) and value not in allowed and value != own_ruc:
                 problems.append(
                     f"{relative}: possible real RUC {value} (add synthetic values to "
                     f"{ALLOWLIST_RELATIVE.as_posix()})"

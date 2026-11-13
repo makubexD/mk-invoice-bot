@@ -4,7 +4,7 @@ These principles govern every spec, design decision and pull request. A change t
 
 **Scope (D39):** this repo builds **mk-invoice-bot**, a standalone bot that captures Peruvian invoices (SUNAT CPE) over WhatsApp and Telegram, validates them, and delivers them to the configured sinks. It works fully on its own. Other systems, such as the personal agent **Jarvis** (separate repo), integrate only through the bot's public contract (P10). The bot never depends on them.
 
-*Amended 2026-11-10: P1, P2 and P3 were revised (D24, D31, D40), P10 was added (D39). P6 and P9 were extended. Later the same day: P1 (D42), P3 (D43), P6 (secrets, untrusted text), P9 (D44, D46) and P10 (write confirmation).*
+*Amended 2026-11-10: P1, P2 and P3 were revised (D24, D31, D40), P10 was added (D39). P6 and P9 were extended. Later the same day: P1 (D42), P3 (D43), P6 (secrets, untrusted text), P9 (D44, D46) and P10 (write confirmation).* *2026-11-12: P6 (store directory, D47) and P9 (gap PR from a template as the last v1 step, D52).* *Later on 2026-11-12: P3 reworded (D57, D58).*
 
 ## P1 · Near-zero cost
 - Free tiers and open-source software. A paid service is allowed only when it is the official path (Meta Cloud API) or as an **optional, disabled-by-default** adapter (LLM fallback, paid CPE APIs, captcha solvers).
@@ -19,7 +19,7 @@ These principles govern every spec, design decision and pull request. A change t
 - Everything runs in containers, configured only by environment variables and config files (12-factor). Nothing may assume a specific VPS or cloud provider.
 
 ## P3 · Deterministic extraction first
-- Order of precedence: **QR decode → official XML → OCR + regex → vision LLM (optional fallback, per-flow opt-in)** (D24, D43).
+- Order of precedence for reading an invoice: **QR decode → OCR + regex → vision LLM (optional fallback, per-flow opt-in)** (D24, D43). The official XML is not an input (D58): once the bot downloads it, it is authoritative for the amounts (R-2.7).
 - The LLM runs only when every deterministic method fails, and only for flows that opt in. **Flow B (work invoices) never goes to the LLM** (D43). It is called through a provider-neutral port, its output is re-checked by the same validators (R-2.4), and its fields carry `source=llm` with low confidence and **always need user confirmation**.
 - Rules that code can decide (RUC check digit, routing, totals, duplicates) are never delegated to an LLM.
 - Every extracted field carries its `source` (qr|xml|ocr|padron|llm|user) and a `confidence`.
@@ -39,7 +39,7 @@ These principles govern every spec, design decision and pull request. A change t
 - Secrets (OAuth refresh tokens, SUNAT client secret, SOL credentials, API tokens) never enter git. They are **encrypted at rest** (`age` or `systemd-creds`) and decrypted into memory at start; `.env` holds only non-secret settings. They are never logged, and each adapter receives only the secrets it declares (R-9.9, R-9.10). A missing secret **fails closed**: no default ever turns a check off.
 - Text from senders, OCR, LLMs and third-party sites is **untrusted**. It never reaches GitHub (R-11.12), every outbound fetch passes one request guard (R-5.10), and the contract marks it `trust: untrusted` (R-12.8).
 - Use a **secondary SOL user** with query-only permissions. Scrape only the owner's own invoices, rate-limited, and respect the target sites' terms.
-- While the repo is public (D27), no real RUCs, phone numbers, personal data or secrets in git, including tests and fixtures.
+- While the repo is public (D27), no real RUCs, phone numbers, personal data or secrets in git, including tests and fixtures. The one exception is the store directory (`config/stores/`), committed by the owner's decision (D47).
 
 ## P7 · Idempotent and resumable
 - Each inbound message is idempotent on its channel message id. Each invoice has a natural key `(ruc_emisor, tipo, serie, numero)`. Duplicates are detected and never processed twice.
@@ -54,7 +54,7 @@ These principles govern every spec, design decision and pull request. A change t
 - When the cause is a missing capability in the repo, the system raises a **gap** (D44):
   - an issue in the private ops repo;
   - a chat alert to the owner.
-  - Draft PRs, YAML stubs and red-CI watches are post-MVP.
+  - At the end of development, once the repo is private, a gap also opens a PR from a template that stays red until the owner completes it (S16.2, D52). Red-CI watches and other bot-made PRs are post-MVP.
 - Deploys have **one path** (D37, D46): a green CI run on `main` deploys code and config, with `pg_dump`, migrations, a health check and automatic rollback. When the fix is deployed, the affected invoices resume automatically.
 - The UX stays smooth: no menus when the code can decide (the flow comes from the buyer RUC). Questions are asked only when data is missing or ambiguous.
 

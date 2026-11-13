@@ -1,0 +1,7 @@
+ruc: "20612636398"
+razon_social: "INTIMOS DOBLE J S.A.C."
+tipo: restaurante
+brands:
+  - comercio: Intiwarma
+portal: null  # page unknown: the owner provides it (S0.6); until then PORTAL_MISSING
+notes: "persona jurídica (RUC 20)"
