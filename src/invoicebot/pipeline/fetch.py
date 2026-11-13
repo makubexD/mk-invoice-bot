@@ -26,7 +26,7 @@ from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, Portal, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
-from invoicebot.fetchers.chain import Attempt, Done, Run, Wait, decide, parse_delay
+from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, parse_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
@@ -142,10 +142,12 @@ def make_fetch_handler(
         # retry, since its run_after already held the delay (D65), so the fetcher runs now.
         if isinstance(decision, Run | Wait):
             outcome = await _run(inputs, decision.fetcher, registry, schedule_for, data_dir)
-        elif isinstance(decision, Done):
-            outcome = await _done(inputs, decision.fetcher)
-        else:
+        elif isinstance(decision, Exhausted):
             outcome = await _exhausted(inputs, reading)
+        else:
+            # Done: the ok attempt and the DELIVERING commit happen together (R-5.1), so an
+            # invoice that still fetches has no ok attempt; the queue retries or parks this job.
+            raise RuntimeError(f"invoice {job.invoice_id} has an ok attempt but is still fetching")
         logger.info(
             "step done",
             extra={
@@ -228,13 +230,6 @@ async def _record_result(
             await _notify(conn, inputs.head, None, FETCH_WAITING.format(id=inputs.job.invoice_id))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
-
-
-async def _done(inputs: _Inputs, fetcher: str) -> _Outcome:
-    """Move an invoice whose documents are already stored on to delivery (R-5.1)."""
-    async with inputs.pool.connection() as conn, conn.transaction():
-        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE)
-    return _Outcome(fetcher=fetcher, portal_key=None, reason=FetchReason.OK.value)
 
 
 async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:

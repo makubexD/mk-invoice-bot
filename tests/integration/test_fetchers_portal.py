@@ -105,6 +105,8 @@ elif MODE == "match":
         write("xml", "invoice.xml", xml_bytes()),
         write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic"),
     ])
+elif MODE == "pdf_only":
+    report("ok", [write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic")])
 elif MODE == "undersize":
     pdf = write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic")
     pdf["size"] = 1
@@ -207,6 +209,17 @@ async def test_fetch_matching_xml_and_pdf_is_ok(tmp_path: Path) -> None:
         assert file.path == out_dir / name
         assert file.size == len(content)
         assert file.sha256 == hashlib.sha256(content).hexdigest()
+
+
+async def test_fetch_pdf_only_is_missing_docs_and_removes_the_pdf(tmp_path: Path) -> None:
+    """R-5.6: a helper that reports only a PDF is missing_docs and leaves no file in out_dir."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "pdf_only").fetch(_invoice(), out_dir)
+
+    assert result.reason is FetchReason.MISSING_DOCS
+    assert result.files == ()
+    assert list(out_dir.iterdir()) == []
 
 
 async def test_fetch_helper_undersized_pdf_reports_the_real_size(tmp_path: Path) -> None:

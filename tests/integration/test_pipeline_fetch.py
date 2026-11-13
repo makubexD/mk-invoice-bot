@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -39,14 +40,13 @@ MINUTES_55 = 55
 HOURS_5_5 = 5.5
 HOURS_6_5 = 6.5
 MINUTES_65 = 65
+_FILE_BYTES: dict[Literal["pdf", "xml"], bytes] = {"pdf": PDF_BYTES, "xml": XML_BYTES}
 
 
-def _config() -> Config:
-    """Return the example config with the work flow using only the portal fetcher."""
+def _config(fetchers: Sequence[str] = ("portal_registry",)) -> Config:
+    """Return the example config with the work flow using ``fetchers`` and requiring both documents."""
     cfg = load_config(EXAMPLE)
-    flow = cfg.flows[FLOW].model_copy(
-        update={"fetchers": ["portal_registry"], "required_docs": ["pdf", "xml"]}
-    )
+    flow = cfg.flows[FLOW].model_copy(update={"fetchers": list(fetchers), "required_docs": ["pdf", "xml"]})
     return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
@@ -100,10 +100,15 @@ def _written(out_dir: Path, kind: Literal["pdf", "xml"], data: bytes) -> Fetched
 
 
 class FakeFetcher:
-    """A fetcher that writes both documents on ``ok``, a partial one otherwise, and returns its reason."""
+    """A fetcher that writes ``kinds`` on ``ok``, a partial one otherwise, and returns its reason."""
 
-    def __init__(self, reason: FetchReason) -> None:
+    def __init__(
+        self,
+        reason: FetchReason,
+        kinds: tuple[Literal["pdf", "xml"], ...] = ("pdf", "xml"),
+    ) -> None:
         self.reason = reason
+        self.kinds = kinds
         self.calls = 0
 
     async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
@@ -112,7 +117,7 @@ class FakeFetcher:
         if self.reason is not FetchReason.OK:
             _written(out_dir, "pdf", PDF_BYTES)
             return FetchResult(self.reason, (), PORTAL_KEY)
-        files = (_written(out_dir, "pdf", PDF_BYTES), _written(out_dir, "xml", XML_BYTES))
+        files = tuple(_written(out_dir, kind, _FILE_BYTES[kind]) for kind in self.kinds)
         return FetchResult(FetchReason.OK, files, PORTAL_KEY)
 
 
@@ -289,6 +294,41 @@ async def test_ok_result_keeps_its_files(
 
     out_dir = tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)
     assert sorted(path.name for path in out_dir.iterdir()) == ["invoice.pdf", "invoice.xml"]
+
+
+async def test_ok_without_a_required_document_records_missing_docs_and_chains(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: an ok fetch lacking a required document records missing_docs and runs the next fetcher."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    first = FakeFetcher(FetchReason.OK, kinds=("pdf",))
+    second = FakeFetcher(FetchReason.TECHNICAL)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("portal_registry", "manual")),
+        _directory(),
+        {"portal_registry": first, "manual": second},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    assert invoice == ("FETCHING_DOCS", None, FLOW)
+    assert files == []
+    assert attempts == [("portal_registry", PORTAL_KEY, False, "missing_docs")]
+    assert len(jobs) == 1  # the next fetch job runs at once, so the chain moves on
+    assert not (tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)).exists()
+
+    await handler(_job(invoice_id, next_job_id))
+
+    assert (first.calls, second.calls) == (1, 1)
 
 
 async def test_not_found_yet_schedules_one_retry_and_one_status_message(
