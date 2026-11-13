@@ -40,6 +40,28 @@ def test_unknown_key_fails_naming_path(tmp_path: Path) -> None:
     assert "ops.backup.bogus" in str(excinfo.value)
 
 
+def test_empty_igv_rates_fails(tmp_path: Path) -> None:
+    """R-2.4: extraction.igv_rates must name at least one rate."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["igv_rates"] = []
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.igv_rates" in str(excinfo.value)
+
+
+def test_accepted_tipos_outside_supported_tipos_fails_naming_flow(tmp_path: Path) -> None:
+    """R-3.1: a flow may only accept tipos listed in extraction.supported_tipos."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["accepted_tipos"] = ["01", "09"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="work_microsoft"):
+        load_config(path)
+
+
 def test_placeholder_resolves() -> None:
     """R-9.6: config placeholders such as {owner.ruc} resolve before validation."""
     cfg = load_config(EXAMPLE)

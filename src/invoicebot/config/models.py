@@ -6,9 +6,10 @@ silently ignored.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from decimal import Decimal
+from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class Owner(BaseModel):
@@ -109,6 +110,10 @@ class Extraction(BaseModel):
     ocr: Ocr
     review_threshold: float
     max_invoice_age_days: int
+    # Written as strings in YAML so no float rounding reaches Decimal (R-2.4).
+    igv_rates: list[Decimal] = Field(min_length=1)
+    supported_tipos: list[str] = Field(min_length=1)
+    helper_timeout_s: int
 
 
 class LlmFallback(BaseModel):
@@ -212,6 +217,7 @@ class Flow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     label: str
+    accepted_tipos: list[str]
     fetchers: list[str]
     required_docs: list[str]
     deliver_without_docs: bool
@@ -369,6 +375,19 @@ class Config(BaseModel):
     gaps: Gaps
     ops: Ops
     limits: Limits
+
+    @model_validator(mode="after")
+    def _accepted_tipos_are_supported(self) -> Self:
+        """R-3.1: a flow may only accept tipos the extractor supports."""
+        supported = set(self.extraction.supported_tipos)
+        for name, flow in self.flows.items():
+            unsupported = [tipo for tipo in flow.accepted_tipos if tipo not in supported]
+            if unsupported:
+                raise ValueError(
+                    f"flow '{name}' accepts tipos {unsupported} outside "
+                    f"extraction.supported_tipos ({sorted(supported)})"
+                )
+        return self
 
 
 class PortalMatch(BaseModel):
