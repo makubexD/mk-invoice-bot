@@ -17,6 +17,18 @@ Everything works the same with Podman and Docker. The script picks the engine fr
 - The Compose stack (`deploy/docker-compose.yml`) must be usable by the same user
   that runs the script.
 
+## OCR engine (D81)
+
+The bot reads every photo with Tesseract 5 and its Spanish model. The image
+installs the Debian packages `tesseract-ocr` and `tesseract-ocr-spa`; CI installs
+the same packages before pytest. On a development machine:
+
+```sh
+sudo apt install --no-install-recommends tesseract-ocr tesseract-ocr-spa
+tesseract --version                      # 5.x
+tesseract --list-langs | grep -x spa     # the Spanish model is present
+```
+
 ## Environment variables
 
 | Variable | Default | Purpose |

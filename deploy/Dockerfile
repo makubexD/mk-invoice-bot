@@ -23,6 +23,11 @@ WORKDIR /app
 RUN groupadd --gid 10001 bot \
     && useradd --uid 10001 --gid bot --create-home --shell /usr/sbin/nologin bot
 
+# OCR engine (D81): the image helper runs `tesseract` as a subprocess with the Spanish model.
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-spa \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 
