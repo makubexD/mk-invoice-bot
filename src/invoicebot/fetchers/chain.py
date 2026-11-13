@@ -7,15 +7,11 @@ the queue's ``run_after`` holds the actual time.
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
 from invoicebot.fetchers.base import FetchReason
-
-_DELAY = re.compile(r"(\d+)([mhd])")
-_MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
 
 
 @dataclass(frozen=True)
@@ -108,10 +104,19 @@ def _wait_or_none(
     return Wait(schedule[retries - 1], fetcher)
 
 
-def parse_delay(text: str) -> timedelta:
-    """Parse a portal's interval such as ``90m``, ``6h`` or ``2d``."""
-    match = _DELAY.fullmatch(text)
-    if match is None:
-        raise ValueError(f"invalid delay: {text!r}")
-    amount, unit = match.groups()
-    return timedelta(minutes=int(amount) * _MINUTES[unit])
+def retry_delay(
+    fetcher: str,
+    attempts: Sequence[Attempt],
+    schedule: Sequence[timedelta],
+) -> timedelta | None:
+    """Return the wait after this ``not_found_yet``, or ``None`` when retries are used up (D65).
+
+    ``n`` counts this fetcher's ``not_found_yet`` attempts so far, so the first one
+    waits ``schedule[0]``.
+    """
+    retries = sum(
+        1
+        for attempt in attempts
+        if attempt.fetcher == fetcher and attempt.reason is FetchReason.NOT_FOUND_YET
+    )
+    return schedule[retries] if retries < len(schedule) else None

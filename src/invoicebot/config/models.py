@@ -7,6 +7,8 @@ silently ignored.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
@@ -495,9 +497,26 @@ class PortalDownloads(BaseModel):
     pdf: str | None = None
 
 
+_DELAY = re.compile(r"(\d+)([mhd])")
+_MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
+
+
+def parse_delay(text: str) -> timedelta:
+    """Parse a portal's interval such as ``90m``, ``6h`` or ``2d``."""
+    match = _DELAY.fullmatch(text)
+    if match is None:
+        raise ValueError(f"invalid delay: {text!r}")
+    amount, unit = match.groups()
+    return timedelta(minutes=int(amount) * _MINUTES[unit])
+
+
 #: D65: a portal's default "not found yet" retry delays, in order.
-DEFAULT_RETRY_SCHEDULE: tuple[str, ...] = ("1h", "6h", "24h", "72h")
-_RETRY_ENTRY = re.compile(r"\d+[mhd]")
+DEFAULT_RETRY_SCHEDULE: tuple[timedelta, ...] = (
+    timedelta(hours=1),
+    timedelta(hours=6),
+    timedelta(hours=24),
+    timedelta(hours=72),
+)
 
 
 class Portal(BaseModel):
@@ -521,17 +540,14 @@ class Portal(BaseModel):
     not_found: str | None = None
     tipo_labels: dict[str, str] = Field(default_factory=dict)
     allow_http: bool = False
-    retry_schedule: list[str] = Field(default_factory=lambda: list(DEFAULT_RETRY_SCHEDULE))
+    retry_schedule: tuple[timedelta, ...] = DEFAULT_RETRY_SCHEDULE
     notes: str = ""
 
-    @field_validator("retry_schedule")
+    @field_validator("retry_schedule", mode="before")
     @classmethod
-    def _retry_schedule_entries_are_delays(cls, value: list[str]) -> list[str]:
+    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
         """D65: every retry delay is written as ``<number><m|h|d>``."""
-        for entry in value:
-            if _RETRY_ENTRY.fullmatch(entry) is None:
-                raise ValueError(f"retry_schedule entry {entry!r} must match ^\\d+[mhd]$")
-        return value
+        return tuple(parse_delay(entry) for entry in value)
 
 
 class StoreDirectory(BaseModel):

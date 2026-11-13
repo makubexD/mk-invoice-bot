@@ -357,6 +357,30 @@ async def test_not_found_yet_schedules_one_retry_and_one_status_message(
     assert outbox == [(FETCH_WAITING.format(id=invoice_id), None)]
 
 
+async def test_not_found_yet_with_an_empty_retry_schedule_schedules_at_once_and_says_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D65: an empty retry_schedule enqueues the next job at once and sends no FETCH_WAITING message."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    directory = _directory()
+    portal = directory.portals[PORTAL_KEY].model_copy(update={"retry_schedule": ()})
+    directory = directory.model_copy(update={"portals": {PORTAL_KEY: portal}})
+    handler = make_fetch_handler(db_pool, _config(), directory, {"portal_registry": fetcher}, tmp_path)
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert attempts == [("portal_registry", PORTAL_KEY, False, "not_found_yet")]
+    assert len(jobs) == 1  # the next job is due at once, so the chain moves on
+    assert abs((jobs[0] - datetime.now(UTC)).total_seconds()) < 10
+    assert outbox == []
+
+
 async def test_second_not_found_yet_retries_in_6h_without_a_second_message(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

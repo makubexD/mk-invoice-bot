@@ -26,7 +26,7 @@ from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, Portal, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
-from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, parse_delay
+from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
@@ -186,8 +186,8 @@ async def _run(
     if not result.ok:
         # R-9.2: a failed fetch, a helper killed on timeout included, leaves nothing.
         shutil.rmtree(out_dir, ignore_errors=True)
-    delay = _next_delay(schedule_for(fetcher), _not_found_count(inputs.attempts, fetcher))
-    first_not_found = _not_found_count(inputs.attempts, None) == 0
+    delay = retry_delay(fetcher, inputs.attempts, schedule_for(fetcher))
+    first_not_found = not any(attempt.reason is FetchReason.NOT_FOUND_YET for attempt in inputs.attempts)
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
     async with inputs.pool.connection() as conn, conn.transaction():
         # Two runs of one job serialize on the job's row lock; the loser writes nothing (R-5.1).
@@ -226,7 +226,7 @@ async def _record_result(
     elif result.reason is FetchReason.NOT_FOUND_YET:
         run_after = None if delay is None else await _run_after(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
-        if first_not_found:
+        if first_not_found and delay is not None:
             await _notify(conn, inputs.head, None, FETCH_WAITING.format(id=inputs.job.invoice_id))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
@@ -305,23 +305,6 @@ def _with_required_docs(result: FetchResult, required_docs: Sequence[str]) -> Fe
     return FetchResult(FetchReason.MISSING_DOCS, (), result.portal_key)
 
 
-def _next_delay(schedule: Sequence[timedelta], previous: int) -> timedelta | None:
-    """Return the wait after ``previous`` earlier not-found-yet attempts of one fetcher (D65).
-
-    ``None`` when the schedule is used up: the next job runs at once and the chain moves on.
-    """
-    return schedule[previous] if previous < len(schedule) else None
-
-
-def _not_found_count(attempts: Sequence[Attempt], fetcher: str | None) -> int:
-    """Count not-found-yet attempts, for one fetcher or for the whole invoice (D65)."""
-    return sum(
-        1
-        for attempt in attempts
-        if attempt.reason is FetchReason.NOT_FOUND_YET and (fetcher is None or attempt.fetcher == fetcher)
-    )
-
-
 def _manual_message(reading: Reading, required_docs: Sequence[str], attempts: Sequence[Attempt]) -> str:
     """Return BR-F07's message for an invoice no fetcher could complete (BR-F07)."""
     return MESSAGES[RULE_EXHAUSTED].format(
@@ -353,17 +336,16 @@ def _reason_line(fetcher: str, reason: FetchReason) -> str:
 
 
 def _schedule_for(ruc_emisor: str, directory: StoreDirectory) -> Callable[[str], Sequence[timedelta]]:
-    """Return each fetcher's retry schedule, parsed from its config texts (D65)."""
+    """Return each fetcher's retry schedule as parsed delays (D65)."""
 
     def schedule(fetcher: str) -> Sequence[timedelta]:
-        entries = _schedule_entries(fetcher, ruc_emisor, directory)
-        return tuple(parse_delay(entry) for entry in entries)
+        return _schedule_entries(fetcher, ruc_emisor, directory)
 
     return schedule
 
 
-def _schedule_entries(fetcher: str, ruc_emisor: str, directory: StoreDirectory) -> Sequence[str]:
-    """Return the delay texts of a fetcher: its portal's schedule or the D65 default (D65)."""
+def _schedule_entries(fetcher: str, ruc_emisor: str, directory: StoreDirectory) -> Sequence[timedelta]:
+    """Return the delays of a fetcher: its portal's schedule or the D65 default (D65)."""
     if fetcher != PORTAL_FETCHER:
         return DEFAULT_RETRY_SCHEDULE
     portal = _portal_for(ruc_emisor, directory)

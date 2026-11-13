@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -10,7 +11,7 @@ import yaml
 from pydantic import ValidationError
 
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import CalendarField, Config, PickField, Portal
+from invoicebot.config.models import CalendarField, Config, PickField, Portal, parse_delay
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -307,7 +308,23 @@ def test_portal_without_retry_schedule_gets_the_default(tmp_path: Path) -> None:
 
     portal = load_directory(config_dir).portals["example"]
 
-    assert portal.retry_schedule == ["1h", "6h", "24h", "72h"]
+    assert portal.retry_schedule == (
+        timedelta(hours=1),
+        timedelta(hours=6),
+        timedelta(hours=24),
+        timedelta(hours=72),
+    )
+
+
+def test_parse_delay_minutes() -> None:
+    """D65: a schedule entry such as 90m parses to a timedelta."""
+    assert parse_delay("90m") == timedelta(minutes=90)
+
+
+def test_parse_delay_rejects_weeks() -> None:
+    """D65: an unsupported unit raises ValueError naming the text."""
+    with pytest.raises(ValueError, match="2w"):
+        parse_delay("2w")
 
 
 def test_retry_schedule_with_an_unknown_unit_fails() -> None:

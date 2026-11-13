@@ -14,7 +14,7 @@ from invoicebot.fetchers.chain import (
     Run,
     Wait,
     decide,
-    parse_delay,
+    retry_delay,
 )
 
 FETCHER = "portal_registry"
@@ -59,15 +59,21 @@ def test_empty_order_is_exhausted() -> None:
     assert decide([], REGISTERED, [], schedule_for) == Exhausted()
 
 
-def test_parse_delay_minutes() -> None:
-    """D65: a schedule entry such as 90m parses to a timedelta."""
-    assert parse_delay("90m") == timedelta(minutes=90)
+def test_retry_delay_first_not_found_is_the_first_wait() -> None:
+    """D65: the first not-found-yet waits ``schedule[0]``."""
+    assert retry_delay(FETCHER, [], schedule_for(FETCHER)) == timedelta(hours=1)
 
 
-def test_parse_delay_rejects_weeks() -> None:
-    """D65: an unsupported unit raises ValueError naming the text."""
-    with pytest.raises(ValueError, match="2w"):
-        parse_delay("2w")
+def test_retry_delay_after_one_not_found_is_the_second_wait() -> None:
+    """D65: after one not-found-yet the next wait is ``schedule[1]``."""
+    history = attempts(FetchReason.NOT_FOUND_YET, 1)
+    assert retry_delay(FETCHER, history, schedule_for(FETCHER)) == timedelta(hours=6)
+
+
+def test_retry_delay_used_up_is_none() -> None:
+    """D65: a used-up schedule has no delay."""
+    history = attempts(FetchReason.NOT_FOUND_YET, 2)
+    assert retry_delay(FETCHER, history, schedule_for(FETCHER)) is None
 
 
 def test_fetch_result_ok_only_for_ok_reason() -> None:
