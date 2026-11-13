@@ -16,9 +16,7 @@ BR-S02's ``{state_desc}``.
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
     "BR-R02": "➡️ {flow.label}",
-    "BR-R03": (
-        "Este comprobante está a nombre de {buyer_desc}. ¿En qué flujo lo registro?"
-    ),
+    "BR-R03": ("Este comprobante está a nombre de {buyer_desc}. ¿En qué flujo lo registro?"),
     "BR-R04": (
         "No pude leer bien el RUC del cliente ({num_doc_adq}?). Lo registro en {flow.label}. ¿Correcto?"
     ),
