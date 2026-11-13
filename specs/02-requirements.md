@@ -52,9 +52,12 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-1.11 (M)** THE SYSTEM SHALL enforce media limits before processing: reject images whose header declares more than 40 megapixels **before decoding**; apply byte caps per media type (`limits.media` in config, never above the channel's own limit, e.g. Telegram `getFile` 20 MB); cap zip entry count and compression ratio. A rejected file gets BR-E07. IF the worker dies twice on the same job, THE SYSTEM SHALL move the invoice to `FAILED` (crash-loop guard, BR-S03).
 
 ## R-2 · Extraction (deterministic first)
-- **R-2.1 (M)** THE SYSTEM SHALL try QR decoding first, with a cascade of zxing-cpp → WeChat QR → pyzbar on preprocessed variants (original, grayscale, upscaled, sharpened, rotated 90°/180°/270°), stopping at the first valid SUNAT payload.
+- **R-2.1 (M)** THE SYSTEM SHALL try QR decoding on every photo, alongside OCR (R-2.3, D81), with a cascade of zxing-cpp → WeChat QR → pyzbar on preprocessed variants (original, grayscale, upscaled, sharpened, rotated 90°/180°/270°), stopping at the first valid SUNAT payload.
 - **R-2.2 (M)** WHEN a SUNAT QR is decoded, THE SYSTEM SHALL extract: `ruc_emisor`, `tipo` (01/03/07/08), `serie`, `numero`, `igv`, `total`, `fecha_emision`, `tipo_doc_adq`, `num_doc_adq`. A payload with a wrong or empty document-type or buyer-type part is repaired, not rejected (D79).
-- **R-2.3 (M)** IF no valid QR is found, THE SYSTEM SHALL run OCR (OpenCV preprocessing + Tesseract `spa`) and a regex/keyword parser that extracts the same fields plus `razon_social` (header text).
+- **R-2.3 (M)** THE SYSTEM SHALL run OCR (OpenCV preprocessing + Tesseract `spa`) on every photo, whether or not a QR decodes, and a regex/keyword parser that extracts the same fields plus `razon_social` (header text). The OCR and QR readings are merged (D81):
+  - a field both give with the same value gets confidence 1.0;
+  - when they disagree, the OCR value stays and the field is flagged `conflict`;
+  - a field only one of them gives comes from that one.
 - **R-2.4 (M)** THE SYSTEM SHALL validate:
   - the RUC check digit (mod 11);
   - the serie pattern (`[FBE][A-Z0-9]{3}` or 4 digits);
@@ -63,7 +66,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   - `IGV ≈ base × rate` (tolerance S/ 0.05) for a rate in the configured list `extraction.igv_rates` (today 0.18, plus the reduced restaurant rates 0.10 and 0.105 under Ley 31556, which change by year; all three appear in the 2026 invoices). A miss marks `igv` as `needs_review`; it never rejects the invoice.
   - Outcomes: a bad RUC check digit → BR-E02; a date out of bounds → BR-E03; a `tipo` outside `extraction.supported_tipos` → BR-E05; any other failed check, or a required field below `review_threshold` → `CONFIRMING` with BR-E09.
 - **R-2.5 (M)** THE SYSTEM SHALL resolve `razon_social` and `estado/condición` of the issuer from the local padrón RUC. OCR text is the fallback.
-- **R-2.6 (M)** Each field SHALL carry `source ∈ {qr, xml, ocr, padron, llm, user}` and `confidence ∈ [0, 1]`.
+- **R-2.6 (M)** Each field SHALL carry `source ∈ {qr, xml, ocr, padron, llm, user}` and `confidence ∈ [0, 1]`. It MAY also carry a flag: `inferred` for a value the reader deduced (D79), or `conflict` for an OCR value the QR contradicts (D81). Both flags are shown on the summary's warning line (D80).
 - **R-2.7 (S)** WHEN the official XML is obtained, THE SYSTEM SHALL read it with the hardened parser (R-2.12) for two things only: to check it is the right invoice (R-5.6), and to take its amounts (base, IGV, service charge, ICBPER, discounts, total) as authoritative. Any discrepancy from the photo data is reported in the completion message. IF the XML can't be read, the photo's values are kept and marked `needs_review` (D57).
 - **R-2.8 (S)** IF the QR contains a URL instead of data, THE SYSTEM SHALL store it as `document_url` for the fetcher.
 - **R-2.10 (S)** THE SYSTEM SHALL capture URLs printed on the receipt (OCR regex such as `consulte .* en (\S+)`) as `printed_urls`. They are hints for the gap issue (R-11.5, R-11.12), not fetch targets.
@@ -177,7 +180,7 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
 
 ## R-9 · Non-functional
 - **R-9.1 (M)** Memory: steady state ≤ 350 MB RSS, peak ≤ 800 MB for the `app` container (Postgres excluded, ≤ 300 MB on its own), verified by a load test of 10 queued invoices.
-- **R-9.2 (M)** Latency: acknowledgement in < 5 s. Summary (QR path) in < 20 s, (OCR path) in < 60 s, on 1 vCPU.
+- **R-9.2 (M)** Latency: acknowledgement in < 5 s. Summary in < 60 s, on 1 vCPU. There is one budget, because every photo runs OCR (D81).
 - **R-9.3 (M)** WhatsApp messages per invoice: ≤ 3 in the happy path (acknowledgement, summary, completion; for flow B the completion is BR-D07, plus the one-line reply to the [Ya lo envié] tap), thanks to auto-routing; ≤ 5 with a gap question. All of them are service messages inside the 24 h window, which are free up to 1,000 per month per number. Templates (R-1.10) are charged per message, so they are used only outside the window.
 - **R-9.4 (M)** Durability: a restart in any state resumes or reports the job. There are no lost invoices.
 - **R-9.5 (M)** Observability: THE SYSTEM SHALL write one JSON object per log line with at least `ts`, `level`, `event`, `invoice_id`, `job_id`, `step`, `rule_id` and `duration_ms`, and SHALL record the duration of every pipeline step per job, so `/estado` and the logs show where time went. `/health` is defined in R-9.14. Secrets are never logged (R-9.16).
