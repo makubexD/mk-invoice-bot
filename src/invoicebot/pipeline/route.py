@@ -20,7 +20,7 @@ from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
 from invoicebot.extract.validate import check_date, doubtful_fields
-from invoicebot.pipeline.extract import ROUTE_STEP
+from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
@@ -54,7 +54,6 @@ logger = logging.getLogger(__name__)
 ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; the ``fetch`` phase adds its next job.
 ROUTED_STATE = "FETCHING_DOCS"
-CANCELLED_STATE = "CANCELLED"
 DATE_FIELD = "fecha_emision"
 
 
@@ -164,25 +163,26 @@ def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:
         return MESSAGES[rule_id].format(flow=flow)
     if rule_id == RULE_WRONG_TIPO and flow is not None:
         return MESSAGES[rule_id].format(
-            tipo_desc=tipo_phrase(_value(reading, "tipo")),
+            tipo_desc=tipo_phrase(reading.value("tipo") or ""),
             flow=flow,
             accepted_desc=tipos_desc(flow.accepted_tipos),
         )
-    buyer = buyer_desc(_value(reading, "tipo_doc_adq"), _value(reading, "num_doc_adq"))
+    buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
     return MESSAGES[RULE_UNMATCHED].format(buyer_desc=buyer)
 
 
 def _summary(reading: Reading, flow: Flow, rule_id: str, today: date, extraction: Extraction) -> str:
     """Return the routed-invoice summary (spec 06 §1 "Summary message", D79, D80)."""
-    fecha = _fecha(reading)
+    fecha = reading.fecha()
+    tipo = reading.value("tipo") or ""
     lines = [
         SUMMARY.format(
-            tipo_desc=TIPO_DESC.get(_value(reading, "tipo"), _value(reading, "tipo")),
-            serie=_value(reading, "serie"),
-            numero=_value(reading, "numero"),
-            fecha=_value(reading, DATE_FIELD) if fecha is None else fecha.strftime(SUMMARY_DATE_FORMAT),
-            ruc_emisor=_value(reading, "ruc_emisor"),
-            total=_value(reading, "total"),
+            tipo_desc=TIPO_DESC.get(tipo, tipo),
+            serie=reading.value("serie") or "",
+            numero=reading.value("numero") or "",
+            fecha=(reading.value(DATE_FIELD) or "") if fecha is None else fecha.strftime(SUMMARY_DATE_FORMAT),
+            ruc_emisor=reading.value("ruc_emisor") or "",
+            total=reading.value("total") or "",
             flow_line=MESSAGES[rule_id].format(flow=flow),
         )
     ]
@@ -196,17 +196,3 @@ def _summary(reading: Reading, flow: Flow, rule_id: str, today: date, extraction
     if doubtful:
         lines.append(SUMMARY_REVIEW.format(fields_desc=fields_desc(doubtful)))
     return "\n".join(lines)
-
-
-def _value(reading: Reading, name: str) -> str:
-    """Return the reading's value for ``name``, or an empty string when it is absent."""
-    field = reading.fields.get(name)
-    return "" if field is None else field.value
-
-
-def _fecha(reading: Reading) -> date | None:
-    """Return the issuing date, or None when it is missing or not ISO."""
-    try:
-        return date.fromisoformat(_value(reading, DATE_FIELD))
-    except ValueError:
-        return None

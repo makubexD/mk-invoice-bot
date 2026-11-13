@@ -11,15 +11,20 @@ import re
 from collections.abc import Collection, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Final, Literal
 
-from invoicebot.extract.fields import REQUIRED, Reading, finite_decimal
+from invoicebot.extract.fields import REQUIRED, Reading
 
 TOLERANCE = Decimal("0.05")
 ZERO = Decimal("0")
 RUC_WEIGHTS = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
 SERIE_PATTERN = re.compile(r"(?:[FBE][A-Z0-9]{3}|[0-9]{4})")
 CHARGE_FIELDS = ("service_charge", "icbper")
+
+#: The issuer RUC fails its check digit (BR-E02).
+RULE_BAD_RUC: Final = "BR-E02"
+#: The document type is not supported (BR-E05).
+RULE_UNSUPPORTED_TIPO: Final = "BR-E05"
 
 
 def is_valid_ruc(text: str) -> bool:
@@ -37,7 +42,7 @@ def is_valid_ruc(text: str) -> bool:
 
 def check_issuer(ruc: str) -> Literal["BR-E02"] | None:
     """Return ``BR-E02`` when the issuer RUC fails its check digit (BR-E02)."""
-    return None if is_valid_ruc(ruc) else "BR-E02"
+    return None if is_valid_ruc(ruc) else RULE_BAD_RUC
 
 
 def check_serie(serie: str) -> bool:
@@ -54,7 +59,7 @@ def check_date(fecha: date, today: date, max_age_days: int) -> Literal["BR-E03"]
 
 def check_tipo(tipo: str, supported: Collection[str]) -> Literal["BR-E05"] | None:
     """Return ``BR-E05`` when ``tipo`` is outside ``supported`` (BR-E05)."""
-    return None if tipo in supported else "BR-E05"
+    return None if tipo in supported else RULE_UNSUPPORTED_TIPO
 
 
 def check_totals(
@@ -115,14 +120,14 @@ def _failed_checks(reading: Reading, rates: Sequence[Decimal]) -> list[str]:
     if serie is not None and not check_serie(serie.value):
         failed.append("serie")
 
-    base = _amount(reading, "base")
-    igv = _amount(reading, "igv")
-    total = _amount(reading, "total")
+    base = reading.amount("base")
+    igv = reading.amount("igv")
+    total = reading.amount("total")
     if total is None and "total" in reading.fields:
         failed.append("total")
     elif total is not None:
         charges = _sum_amounts(reading, CHARGE_FIELDS)
-        discounts = _amount(reading, "discounts")
+        discounts = reading.amount("discounts")
         if not check_totals(total, base, igv, charges, discounts):
             failed.append("total")
 
@@ -131,13 +136,7 @@ def _failed_checks(reading: Reading, rates: Sequence[Decimal]) -> list[str]:
     return failed
 
 
-def _amount(reading: Reading, name: str) -> Decimal | None:
-    """Return the decimal value of ``name``, or ``None`` when absent, unparseable or not finite."""
-    field = reading.fields.get(name)
-    return finite_decimal(field.value) if field is not None else None
-
-
 def _sum_amounts(reading: Reading, names: Sequence[str]) -> Decimal | None:
     """Return the sum of the present amounts in ``names``, or ``None`` when none is present."""
-    present = [amount for name in names if (amount := _amount(reading, name)) is not None]
+    present = [amount for name in names if (amount := reading.amount(name)) is not None]
     return sum(present, ZERO) if present else None

@@ -13,7 +13,7 @@ import re
 from datetime import date
 from decimal import Decimal
 
-from invoicebot.extract.fields import Field, Reading, finite_decimal
+from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
 from invoicebot.extract.validate import is_valid_ruc
 
 PIPE = "|"
@@ -21,7 +21,6 @@ URL_PREFIXES = ("http://", "https://")
 REQUIRED_PART_COUNT = 7
 TIPO_DOC_ADQ_INDEX = 7
 NUM_DOC_ADQ_INDEX = 8
-FULL_CONFIDENCE = 1.0
 INFERRED_CONFIDENCE = 0.9
 RUC_LENGTH = 11
 DNI_LENGTH = 8

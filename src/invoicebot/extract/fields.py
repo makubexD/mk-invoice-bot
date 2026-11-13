@@ -9,12 +9,16 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast, get_args
 
 Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
 
 REQUIRED = ("ruc_emisor", "tipo", "serie", "numero", "fecha_emision", "total")
+
+#: Confidence of a value a reader took directly from the document (R-2.6).
+FULL_CONFIDENCE = 1.0
 
 #: The shapes the JSON form of a reading has; both are closed (R-2.6).
 _READING_KEYS = frozenset({"fields", "document_url"})
@@ -41,6 +45,26 @@ class Reading:
     def missing_required(self) -> tuple[str, ...]:
         """Return the required field names (R-2.13) this reading does not carry, in order."""
         return tuple(name for name in REQUIRED if name not in self.fields)
+
+    def value(self, name: str) -> str | None:
+        """Return the text of field ``name``, or ``None`` when it is absent."""
+        field = self.fields.get(name)
+        return None if field is None else field.value
+
+    def amount(self, name: str) -> Decimal | None:
+        """Return field ``name`` as a finite decimal, or ``None`` when absent or not finite (R-2.6)."""
+        value = self.value(name)
+        return None if value is None else finite_decimal(value)
+
+    def fecha(self) -> date | None:
+        """Return ``fecha_emision`` as a date, or ``None`` when missing or not ISO (D80)."""
+        value = self.value("fecha_emision")
+        if value is None:
+            return None
+        try:
+            return date.fromisoformat(value)
+        except ValueError:
+            return None
 
 
 def reading_to_json(reading: Reading) -> dict[str, Any]:

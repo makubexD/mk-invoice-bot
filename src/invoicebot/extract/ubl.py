@@ -8,17 +8,15 @@ it. Elements are found by local name, so the namespace prefix does not matter.
 
 from __future__ import annotations
 
-from decimal import Decimal
 from enum import StrEnum
 
 from lxml import etree  # parser hardened in parse_invoice_xml (R-2.12)
 
-from invoicebot.extract.fields import Field, Reading, finite_decimal
+from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
 
 MAX_XML_BYTES = 2 * 1024 * 1024
 DOCTYPE_MARKER = b"<!doctype"
 INVOICE_ROOT = "Invoice"
-FULL_CONFIDENCE = 1.0
 AMOUNT_ELEMENTS = (
     ("base", "LineExtensionAmount"),
     ("service_charge", "ChargeTotalAmount"),
@@ -80,18 +78,18 @@ def matches_invoice(xml: Reading, invoice: Reading) -> bool:
     Compares the issuer RUC, the serie, the numero as a number and the total. A reading
     missing any of those fields does not match.
     """
-    xml_ruc = _value(xml, "ruc_emisor")
-    if xml_ruc is None or xml_ruc != _value(invoice, "ruc_emisor"):
+    xml_ruc = xml.value("ruc_emisor")
+    if xml_ruc is None or xml_ruc != invoice.value("ruc_emisor"):
         return False
-    xml_serie = _value(xml, "serie")
-    if xml_serie is None or xml_serie != _value(invoice, "serie"):
+    xml_serie = xml.value("serie")
+    if xml_serie is None or xml_serie != invoice.value("serie"):
         return False
-    xml_number = _integer(_value(xml, "numero"))
-    invoice_number = _integer(_value(invoice, "numero"))
+    xml_number = _integer(xml.value("numero"))
+    invoice_number = _integer(invoice.value("numero"))
     if xml_number is None or invoice_number is None or xml_number != invoice_number:
         return False
-    xml_total = _amount(_value(xml, "total"))
-    invoice_total = _amount(_value(invoice, "total"))
+    xml_total = xml.amount("total")
+    invoice_total = invoice.amount("total")
     return xml_total is not None and xml_total == invoice_total
 
 
@@ -201,12 +199,6 @@ def _attribute(element: etree._Element, name: str) -> str | None:
     return value.strip() or None
 
 
-def _value(reading: Reading, name: str) -> str | None:
-    """Return the text of the field ``name`` in ``reading``, or ``None`` when absent."""
-    field = reading.fields.get(name)
-    return field.value if field is not None else None
-
-
 def _integer(value: str | None) -> int | None:
     """Return ``value`` as an integer, or ``None`` when it is absent or not a number."""
     if value is None:
@@ -215,8 +207,3 @@ def _integer(value: str | None) -> int | None:
         return int(value)
     except ValueError:
         return None
-
-
-def _amount(value: str | None) -> Decimal | None:
-    """Return ``value`` as a finite decimal, or ``None`` when it is absent or invalid."""
-    return finite_decimal(value) if value is not None else None

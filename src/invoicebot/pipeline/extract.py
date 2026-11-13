@@ -23,7 +23,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from invoicebot.channels.base import AttachmentKind, ChannelName, OutboundMessage
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
-from invoicebot.extract.validate import check_issuer, check_tipo
+from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue
@@ -44,17 +44,15 @@ ROUTE_STEP = "route"
 PHOTO_KIND: AttachmentKind = "photo"
 #: States in which the handler acts; any other state is left untouched (R-9.4).
 ACTIVE_STATES = frozenset({"RECEIVED", "EXTRACTING"})
+#: The state of an invoice the pipeline stops processing.
+CANCELLED_STATE = "CANCELLED"
 #: No QR, an unreadable photo or a required field missing (BR-E01).
 RULE_UNREADABLE: RuleId = "BR-E01"
-#: The issuer RUC fails its check digit (BR-E02).
-RULE_BAD_RUC: RuleId = "BR-E02"
-#: The document type is not supported (BR-E05).
-RULE_UNSUPPORTED_TIPO: RuleId = "BR-E05"
 #: State each failure rule leaves the invoice in (spec 06).
 FAILURE_STATE: dict[RuleId, str] = {
     RULE_UNREADABLE: "EXTRACT_FAILED",
     RULE_BAD_RUC: "EXTRACT_FAILED",
-    RULE_UNSUPPORTED_TIPO: "CANCELLED",
+    RULE_UNSUPPORTED_TIPO: CANCELLED_STATE,
 }
 
 
@@ -229,16 +227,11 @@ async def _finish(
 def _message(rule_id: RuleId, reading: Reading | None) -> str:
     """Return the rule's es-PE message, filling the value BR-E02 and BR-E05 name (spec 06)."""
     if rule_id == RULE_BAD_RUC:
-        return MESSAGES[rule_id].format(ruc=_field_value(reading, "ruc_emisor"))
+        return MESSAGES[rule_id].format(ruc="" if reading is None else reading.value("ruc_emisor") or "")
     if rule_id == RULE_UNSUPPORTED_TIPO:
-        return MESSAGES[rule_id].format(tipo_desc=tipo_phrase(_field_value(reading, "tipo")))
+        tipo = "" if reading is None else reading.value("tipo") or ""
+        return MESSAGES[rule_id].format(tipo_desc=tipo_phrase(tipo))
     return MESSAGES[rule_id]
-
-
-def _field_value(reading: Reading | None, name: str) -> str:
-    """Return the reading's value for ``name``, or an empty string when it is absent."""
-    field = None if reading is None else reading.fields.get(name)
-    return "" if field is None else field.value
 
 
 def _log_outcome(
