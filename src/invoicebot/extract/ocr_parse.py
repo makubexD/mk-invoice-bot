@@ -1,24 +1,21 @@
 """Read invoice fields from OCR text with keyword-anchored rules (S3.6, R-2.3, R-2.10, R-2.14).
 
-The rules live in ``config/parsing_rules.yaml`` and are compiled once when the file loads. Each
-field is read from the first matching rule, its confidence is the mean confidence of the OCR
-words its match covers, and ``source`` is ``"ocr"``. Printed URLs ride beside the reading because
-:class:`Reading` has no slot for them. The OCR text and the printed URLs are never logged (R-9.16).
+The rules live in ``config/parsing_rules.yaml`` and are loaded and compiled once by
+:mod:`invoicebot.extract.parsing_rules`. Each field is read from the first matching rule, its
+confidence is the mean confidence of the OCR words its match covers, and ``source`` is ``"ocr"``.
+Printed URLs ride beside the reading because :class:`Reading` has no slot for them. The OCR text
+and the printed URLs are never logged (R-9.16).
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Annotated, Self
 from urllib.parse import urlsplit, urlunsplit
-
-import yaml
-from pydantic import BaseModel, BeforeValidator, ConfigDict, PrivateAttr, model_validator
 
 from invoicebot.extract.fields import Field, Flag, Reading
 from invoicebot.extract.ocr import OcrText
+from invoicebot.extract.parsing_rules import ParsingRules
 from invoicebot.extract.qr_payload import (
     DOCUMENT_TYPE_BY_SERIE_LETTER,
     parse_amount,
@@ -41,77 +38,6 @@ MAX_PRINTED_URLS = 3
 NO_CONFIDENCE = 0.0
 
 
-def _compile_rule(value: object, required_groups: tuple[str, ...]) -> re.Pattern[str]:
-    """Compile one rule pattern, raising ValueError when it breaks or lacks a named group."""
-    if not isinstance(value, str):
-        raise ValueError("a parsing rule pattern must be a string")
-    try:
-        compiled = re.compile(value, re.IGNORECASE)
-    except re.error as exc:
-        raise ValueError(f"parsing rule pattern {value!r} does not compile: {exc}") from exc
-    missing = [group for group in required_groups if group not in compiled.groupindex]
-    if missing:
-        raise ValueError(f"parsing rule pattern {value!r} lacks named group(s) {', '.join(missing)}")
-    return compiled
-
-
-def _compile_value(value: object) -> re.Pattern[str]:
-    """Compile a pattern whose ``value`` group carries the extracted text."""
-    return _compile_rule(value, ("value",))
-
-
-def _compile_keyword(value: object) -> re.Pattern[str]:
-    """Compile a keyword pattern, which captures nothing."""
-    return _compile_rule(value, ())
-
-
-def _compile_serie_numero(value: object) -> re.Pattern[str]:
-    """Compile the serie-and-number pattern, which needs both its named groups."""
-    return _compile_rule(value, ("serie", "numero"))
-
-
-ValuePattern = Annotated[re.Pattern[str], BeforeValidator(_compile_value)]
-KeywordPattern = Annotated[re.Pattern[str], BeforeValidator(_compile_keyword)]
-SerieNumeroPattern = Annotated[re.Pattern[str], BeforeValidator(_compile_serie_numero)]
-
-
-class ParsingRules(BaseModel):
-    """The validated parsing rules, with every pattern compiled at load time (S3.6)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    ruc: tuple[ValuePattern, ...]
-    tipo: dict[str, tuple[KeywordPattern, ...]]
-    serie_numero: SerieNumeroPattern
-    date: ValuePattern
-    amount_gap: KeywordPattern
-    amount_value: ValuePattern
-    amounts: dict[str, tuple[KeywordPattern, ...]]
-    printed_url: ValuePattern
-
-    _amount_patterns: dict[str, tuple[re.Pattern[str], ...]] = PrivateAttr()
-
-    @model_validator(mode="after")
-    def _build_amount_patterns(self) -> Self:
-        """Join each amount keyword with the gap and value rules, once at load time."""
-        combined = {
-            name: tuple(
-                _compile_rule(
-                    f"(?:{keyword.pattern}){self.amount_gap.pattern}(?:{self.amount_value.pattern})", ()
-                )
-                for keyword in keywords
-            )
-            for name, keywords in self.amounts.items()
-        }
-        object.__setattr__(self, "_amount_patterns", combined)
-        return self
-
-    @property
-    def amount_patterns(self) -> dict[str, tuple[re.Pattern[str], ...]]:
-        """Return the compiled keyword-gap-value patterns per amount field, in file order."""
-        return self._amount_patterns
-
-
 @dataclass(frozen=True)
 class OcrReading:
     """What the OCR reader produced: the reading and the URLs printed on the document."""
@@ -127,14 +53,6 @@ class _WordSpan:
     start: int
     end: int
     confidence: float
-
-
-def load_rules(path: Path) -> ParsingRules:
-    """Read and validate the parsing-rule file; raise ValueError when it is not usable (S3.6)."""
-    document = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
-    if not isinstance(document, dict):
-        raise ValueError(f"parsing rules root must be a mapping, got {type(document).__name__}")
-    return ParsingRules.model_validate(document)
 
 
 def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:

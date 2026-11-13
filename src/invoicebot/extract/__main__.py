@@ -28,7 +28,8 @@ from invoicebot.extract.fields import reading_to_json
 from invoicebot.extract.image import ImageUnreadable, load_gray
 from invoicebot.extract.merge import merge
 from invoicebot.extract.ocr import preprocess, read_text
-from invoicebot.extract.ocr_parse import load_rules, parse_ocr
+from invoicebot.extract.ocr_parse import parse_ocr
+from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.extract.qr import read_invoice_qr
 
 #: Exit code for a missing file or a bad invocation; the handler retries these (R-9.4).

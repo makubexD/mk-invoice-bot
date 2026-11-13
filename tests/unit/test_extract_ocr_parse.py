@@ -9,7 +9,8 @@ import pytest
 import yaml
 
 from invoicebot.extract.ocr import OcrText, OcrWord
-from invoicebot.extract.ocr_parse import OcrReading, ParsingRules, load_rules, parse_ocr
+from invoicebot.extract.ocr_parse import OcrReading, parse_ocr
+from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 
 ROOT = Path(__file__).resolve().parents[2]
 RULES_PATH = ROOT / "config" / "parsing_rules.yaml"
