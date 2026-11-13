@@ -10,10 +10,10 @@ from __future__ import annotations
 import re
 from collections.abc import Collection, Sequence
 from datetime import date, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Literal
 
-from invoicebot.extract.fields import REQUIRED, Reading
+from invoicebot.extract.fields import REQUIRED, Reading, finite_decimal
 
 TOLERANCE = Decimal("0.05")
 ZERO = Decimal("0")
@@ -132,18 +132,9 @@ def _failed_checks(reading: Reading, rates: Sequence[Decimal]) -> list[str]:
 
 
 def _amount(reading: Reading, name: str) -> Decimal | None:
-    """Return the decimal value of ``name``, or ``None`` when absent, unparseable or not finite.
-
-    The text is untrusted: ``NaN`` and ``Infinity`` parse as ``Decimal`` but raise on comparison.
-    """
+    """Return the decimal value of ``name``, or ``None`` when absent, unparseable or not finite."""
     field = reading.fields.get(name)
-    if field is None:
-        return None
-    try:
-        amount = Decimal(field.value)
-    except InvalidOperation:
-        return None
-    return amount if amount.is_finite() else None
+    return finite_decimal(field.value) if field is not None else None
 
 
 def _sum_amounts(reading: Reading, names: Sequence[str]) -> Decimal | None:

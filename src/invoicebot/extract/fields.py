@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
@@ -34,3 +35,16 @@ class Reading:
     def missing_required(self) -> tuple[str, ...]:
         """Return the required field names (R-2.13) this reading does not carry, in order."""
         return tuple(name for name in REQUIRED if name not in self.fields)
+
+
+def finite_decimal(text: str) -> Decimal | None:
+    """Return ``text`` as a finite ``Decimal``, or ``None`` when it is not one.
+
+    Extracted text is untrusted: ``NaN`` and ``Infinity`` parse as ``Decimal`` but raise on
+    comparison, so every reader and validator parses amounts through this one function.
+    """
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+    return amount if amount.is_finite() else None

@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import re
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 
-from invoicebot.extract.fields import Field, Reading
+from invoicebot.extract.fields import Field, Reading, finite_decimal
 from invoicebot.extract.validate import is_valid_ruc
 
 PIPE = "|"
@@ -136,8 +136,4 @@ def _parse_date(text: str) -> str | None:
 
 def _parse_amount(text: str) -> Decimal | None:
     """Return ``text`` as a finite decimal, accepting a comma or a dot, or ``None``."""
-    try:
-        amount = Decimal(text.replace(",", "."))
-    except InvalidOperation:
-        return None
-    return amount if amount.is_finite() else None
+    return finite_decimal(text.replace(",", "."))
