@@ -75,9 +75,9 @@ VALID_PAYLOADS = [
         id="spaces-around-parts",
     ),
     pytest.param(
-        f"{SYNTHETIC_RUC}|01|F001|00015160|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}",
-        _fields({"numero": "00015160"}),
-        id="zero-padded-numero-kept",
+        f"{SYNTHETIC_RUC}|01|F001|00000123|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}",
+        _fields({"numero": "123"}),
+        id="zero-padded-numero-stripped",
     ),
     pytest.param(
         f"{SYNTHETIC_RUC}|03|B001|15160|7.36|49.90|2026-11-13|1|{DNI}",
@@ -215,6 +215,57 @@ def test_parse_qr_payload_maps_parts_by_position(
     assert all(field.source == "qr" for field in reading.fields.values())
 
 
+def test_inferred_tipo_carries_the_inferred_flag() -> None:
+    """D79: a tipo inferred from the serie letter is flagged inferred."""
+    reading = parse_qr_payload(f"{SYNTHETIC_RUC}|6|F001|15160|7.36|49.90|2026-11-13")
+
+    assert reading is not None
+    assert reading.fields["tipo"].flag == "inferred"
+
+
+def test_parse_qr_payload_drops_the_time_from_the_date() -> None:
+    """D79: a date part followed by a time keeps only the date."""
+    reading = parse_qr_payload(
+        f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-01-05 13:45:00|6|{SYNTHETIC_RUC}"
+    )
+
+    assert reading is not None
+    assert reading.fields["fecha_emision"].value == "2026-01-05"
+
+
+def test_parse_qr_payload_reads_a_ruc_after_a_label() -> None:
+    """D79: a short non-numeric label and `` - `` before the issuer RUC are dropped."""
+    reading = parse_qr_payload(f"XXX - {SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}")
+
+    assert reading is not None
+    assert reading.fields["ruc_emisor"].value == SYNTHETIC_RUC
+    assert reading.fields["ruc_emisor"].confidence == FULL
+
+
+@pytest.mark.parametrize(
+    ("word", "number", "code"),
+    [
+        ("RUC", DNI, "6"),
+        ("DNI", SYNTHETIC_RUC, "1"),
+    ],
+)
+def test_parse_qr_payload_infers_buyer_type_from_a_word(word: str, number: str, code: str) -> None:
+    """D79: a buyer type written as ``RUC`` or ``DNI`` becomes its code, flagged inferred."""
+    reading = parse_qr_payload(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|{word}|{number}")
+
+    assert reading is not None
+    field = reading.fields["tipo_doc_adq"]
+    assert (field.value, field.confidence, field.flag) == (code, INFERRED, "inferred")
+
+
+def test_parse_qr_payload_keeps_a_digit_buyer_type_unflagged() -> None:
+    """D79: a buyer type given as digits stays unflagged."""
+    reading = parse_qr_payload(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13|6|{SYNTHETIC_RUC}")
+
+    assert reading is not None
+    assert reading.fields["tipo_doc_adq"].flag is None
+
+
 @pytest.mark.parametrize(
     ("payload", "expected_url"),
     [
@@ -240,6 +291,14 @@ BROKEN_PAYLOADS = [
     pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160|7.36|49.90", id="six-parts"),
     pytest.param("2000000000A|01|F001|15160|7.36|49.90|2026-11-13", id="letters-in-ruc"),
     pytest.param("2000000000|01|F001|15160|7.36|49.90|2026-11-13", id="short-ruc"),
+    pytest.param(
+        f"{'X' * 20} - {SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13",
+        id="long-label-before-ruc",
+    ),
+    pytest.param(
+        f"XX1 - {SYNTHETIC_RUC}|01|F001|15160|7.36|49.90|2026-11-13",
+        id="digit-in-label-before-ruc",
+    ),
     pytest.param(f"{SYNTHETIC_RUC}|01||15160|7.36|49.90|2026-11-13", id="empty-serie"),
     pytest.param(f"{SYNTHETIC_RUC}|01|F001||7.36|49.90|2026-11-13", id="empty-numero"),
     pytest.param(f"{SYNTHETIC_RUC}|01|F001|15160||49.90|2026-11-13", id="empty-igv"),

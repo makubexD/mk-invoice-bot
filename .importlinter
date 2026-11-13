@@ -73,3 +73,4 @@ source_modules =
 forbidden_modules =
     cv2
     zxingcpp
+    invoicebot.extract.ocr

@@ -1,21 +1,24 @@
 """Job handler that reads one invoice photo in a helper process (S3.11, R-2.1).
 
-:func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding
-runs in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
-never loads OpenCV or zxing and their memory returns when the helper exits (D78). The
-helper's one JSON line is validated before use. The outcome's state change, next job and
+:func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding and
+OCR run in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
+never loads OpenCV, zxing or Tesseract and their memory returns when the helper exits (D78).
+The helper's one JSON line is validated before use. The outcome's state change, next job and
 outbox message commit in one transaction (CLAUDE.md "Database").
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
+import signal
 import sys
 import time
 from collections.abc import Sequence
-from typing import Any, Literal
+from pathlib import Path
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -33,6 +36,8 @@ from invoicebot.store.invoices import get_file_path, load_invoice_head, save_rea
 
 #: BR-E07 counts megapixels; OpenCV's decode cap counts pixels.
 PIXELS_PER_MEGAPIXEL = 1_000_000
+#: The helper prints one small JSON object; anything larger is a bug the queue retries (R-9.2).
+MAX_HELPER_OUTPUT_BYTES = 64 * 1024
 logger = logging.getLogger(__name__)
 
 type RuleId = Literal["BR-E01", "BR-E02", "BR-E05"]
@@ -63,20 +68,23 @@ class _HelperResult(BaseModel):
     reading: dict[str, Any] | None
     variant: str | None
     decoder: str | None
+    ocr: bool
     error: Literal["unreadable"] | None
 
 
-def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLimits) -> Handler:
+def make_extract_handler(
+    pool: Pool, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+) -> Handler:
     """Build the handler that reads an invoice's photo and queues its routing (S3.11).
 
-    The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with
-    no photo file — a PDF or XML attachment until read-more ships — ends with BR-E01 and a
-    message asking for a photo or typed data. A photo it cannot read, a required field it
-    does not find, a bad issuer RUC and an unsupported document type end the invoice with
-    BR-E01, BR-E02 or BR-E05 and a message to the sender. A reading that passes them is
-    stored and the invoice moves to ``ROUTING`` with a ``route`` job. A helper that exits
-    non-zero for any other reason raises, so the queue retries and, after its limit, fails
-    the invoice with BR-S03.
+    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with. The handler
+    acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no photo file —
+    a PDF or XML attachment until read-more ships — ends with BR-E01 and a message asking for a
+    photo or typed data. A photo it cannot read, a required field it does not find, a bad
+    issuer RUC and an unsupported document type end the invoice with BR-E01, BR-E02 or BR-E05
+    and a message to the sender. A reading that passes them is stored and the invoice moves to
+    ``ROUTING`` with a ``route`` job. A helper that exits non-zero for any other reason raises,
+    so the queue retries and, after its limit, fails the invoice with BR-S03.
     """
 
     async def handle(job: Job) -> None:
@@ -99,7 +107,7 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
             await set_state(conn, job.invoice_id, "EXTRACTING")
 
         try:
-            result = await _run_helper(path, extraction_cfg, media)
+            result = await _run_helper(path, extraction_cfg, media, rules_path)
         except TimeoutError:
             await _finish(pool, job.invoice_id, channel, profile_id, RULE_UNREADABLE, None)
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
@@ -122,22 +130,29 @@ def make_extract_handler(pool: Pool, extraction_cfg: Extraction, media: MediaLim
     return handle
 
 
-async def _run_helper(path: str, extraction_cfg: Extraction, media: MediaLimits) -> _HelperResult:
+async def _run_helper(
+    path: str, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+) -> _HelperResult:
     """Run the extract helper under the heavy slot and return its validated result.
 
-    The helper runs with a minimal environment and an import path that does not include
-    the working directory, and it is killed and reaped on every exit — timeout, crash or
-    cancellation — so no decode process outlives its job (R-9.2).
+    The helper receives the photo caps, the OCR config and ``rules_path`` as arguments. It
+    runs with a minimal environment and an import path that does not include the working
+    directory, and its whole process group is killed and reaped on every exit — timeout,
+    crash or cancellation — so no decode process or child it started outlives its job
+    (R-9.2).
 
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
             reaped first.
-        RuntimeError: when the helper exits non-zero or prints malformed JSON.
+        RuntimeError: when the helper exits non-zero, prints more than
+            ``MAX_HELPER_OUTPUT_BYTES`` or prints malformed JSON.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         # Cap the pixels OpenCV may decode, so a decompression bomb is refused early (R-1.11).
         "OPENCV_IO_MAX_IMAGE_PIXELS": str(media.max_megapixels * PIXELS_PER_MEGAPIXEL),
+        # One Tesseract thread per job on the 2 GB host.
+        "OMP_THREAD_LIMIT": "1",
     }
     async with HEAVY:
         process = await asyncio.create_subprocess_exec(
@@ -148,16 +163,36 @@ async def _run_helper(path: str, extraction_cfg: Extraction, media: MediaLimits)
             path,
             str(extraction_cfg.max_image_px),
             str(media.max_bytes.image),
+            extraction_cfg.ocr.engine,
+            extraction_cfg.ocr.lang,
+            str(extraction_cfg.ocr.psm),
+            str(extraction_cfg.ocr.timeout_s),
+            str(rules_path),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             env=env,
+            start_new_session=True,
         )
         try:
             async with asyncio.timeout(extraction_cfg.helper_timeout_s):
-                stdout, _ = await process.communicate()
+                stdout_stream = cast(asyncio.StreamReader, process.stdout)
+                chunks: list[bytes] = []
+                remaining = MAX_HELPER_OUTPUT_BYTES + 1
+                while remaining > 0:
+                    chunk = await stdout_stream.read(remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                stdout = b"".join(chunks)
+                if len(stdout) > MAX_HELPER_OUTPUT_BYTES:
+                    raise RuntimeError("extract helper output exceeds the cap")
+                await process.wait()
         finally:
+            # Kill the group in every case, so a child of a helper that already exited dies too.
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
             if process.returncode is None:
-                process.kill()
                 await process.wait()
     if process.returncode != 0:
         raise RuntimeError(f"extract helper exited with code {process.returncode}")
@@ -230,7 +265,7 @@ def _log_outcome(
     rule_id: RuleId | None,
     started: float,
 ) -> None:
-    """Log ids, the decoder that hit and the timing; never an extracted value (R-9.16)."""
+    """Log ids, the decoder, whether OCR ran and the timing; never an extracted value (R-9.16)."""
     logger.info(
         "step done",
         extra={
@@ -238,6 +273,7 @@ def _log_outcome(
             "invoice_id": invoice_id,
             "variant": None if result is None else result.variant,
             "decoder": None if result is None else result.decoder,
+            "ocr": None if result is None else result.ocr,
             "rule_id": rule_id,
             "duration_ms": int((time.perf_counter() - started) * 1000),
         },

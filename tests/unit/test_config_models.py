@@ -145,3 +145,62 @@ def test_routing_rule_with_unknown_when_key_fails(tmp_path: Path) -> None:
         load_config(path)
 
     assert "routing.rules.0.when" in str(excinfo.value)
+
+
+def test_ocr_engine_other_than_tesseract_fails(tmp_path: Path) -> None:
+    """D81: the helper only runs Tesseract, so another engine fails at load instead of being ignored."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["ocr"]["engine"] = "paddle"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.ocr.engine" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("lang", ["../x", "-psm"])
+def test_ocr_lang_outside_tesseract_codes_fails(tmp_path: Path, lang: str) -> None:
+    """D81: an OCR lang that is a path or a flag fails at load before it reaches the argument list."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["ocr"]["lang"] = lang
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "extraction.ocr.lang" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("lang", ["spa", "spa+eng"])
+def test_ocr_lang_tesseract_codes_load(tmp_path: Path, lang: str) -> None:
+    """D81: a Tesseract language code loads, alone or combined with another code."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["ocr"]["lang"] = lang
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).extraction.ocr.lang == lang
+
+
+def test_ocr_timeout_equal_to_helper_timeout_fails(tmp_path: Path) -> None:
+    """D81: OCR equal to the helper timeout would be killed by it, so the load fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["ocr"]["timeout_s"] = 30
+    document["extraction"]["helper_timeout_s"] = 30
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"ocr\.timeout_s"):
+        load_config(path)
+
+
+def test_ocr_timeout_below_helper_timeout_loads(tmp_path: Path) -> None:
+    """D81: an OCR timeout below the helper timeout leaves OCR time to finish."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["extraction"]["ocr"]["timeout_s"] = 30
+    document["extraction"]["helper_timeout_s"] = 31
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert cfg.extraction.ocr.timeout_s == 30
+    assert cfg.extraction.helper_timeout_s == 31

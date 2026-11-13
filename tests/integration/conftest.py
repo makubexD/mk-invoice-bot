@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import os
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -100,11 +100,19 @@ SERIE = "F001"
 NUMERO = "15160"
 TOTAL = "49.90"
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
+PARSING_RULES_PATH = REPO_ROOT / "config" / "parsing_rules.yaml"
 _WHITE = 255
 _CANVAS_PX = 800
 _QR_SCALE = 6
 _QR_OFFSET_PX = 100
 _MAX_QUEUED = 10
+#: Font and layout that make Tesseract read the printed invoice text (D81, R-9.16).
+_FONT = cv2.FONT_HERSHEY_SIMPLEX
+_FONT_SCALE = 1.0
+_FONT_THICKNESS = 2
+_TEXT_LEFT_PX = 60
+_TEXT_TOP_PX = 500
+_TEXT_STEP_PX = 60
 
 
 def _qr_payload(fecha: date) -> str:
@@ -112,7 +120,40 @@ def _qr_payload(fecha: date) -> str:
     return f"{ISSUER_RUC}|01|{SERIE}|{NUMERO}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
 
 
-def _write_photo(path: Path, payload: str | None) -> Path:
+def _draw_text(canvas: np.ndarray, lines: Sequence[str]) -> None:
+    """Draw ``lines`` in large black letters so Tesseract reads them off the photo (D81)."""
+    for index, line in enumerate(lines):
+        cv2.putText(
+            canvas,
+            line,
+            (_TEXT_LEFT_PX, _TEXT_TOP_PX + index * _TEXT_STEP_PX),
+            _FONT,
+            _FONT_SCALE,
+            0,
+            _FONT_THICKNESS,
+        )
+
+
+@pytest.fixture
+def draw_text() -> Callable[[np.ndarray, Sequence[str]], None]:
+    """Return the helper that draws printed invoice text on a photo for OCR."""
+    return _draw_text
+
+
+def _printed_lines(payload: str) -> tuple[str, ...]:
+    """Return a QR payload's required fields as the text a printed invoice shows (R-2.3)."""
+    issuer, tipo, serie, numero, _igv, total, fecha = payload.split("|")[:7]
+    title = "FACTURA ELECTRONICA" if tipo == "01" else "BOLETA ELECTRONICA"
+    return (
+        f"RUC {issuer}",
+        title,
+        f"{serie}-{numero}",
+        f"Fecha de emision: {date.fromisoformat(fecha):%d/%m/%Y}",
+        f"IMPORTE TOTAL S/ {total}",
+    )
+
+
+def _write_photo(path: Path, payload: str | None, printed_lines: Sequence[str] = ()) -> Path:
     """Write a white PNG photo, with ``payload`` as a QR code unless it is None."""
     canvas = np.full((_CANVAS_PX, _CANVAS_PX), _WHITE, dtype=np.uint8)
     if payload is not None:
@@ -120,6 +161,7 @@ def _write_photo(path: Path, payload: str | None) -> Path:
         code = cv2.resize(code, None, fx=_QR_SCALE, fy=_QR_SCALE, interpolation=cv2.INTER_NEAREST)
         height, width = code.shape
         canvas[_QR_OFFSET_PX : _QR_OFFSET_PX + height, _QR_OFFSET_PX : _QR_OFFSET_PX + width] = code
+    _draw_text(canvas, printed_lines)
     ok, encoded = cv2.imencode(".png", canvas)
     assert ok
     path.write_bytes(encoded.tobytes())
@@ -136,7 +178,7 @@ def _read_config(profile_id: str) -> AppConfig:
 
 
 #: Runs one conversation, with or without a QR, and returns the fake channel and the QR text.
-type ReadConversation = Callable[[bool], Awaitable[tuple[FakeChannel, str]]]
+type ReadConversation = Callable[..., Awaitable[tuple[FakeChannel, str]]]
 
 
 @pytest.fixture
@@ -147,10 +189,13 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
     after intake it writes the photo, adds the ``files`` row and the ``extract`` job,
     then runs the extract and route handlers on their jobs and sends the outbox to a
     fake channel. The outbox is cleared first, so the fake sees only this conversation.
+    With ``printed``, the photo also carries the QR payload's required fields as printed
+    text, so OCR reads it (R-2.3, R-9.16).
     """
 
-    async def run(with_qr: bool) -> tuple[FakeChannel, str]:
+    async def run(with_qr: bool, *, printed: bool = False) -> tuple[FakeChannel, str]:
         payload = _qr_payload(datetime.now(UTC).date())
+        printed_lines = _printed_lines(payload) if printed else ()
         profile_id = f"profile-{uuid4().hex}"
         cfg = _read_config(profile_id)
         msg = InboundMessage(
@@ -168,7 +213,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             intake = await handle_inbound(conn, msg, max_queued_per_sender=_MAX_QUEUED)
         assert intake.invoice_id is not None
         invoice_id = intake.invoice_id
-        photo = _write_photo(tmp_path / f"{invoice_id}.png", payload if with_qr else None)
+        photo = _write_photo(tmp_path / f"{invoice_id}.png", payload if with_qr else None, printed_lines)
         data = photo.read_bytes()
         record = FileRecord(
             kind="photo",
@@ -181,7 +226,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             await add_file(conn, invoice_id, record)
             extract_job = await enqueue(conn, invoice_id, EXTRACT_STEP)
 
-        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media)(
+        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media, PARSING_RULES_PATH)(
             _job(extract_job, invoice_id, EXTRACT_STEP)
         )
         async with db_pool.connection() as conn:

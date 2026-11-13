@@ -17,7 +17,6 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import OutboundMessage
 from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
-from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
 from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.queue import outbox
@@ -159,7 +158,7 @@ def _summary(reading: Reading, flow: Flow, rule_id: str, today: date, extraction
             flow_line=MESSAGES[rule_id].format(flow=flow),
         )
     ]
-    inferred = [name for name, field in reading.fields.items() if field.confidence == INFERRED_CONFIDENCE]
+    inferred = [name for name, field in reading.fields.items() if field.flag == "inferred"]
     if inferred:
         lines.append(SUMMARY_INFERRED.format(fields_desc=fields_desc(inferred)))
     doubtful = list(doubtful_fields(reading, extraction.review_threshold, extraction.igv_rates))

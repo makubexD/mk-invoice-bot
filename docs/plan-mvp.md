@@ -2,21 +2,22 @@
 
 Source of truth: `specs/` (constitution, requirements, design, backlog in `specs/04-tasks.md`). Each phase becomes its own step plan, `docs/plan-mvp-<phase>.md`, written when the previous phase finishes. A phase is done when its milestone demo in spec 04 passes.
 
-| #   | Phase (plan file)              | Backlog                                             | Milestone  | Needs from the owner first                                                               |
-| --- | ------------------------------ | --------------------------------------------------- | ---------- | ---------------------------------------------------------------------------------------- |
-| 1   | `foundation` (done 2026-11-11) | E1 (S1.1–S1.10, S5.1, S12.2)                        | part of M1 | Nothing                                                                                  |
-| 2   | `whatsapp` (done 2026-11-11)   | E2 (incl. S2.7–S2.9 window and templates)           | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                            |
-| 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2 | M1 | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR) |
-| 4   | `fetch`                        | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9 | M2 | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`) |
-| 5   | `file-b`                       | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16 | M3 | Entra app for the personal account; the Excel template on the host; a test inbox |
-| 6   | `widen-b`                      | rest of E4 and E5; S7.2, S7.4, S7.5; E8 (MVP part); S10.3, S10.4, S10.7, S10.10; S11.9, S11.11, S11.12, S11.14, S11.15, S11.17; E15 | M4 | S0.6 (remaining store pages), S0.8, S0.10, S0.11; Q5 (inbox for the email fallback); the bot's Outlook.com mailbox |
-| 7   | `read-more`                    | spike S0.3; S3.4–S3.10; E6                          | M5 | S0.1: private set growing to ≥ 30 pairs; S0.5 |
-| 8   | `flow-a`                       | E9, S10.6                                           | M6 | S0.4, Google OAuth app in production status |
-| 9   | `ops`                          | E12, then S12.7 (repo private), then S16.2          | M7 | VPS chosen (D42) |
-| –   | v1.1 `contract`                | E13, E14                                            | M8 | — |
-| –   | optional `llm-fallback`        | E3b                                                 | —          | DeepSeek key; flows opted in (never flow B, D43)                                         |
+| #   | Phase (plan file)              | Backlog                                                                                                                             | Milestone  | Needs from the owner first                                                                                         |
+| --- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- | ---------- | ------------------------------------------------------------------------------------------------------------------ |
+| 1   | `foundation` (done 2026-11-11) | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                                        | part of M1 | Nothing                                                                                                            |
+| 2   | `whatsapp` (done 2026-11-11)   | E2 (incl. S2.7–S2.9 window and templates)                                                                                           | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                                                      |
+| 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                  | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                                                  |
+| 3b  | `ocr` (done 2026-11-13)        | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                  | M1b        | Tesseract with Spanish on the host; the private samples folder                                                     |
+| 4   | `fetch`                        | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                 | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)                                       |
+| 5   | `file-b`                       | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                              | M3         | Entra app for the personal account; the Excel template on the host; a test inbox                                   |
+| 6   | `widen-b`                      | rest of E4 and E5; S7.2, S7.4, S7.5; E8 (MVP part); S10.3, S10.4, S10.7, S10.10; S11.9, S11.11, S11.12, S11.14, S11.15, S11.17; E15 | M4         | S0.6 (remaining store pages), S0.8, S0.10, S0.11; Q5 (inbox for the email fallback); the bot's Outlook.com mailbox |
+| 7   | `read-more`                    | S3.4, S3.8–S3.10; E6                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                                                      |
+| 8   | `flow-a`                       | E9, S10.6                                                                                                                           | M6         | S0.4, Google OAuth app in production status                                                                        |
+| 9   | `ops`                          | E12, then S12.7 (repo private), then S16.2                                                                                          | M7         | VPS chosen (D42)                                                                                                   |
+| –   | v1.1 `contract`                | E13, E14                                                                                                                            | M8         | —                                                                                                                  |
+| –   | optional `llm-fallback`        | E3b                                                                                                                                 | —          | DeepSeek key; flows opted in (never flow B, D43)                                                                   |
 
-**Why this order (D64):** the first three phases are a thin slice of the work flow for one real store, so the riskiest pieces (the store's site, the Excel, the mail) are proven before anything is widened. OCR, PDF input, the padrón and the synthetic generator wait for `read-more`, because a readable QR plus the downloaded XML already give every field the work flow needs.
+**Why this order (D64):** the first three phases are a thin slice of the work flow for one real store, so the riskiest pieces (the store's site, the Excel, the mail) are proven before anything is widened. PDF input, the padrón and the synthetic generator wait for `read-more`, because a readable QR plus the downloaded XML already give every field the work flow needs. OCR moved forward to phase 3b (D81), because the QR decodes on only half of real photos.
 
 **Phase 3 (`read`) is done when** an integration test shows a photo with a QR going `RECEIVED` → `EXTRACTING` → `ROUTING` → summary sent with the routed flow's label, a photo without a readable QR ends in `EXTRACT_FAILED` with BR-E01, the QR spike is recorded in `specs/spikes/qr.md`, and the lint, type and import checks pass. Phase 3 adds `zxing-cpp`, OpenCV and `lxml` (more QR decoders only if the spike asks for them; Tesseract comes with `read-more`) and puts extraction code in `src/invoicebot/extract/` with an import-linter contract. "≥ 30 real pairs meet R-2.9" is checked before v1 goes live (D56).
 
@@ -37,12 +38,25 @@ Rules for every phase plan: steps of one concern in at most about 3 files, each 
 
 Each item goes into the named phase's plan.
 
-- **Next (owner, 2026-11-13): D81, OCR as the primary reader.** The QR spike reads 50 % of real WhatsApp photos (`specs/spikes/qr.md`), far below S3.3's 95 %. The owner chose OCR on every photo, with the QR only confirming or filling fields. D81 is recorded in spec 05 and its plan written before `fetch` starts; it changes R-2.3, spec 03 §extract and the R-9.2 budget, and pulls S0.3, S3.5 and S3.6 forward from `read-more`.
-- **D81 plan:** the QR payload repairs the spike found (date with time, label before the RUC, word buyer type; the decimal comma is already read), and the XML fix for a `schemaLocation` namespace with a relative Windows path (2 of 10 real XMLs fail as `malformed`).
-- **D81 plan:** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
+- **Next (owner, 2026-11-13): D81, OCR as the primary reader.** The QR spike reads 50 % of real WhatsApp photos (`specs/spikes/qr.md`), far below S3.3's 95 %. The owner chose OCR on every photo, with the QR only confirming or filling fields. D81 is recorded in spec 05, and phase 3b `ocr` (`docs/plan-mvp-ocr.md`) runs before `fetch`. It changes R-2.1, R-2.3, R-2.6, spec 03 §5 and the R-9.2 budget, and pulls S0.3, S3.5, S3.6 and S3.7 forward from `read-more`.
+- **`ocr` (step 10):** the QR payload repairs the spike found (date with time, label before the RUC, word buyer type; the decimal comma is already read), and the XML fix for a `schemaLocation` namespace with a relative Windows path (2 of 10 real XMLs fail as `malformed`).
+- **`ocr` (step 4):** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
 - **`fetch`:** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
 - **`fetch`:** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared.
 - **`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.
+
+## Carried over from the `ocr` review
+
+Each item goes into the named phase's plan.
+
+- **`fetch` (before the host is shared):** put the helper and Tesseract under a cgroup memory cap on the 2 GB host; set `RLIMIT_FSIZE=0` for Tesseract and document it; cap the OCR text size and the matches per parsing rule.
+- **`fetch`:** catch OpenCV errors in the helper and report the photo as unreadable instead of exiting non-zero (today the queue retries them).
+- **`fetch`:** the helper's `variant` and `decoder` strings are logged unchecked. Move the QR variant and decoder names to a module without cv2 and make the result fields `Literal`s of them (R-9.16).
+- **`widen-b`:** drop `printed_urls` until a step reads them, or put them to use.
+- **`read-more`:** `parse_invoice_xml` relies on the hardened parser plus the docinfo check, not on its byte scan for `<!doctype` (a UTF-16 document without a BOM passes the scan). Before a caller lands, refuse input that does not start with `<` after an optional UTF-8 BOM and whitespace.
+- **`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.
+- **`read-more`:** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
+- **Known, accepted:** the helper's process group is killed once more after the helper exits, by the old process ID; a reused ID could be hit in that window, which is very small.
 
 ## Known drift between code and specs
 

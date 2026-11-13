@@ -166,6 +166,8 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
    - Check the byte cap for the media type, and read the image header: more than 40 megapixels is rejected **before decoding** (R-1.11, BR-E07).
    - Decode with `cv2.imdecode`, downscale to ≤ 2000 px on the long side.
    - Keep a grayscale copy and drop the color image as soon as possible.
+The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 5 merges their readings (D81).
+
 2. **QR cascade** (stop at the first payload that parses as SUNAT):
    1. zxing-cpp `read_barcodes(gray, formats=QRCode|PDF417)`. Older CPEs used PDF417.
    2. If nothing: crop candidate regions (bottom 40%, and contour-detected squares), apply 2× upscale + unsharp mask, retry zxing.
@@ -175,8 +177,8 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
    - Split on `|`, strip, and map by position. Real payloads have 9 to 11 parts; a payload whose document-type or buyer-type part is wrong or empty is repaired from the serie letter and the buyer number (D79).
    - Validate the RUC check digit, `tipo` in `extraction.supported_tipos`, the serie regex, decimals, and the date (`yyyy-mm-dd` per RS 114-2019 Anexo VI; `dd/mm/yyyy` tolerated).
    - A payload starting with `http` becomes `document_url`.
-4. **OCR fallback** (subprocess `tesseract - - -l spa --psm 4 --oem 1`, 30 s timeout):
-   - Preprocess: 4-point perspective warp → deskew → CLAHE → adaptive Gaussian threshold → morphological open.
+4. **OCR** (subprocess `tesseract - - -l spa --psm 4 --oem 1`, 30 s timeout):
+   - Preprocess: deskew → CLAHE → adaptive Gaussian threshold (S0.3, `specs/spikes/ocr.md`). A perspective warp fired on no real photo and hurt the renders, so it is not used.
    - Rule file `config/parsing_rules.yaml`, keyword-anchored regexes:
      - `R\.?U\.?C\.?\s*:?\s*(\d{11})`
      - `(FACTURA|BOLETA)\s+ELECTR[OÓ]NICA`
@@ -185,17 +187,23 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
      - `(IMPORTE\s+)?TOTAL(\s+A\s+PAGAR)?\s*:?\s*S/?\.?\s*([\d.,]+)`
      - `IGV`, `OP\.?\s*GRAVADA`
      - `RECARGO|SERVICIO`, `ICBPER`, `DESCUENTO` (R-2.14)
+   - The serie's last three characters map `O Q D` to `0` and `I L` to `1` before validation: Tesseract reads `F001` as `FOO1` (S0.3).
    - The first 11-digit RUC with a valid check digit near the header is the issuer; the second one is the buyer.
-5. **XML and PDF:**
+5. **Merge (D81):** OCR is the primary reading and the QR confirms it.
+   - A field both give with the same value gets confidence 1.0.
+   - When they disagree, the OCR value stays and the field is flagged `conflict` (R-2.6), which the summary shows on the D80 warning line.
+   - A field only one of them gives comes from that one, with its own confidence and flag.
+   - `document_url` comes from the QR.
+6. **XML and PDF:**
    - **XML** (the downloaded file, and the golden set's expected values): a light, hardened UBL read (`extract/ubl.py`, R-2.12) of the match fields and the amounts (R-2.7, D57). No signature checks in the MVP. Built in phase 3 (S7.3, S7.7 moved, D55).
-   - **PDF input** (D58): the text layer and QR first (`extract/pdf.py`); a PDF without text is rendered (page 1) and goes through steps 2–4.
-6. **Enrich:**
+   - **PDF input** (D58): the text layer and QR first (`extract/pdf.py`); a PDF without text is rendered (page 1) and goes through steps 2–5.
+7. **Enrich:**
    - Padrón lookup gives `razon_social`, `estado` and `condicion`.
    - `comercio` is not resolved here: a flow that needs it (flow B's folder name) looks it up in the store directory after routing, and asks BR-R09 then if the brand is ambiguous (R-7.1).
-7. **Score:**
-   - Per-field confidence: QR = 1.0, padrón = 1.0, OCR scaled by the Tesseract word confidence and by cross-checks.
+8. **Score:**
+   - Per-field confidence: QR = 1.0, padrón = 1.0, a field the QR confirms = 1.0, OCR scaled by the Tesseract word confidence and by cross-checks.
    - The overall status is `ok` when every required field has confidence ≥ 0.8, otherwise `needs_review`. Uncertain fields are highlighted in the summary.
-8. **LLM fallback** (D43, R-2.11), only when steps 2–4 miss required fields **and** `llm_fallback` is enabled for the flow (never flow B) **and** the monthly cap isn't reached:
+9. **LLM fallback** (D43, R-2.11), only when steps 2–5 miss required fields **and** `llm_fallback` is enabled for the flow (never flow B) **and** the monthly cap isn't reached:
    - Send the image downscaled to ≤ 1024 px on the long side (about one image-token block), with no other invoice data.
    - Parse the JSON answer into fields with `source=llm`, confidence ≤ 0.5, and run them through the same validators (R-2.4). A field that fails is dropped, not kept as text.
    - Record tokens and cost in `llm_usage`. At the cap, skip with BR-E08.

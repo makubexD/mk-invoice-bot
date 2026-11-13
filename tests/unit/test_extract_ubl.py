@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from invoicebot.extract.fields import Field, Reading
@@ -228,6 +230,13 @@ def test_parse_invoice_xml_accepts_a_utf8_invoice() -> None:
     assert reading.value("numero") == "15160"
 
 
+def test_parse_invoice_xml_strips_leading_zeros_from_numero() -> None:
+    """R-2.7: an ID F001-00000123 yields numero 123, the same value the other readers store."""
+    reading = parse_invoice_xml(_invoice_xml(serie="F001", numero="00000123").encode())
+
+    assert reading.value("numero") == "123"
+
+
 def test_matches_invoice_ignores_zero_padding() -> None:
     """R-5.6: F014-15160 and F014-00015160 are the same invoice."""
     xml = parse_invoice_xml(_invoice_xml(numero="00015160").encode())
@@ -270,3 +279,57 @@ def test_matches_invoice_rejects_a_field_missing_from_both_readings() -> None:
 def test_parse_invoice_xml_iso_8859_1_declaration_reads_like_utf8() -> None:
     """R-5.6: an ISO-8859-1 invoice, common in SUNAT XML, reads the same as its UTF-8 form."""
     assert parse_invoice_xml(ISO_8859_1_INVOICE_XML) == parse_invoice_xml(_invoice_xml().encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    "declaration", ['xmlns:schemaLocation="..\\x.xsd"', "xmlns:schemaLocation='..\\x.xsd'"]
+)
+def test_parse_invoice_xml_ignores_a_backslash_schema_location_namespace(declaration: str) -> None:
+    """R-2.12: a root namespace whose value is a relative Windows path is ignored, in either quote style."""
+    without = _invoice_xml()
+    with_schema_location = without.replace(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"',
+        f'<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"\n         {declaration}',
+    )
+    assert with_schema_location != without
+
+    reading = parse_invoice_xml(with_schema_location.encode())
+
+    assert reading == parse_invoice_xml(without.encode())
+
+
+def test_parse_invoice_xml_leaves_backslash_namespace_text_untouched() -> None:
+    """R-2.12: a backslash xmlns declaration in element text survives the root repair verbatim."""
+    note_text = 'xmlns:x="a\\b"'
+    invoice = _invoice_xml(razon_social=note_text).replace(
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"',
+        '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"\n'
+        '         xmlns:extra="a\\b"',
+        1,
+    )
+
+    reading = parse_invoice_xml(invoice.encode())
+
+    assert reading.value("razon_social") == note_text
+
+
+def test_parse_invoice_xml_rejects_a_huge_backslash_run_quickly() -> None:
+    """R-2.12: a namespace run just under 2 MB is rejected as malformed without stalling.
+
+    The prefixed root keeps the document invalid after the declaration is dropped, so the
+    malformed outcome is observable while the repair itself is what must stay bounded.
+    """
+    root = b'<?xml version="1.0"?><a:Invoice xmlns:a="urn:a\\b">'
+    closing = b"</a:Invoice>"
+    declaration_prefix = b'xmlns:a="'
+    backslashes = MAX_XML_BYTES - len(root) - len(closing) - len(declaration_prefix) - 1
+    data = root + declaration_prefix + b"\\" * backslashes + closing
+    assert len(data) < MAX_XML_BYTES
+
+    started = time.perf_counter()
+    with pytest.raises(XmlRejected) as excinfo:
+        parse_invoice_xml(data)
+    elapsed = time.perf_counter() - started
+
+    assert excinfo.value.reason is XmlReason.MALFORMED
+    assert elapsed < 1.0

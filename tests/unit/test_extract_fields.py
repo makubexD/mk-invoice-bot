@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from invoicebot.extract.fields import Field, Reading, reading_from_json, reading_to_json
+from invoicebot.extract.fields import Field, Flag, Reading, reading_from_json, reading_to_json
 
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
@@ -52,6 +52,24 @@ def test_reading_without_document_url_round_trips() -> None:
     assert reading_from_json(reading_to_json(reading)) == reading
 
 
+@pytest.mark.parametrize("flag", ["inferred", "conflict"])
+def test_reading_with_each_flag_round_trips(flag: Flag) -> None:
+    """R-2.6: a reading with a flagged field survives the JSON round trip unchanged."""
+    reading = Reading(
+        fields={"total": Field(value="49.90", source="ocr", confidence=0.9, flag=flag)},
+        document_url=None,
+    )
+
+    assert reading_from_json(reading_to_json(reading)) == reading
+
+
+def test_field_without_flag_loads_with_none() -> None:
+    """R-2.6: a reading stored before flags existed loads with ``flag=None``."""
+    reading = reading_from_json(_payload())
+
+    assert reading.fields["total"].flag is None
+
+
 @pytest.mark.parametrize(
     ("payload", "match"),
     [
@@ -74,6 +92,7 @@ def test_reading_without_document_url_round_trips() -> None:
             id="confidence-int-above-one",
         ),
         pytest.param(_payload_with_field(value=20000000001), "value must be a string", id="non-str-value"),
+        pytest.param(_payload_with_field(flag="evil"), "flag must be one of", id="unknown-flag"),
     ],
 )
 def test_reading_from_json_rejects_an_invalid_payload(payload: object, match: str) -> None:
@@ -97,6 +116,7 @@ def test_reading_from_json_rejects_an_invalid_payload(payload: object, match: st
         pytest.param(
             {**_payload(), "extra": "LEAK"}, "reading must be an object", "LEAK", id="extra-key-value"
         ),
+        pytest.param(_payload_with_field(flag="evil"), "flag must be one of", "evil", id="unknown-flag"),
     ],
 )
 def test_reading_from_json_error_never_quotes_the_bad_value(

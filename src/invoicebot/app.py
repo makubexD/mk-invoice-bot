@@ -23,6 +23,7 @@ from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAp
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, WhatsAppChannel
+from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.logging import configure_logging
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
@@ -104,6 +105,8 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         return
     assert_no_plain_secrets(os.environ)
     cfg = load_config(settings.config_path)
+    # Fail fast: a missing or invalid rules file stops startup (S3.6).
+    load_rules(settings.parsing_rules_path)
     rules = compile_rules(cfg.routing)
     store = _load_secrets(settings)
     configure_logging(store.values())
@@ -126,7 +129,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             pool,
             {
                 DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
-                EXTRACT_STEP: make_extract_handler(pool, cfg.extraction, cfg.limits.media),
+                EXTRACT_STEP: make_extract_handler(
+                    pool,
+                    cfg.extraction,
+                    cfg.limits.media,
+                    settings.parsing_rules_path,
+                ),
                 ROUTE_STEP: make_route_handler(pool, cfg, rules),
             },
         )

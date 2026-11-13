@@ -7,9 +7,12 @@ test (R-2.1, R-2.13, BR-E01, BR-E02, BR-E05, R-9.4). The database is real Postgr
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import os
+import signal
 import sys
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -23,9 +26,15 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
-from invoicebot.pipeline.extract import ROUTE_STEP, _parse_result, make_extract_handler
+from invoicebot.pipeline.extract import (
+    MAX_HELPER_OUTPUT_BYTES,
+    ROUTE_STEP,
+    _parse_result,
+    make_extract_handler,
+)
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
@@ -48,14 +57,53 @@ UNSUPPORTED_TIPO_PAYLOAD = (
     f"{SYNTHETIC_RUC}|{UNSUPPORTED_TIPO}|{SERIE}|{NUMERO}|{IGV}|{TOTAL}|{FECHA}|6|{SYNTHETIC_RUC}"
 )
 WHITE = 255
+RULES_PATH = Path(__file__).resolve().parents[2] / "config" / "parsing_rules.yaml"
 CANVAS = 800  # height and width, in pixels
 QR_SCALE = 6
 QR_TOP = 100
 QR_LEFT = 100
 PNG = ".png"
-HELPER_TIMEOUT_S = 30
+OCR_TIMEOUT_S = 30
+HELPER_TIMEOUT_S = 50
+#: A recent date, so an invoice read from the photo still routes (BR-E03).
+PRINTED_DATE = datetime.now(UTC).date()
+#: The six required fields as printed text on the photo (R-2.3, D81).
+PRINTED_LINES = (
+    f"RUC {SYNTHETIC_RUC}",
+    "FACTURA ELECTRONICA",
+    f"{SERIE}-{NUMERO}",
+    f"Fecha de emision: {PRINTED_DATE:%d/%m/%Y}",
+    f"IMPORTE TOTAL S/ {TOTAL}",
+)
+#: The OCR total when the printed value disagrees with the QR (D81).
+CONFLICT_TOTAL = "12.50"
+#: A QR payload carrying the same values as PRINTED_LINES (D81).
+CONFIRMING_PAYLOAD = (
+    f"{SYNTHETIC_RUC}|01|{SERIE}|{NUMERO}|{IGV}|{TOTAL}|{PRINTED_DATE.isoformat()}|6|{SYNTHETIC_RUC}"
+)
 EXPIRED_TIMEOUT_S = 0.001  # far below any decode, so the helper always times out
 SLOW_HELPER_SCRIPT = "import time; time.sleep(30)"
+#: A helper that prints more than the output cap and exits 0 (R-9.2).
+OVERSIZED_HELPER_SCRIPT = f"import sys; sys.stdout.write('x' * {MAX_HELPER_OUTPUT_BYTES + 1})"
+#: A helper that starts a sleeping grandchild, records its pid, then sleeps (R-9.2).
+#: The grandchild must not hold the helper's stdout pipe, or reading stdout to EOF
+#: would keep the handler waiting until the grandchild exits.
+TREE_HELPER_SCRIPT = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen(\n"
+    "    [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+    "    stdout=subprocess.DEVNULL,\n"
+    "    stderr=subprocess.DEVNULL,\n"
+    ")\n"
+    "with open(sys.argv[1], 'w') as pid_file:\n"
+    "    pid_file.write(str(child.pid))\n"
+    "time.sleep(30)\n"
+)
+#: Long enough for the grandchild to start, short enough to keep the test quick.
+TREE_TIMEOUT_S = 2.0
+#: How long a killed grandchild may take to be reparented and reaped by init.
+GRANDCHILD_GONE_TIMEOUT_S = 3.0
+GRANDCHILD_POLL_S = 0.05
 CHILD_START_TIMEOUT_S = 10
 SIGKILL_EXIT_CODE = -9
 
@@ -70,16 +118,23 @@ MEDIA = MediaLimits(
 
 
 def _config(*, helper_timeout_s: float = HELPER_TIMEOUT_S) -> Extraction:
-    """Return the extraction config the handler runs with."""
-    return Extraction(
+    """Return the extraction config the handler runs with.
+
+    The timeout tests deliberately use a helper timeout at or below the OCR timeout, which the
+    model refuses (D81); ``model_copy`` sets it there without revalidation.
+    """
+    config = Extraction(
         max_image_px=2000,
-        ocr=Ocr(engine="tesseract", lang="spa", timeout_s=30),
+        ocr=Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=OCR_TIMEOUT_S),
         review_threshold=0.8,
         max_invoice_age_days=365,
         igv_rates=[Decimal("0.18"), Decimal("0.105"), Decimal("0.10")],
         supported_tipos=["01", "03", "07", "08"],
-        helper_timeout_s=helper_timeout_s,
+        helper_timeout_s=HELPER_TIMEOUT_S,
     )
+    if helper_timeout_s == HELPER_TIMEOUT_S:
+        return config
+    return config.model_copy(update={"helper_timeout_s": helper_timeout_s})
 
 
 def _canvas() -> np.ndarray:
@@ -92,13 +147,33 @@ def _write_blank_photo(path: Path) -> Path:
     return _write_image(_canvas(), path)
 
 
-def _write_qr_photo(payload: str, path: Path) -> Path:
-    """Write a photo carrying ``payload`` as a QR code and return its path."""
-    canvas = _canvas()
+def _draw_qr(canvas: np.ndarray, payload: str) -> None:
+    """Draw ``payload`` as a QR code at the photo's top-left."""
     code = cv2.QRCodeEncoder.create().encode(payload)
     code = cv2.resize(code, None, fx=QR_SCALE, fy=QR_SCALE, interpolation=cv2.INTER_NEAREST)
     height, width = code.shape
     canvas[QR_TOP : QR_TOP + height, QR_LEFT : QR_LEFT + width] = code
+
+
+def _write_qr_photo(payload: str, path: Path) -> Path:
+    """Write a photo carrying ``payload`` as a QR code and return its path."""
+    canvas = _canvas()
+    _draw_qr(canvas, payload)
+    return _write_image(canvas, path)
+
+
+def _write_printed_photo(
+    lines: Sequence[str],
+    path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+    *,
+    qr_payload: str | None = None,
+) -> Path:
+    """Write a photo carrying ``lines`` as printed text, with a QR code when given."""
+    canvas = _canvas()
+    if qr_payload is not None:
+        _draw_qr(canvas, qr_payload)
+    draw_text(canvas, lines)
     return _write_image(canvas, path)
 
 
@@ -149,7 +224,9 @@ async def _run_handler(
     helper_timeout_s: float = HELPER_TIMEOUT_S,
 ) -> None:
     """Run the extract handler once for invoice_id."""
-    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA)(_job(invoice_id))
+    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA, RULES_PATH)(
+        _job(invoice_id)
+    )
 
 
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -204,6 +281,76 @@ async def test_valid_qr_photo_saves_the_reading_and_queues_routing(
     assert reading == parse_qr_payload(VALID_PAYLOAD)
     assert route_jobs == 1
     assert unreadable == []
+
+
+async def test_text_only_photo_routes_with_ocr_fields(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+) -> None:
+    """R-2.3: a photo printing the six required fields with no QR ends in ROUTING with OCR fields."""
+    photo = _write_printed_photo(PRINTED_LINES, tmp_path / f"printed{PNG}", draw_text)
+    invoice_id, _ = await _invoice_with_photo(db_pool, photo)
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+
+    assert (state, rule_id) == ("ROUTING", None)
+    assert reading is not None
+    assert reading.missing_required() == ()
+    assert all(field.source == "ocr" for field in reading.fields.values())
+    assert reading.value("ruc_emisor") == SYNTHETIC_RUC
+    assert reading.value("fecha_emision") == PRINTED_DATE.isoformat()
+    assert reading.value("total") == TOTAL
+
+
+async def test_qr_and_printed_text_confirm_each_other(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+) -> None:
+    """D81: a QR and the same values printed store the required fields at confidence 1.0."""
+    photo = _write_printed_photo(
+        PRINTED_LINES, tmp_path / f"confirmed{PNG}", draw_text, qr_payload=CONFIRMING_PAYLOAD
+    )
+    invoice_id, _ = await _invoice_with_photo(db_pool, photo)
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+
+    assert (state, rule_id) == ("ROUTING", None)
+    assert reading is not None
+    assert reading.missing_required() == ()
+    assert all(reading.fields[name].confidence == FULL_CONFIDENCE for name in REQUIRED)
+    assert all(reading.fields[name].flag is None for name in REQUIRED)
+
+
+async def test_printed_total_disagreeing_with_qr_is_flagged_conflict(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+) -> None:
+    """D81: a printed total that disagrees with the QR routes with the OCR total flagged conflict."""
+    lines = (*PRINTED_LINES[:-1], f"IMPORTE TOTAL S/ {CONFLICT_TOTAL}")
+    photo = _write_printed_photo(lines, tmp_path / f"conflict{PNG}", draw_text, qr_payload=CONFIRMING_PAYLOAD)
+    invoice_id, _ = await _invoice_with_photo(db_pool, photo)
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+
+    assert (state, rule_id) == ("ROUTING", None)
+    assert reading is not None
+    total = reading.fields["total"]
+    assert (total.value, total.source, total.flag) == (CONFLICT_TOTAL, "ocr", "conflict")
 
 
 async def test_blank_photo_fails_with_br_e01(
@@ -392,6 +539,7 @@ async def test_cancelling_the_handler_leaves_no_helper_process(
             SLOW_HELPER_SCRIPT,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=_kwargs.get("start_new_session", False),
         )
         children.append(child)
         started.set()
@@ -412,6 +560,81 @@ async def test_cancelling_the_handler_leaves_no_helper_process(
     assert [child.returncode for child in children] == [SIGKILL_EXIT_CODE]
     with pytest.raises(ProcessLookupError):
         os.kill(children[0].pid, 0)
+
+
+async def test_timeout_kills_a_helper_and_the_child_it_started(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.2: a helper that started a child is killed on timeout and the child is gone too."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"tree{PNG}"))
+    pid_file = tmp_path / "grandchild.pid"
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _tree_exec(*_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        return await real_exec(
+            sys.executable,
+            "-c",
+            TREE_HELPER_SCRIPT,
+            str(pid_file),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=kwargs.get("start_new_session", False),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _tree_exec)
+    grandchild_pid: int | None = None
+    try:
+        await _run_handler(db_pool, invoice_id, helper_timeout_s=TREE_TIMEOUT_S)
+        assert pid_file.exists()
+        grandchild_pid = int(pid_file.read_text())
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + GRANDCHILD_GONE_TIMEOUT_S
+        while True:
+            try:
+                os.kill(grandchild_pid, 0)
+            except ProcessLookupError:
+                break
+            if loop.time() >= deadline:
+                pytest.fail(f"grandchild {grandchild_pid} outlived the helper")
+            await asyncio.sleep(GRANDCHILD_POLL_S)
+    finally:
+        if grandchild_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(grandchild_pid, signal.SIGKILL)
+
+
+async def test_helper_output_over_the_cap_raises_so_the_queue_retries(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.2: a helper over the cap raises RuntimeError and leaves the invoice for a retry."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"oversized{PNG}"))
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _oversized_exec(*_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        return await real_exec(
+            sys.executable,
+            "-c",
+            OVERSIZED_HELPER_SCRIPT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=kwargs.get("start_new_session", False),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _oversized_exec)
+
+    with pytest.raises(RuntimeError, match="output exceeds the cap"):
+        await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+
+    assert (state, rule_id) == ("EXTRACTING", None)
+    assert route_jobs == 0
 
 
 async def test_malformed_helper_output_drops_the_pydantic_cause() -> None:
