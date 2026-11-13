@@ -123,6 +123,18 @@ def test_missing_secret_disables_the_adapter(tmp_path: Path) -> None:
         view.get("gmail_client_secret")
 
 
+def test_empty_secret_counts_as_missing(tmp_path: Path) -> None:
+    """R-9.10: a declared secret stored as an empty string disables the view like a missing one."""
+    store = _loaded(tmp_path, {"gmail_refresh_token": VALUE_REFRESH, "gmail_client_secret": ""})
+
+    view = store.scoped("email_inbox", {"gmail_refresh_token", "gmail_client_secret"})
+
+    assert view.enabled is False
+    assert view.missing == frozenset({"gmail_client_secret"})
+    with pytest.raises(SecretMissing):
+        view.get("gmail_client_secret")
+
+
 def test_repr_never_contains_secret_values(tmp_path: Path) -> None:
     """R-9.9: repr of the store and of an adapter view exposes no secret value."""
     store = _loaded(tmp_path, {"gmail_refresh_token": VALUE_REFRESH, "sol_password": VALUE_SOL})
