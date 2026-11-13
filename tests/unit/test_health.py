@@ -18,6 +18,7 @@ from invoicebot.secrets import SECRET_ENV_SUFFIXES
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
+PARSING_RULES = REPO_ROOT / "config" / "parsing_rules.yaml"
 VERIFY_VALUE = "synthetic-verify-value"
 #: A port nothing listens on, so the pool never connects and no test needs Postgres.
 UNREACHABLE_DSN = "postgresql://invoicebot@127.0.0.1:1/invoicebot?connect_timeout=1"
@@ -38,6 +39,7 @@ def runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Pat
     monkeypatch.setenv("SECRETS_PATH", str(tmp_path / "secrets.age"))
     monkeypatch.setenv("AGE_IDENTITY_PATH", str(tmp_path / "identity.key"))
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("PARSING_RULES_PATH", str(PARSING_RULES))
     root = logging.getLogger()
     handlers, level = list(root.handlers), root.level
     yield tmp_path

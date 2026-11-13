@@ -38,6 +38,7 @@ COPY alembic.ini ./
 COPY migrations ./migrations
 COPY scripts ./scripts
 COPY config/example.yaml ./config/example.yaml
+COPY config/parsing_rules.yaml ./config/parsing_rules.yaml
 RUN chmod -R a+rX /app/alembic.ini /app/migrations /app/scripts /app/config
 
 # Media and work files. A new named volume copies this owner, so the bot can write.

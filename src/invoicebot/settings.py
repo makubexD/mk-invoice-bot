@@ -20,6 +20,8 @@ class Settings(BaseSettings):
 
     database_url: str | None = None
     config_path: Path = RUNTIME_CONFIG_DIR / "config.yaml"
+    #: Rules ship with the code, not with the operator's config folder.
+    parsing_rules_path: Path = Path("/app/config/parsing_rules.yaml")
     secrets_path: Path | None = None
     age_identity_path: Path | None = None
     data_dir: Path = Path("/data")

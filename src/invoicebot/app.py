@@ -23,6 +23,7 @@ from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAp
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, WhatsAppChannel
+from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.logging import configure_logging
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
@@ -50,8 +51,6 @@ WHATSAPP_SECRETS = frozenset(
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
-#: Parsing rules that sit beside the loaded config file (S3.6).
-PARSING_RULES_FILE = "parsing_rules.yaml"
 
 
 async def _no_db_ping() -> bool:
@@ -106,6 +105,8 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         return
     assert_no_plain_secrets(os.environ)
     cfg = load_config(settings.config_path)
+    # Fail fast: a missing or invalid rules file stops startup (S3.6).
+    load_rules(settings.parsing_rules_path)
     rules = compile_rules(cfg.routing)
     store = _load_secrets(settings)
     configure_logging(store.values())
@@ -132,7 +133,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                     pool,
                     cfg.extraction,
                     cfg.limits.media,
-                    settings.config_path.parent / PARSING_RULES_FILE,
+                    settings.parsing_rules_path,
                 ),
                 ROUTE_STEP: make_route_handler(pool, cfg, rules),
             },
