@@ -17,7 +17,8 @@ from invoicebot.config.models import Brand, Config, Portal, Store, StoreDirector
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
-from invoicebot.queue.jobs import Job
+from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import FETCH_WAITING
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
@@ -130,29 +131,42 @@ async def _fetching_invoice(
     return invoice_id
 
 
-async def _run(
-    pool: AsyncConnectionPool[AsyncConnection[Any]],
-    fetcher: FakeFetcher,
-    invoice_id: int,
-    data_dir: Path,
-) -> None:
-    """Run the fetch handler once with the one-fetcher registry."""
-    job = Job(
-        id=1,
+def _job(invoice_id: int, job_id: int = 1) -> Job:
+    """Build the job the handler receives for ``invoice_id``."""
+    return Job(
+        id=job_id,
         invoice_id=invoice_id,
         step=FETCH_STEP,
         attempts=0,
         crashes=0,
         lease_until=datetime.now(UTC),
     )
-    handler = make_fetch_handler(
+
+
+def _handler(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    fetcher: FakeFetcher,
+    data_dir: Path,
+) -> Handler:
+    """Build the fetch handler with the one-fetcher registry."""
+    return make_fetch_handler(
         pool,
         _config(),
         _directory(),
         {"portal_registry": fetcher},
         data_dir,
     )
-    await handler(job)
+
+
+async def _run(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    fetcher: FakeFetcher,
+    invoice_id: int,
+    data_dir: Path,
+    job_id: int = 1,
+) -> None:
+    """Run the fetch handler once with the given job id."""
+    await _handler(pool, fetcher, data_dir)(_job(invoice_id, job_id))
 
 
 async def _invoice(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None, str | None]:
@@ -189,6 +203,16 @@ async def _fetch_jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[Any]:
         (invoice_id, FETCH_STEP),
     )
     return [row[0] for row in await cur.fetchall()]
+
+
+async def _latest_fetch_job_id(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    cur = await conn.execute(
+        "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s ORDER BY id DESC LIMIT 1",
+        (invoice_id, FETCH_STEP),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -275,8 +299,10 @@ async def test_second_not_found_yet_retries_in_6h_without_a_second_message(
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
     await _run(db_pool, fetcher, invoice_id, tmp_path)
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
 
-    await _run(db_pool, fetcher, invoice_id, tmp_path)
+    await _run(db_pool, fetcher, invoice_id, tmp_path, retry_job_id)
 
     async with db_pool.connection() as conn:
         attempts = await _attempts(conn, invoice_id)
@@ -291,6 +317,29 @@ async def test_second_not_found_yet_retries_in_6h_without_a_second_message(
     assert len(outbox) == 1
     assert row is not None
     assert HOURS_5_5 <= row[0].total_seconds() / 3600 <= HOURS_6_5
+
+
+async def test_running_the_same_fetch_job_twice_fetches_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: a redelivered job is superseded, so it fetches nothing and records no attempt."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        job_id = await enqueue(conn, invoice_id, FETCH_STEP)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = _handler(db_pool, fetcher, tmp_path)
+    job = _job(invoice_id, job_id)
+
+    await handler(job)
+    await handler(job)
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert fetcher.calls == 1
+    assert attempts == [("portal_registry", PORTAL_KEY, False, "not_found_yet")]
+    assert len(jobs) == 2  # the original job and the one retry the first run scheduled
 
 
 async def test_not_found_yet_past_the_last_retry_ends_manual_required(
@@ -328,7 +377,10 @@ async def test_xml_mismatch_ends_manual_required_with_its_line(
     fetcher = FakeFetcher(FetchReason.XML_MISMATCH)
 
     await _run(db_pool, fetcher, invoice_id, tmp_path)
-    await _run(db_pool, fetcher, invoice_id, tmp_path)
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path, next_job_id)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice(conn, invoice_id)

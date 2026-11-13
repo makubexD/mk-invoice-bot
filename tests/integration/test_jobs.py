@@ -19,6 +19,7 @@ from invoicebot.queue.jobs import (
     enqueue,
     fail,
     is_dead,
+    is_superseded,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -307,6 +308,42 @@ async def test_complete_with_lost_lease_returns_false_and_leaves_the_row(
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == 1
+
+
+async def test_is_superseded_is_false_for_the_only_job_of_an_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-5.1: the only job of an invoice is current, so it is not superseded."""
+    async with db_pool.connection() as conn:
+        await _clear_jobs(conn)
+        invoice_id = await _insert_invoice(conn)
+        job_id = await _enqueue(conn, invoice_id)
+
+    job = await _claim(db_pool, "worker-a")
+    assert job is not None
+    assert job.id == job_id
+
+    async with db_pool.connection() as conn:
+        assert await is_superseded(conn, job) is False
+
+
+async def test_is_superseded_is_true_once_a_newer_job_for_the_same_step_exists(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-5.1: a newer job for the same invoice and step makes the running one stale."""
+    async with db_pool.connection() as conn:
+        await _clear_jobs(conn)
+        invoice_id = await _insert_invoice(conn)
+        await _enqueue(conn, invoice_id)
+
+    job = await _claim(db_pool, "worker-a")
+    assert job is not None
+
+    async with db_pool.connection() as conn:
+        await _enqueue(conn, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await is_superseded(conn, job) is True
 
 
 async def test_enqueue_notifies_a_listener_after_commit(

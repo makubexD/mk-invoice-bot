@@ -26,7 +26,7 @@ from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import Attempt, Done, Run, Wait, decide, parse_delay
 from invoicebot.queue import outbox
-from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     FETCH_NOT_FOUND_LINE,
@@ -113,6 +113,9 @@ def make_fetch_handler(
             head = await load_invoice_head(conn, job.invoice_id)
             if head is None or head.state != FETCHING_STATE:
                 return
+            # A redelivered job whose next job already ran is stale (R-5.1).
+            if await is_superseded(conn, job):
+                return
             reading = await load_reading(conn, job.invoice_id)
             flow_name = await load_flow(conn, job.invoice_id)
             rows = await list_attempts(conn, job.invoice_id)
@@ -173,12 +176,16 @@ async def _run(
     result = _with_required_docs(result, inputs.flow.required_docs)
     delay = _next_delay(schedule_for(fetcher), _not_found_count(inputs.attempts, fetcher))
     first_not_found = _not_found_count(inputs.attempts, None) == 0
+    outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
     async with inputs.pool.connection() as conn, conn.transaction():
+        # Two runs of one job serialize on the job's row lock; the loser writes nothing (R-5.1).
+        if await is_superseded(conn, inputs.job):
+            return outcome
         await record_attempt(
             conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
         )
         await _record_result(conn, inputs, result, delay, first_not_found)
-    return _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
+    return outcome
 
 
 async def _record_result(
