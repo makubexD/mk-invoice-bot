@@ -13,7 +13,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from invoicebot.channels.base import AttachmentKind, ChannelName
-from invoicebot.extract.fields import Field, Reading, finite_decimal
+from invoicebot.extract.fields import Reading, finite_decimal, reading_from_json, reading_to_json
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -190,7 +190,7 @@ async def save_reading(conn: AsyncConnection[Any], invoice_id: int, reading: Rea
             _amount(reading, "igv"),
             _amount(reading, "total"),
             _field_value(reading, "num_doc_adq"),
-            Jsonb(_reading_json(reading)),
+            Jsonb(reading_to_json(reading)),
             invoice_id,
         ),
     )
@@ -202,18 +202,7 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     row = await cur.fetchone()
     if row is None or row[0] is None:
         return None
-    payload: dict[str, Any] = row[0]
-    stored_fields: dict[str, dict[str, Any]] = payload["fields"]
-    fields = {
-        name: Field(
-            value=str(raw["value"]),
-            source=raw["source"],
-            confidence=float(raw["confidence"]),
-        )
-        for name, raw in stored_fields.items()
-    }
-    document_url = payload.get("document_url")
-    return Reading(fields=fields, document_url=None if document_url is None else str(document_url))
+    return reading_from_json(row[0])
 
 
 async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: AttachmentKind) -> str | None:
@@ -261,14 +250,3 @@ def _ruc_emisor(reading: Reading) -> int | None:
     """Return the issuer RUC as the BIGINT column stores it, or None when missing."""
     value = _field_value(reading, "ruc_emisor")
     return None if value is None else int(value)
-
-
-def _reading_json(reading: Reading) -> dict[str, Any]:
-    """Return the whole reading as JSON: one value/source/confidence object per field."""
-    return {
-        "fields": {
-            name: {"value": field.value, "source": field.source, "confidence": field.confidence}
-            for name, field in reading.fields.items()
-        },
-        "document_url": reading.document_url,
-    }

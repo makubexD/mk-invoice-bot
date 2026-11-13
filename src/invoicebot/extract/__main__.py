@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from invoicebot.extract.fields import Reading
+from invoicebot.extract.fields import reading_to_json
 from invoicebot.extract.image import ImageUnreadable, load_gray
 from invoicebot.extract.qr import read_invoice_qr
 
@@ -73,7 +73,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     _emit(
         {
-            "reading": _reading_json(hit.reading),
+            "reading": reading_to_json(hit.reading),
             "variant": hit.variant,
             "decoder": hit.decoder,
             "error": None,
@@ -85,17 +85,6 @@ def main(argv: list[str] | None = None) -> int:
 def _unreadable() -> dict[str, Any]:
     """Return the result for a photo where no SUNAT reading was found."""
     return {"reading": None, "variant": None, "decoder": None, "error": UNREADABLE}
-
-
-def _reading_json(reading: Reading) -> dict[str, Any]:
-    """Render a reading as the field/value/source/confidence object the handler validates."""
-    return {
-        "fields": {
-            name: {"value": field.value, "source": field.source, "confidence": field.confidence}
-            for name, field in reading.fields.items()
-        },
-        "document_url": reading.document_url,
-    }
 
 
 def _emit(payload: dict[str, Any]) -> None:

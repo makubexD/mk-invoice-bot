@@ -54,7 +54,7 @@ QR_TOP = 100
 QR_LEFT = 100
 PNG = ".png"
 HELPER_TIMEOUT_S = 30
-EXPIRED_TIMEOUT_S = 0
+EXPIRED_TIMEOUT_S = 0.001  # far below any decode, so the helper always times out
 SLOW_HELPER_SCRIPT = "import time; time.sleep(30)"
 CHILD_START_TIMEOUT_S = 10
 SIGKILL_EXIT_CODE = -9
@@ -69,7 +69,7 @@ MEDIA = MediaLimits(
 )
 
 
-def _config(*, helper_timeout_s: int = HELPER_TIMEOUT_S) -> Extraction:
+def _config(*, helper_timeout_s: float = HELPER_TIMEOUT_S) -> Extraction:
     """Return the extraction config the handler runs with."""
     return Extraction(
         max_image_px=2000,
@@ -146,7 +146,7 @@ async def _run_handler(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     invoice_id: int,
     *,
-    helper_timeout_s: int = HELPER_TIMEOUT_S,
+    helper_timeout_s: float = HELPER_TIMEOUT_S,
 ) -> None:
     """Run the extract handler once for invoice_id."""
     await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA)(_job(invoice_id))

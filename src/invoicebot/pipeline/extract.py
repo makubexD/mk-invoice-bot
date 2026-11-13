@@ -22,7 +22,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind, ChannelName, OutboundMessage
 from invoicebot.config.models import Extraction, MediaLimits
-from invoicebot.extract.fields import Field, Reading, Source
+from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.validate import check_issuer, check_tipo
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue import outbox
@@ -58,41 +58,12 @@ FAILURE_STATE: dict[RuleId, str] = {
 }
 
 
-class _FieldPayload(BaseModel):
-    """One field as the helper prints it (R-2.6)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    value: str
-    source: Source
-    confidence: float
-
-
-class _ReadingPayload(BaseModel):
-    """A reading as the helper prints it (R-2.6, R-2.8)."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    fields: dict[str, _FieldPayload]
-    document_url: str | None
-
-    def to_reading(self) -> Reading:
-        """Return the payload as the core reading model."""
-        return Reading(
-            fields={
-                name: Field(value=payload.value, source=payload.source, confidence=payload.confidence)
-                for name, payload in self.fields.items()
-            },
-            document_url=self.document_url,
-        )
-
-
 class _HelperResult(BaseModel):
     """The one JSON object :mod:`invoicebot.extract` writes to stdout."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    reading: _ReadingPayload | None
+    reading: dict[str, Any] | None
     variant: str | None
     decoder: str | None
     error: Literal["unreadable"] | None
@@ -218,7 +189,11 @@ def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId |
     """Return the rule the reading breaks and the reading itself (R-2.13, BR-E02, BR-E05)."""
     if result.error is not None or result.reading is None:
         return RULE_UNREADABLE, None
-    reading = result.reading.to_reading()
+    try:
+        reading = reading_from_json(result.reading)
+    except ValueError:
+        # The helper's payload quotes values such as a RUC or an amount (R-9.16).
+        raise RuntimeError("extract helper printed malformed JSON") from None
     if reading.missing_required():
         return RULE_UNREADABLE, None
     issuer = reading.fields["ruc_emisor"].value

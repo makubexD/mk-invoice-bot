@@ -113,7 +113,7 @@ class Extraction(BaseModel):
     # Written as strings in YAML so no float rounding reaches Decimal (R-2.4).
     igv_rates: list[Decimal] = Field(min_length=1)
     supported_tipos: list[str] = Field(min_length=1)
-    helper_timeout_s: int = Field(gt=0)
+    helper_timeout_s: float = Field(gt=0)
 
 
 class LlmFallback(BaseModel):
