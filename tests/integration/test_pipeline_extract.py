@@ -29,7 +29,12 @@ from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
-from invoicebot.pipeline.extract import ROUTE_STEP, _parse_result, make_extract_handler
+from invoicebot.pipeline.extract import (
+    MAX_HELPER_OUTPUT_BYTES,
+    ROUTE_STEP,
+    _parse_result,
+    make_extract_handler,
+)
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
@@ -58,7 +63,8 @@ QR_SCALE = 6
 QR_TOP = 100
 QR_LEFT = 100
 PNG = ".png"
-HELPER_TIMEOUT_S = 30
+OCR_TIMEOUT_S = 30
+HELPER_TIMEOUT_S = 50
 #: A recent date, so an invoice read from the photo still routes (BR-E03).
 PRINTED_DATE = datetime.now(UTC).date()
 #: The six required fields as printed text on the photo (R-2.3, D81).
@@ -77,8 +83,10 @@ CONFIRMING_PAYLOAD = (
 )
 EXPIRED_TIMEOUT_S = 0.001  # far below any decode, so the helper always times out
 SLOW_HELPER_SCRIPT = "import time; time.sleep(30)"
+#: A helper that prints more than the output cap and exits 0 (R-9.2).
+OVERSIZED_HELPER_SCRIPT = f"import sys; sys.stdout.write('x' * {MAX_HELPER_OUTPUT_BYTES + 1})"
 #: A helper that starts a sleeping grandchild, records its pid, then sleeps (R-9.2).
-#: The grandchild must not hold the helper's stdout pipe, or ``communicate`` alone
+#: The grandchild must not hold the helper's stdout pipe, or reading stdout to EOF
 #: would keep the handler waiting until the grandchild exits.
 TREE_HELPER_SCRIPT = (
     "import subprocess, sys, time\n"
@@ -110,16 +118,23 @@ MEDIA = MediaLimits(
 
 
 def _config(*, helper_timeout_s: float = HELPER_TIMEOUT_S) -> Extraction:
-    """Return the extraction config the handler runs with."""
-    return Extraction(
+    """Return the extraction config the handler runs with.
+
+    The timeout tests deliberately use a helper timeout at or below the OCR timeout, which the
+    model refuses (D81); ``model_copy`` sets it there without revalidation.
+    """
+    config = Extraction(
         max_image_px=2000,
-        ocr=Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=30),
+        ocr=Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=OCR_TIMEOUT_S),
         review_threshold=0.8,
         max_invoice_age_days=365,
         igv_rates=[Decimal("0.18"), Decimal("0.105"), Decimal("0.10")],
         supported_tipos=["01", "03", "07", "08"],
-        helper_timeout_s=helper_timeout_s,
+        helper_timeout_s=HELPER_TIMEOUT_S,
     )
+    if helper_timeout_s == HELPER_TIMEOUT_S:
+        return config
+    return config.model_copy(update={"helper_timeout_s": helper_timeout_s})
 
 
 def _canvas() -> np.ndarray:
@@ -588,6 +603,38 @@ async def test_timeout_kills_a_helper_and_the_child_it_started(
         if grandchild_pid is not None:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(grandchild_pid, signal.SIGKILL)
+
+
+async def test_helper_output_over_the_cap_raises_so_the_queue_retries(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.2: a helper over the cap raises RuntimeError and leaves the invoice for a retry."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"oversized{PNG}"))
+    real_exec = asyncio.create_subprocess_exec
+
+    async def _oversized_exec(*_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
+        return await real_exec(
+            sys.executable,
+            "-c",
+            OVERSIZED_HELPER_SCRIPT,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=kwargs.get("start_new_session", False),
+        )
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _oversized_exec)
+
+    with pytest.raises(RuntimeError, match="output exceeds the cap"):
+        await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+
+    assert (state, rule_id) == ("EXTRACTING", None)
+    assert route_jobs == 0
 
 
 async def test_malformed_helper_output_drops_the_pydantic_cause() -> None:

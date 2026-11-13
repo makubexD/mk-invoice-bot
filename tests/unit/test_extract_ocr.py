@@ -73,8 +73,10 @@ def test_read_text_blank_image_yields_no_words() -> None:
     assert result is None or not any(word for line in result.lines for word in line)
 
 
-def test_read_text_timeout_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """R-9.2: a Tesseract run longer than timeout_s returns ``None``."""
+def test_read_text_timeout_returns_none(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-9.2: a Tesseract run longer than timeout_s returns ``None`` and logs a warning."""
 
     def _timeout(*_args: object, **_kwargs: object) -> None:
         raise subprocess.TimeoutExpired(cmd="tesseract", timeout=TIMEOUT_FOR_TEST_S)
@@ -82,6 +84,7 @@ def test_read_text_timeout_returns_none(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _timeout)
 
     assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+    assert "tesseract timed out" in caplog.text
 
 
 def test_read_text_missing_tesseract_binary_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:

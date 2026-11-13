@@ -18,7 +18,7 @@ import sys
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -36,6 +36,8 @@ from invoicebot.store.invoices import get_file_path, load_invoice_head, save_rea
 
 #: BR-E07 counts megapixels; OpenCV's decode cap counts pixels.
 PIXELS_PER_MEGAPIXEL = 1_000_000
+#: The helper prints one small JSON object; anything larger is a bug the queue retries (R-9.2).
+MAX_HELPER_OUTPUT_BYTES = 64 * 1024
 logger = logging.getLogger(__name__)
 
 type RuleId = Literal["BR-E01", "BR-E02", "BR-E05"]
@@ -142,7 +144,8 @@ async def _run_helper(
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
             reaped first.
-        RuntimeError: when the helper exits non-zero or prints malformed JSON.
+        RuntimeError: when the helper exits non-zero, prints more than
+            ``MAX_HELPER_OUTPUT_BYTES`` or prints malformed JSON.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -172,7 +175,19 @@ async def _run_helper(
         )
         try:
             async with asyncio.timeout(extraction_cfg.helper_timeout_s):
-                stdout, _ = await process.communicate()
+                stdout_stream = cast(asyncio.StreamReader, process.stdout)
+                chunks: list[bytes] = []
+                remaining = MAX_HELPER_OUTPUT_BYTES + 1
+                while remaining > 0:
+                    chunk = await stdout_stream.read(remaining)
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                stdout = b"".join(chunks)
+                if len(stdout) > MAX_HELPER_OUTPUT_BYTES:
+                    raise RuntimeError("extract helper output exceeds the cap")
+                await process.wait()
         finally:
             # Kill the group in every case, so a child of a helper that already exited dies too.
             with contextlib.suppress(ProcessLookupError):

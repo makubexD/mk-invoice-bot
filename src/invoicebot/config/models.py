@@ -98,8 +98,12 @@ class Sunat(BaseModel):
 class Ocr(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    engine: str
-    lang: str
+    # The helper always runs Tesseract, so any other engine is refused at load. A pattern
+    # instead of ``Literal`` keeps the helper's string argument typed as ``str`` (strict mypy).
+    engine: str = Field(pattern=r"^tesseract$")
+    # Tesseract language codes: one or more codes joined with ``+``. The pattern refuses a
+    # path (``../x``) and a leading dash (``-psm``) that would reach the argument list.
+    lang: str = Field(pattern=r"^[A-Za-z_]+(\+[A-Za-z_]+)*$")
     psm: int = Field(ge=0, le=13)
     timeout_s: int = Field(gt=0)
 
@@ -115,6 +119,16 @@ class Extraction(BaseModel):
     igv_rates: list[Decimal] = Field(min_length=1)
     supported_tipos: list[str] = Field(min_length=1)
     helper_timeout_s: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _ocr_finishes_before_helper_timeout(self) -> Self:
+        """D81: OCR must finish before the helper timeout kills the whole helper."""
+        if self.ocr.timeout_s >= self.helper_timeout_s:
+            raise ValueError(
+                f"extraction.ocr.timeout_s ({self.ocr.timeout_s}) must be less than "
+                f"extraction.helper_timeout_s ({self.helper_timeout_s})"
+            )
+        return self
 
 
 class LlmFallback(BaseModel):

@@ -123,6 +123,7 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
             check=False,
         )
     except subprocess.TimeoutExpired:
+        logger.warning("tesseract timed out")
         return None
     except OSError:
         logger.warning("tesseract could not be run")
