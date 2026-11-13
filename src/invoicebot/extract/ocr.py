@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import math
+import resource
 import subprocess  # nosec B404  # runs only the fixed Tesseract argument list below
 from dataclasses import dataclass
 from typing import cast
@@ -93,11 +94,19 @@ def preprocess(gray: np.ndarray) -> np.ndarray:
     )
 
 
+def _no_file_writes() -> None:
+    """Refuse every file write in the Tesseract child process (R-9.2)."""
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
+
+
 def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
     """Run Tesseract over ``image`` and return its words, or ``None`` when OCR did not run.
 
     A missing binary, a timeout or a non-zero exit is treated as "no OCR". Stderr is discarded
     and the text is never logged (R-9.16).
+
+    Tesseract writes only to stdout (TSV), so any file write is a bug or an attack and is refused
+    by an empty file-size limit (R-9.2).
     """
     encoded, buffer = cv2.imencode(PNG_FORMAT, image)
     if not encoded:
@@ -121,6 +130,7 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
             capture_output=True,
             timeout=ocr_cfg.timeout_s,
             check=False,
+            preexec_fn=_no_file_writes,  # the helper process is single-threaded, so this is safe
         )
     except subprocess.TimeoutExpired:
         logger.warning("tesseract timed out")

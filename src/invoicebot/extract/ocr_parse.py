@@ -9,7 +9,9 @@ and the printed URLs are never logged (R-9.16).
 
 from __future__ import annotations
 
+import itertools
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from urllib.parse import urlsplit, urlunsplit
 
@@ -37,6 +39,10 @@ AMOUNT_SEPARATORS_PATTERN = re.compile(r"[.,]")
 URL_TRAILING_CHARS = ".,;)"
 MAX_PRINTED_URLS = 3
 NO_CONFIDENCE = 0.0
+#: Most OCR text characters parsed, so a huge read cannot exhaust the helper (R-9.2).
+MAX_OCR_TEXT_CHARS = 64 * 1024
+#: Most matches considered per parsing rule, so a pathological text cannot exhaust it (R-9.2).
+MAX_MATCHES_PER_RULE = 50
 
 
 @dataclass(frozen=True)
@@ -59,6 +65,7 @@ class _WordSpan:
 def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:
     """Return the fields and printed URLs read from ``text`` with ``rules`` (S3.6, R-2.3)."""
     searched, spans = _build_text(text)
+    searched = searched[:MAX_OCR_TEXT_CHARS]
     fields: dict[str, Field] = {}
     _add_rucs(fields, searched, spans, rules)
     serie, numero = _read_serie_numero(searched, spans, rules)
@@ -75,6 +82,11 @@ def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:
     fields.update(_read_amounts(searched, spans, rules))
     reading = Reading(fields=fields, document_url=None)
     return OcrReading(reading=reading, printed_urls=_read_printed_urls(searched, rules))
+
+
+def _matches(pattern: re.Pattern[str], searched: str) -> Iterator[re.Match[str]]:
+    """Return at most :data:`MAX_MATCHES_PER_RULE` matches of ``pattern`` in ``searched``."""
+    return itertools.islice(pattern.finditer(searched), MAX_MATCHES_PER_RULE)
 
 
 def _build_text(text: OcrText) -> tuple[str, tuple[_WordSpan, ...]]:
@@ -131,7 +143,7 @@ def _ruc_matches(
     found: list[tuple[str, float]] = []
     seen: set[str] = set()
     for pattern in rules.ruc:
-        for match in pattern.finditer(searched):
+        for match in _matches(pattern, searched):
             value = match.group("value")
             if value in seen or not is_valid_ruc(value):
                 continue
@@ -152,7 +164,7 @@ def _read_serie_numero(
     serie needs a digit after its letter, so a word such as ``BASE`` is not one.
     """
     fallback: tuple[re.Match[str], str] | None = None
-    for match in rules.serie_numero.finditer(searched):
+    for match in _matches(rules.serie_numero, searched):
         serie = _fix_serie(match.group("serie").upper())
         if not check_serie(serie):
             continue
@@ -212,7 +224,7 @@ def _read_date(
     rules: ParsingRules,
 ) -> Field | None:
     """Return the first date the shared QR date parser accepts, as an ISO string (R-2.3)."""
-    for match in rules.date.finditer(searched):
+    for match in _matches(rules.date, searched):
         value = match.group("value")
         normalized = value.replace("-", "/") if value[2] == "-" else value
         iso = parse_date(normalized)
@@ -242,7 +254,7 @@ def _read_amount(
 ) -> Field | None:
     """Return the first amount a keyword-gap-value pattern reads and the amount parser accepts."""
     for pattern in patterns:
-        for match in pattern.finditer(searched):
+        for match in _matches(pattern, searched):
             amount = parse_amount(_normalise_amount(match.group("value")))
             if amount is not None:
                 return _ocr_field(str(amount), _confidence(spans, *match.span("value")))
@@ -261,7 +273,7 @@ def _normalise_amount(text: str) -> str:
 def _read_printed_urls(searched: str, rules: ParsingRules) -> tuple[str, ...]:
     """Return the distinct printed URLs reduced to scheme, host and path, capped at three (R-2.10)."""
     urls: list[str] = []
-    for match in rules.printed_url.finditer(searched):
+    for match in _matches(rules.printed_url, searched):
         url = _reduce_url(match.group("value"))
         if url is None or url in urls:
             continue
