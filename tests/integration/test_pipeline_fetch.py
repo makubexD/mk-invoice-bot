@@ -100,7 +100,7 @@ def _written(out_dir: Path, kind: Literal["pdf", "xml"], data: bytes) -> Fetched
 
 
 class FakeFetcher:
-    """A fetcher that writes both documents on ``ok`` and otherwise returns its reason."""
+    """A fetcher that writes both documents on ``ok``, a partial one otherwise, and returns its reason."""
 
     def __init__(self, reason: FetchReason) -> None:
         self.reason = reason
@@ -110,6 +110,7 @@ class FakeFetcher:
         self.calls += 1
         del invoice
         if self.reason is not FetchReason.OK:
+            _written(out_dir, "pdf", PDF_BYTES)
             return FetchResult(self.reason, (), PORTAL_KEY)
         files = (_written(out_dir, "pdf", PDF_BYTES), _written(out_dir, "xml", XML_BYTES))
         return FetchResult(FetchReason.OK, files, PORTAL_KEY)
@@ -263,6 +264,31 @@ async def test_ok_stores_both_files_and_moves_to_delivering(
     assert all(Path(path).is_relative_to(out_dir) for _kind, path, _sha, _size in files)
     assert attempts == [("portal_registry", PORTAL_KEY, True, "ok")]
     assert jobs == []
+
+
+async def test_timeout_result_leaves_no_fetch_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.2: a fetch that ends in timeout leaves no folder under tmp/."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.TIMEOUT), invoice_id, tmp_path)
+
+    assert not (tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)).exists()
+
+
+async def test_ok_result_keeps_its_files(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.2: an ok fetch keeps its files under tmp/ for deliver to move."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.OK), invoice_id, tmp_path)
+
+    out_dir = tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)
+    assert sorted(path.name for path in out_dir.iterdir()) == ["invoice.pdf", "invoice.xml"]
 
 
 async def test_not_found_yet_schedules_one_retry_and_one_status_message(

@@ -10,6 +10,7 @@ moves the invoice to ``MANUAL_REQUIRED`` with BR-F07's message.
 from __future__ import annotations
 
 import logging
+import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,11 +21,13 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import OutboundMessage
+from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
 from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, Portal, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import Attempt, Done, Run, Wait, decide, parse_delay
+from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
@@ -61,8 +64,6 @@ MANUAL_STATE = "MANUAL_REQUIRED"
 RULE_EXHAUSTED = "BR-F07"
 #: The fetcher whose retry schedule comes from the store's portal (D65).
 PORTAL_FETCHER = "portal_registry"
-#: Directory, under the data dir, where a fetcher writes before the files are stored.
-TMP_DIR = "tmp"
 
 #: The BR-F message of a fetcher's chain-final reason (spec 06 §1, BR-F07).
 _REASON_RULES: dict[FetchReason, str] = {
@@ -168,12 +169,21 @@ async def _run(
     data_dir: Path,
 ) -> _Outcome:
     """Run one fetcher and record its result in one transaction (S7.1, R-5.7)."""
-    out_dir = data_dir / TMP_DIR / str(inputs.job.invoice_id)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # One folder per job: a duplicate run's cleanup cannot remove the files another run stored.
+    out_dir = data_dir / TMP_DIRECTORY / str(inputs.job.invoice_id) / str(inputs.job.id)
+    out_dir.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
     started = time.perf_counter()
-    result = await registry[fetcher].fetch(inputs.invoice, out_dir)
+    try:
+        result = await registry[fetcher].fetch(inputs.invoice, out_dir)
+    except BaseException:
+        # R-9.2: a fetcher that raises leaves no partial files behind.
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise
     duration_ms = int((time.perf_counter() - started) * 1000)
     result = _with_required_docs(result, inputs.flow.required_docs)
+    if not result.ok:
+        # R-9.2: a failed fetch, a helper killed on timeout included, leaves nothing.
+        shutil.rmtree(out_dir, ignore_errors=True)
     delay = _next_delay(schedule_for(fetcher), _not_found_count(inputs.attempts, fetcher))
     first_not_found = _not_found_count(inputs.attempts, None) == 0
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
@@ -197,6 +207,7 @@ async def _record_result(
 ) -> None:
     """Store an ``ok`` result's files, or schedule the next try, in the caller's transaction."""
     if result.ok:
+        # shortcut: a fetched file's local_path stays under tmp/ until deliver moves it.
         for fetched in result.files:
             await add_file(
                 conn,

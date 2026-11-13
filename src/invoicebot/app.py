@@ -27,7 +27,7 @@ from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.logging import configure_logging
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
-from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
+from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.route import make_route_handler
@@ -129,7 +129,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         )
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
         registry = {
-            "portal_registry": PortalFetcher(
+            PORTAL_FETCHER: PortalFetcher(
                 directory, cfg.limits.media.max_bytes, cfg.extraction.helper_timeout_s
             )
         }
