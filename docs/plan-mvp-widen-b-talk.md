@@ -335,3 +335,79 @@ Files: `tests/integration/test_conversation_fake.py`.
 - Docstrings cite R-3.2, R-3.5, R-3.6, R-3.7, R-10.1.
 
 Test: `uv run pytest -q tests/integration/test_conversation_fake.py`.
+
+## Step 26: Spec: edits drop dependent answers; duplicates are per profile `[inline: spec wording for the owner's two finish-review decisions]`
+
+Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `specs/03-design.md`.
+
+- D92: an edit drops only the stored answers that depend on an edited field: `cliente` → `flow`, `buyer_ok`, `cap_ok`; `ruc`/`serie` → `comercio`; `total` → `cap_ok` (R-3.5 re-routes "if the buyer changed"). Owner decision, 2026-11-14.
+- D93 and BR-E04: the natural key is scoped to the profile (`<profile_id>|ruc_emisor|tipo|serie|numero`); another profile's invoice is never matched or mentioned (R-10.1). Owner decision, 2026-11-14. Design §8's `natural_key` note says the same.
+
+Test: none (spec text).
+
+## Step 27: Edit input caps and the cliente answers (finish review) `[worker]`
+
+Files: `src/invoicebot/pipeline/edits.py`, `src/invoicebot/pipeline/overrides.py`, `tests/unit/test_edits_parse.py`, `tests/unit/test_overrides_parse.py`.
+
+- `total` accepts at most 10 integer digits (`invoices.total` is `NUMERIC(12,2)`): `[0-9]{1,10}(?:[.,][0-9]{1,2})?`.
+- `EDIT_INVALID` echoes the line through `replace_unsafe_chars` and truncated to `MAX_OVERRIDE_CHARS` characters.
+- `STALE_ANSWERS["num_doc_adq"]` adds `cap_ok`.
+- `parse_overrides` reads keys accent-free like `parse_edits` (one shared helper, in `overrides.py`), so `descripción=` is an override.
+
+Test cases: `total=9999999999.99` → `9999999999.99`; `total=99999999999` → error, rule None; a 500-character unknown key with a zero-width space → the error's echoed line has no unsafe character and at most 120 characters; `descripción=Almuerzo` → override `descripcion`.
+
+Test: `uv run pytest -q tests/unit/test_edits_parse.py tests/unit/test_overrides_parse.py`.
+
+## Step 28: Per-profile natural key (D93, BR-E04, R-10.1) `[worker]`
+
+Files: `src/invoicebot/pipeline/route.py`, `tests/integration/test_pipeline_route.py`.
+
+- `_natural_key` prefixes the profile id: `<profile_id>|ruc_emisor|tipo|serie|numero`, so the global `UNIQUE` column is unique per profile without a migration. Keys stored before this change no longer match; no data migration (no production data yet).
+
+Test cases: the same invoice from two profiles → both route, no BR-E04; twice from one profile → BR-E04 with the first's id (existing test).
+
+Test: `uv run pytest -q tests/integration/test_pipeline_route.py`.
+
+## Step 29: Guarded cancels and extract start (D95, D96) `[worker]`
+
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/pipeline/commands.py`, `src/invoicebot/pipeline/extract.py`, tests in `tests/integration/test_commands.py`.
+
+- `cancel_invoice(conn, invoice_id, msg, *, expected)` passes `expected` to `set_state`; the button passes the state `resolve_reply` checked (reload it), `/cancelar` passes `head.state`.
+- `extract.py`'s move to `EXTRACTING` passes `expected=` the state it read, so a `/cancelar` in between wins.
+
+Test cases: `/cancelar` on an invoice whose state moves to `DELIVERING` after `resolve_target` (simulate: update the row, then call `cancel_invoice` with the old `expected`) → `StateMoved`, invoice still `DELIVERING`.
+
+Test: `uv run pytest -q tests/integration/test_commands.py tests/integration/test_pipeline_actions.py`.
+
+## Step 30: StateMoved during intake retries; a stored reading stamps updated_at (D95, BR-S08) `[worker]`
+
+Files: `src/invoicebot/api/webhook.py`, `src/invoicebot/store/invoices.py`, tests in `tests/integration/test_webhook.py`, `tests/integration/test_invoices_store.py`.
+
+- `webhook.py`: `StateMoved` joins the exception tuple that answers 503, so Meta redelivers and the retry applies to the new state.
+- `save_reading` also sets `updated_at = now()`, so an edit that answers BR-E01 again restarts the park clock.
+
+Test cases: a handler raising `StateMoved` → 503; `save_reading` on a row with `updated_at` 25 h ago → `updated_at` within the last minute.
+
+Test: `uv run pytest -q tests/integration/test_webhook.py tests/integration/test_invoices_store.py`.
+
+## Step 31: An edit during routing wins (D95) `[worker]`
+
+Files: `src/invoicebot/pipeline/route.py`, `tests/integration/test_pipeline_route.py`.
+
+- In the route handler's write transaction, first `SELECT 1 FROM invoices WHERE id = %s FOR UPDATE` (a store function in `store/invoices.py` is allowed, `lock_invoice`), then `if await is_superseded(conn, job): return` before claiming the key or writing. An edit that committed a newer route job makes this run a no-op; an edit still waiting on the lock gets `StateMoved` and retries.
+
+Test cases: run the handler for job 1 after an edit enqueued job 2 (same invoice, step `route`) → job 1 writes nothing, invoice still `ROUTING`; job 2 → routed with the edited reading.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_route.py`.
+
+## Step 32: [Editar] pins the edit target (R-3.5, D90) `[worker]`
+
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/store/invoices.py`, `src/invoicebot/pipeline/edits.py`, tests in `tests/integration/test_intake.py`.
+
+- `_edit` clears `editing` from the profile's other invoices' flow data and sets `editing: true` on this one (one store function, `mark_editing(conn, profile_id, invoice_id)`). `find_override_target`'s fallback orders `editing` invoices first, then newest. `apply_edits` removes the flag once the edit is stored.
+
+Test cases: [Editar] on #older while #newer is open, then `total=45.50` → applied to #older; a second `total=` afterwards → newest again.
+
+Test: `uv run pytest -q tests/integration/test_intake.py tests/integration/test_pipeline_actions.py`.
+
+Carried over to the next phase (finish review, not fixed here): a press on an older menu indexes the newest `choices` (store a menu id in the button); `/pendientes` re-sends questions without a rate limit; a resumed press whose action rejects its choice leaves the invoice unparked; `/pendientes` shows the prepared date in UTC (`shortcut:` in `commands.py`).
