@@ -349,9 +349,9 @@ Files: `src/invoicebot/app.py`, `src/invoicebot/pipeline/fetch.py`, `tests/integ
 
 Test: `uv run pytest -q tests/integration/test_pipeline_fetch.py && uv run lint-imports`.
 
-## Step 25: Live run (M3) `[inline: live accounts, the owner's template and a private invoice]`
+## Deferred: live run (M3)
 
-Waits for the three owner items above.
+Deferred by the owner on 2026-11-14 until the three owner items above are ready; the roadmap tracks it. Not a step of this plan, so the phase finishes without it.
 
 - Host private config: `microsoft.client_id`, the template path and its SHA-256, `mailer.to` = the test inbox, `env: production` and `mail.send_enabled: true` only for this run on this machine (R-7.7, D68); `mailer.modes: [graph]`.
 - `scripts/auth_microsoft.py --account personal`, then the M2 La Leña photo through the fake channel or WhatsApp.
