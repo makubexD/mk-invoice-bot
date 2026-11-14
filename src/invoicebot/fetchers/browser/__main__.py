@@ -20,7 +20,7 @@ import sys
 from typing import Any
 from urllib.parse import urlsplit
 
-from playwright.async_api import async_playwright
+from playwright.async_api import Page, Request, async_playwright
 
 from invoicebot.config.models import MediaMaxBytes, Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
@@ -36,12 +36,15 @@ logger = logging.getLogger(__name__)
 MAX_REQUEST_BYTES = 1024 * 1024
 #: CPU seconds the whole helper may burn before the kernel ends it (R-9.2).
 MAX_CPU_SECONDS = 120
-#: Chromium's launch flags from spec 03 §8; images are added below for captcha pages.
+#: Chromium's launch flags from spec 03 §8; images are added below for captcha pages. The
+#: WebRTC policy keeps a page's UDP (STUN/TURN) off the network: it would skip the guard
+#: proxy and could probe internal addresses (R-5.10).
 LAUNCH_ARGS: tuple[str, ...] = (
     "--disable-dev-shm-usage",
     "--no-zygote",
     "--renderer-process-limit=1",
     "--disable-gpu",
+    "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
 )
 #: Disables image loading for portals without a captcha.
 IMAGES_OFF = "--blink-settings=imagesEnabled=false"
@@ -110,20 +113,40 @@ async def _run_browser(request: HelperRequest) -> None:
             context.set_default_timeout(request.page_timeout_ms)
             await context.route("**/*", guard.on_route)
             page = await context.new_page()
+            navigation_hosts = record_navigation_hosts(page)
             result = await fill_and_download(
                 page, portal, request.invoice, request.out_dir, request.max_bytes
             )
         finally:
             await browser.close()
-    _emit(_output(_guarded_result(result, proxy.first_block)))
+    _emit(_output(_guarded_result(result, proxy.block_for(navigation_hosts))))
 
 
-def _guarded_result(result: FetchResult, first_block: GuardReason | None) -> FetchResult:
+def record_navigation_hosts(page: Page) -> list[str]:
+    """Return a list that collects the host of every main-frame navigation, redirect hops included.
+
+    A proxy refusal of a plain ``http`` hop still ends the navigation with a 403 page, not a
+    failed request, so the helper compares these hosts with the proxy's refused hosts (R-5.10).
+    """
+    hosts: list[str] = []
+
+    def on_request(request: Request) -> None:
+        if request.is_navigation_request() and request.frame == page.main_frame:
+            host = urlsplit(request.url).hostname
+            if host is not None and host not in hosts:
+                hosts.append(host)
+
+    page.on("request", on_request)
+    return hosts
+
+
+def _guarded_result(result: FetchResult, block: GuardReason | None) -> FetchResult:
     """Promote a technical or timeout result to ``guard_blocked`` (R-5.10).
 
-    A blocked sub-resource records no ``first_block``; a not-found page keeps its reason.
+    ``block`` is the proxy's refusal of a host the page navigated to; a blocked sub-resource
+    gives none, and a not-found page keeps its reason.
     """
-    if first_block is None or result.reason not in BLOCKABLE_REASONS:
+    if block is None or result.reason not in BLOCKABLE_REASONS:
         return result
     return FetchResult(reason=FetchReason.GUARD_BLOCKED, files=(), portal_key=result.portal_key)
 

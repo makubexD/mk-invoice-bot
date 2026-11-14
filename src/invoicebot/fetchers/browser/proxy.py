@@ -26,6 +26,8 @@ _HEAD_LIMIT = 16 * 1024
 _HEAD_END = b"\r\n\r\n"
 #: The most tunnels/forwards open at once; the next one gets 429 (R-5.10).
 _MAX_OPEN = 32
+#: The most refused hosts remembered; a page cannot grow the map without bound (R-9.1).
+_MAX_BLOCKED_HOSTS = 64
 #: Read size for the two-way pipe; the server's reader limit equals the head limit.
 _PIPE_CHUNK = _HEAD_LIMIT
 _LOOPBACK = "127.0.0.1"
@@ -46,8 +48,10 @@ class GuardProxy:
     addresses pass ``check_addresses``; a plain ``GET`` in absolute ``http://`` form must
     first pass ``check_url`` against ``http_hosts`` and then the same address check. The
     upstream connection is opened to ``addresses[0]``, never to the host name, so a
-    rebinding answer cannot redirect a checked request elsewhere (D82). The first refusal
-    is kept in ``first_block``; the 33rd open tunnel gets ``429`` without being recorded.
+    rebinding answer cannot redirect a checked request elsewhere (D82). Each refused host's
+    first reason is kept in ``blocked``, so the helper can tell a blocked navigation from a
+    blocked sub-resource (``block_for``); the 33rd open tunnel gets ``429`` without being
+    recorded.
     """
 
     def __init__(
@@ -65,7 +69,7 @@ class GuardProxy:
         self._check_addresses = check_addresses
         self._https_port = https_port
         self.port = 0
-        self.first_block: GuardReason | None = None
+        self.blocked: dict[str, GuardReason] = {}
         self._server: asyncio.Server | None = None
         self._open: set[asyncio.StreamWriter] = set()
         self._tasks: set[asyncio.Task[None]] = set()
@@ -146,15 +150,15 @@ class GuardProxy:
         """Serve a CONNECT: check the host, then tunnel to the pinned address on https_port."""
         parsed = _parse_connect_target(target)
         if parsed is None:
-            await self._refuse(writer, GuardReason.BAD_URL)
+            await self._refuse(writer, GuardReason.BAD_URL, None)
             return
         host, port = parsed
         if port != self._https_port:
-            await self._refuse(writer, GuardReason.BAD_URL)
+            await self._refuse(writer, GuardReason.BAD_URL, host)
             return
         pinned, reason = await self._resolve_pin(host)
         if reason is not None:
-            await self._refuse(writer, reason)
+            await self._refuse(writer, reason, host)
             return
         upstream = await self._open_upstream(writer, pinned, self._https_port)
         if upstream is None:
@@ -188,11 +192,11 @@ class GuardProxy:
         host, port, origin = parsed
         reason = check_url(url, self._http_hosts)
         if reason is not None:
-            await self._refuse(writer, reason)
+            await self._refuse(writer, reason, host)
             return
         pinned, reason = await self._resolve_pin(host)
         if reason is not None:
-            await self._refuse(writer, reason)
+            await self._refuse(writer, reason, host)
             return
         upstream = await self._open_upstream(writer, pinned, port)
         if upstream is None:
@@ -232,11 +236,19 @@ class GuardProxy:
             return "", reason
         return addresses[0], None
 
-    async def _refuse(self, writer: asyncio.StreamWriter, reason: GuardReason) -> None:
-        """Answer 403 and keep the first refusal reason."""
-        if self.first_block is None:
-            self.first_block = reason
+    async def _refuse(self, writer: asyncio.StreamWriter, reason: GuardReason, host: str | None) -> None:
+        """Answer 403 and keep the host's first refusal reason, up to ``_MAX_BLOCKED_HOSTS``."""
+        if host is not None and host not in self.blocked and len(self.blocked) < _MAX_BLOCKED_HOSTS:
+            self.blocked[host] = reason
         await _write(writer, _HTTP_403)
+
+    def block_for(self, hosts: Iterable[str]) -> GuardReason | None:
+        """Return the refusal of the first of ``hosts`` the proxy refused, or None (R-5.10)."""
+        for host in hosts:
+            reason = self.blocked.get(host)
+            if reason is not None:
+                return reason
+        return None
 
 
 def _parse_head(head: bytes) -> tuple[bytes, bytes, bytes, bytes] | None:

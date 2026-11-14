@@ -5,13 +5,18 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
+from typing import Any
 
 import pytest_asyncio
 from playwright.async_api import Browser, async_playwright
 
 from invoicebot.config.models import Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
-from invoicebot.fetchers.browser.__main__ import _guarded_result, _launch_options
+from invoicebot.fetchers.browser.__main__ import (
+    _guarded_result,
+    _launch_options,
+    record_navigation_hosts,
+)
 from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.net.guard import GuardReason
 
@@ -21,6 +26,8 @@ _START_HOST = "start.test"
 _EVIL_HOST = "evil.test"
 _ALLOWED_ADDRESS = "127.0.0.1"
 _REFUSED_ADDRESS = "127.0.0.2"
+#: How long a page gets to send STUN; without the WebRTC flag packets arrive within a second.
+_STUN_WAIT_S = 2
 
 
 class _FakeResolver:
@@ -85,7 +92,7 @@ async def test_connect_to_loopback_is_refused_as_private() -> None:
             writer.close()
             await writer.wait_closed()
     assert response.startswith(b"HTTP/1.1 403")
-    assert proxy.first_block is GuardReason.PRIVATE_ADDRESS
+    assert proxy.blocked == {"loopback.test": GuardReason.PRIVATE_ADDRESS}
 
 
 async def test_allowed_connect_tunnels_bytes_both_ways(echo_port: int) -> None:
@@ -184,7 +191,7 @@ async def test_thirty_third_tunnel_is_refused(echo_port: int) -> None:
             for tunnel in tunnels:
                 await tunnel.wait_closed()
     assert response.startswith(b"HTTP/1.1 429")
-    assert proxy.first_block is None
+    assert proxy.blocked == {}
 
 
 async def test_head_over_16_kib_is_bad_request() -> None:
@@ -244,7 +251,8 @@ async def evil_site() -> AsyncIterator[_EvilSite]:
 
 @pytest_asyncio.fixture
 async def start_site(evil_site: _EvilSite) -> AsyncIterator[int]:
-    """A page on 127.0.0.1: ``/`` redirects to evil, any other path opens a WebSocket to it."""
+    """A page on 127.0.0.1: ``/`` redirects to evil, ``/script`` loads a script from it, any
+    other path opens a WebSocket to it."""
 
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -262,7 +270,10 @@ async def start_site(evil_site: _EvilSite) -> AsyncIterator[int]:
                 "Connection: close\r\n\r\n"
             ).encode()
         else:
-            page = f"<script>new WebSocket('ws://{_EVIL_HOST}:{evil_site.port}/');</script>"
+            if path == b"/script":
+                page = f"<script src='http://{_EVIL_HOST}:{evil_site.port}/x.js'></script>"
+            else:
+                page = f"<script>new WebSocket('ws://{_EVIL_HOST}:{evil_site.port}/');</script>"
             body = page.encode()
             response = (
                 "HTTP/1.1 200 OK\r\n"
@@ -310,7 +321,7 @@ async def browser(browser_proxy: GuardProxy) -> AsyncIterator[Browser]:
 async def _wait_until_blocked(proxy: GuardProxy) -> None:
     """Wait up to five seconds for the WebSocket handshake to be refused."""
     for _ in range(100):
-        if proxy.first_block is not None:
+        if proxy.blocked:
             return
         await asyncio.sleep(0.05)
 
@@ -320,15 +331,18 @@ async def test_redirect_to_a_refused_address_never_reaches_it(
 ) -> None:
     """R-5.10: a 302 to a host the proxy refuses never reaches that host."""
     page = await browser.new_page()
+    navigation_hosts = record_navigation_hosts(page)
     try:
         await page.goto(f"http://{_START_HOST}:{start_site}/")
     finally:
         await page.close()
 
     assert evil_site.hits == 0
-    assert browser_proxy.first_block is GuardReason.PRIVATE_ADDRESS
+    assert navigation_hosts == [_START_HOST, _EVIL_HOST]
+    block = browser_proxy.block_for(navigation_hosts)
+    assert block is GuardReason.PRIVATE_ADDRESS
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
-    assert _guarded_result(technical, browser_proxy.first_block).reason is FetchReason.GUARD_BLOCKED
+    assert _guarded_result(technical, block).reason is FetchReason.GUARD_BLOCKED
 
 
 async def test_websocket_to_a_refused_address_is_blocked(
@@ -343,4 +357,57 @@ async def test_websocket_to_a_refused_address_is_blocked(
         await page.close()
 
     assert evil_site.hits == 0
-    assert browser_proxy.first_block is not None
+    assert _EVIL_HOST in browser_proxy.blocked
+
+
+async def test_blocked_sub_resource_keeps_a_technical_result(
+    browser: Browser, browser_proxy: GuardProxy, start_site: int, evil_site: _EvilSite
+) -> None:
+    """R-5.10: a refused script on a page that loaded is no blocked navigation; technical stays."""
+    page = await browser.new_page()
+    navigation_hosts = record_navigation_hosts(page)
+    try:
+        await page.goto(f"http://{_START_HOST}:{start_site}/script")
+        await _wait_until_blocked(browser_proxy)
+    finally:
+        await page.close()
+
+    assert evil_site.hits == 0
+    assert _EVIL_HOST in browser_proxy.blocked
+    assert navigation_hosts == [_START_HOST]
+    technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
+    assert _guarded_result(technical, browser_proxy.block_for(navigation_hosts)) is technical
+
+
+class _UdpCounter(asyncio.DatagramProtocol):
+    """Counts the datagrams that reach a local UDP port."""
+
+    def __init__(self) -> None:
+        self.hits = 0
+
+    def datagram_received(self, data: bytes, addr: tuple[str | Any, int]) -> None:
+        """Count one datagram."""
+        del data, addr
+        self.hits += 1
+
+
+async def test_webrtc_stun_never_leaves_the_browser(browser: Browser) -> None:
+    """R-5.10: a page's WebRTC STUN request skips the proxy, so the launch flags must stop it."""
+    loop = asyncio.get_running_loop()
+    counter = _UdpCounter()
+    transport, _ = await loop.create_datagram_endpoint(lambda: counter, local_addr=(_REFUSED_ADDRESS, 0))
+    udp_port = transport.get_extra_info("sockname")[1]
+    page = await browser.new_page()
+    try:
+        await page.set_content(
+            "<script>const pc = new RTCPeerConnection("
+            f"{{iceServers: [{{urls: 'stun:{_REFUSED_ADDRESS}:{udp_port}'}}]}});"
+            "pc.createDataChannel('probe');"
+            "pc.createOffer().then(offer => pc.setLocalDescription(offer));</script>"
+        )
+        await asyncio.sleep(_STUN_WAIT_S)
+    finally:
+        await page.close()
+        transport.close()
+
+    assert counter.hits == 0
