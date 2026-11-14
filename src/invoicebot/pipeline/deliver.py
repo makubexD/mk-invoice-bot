@@ -8,7 +8,10 @@ transaction, opens a ``prepared`` batch, records the draft file and moves the in
 ``BATCHED`` with BR-D07 and its [Ya lo envié] button (R-8.1). The automatic mode opens a
 ``sending`` batch, sends once, then closes the invoice as ``DONE`` with BR-D10 and deletes the
 photo. A batch a previous attempt left ``sending`` is not sent again: it is marked ``failed``
-and BR-D03 asks the owner to reprocess (D89).
+and BR-D03 asks the owner to reprocess (D89). A sign-in failure leaves the invoice
+``PENDING_AUTH`` with BR-D01, a bad Excel template leaves it ``MANUAL_REQUIRED`` with BR-D02,
+and a final Graph error fails the batch and leaves the invoice ``BATCHED`` with BR-D03; a
+transient Graph error propagates so the queue retries it.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
+from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.channels.base import Button, OutboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import (
@@ -33,6 +37,7 @@ from invoicebot.config.models import (
     Flow,
     MailerSink,
     OneDriveFolderSink,
+    Profile,
     StoreDirectory,
 )
 from invoicebot.extract.fields import Reading
@@ -42,10 +47,11 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, SENT_BUTTON_TITLE, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
-from invoicebot.sinks.excel_template import build_excel
+from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
 from invoicebot.sinks.folders import comercio_for
 from invoicebot.sinks.mailer import MailMode, build_mail
+from invoicebot.sinks.onedrive import GraphError
 from invoicebot.sinks.onedrive_folder import file_folder
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
@@ -90,6 +96,20 @@ DONE_STATE = "DONE"
 RULE_SEND_FAILED = "BR-D03"
 #: BR-D10: the rule that reports a filed and mailed invoice (R-7.7).
 RULE_SENT = "BR-D10"
+#: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
+RULE_AUTH = "BR-D01"
+#: BR-D01's admin-only alert, with the script the admin runs (BR-D01).
+RULE_AUTH_ADMIN = "BR-D01_admin"
+#: BR-D02: the rule that reports an Excel template that cannot be filled (R-7.10).
+RULE_TEMPLATE_INVALID = "BR-D02"
+#: Where a missing token leaves the invoice until the account signs in (BR-D01).
+PENDING_AUTH_STATE = "PENDING_AUTH"
+#: Where a broken Excel template leaves the invoice (BR-D02).
+MANUAL_REQUIRED_STATE = "MANUAL_REQUIRED"
+#: The provider named in the sender's BR-D01 text.
+AUTH_PROVIDER_NAME = "Microsoft"
+#: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
+AUTH_PROVIDER_SLUG = "microsoft"
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
 #: The button action that confirms the owner sent the draft (R-7.8, R-8.1).
@@ -187,12 +207,19 @@ def make_deliver_handler(
             )
             return
         prepared = await _prepare_values(context, invoice)
-        delivery = await _prepare(context, invoice, sinks, prepared)
-        mode_name, mode = _mode(context.modes, sinks.mailer)
-        if mode.automatic:
-            await _automatic(context, delivery, prepared, mode)
-        else:
-            await _assisted(context, delivery, mode)
+        try:
+            delivery = await _prepare(context, invoice, sinks, prepared)
+            mode_name, mode = _mode(context.modes, sinks.mailer)
+            if mode.automatic:
+                await _automatic(context, delivery, prepared, mode)
+            else:
+                await _assisted(context, delivery, mode)
+        except AuthRequired:
+            await _pending_auth(context, invoice)
+            return
+        except TemplateInvalid:
+            await _template_invalid(context, invoice)
+            return
         logger.info(
             "step done",
             extra={
@@ -386,17 +413,31 @@ async def _automatic(
 ) -> None:
     """Send the mail once and close the delivery, or report a crashed send (R-7.5, D89).
 
-    The first transaction records the batch as ``sending`` before the external call. A batch
-    already ``sending`` means a previous attempt died mid-send, so it is never sent again: the
-    batch fails and BR-D03 asks the owner to reprocess it (D89).
+    The first transaction records the batch as ``sending`` before the external call; an
+    existing batch may be ``failed`` or ``prepared``, so its state is always set again. A
+    batch already ``sending`` means a previous attempt died mid-send, so it is never sent
+    again: the batch fails and BR-D03 asks the owner to reprocess it (D89). ``GraphTransient``
+    is a separate class, so it propagates for the queue to retry; only ``GraphError`` fails
+    the batch.
     """
     async with context.pool.connection() as conn, conn.transaction():
         if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
             await _crashed_send(conn, delivery, prepared)
             return
         batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
+        await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
 
-    await mode.deliver(delivery.invoice_id, delivery.mail)
+    try:
+        await mode.deliver(delivery.invoice_id, delivery.mail)
+    except GraphError:
+        await _send_failed(context, delivery, prepared, batch_id)
+        return
+    except AuthRequired:
+        # The token is fetched before anything is sent, so the mail did not go out: free the
+        # batch so the delivery resumed after re-auth sends it instead of treating it as crashed.
+        async with context.pool.connection() as conn, conn.transaction():
+            await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+        raise
 
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
@@ -414,12 +455,82 @@ async def _crashed_send(conn: AsyncConnection[Any], delivery: _Delivery, prepare
     """Fail the batch a previous attempt left ``sending`` and ask the owner to reprocess (D89)."""
     batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
-    text = MESSAGES[RULE_SEND_FAILED].format(
+    await _notify(conn, delivery.head, RULE_SEND_FAILED, _send_failed_text(prepared, delivery.invoice_id), [])
+
+
+async def _send_failed(
+    context: _Context,
+    delivery: _Delivery,
+    prepared: _Values,
+    batch_id: int,
+) -> None:
+    """Fail the batch and leave the invoice ``BATCHED`` so a reprocess retries it (BR-D03)."""
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, delivery.invoice_id):
+            return
+        await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+        await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
+        text = _send_failed_text(prepared, delivery.invoice_id)
+        await _notify(conn, delivery.head, RULE_SEND_FAILED, text, [])
+
+
+def _send_failed_text(prepared: _Values, invoice_id: int) -> str:
+    """Return BR-D03's text for the invoice's serie, numero and id (BR-D03)."""
+    return MESSAGES[RULE_SEND_FAILED].format(
         serie=prepared.values["serie"],
         numero=prepared.values["numero"],
-        id=delivery.invoice_id,
+        id=invoice_id,
     )
-    await _notify(conn, delivery.head, RULE_SEND_FAILED, text, [])
+
+
+async def _pending_auth(context: _Context, invoice: _Invoice) -> None:
+    """Park the invoice until the account signs in and alert its sender and admins (BR-D01)."""
+    text = MESSAGES[RULE_AUTH].format(provider=AUTH_PROVIDER_NAME)
+    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG)
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, invoice.job.invoice_id):
+            return
+        await set_state(conn, invoice.job.invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
+        await _notify(conn, invoice.head, RULE_AUTH, text, [])
+        for profile_id, profile in context.cfg.profiles.items():
+            if profile.admin:
+                await _notify_admin(conn, profile_id, profile, admin_text)
+
+
+async def _notify_admin(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    profile: Profile,
+    text: str,
+) -> None:
+    """Queue BR-D01's admin text for one admin profile on its preferred channel, if it has one (BR-D01)."""
+    channel = profile.preferred_channel
+    if channel is None:
+        # One unreachable admin must not undo the PENDING_AUTH move or the other alerts.
+        logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": RULE_AUTH_ADMIN})
+        return
+    message = OutboundMessage(
+        channel=channel,
+        recipient=profile_id,
+        profile_id=profile_id,
+        rule_id=RULE_AUTH_ADMIN,
+        text=text,
+    )
+    await outbox.add(conn, channel, profile_id, message.model_dump(mode="json"))
+
+
+async def _template_invalid(context: _Context, invoice: _Invoice) -> None:
+    """Move the invoice to ``MANUAL_REQUIRED`` with BR-D02 (R-7.10)."""
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, invoice.job.invoice_id):
+            return
+        await set_state(conn, invoice.job.invoice_id, MANUAL_REQUIRED_STATE, rule_id=RULE_TEMPLATE_INVALID)
+        await _notify(conn, invoice.head, RULE_TEMPLATE_INVALID, MESSAGES[RULE_TEMPLATE_INVALID], [])
+    # shortcut: the TEMPLATE_INVALID gap is not filed yet, so a fixed template does not resume it.
+    logger.warning(
+        "shortcut: the TEMPLATE_INVALID gap is not filed yet",
+        extra={"step": DELIVER_STEP, "invoice_id": invoice.job.invoice_id},
+    )
 
 
 async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool:

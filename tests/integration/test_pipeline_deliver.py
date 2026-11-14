@@ -18,6 +18,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Brand, Config, ExcelTemplateSink, MailerSink, Store, StoreDirectory
@@ -28,7 +29,14 @@ from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.mailer import DryRun
-from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data, open_batch
+from invoicebot.sinks.onedrive import GraphError, GraphTransient
+from invoicebot.store.flow_b import (
+    get_batch_state,
+    load_flow_data,
+    merge_flow_data,
+    open_batch,
+    set_batch_state,
+)
 from invoicebot.store.invoices import (
     FileRecord,
     add_file,
@@ -122,6 +130,42 @@ class FakeGraphMode:
         self.calls.append((invoice_id, mail))
 
 
+class RaisingMode:
+    """An automatic mode whose send raises the error the test installed (BR-D01, R-7.3, BR-D03)."""
+
+    automatic = True
+
+    def __init__(self, error: Exception) -> None:
+        self._error = error
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+        """Raise the installed error instead of sending."""
+        raise self._error
+
+
+class ObservingGraphMode:
+    """An automatic mode that records the batch state it sees just before sending (D89)."""
+
+    automatic = True
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+        self._pool = pool
+        self.seen_state: str | None = None
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+        """Read the batch's state; it must be ``sending`` before the send (D89)."""
+        async with self._pool.connection() as conn:
+            self.seen_state = await get_batch_state(conn, invoice_id)
+
+
+class AuthRequiredDrive(FakeDrive):
+    """A drive that reports the account must sign in before it lists a folder (BR-D01)."""
+
+    async def list_names(self, path: str) -> list[str]:
+        """Raise ``AuthRequired`` instead of listing the drive."""
+        raise AuthRequired("personal")
+
+
 def _field(value: str) -> Field:
     return Field(value=value, source="qr", confidence=1.0)
 
@@ -178,6 +222,26 @@ def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run") -> Conf
             "profiles": {profile_id: cfg.profiles[PROFILE]},
         }
     )
+
+
+def _config_with_admins(cfg: Config, profile_id: str, admin_ids: list[str]) -> Config:
+    """Return cfg whose sender is not an admin and which has one admin profile per id (BR-D01)."""
+    sender = cfg.profiles[profile_id].model_copy(update={"admin": False})
+    profiles = {profile_id: sender}
+    for admin_id in admin_ids:
+        profiles[admin_id] = sender.model_copy(update={"admin": True})
+    return cfg.model_copy(update={"profiles": profiles})
+
+
+def _config_with_bad_template(cfg: Config) -> Config:
+    """Return cfg whose Excel sink pins a SHA-256 the template cannot match (BR-D02)."""
+    sinks: list[Any] = []
+    for sink in cfg.flows[FLOW].sinks:
+        if isinstance(sink, ExcelTemplateSink):
+            sink = sink.model_copy(update={"template_sha256": "0" * 64})
+        sinks.append(sink)
+    flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
+    return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
 def _job(invoice_id: int) -> Job:
@@ -477,6 +541,129 @@ async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
             [],
         )
     ]
+
+
+async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D01, R-7.9: a missing token leaves PENDING_AUTH and alerts the sender and each admin."""
+    profile_id = f"deliver-{uuid4().hex}"
+    admin_ids = [f"admin-a-{uuid4().hex}", f"admin-b-{uuid4().hex}"]
+    cfg = _config_with_admins(_config(tmp_path, profile_id), profile_id, admin_ids)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, AuthRequiredDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        user = await _outbox(conn, profile_id)
+        admins = [await _outbox(conn, admin_id) for admin_id in admin_ids]
+    assert invoice == ("PENDING_AUTH", "BR-D01")
+    assert user == [(MESSAGES["BR-D01"].format(provider="Microsoft"), "BR-D01", [])]
+    assert admins == [
+        [(MESSAGES["BR-D01_admin"].format(provider="microsoft"), "BR-D01_admin", [])] for _ in admin_ids
+    ]
+
+
+async def test_a_bad_template_hash_requires_a_manual_fix(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02, R-7.10: a template that does not match its pinned hash leaves MANUAL_REQUIRED."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-D02")
+    assert outbox == [(MESSAGES["BR-D02"], "BR-D02", [])]
+
+
+async def test_graph_error_fails_the_batch_and_keeps_the_invoice_batched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D03, D89: a final send failure fails the batch and leaves the invoice BATCHED."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphError(400)), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("BATCHED", "BR-D03")
+    assert batch_state == "failed"
+    assert outbox == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+
+
+async def test_graph_transient_propagates_and_leaves_the_batch_sending(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.3, D89: a transient send failure reaches the queue and the batch stays sending."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    with pytest.raises(GraphTransient, match="status 503"):
+        await _handler(
+            db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphTransient(503)), mode_name="graph"
+        )(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DELIVERING", None)
+    assert batch_state == "sending"
+    assert outbox == []
+
+
+async def test_auth_required_on_send_parks_the_invoice_and_frees_the_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D01, D89: an expired token at send time parks the invoice; the batch is failed, not sending."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(
+        db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(AuthRequired("personal")), mode_name="graph"
+    )(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+    assert invoice == ("PENDING_AUTH", "BR-D01")
+    assert batch_state == "failed"
+
+
+async def test_a_failed_batch_is_marked_sending_before_the_send(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D89: an existing failed batch is set sending before the mode sends it."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "sending")
+        await set_batch_state(conn, batch_id, "failed")
+    mode = ObservingGraphMode(db_pool)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+    assert mode.seen_state == "sending"
+    assert invoice == ("DONE", "BR-D10")
+    assert batch_state == "sent"
 
 
 async def test_flow_without_a_folder_sink_is_a_no_op(
