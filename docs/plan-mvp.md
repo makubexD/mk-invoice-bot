@@ -11,7 +11,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                     | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
 | 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                  | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
 | 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                   | part of M4 | Nothing                                                                          |
-| 6b  | `widen-b-talk`                     | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
+| 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
 | 6c  | `widen-b-fetch`                    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.3, S10.4, S10.7, S10.10, S11.9; portal config checks | part of M4 | S0.6 (remaining store pages); Q5                                                 |
 | 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                             | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
 | 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                    | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
@@ -36,6 +36,17 @@ Each item goes into the named phase's plan.
 - **`ops`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.
 
 Rules for every phase plan: steps of one concern in at most about 3 files, each with its own test command; tests cite requirement and rule IDs; no real RUCs, phone numbers or photos in git (D27).
+
+## Carried over from the `widen-b-talk` review
+
+Each item goes into the `widen-b-fetch` plan unless named otherwise.
+
+- A press on an older menu indexes the newest `choices`: store a menu id in the button.
+- `/pendientes` re-sends parked questions without a rate limit.
+- A resumed press whose action rejects its choice leaves the invoice unparked.
+- `/pendientes` shows the prepared date in UTC (`shortcut:` in `commands.py`).
+- A NUL in an inbound text fails the JSONB insert, so the webhook answers 503 and Meta redelivers it for days. Strip or reject control characters in `parse_webhook`, and answer 200 for a message that can never succeed.
+- Profile ids have no pattern; the per-profile natural key (D93) assumes they never contain `|`. Give them one (`^[a-z0-9_-]+$`) in the config model.
 
 ## Carried over from the `read` review
 
