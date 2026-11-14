@@ -349,6 +349,12 @@ HELP_AYUDA = "/ayuda: esta lista"
 #: ``/estado``'s own line in the command list (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_ESTADO = "/estado 12: cómo va el comprobante #12"
+#: ``/cancelar``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_CANCELAR = "/cancelar 12: cancela el comprobante #12"
+#: ``/reprocesar``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_REPROCESAR = "/reprocesar 12: reintenta el comprobante #12 si falló"
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."
@@ -361,6 +367,18 @@ STATUS_RULE_ONLY = "Motivo: {rule_id}."
 #: The answer when a command that needs an invoice id is sent without one (R-10.1).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
+#: ``/cancelar``'s answer when the invoice is past CANCELLABLE (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+CANCEL_LATE = "El comprobante #{id} ya está {state_desc}; ya no se puede cancelar."
+#: ``/reprocesar``'s answer when it requeued the invoice's step (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+REPROCESS_STARTED = "Vuelvo a intentar el comprobante #{id}."
+#: ``/reprocesar``'s answer when the invoice's state has no step to restart (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+REPROCESS_NOT_ALLOWED = (
+    "El comprobante #{id} está {state_desc}. /reprocesar solo sirve para comprobantes "
+    "que fallaron o que esperan sus archivos."
+)
 
 
 def modes_desc(modes: Sequence[str]) -> str:

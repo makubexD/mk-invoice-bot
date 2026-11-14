@@ -15,20 +15,44 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.pipeline.actions import cancel_invoice
+from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE
+from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue import outbox
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
+    CANCEL_LATE,
     COMMAND_NEEDS_ID,
     HELP_AYUDA,
+    HELP_CANCELAR,
     HELP_ESTADO,
     HELP_HEADER,
+    HELP_REPROCESAR,
     MESSAGES,
+    REPROCESS_NOT_ALLOWED,
+    REPROCESS_STARTED,
     STATUS,
     STATUS_RULE,
     STATUS_RULE_ONLY,
     state_desc,
 )
-from invoicebot.store.invoices import InvoiceHead, get_state_rule, load_invoice_head
+from invoicebot.states import (
+    BATCHED,
+    CANCELLABLE,
+    DELIVERING,
+    FAILED,
+    FETCHING_DOCS,
+    MANUAL_REQUIRED,
+)
+from invoicebot.store.flow_b import get_batch_state
+from invoicebot.store.invoices import (
+    InvoiceHead,
+    get_state_rule,
+    load_flow,
+    load_invoice_head,
+    set_state,
+)
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
 RULE_NOT_FOUND = "BR-S07"
@@ -158,6 +182,69 @@ async def _estado(
     await _reply(conn, msg, None, text)
 
 
+async def _cancelar(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    admins: frozenset[str],
+) -> None:
+    """Cancel the named invoice when its state is CANCELLABLE, or explain why not (S4.9, D96)."""
+    target = await resolve_target(conn, msg, "cancelar", arg, admins)
+    if target is None:
+        return
+    invoice_id, head = target
+    if head.state in CANCELLABLE:
+        await cancel_invoice(conn, invoice_id, msg)
+        return
+    text = CANCEL_LATE.format(id=invoice_id, state_desc=state_desc(head.state))
+    await _reply(conn, msg, None, text)
+
+
+async def _reprocesar(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    admins: frozenset[str],
+) -> None:
+    """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96)."""
+    target = await resolve_target(conn, msg, "reprocesar", arg, admins)
+    if target is None:
+        return
+    invoice_id, head = target
+    if await _requeue(conn, invoice_id, head.state):
+        await _reply(conn, msg, None, REPROCESS_STARTED.format(id=invoice_id))
+        return
+    text = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc(head.state))
+    await _reply(conn, msg, None, text)
+
+
+async def _requeue(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
+    """Queue the step the invoice's state needs, returning whether there is one (S4.9, D96)."""
+    if state in (FAILED, MANUAL_REQUIRED):
+        return await _retry_documents(conn, invoice_id, state)
+    if state == BATCHED:
+        return await _retry_delivery(conn, invoice_id)
+    return False
+
+
+async def _retry_documents(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
+    """Send a failed or manual invoice back to its fetch step, if it has a flow (S4.9, D96)."""
+    if state == FAILED and await load_flow(conn, invoice_id) is None:
+        return False
+    await set_state(conn, invoice_id, FETCHING_DOCS, expected=state)
+    await enqueue(conn, invoice_id, FETCH_STEP)
+    return True
+
+
+async def _retry_delivery(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Send an invoice whose batch failed back to deliver, which resends it (S4.9, D96)."""
+    if await get_batch_state(conn, invoice_id) != FAILED_BATCH_STATE:
+        return False
+    await set_state(conn, invoice_id, DELIVERING, expected=BATCHED)
+    await enqueue(conn, invoice_id, DELIVER_STEP)
+    return True
+
+
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -172,4 +259,6 @@ async def _reply(
 COMMANDS: Mapping[str, Command] = {
     "ayuda": Command(_ayuda, HELP_AYUDA),
     "estado": Command(_estado, HELP_ESTADO),
+    "cancelar": Command(_cancelar, HELP_CANCELAR),
+    "reprocesar": Command(_reprocesar, HELP_REPROCESAR),
 }

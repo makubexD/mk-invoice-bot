@@ -182,11 +182,10 @@ async def _continue(
     return ()
 
 
-async def _cancel(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
-) -> tuple[Path, ...]:
-    """Cancel the invoice from any CANCELLABLE state and tell its sender (R-3.4, BR-D06).
+async def cancel_invoice(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> None:
+    """Cancel the invoice and tell its sender (R-3.4, BR-D06, D96).
 
+    Shared by the [Cancelar] button and ``/cancelar``, which checks the state itself.
     CANCELLED is in ``NEEDS_RULE`` and the catalog has no sender-cancel rule, so this
     keeps recording BR-D06's id, as it did when [Cancelar] only answered BR-D06.
     """
@@ -194,6 +193,13 @@ async def _cancel(
     # BR-D06; it needs its own catalogued rule before reports read rule_id.
     await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP)
     await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
+
+
+async def _cancel(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
+    """Cancel the invoice from any CANCELLABLE state (R-3.4, BR-D06, D96)."""
+    await cancel_invoice(conn, invoice_id, msg)
     return ()
 
 

@@ -17,22 +17,35 @@ from invoicebot.pipeline.commands import COMMANDS, parse_command, resolve_target
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
+    CANCEL_LATE,
+    CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
     HELP_AYUDA,
     HELP_HEADER,
     MESSAGES,
+    REPROCESS_NOT_ALLOWED,
+    REPROCESS_STARTED,
     STATUS,
     STATUS_RULE,
     STATUS_RULE_ONLY,
     state_desc,
 )
-from invoicebot.store.invoices import InvoiceHead, create_invoice, set_state
+from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
+from invoicebot.store.invoices import (
+    InvoiceHead,
+    create_invoice,
+    load_invoice_head,
+    set_flow,
+    set_state,
+)
 
 MAX_QUEUED = 10
 #: An id no test creates, so BR-S07's unknown-id answer is deterministic.
 UNKNOWN_INVOICE_ID = 999_999_999
 #: The stored question text a BR-R03 invoice's ``/estado`` repeats (S4.9).
 QUESTION_TEXT = "¿En qué flujo lo registro?"
+#: The flow an invoice must have before ``/reprocesar`` restarts its fetch (D96).
+FLOW = "work_microsoft"
 
 
 def _profile() -> str:
@@ -64,12 +77,36 @@ async def _invoice_in(
     profile_id: str,
     state: str,
     rule_id: str | None = None,
+    *,
+    flow: bool = False,
 ) -> int:
-    """Create an invoice in state, waiting on rule_id, and return its id."""
+    """Create an invoice in state, waiting on rule_id and routed to FLOW when asked."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        if flow:
+            await set_flow(conn, invoice_id, FLOW)
         await set_state(conn, invoice_id, state, rule_id=rule_id)
     return invoice_id
+
+
+async def _failed_batch_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+) -> int:
+    """Create a BATCHED invoice whose batch failed, and return its id (D96)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_flow(conn, invoice_id, FLOW)
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "failed")
+        await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
+    return invoice_id
+
+
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the steps of the invoice's queued jobs, in insertion order."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
 
 
 async def _question(
@@ -325,4 +362,180 @@ async def test_estado_on_another_profiles_invoice_answers_br_s07(
         await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
         replies = await _replies(conn, sender_profile)
 
+    assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
+
+
+async def test_cancelar_cancels_a_confirming_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /cancelar on a CONFIRMING invoice cancels it with the button's reply."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-D06")
+    msg = _message(profile_id, f"/cancelar {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "CANCELLED"
+    assert jobs == []
+    assert replies == [(CANCELLED_BY_USER.format(id=invoice_id), None)]
+
+
+async def test_cancelar_on_a_batched_invoice_is_late(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /cancelar on a BATCHED invoice answers CANCEL_LATE and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "BATCHED", rule_id="BR-D07")
+    msg = _message(profile_id, f"/cancelar {invoice_id}")
+    expected = CANCEL_LATE.format(id=invoice_id, state_desc=state_desc("BATCHED"))
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "BATCHED"
+    assert jobs == []
+    assert replies == [(expected, None)]
+
+
+async def test_reprocesar_on_failed_with_a_flow_refetches(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /reprocesar on a FAILED invoice with a flow returns it to FETCHING_DOCS."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03", flow=True)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_manual_required_refetches(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /reprocesar on a MANUAL_REQUIRED invoice returns it to FETCHING_DOCS."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_a_failed_batch_redelivers(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /reprocesar on a BATCHED invoice with a failed batch queues deliver again."""
+    profile_id = _profile()
+    invoice_id = await _failed_batch_invoice(db_pool, profile_id)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "DELIVERING"
+    assert batch_state == "failed"
+    assert jobs == ["deliver"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_done_is_not_allowed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: /reprocesar on a DONE invoice answers REPROCESS_NOT_ALLOWED and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "DONE")
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("DONE"))
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "DONE"
+    assert jobs == []
+    assert replies == [(expected, None)]
+
+
+async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: a FAILED invoice with no flow cannot restart its fetch."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03")
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("FAILED"))
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "FAILED"
+    assert jobs == []
+    assert replies == [(expected, None)]
+
+
+@pytest.mark.parametrize("command", ["cancelar", "reprocesar"])
+async def test_cancel_and_reprocess_on_another_profiles_invoice_answer_br_s07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    command: str,
+) -> None:
+    """BR-S07: another profile's id is refused for /cancelar and /reprocesar alike."""
+    owner_profile = _profile()
+    invoice_id = await _invoice_in(db_pool, owner_profile, "CONFIRMING", rule_id="BR-D06")
+    sender_profile = _profile()
+    msg = _message(sender_profile, f"/{command} {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, sender_profile)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "CONFIRMING"
+    assert jobs == []
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
