@@ -23,6 +23,8 @@ CHARGE_FIELDS = ("service_charge", "icbper")
 
 #: The issuer RUC fails its check digit (BR-E02).
 RULE_BAD_RUC: Final = "BR-E02"
+#: The issue date is impossible, in the future or too old (BR-E03).
+RULE_BAD_DATE: Final = "BR-E03"
 #: The document type is not supported (BR-E05).
 RULE_UNSUPPORTED_TIPO: Final = "BR-E05"
 
@@ -53,7 +55,7 @@ def check_serie(serie: str) -> bool:
 def check_date(fecha: date, today: date, max_age_days: int) -> Literal["BR-E03"] | None:
     """Return ``BR-E03`` when ``fecha`` is in the future or older than the limit (BR-E03)."""
     if fecha > today or fecha < today - timedelta(days=max_age_days):
-        return "BR-E03"
+        return RULE_BAD_DATE
     return None
 
 

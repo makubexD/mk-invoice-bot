@@ -323,6 +323,12 @@ CANCELLED_BY_USER = "🚫 Cancelado: no registraré el comprobante #{id}."
 #: One-line confirmation after a chat motivo= / descripcion= override (R-7.4, D70).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 OVERRIDES_SAVED = "📝 Anotado en el comprobante #{id}."
+#: The general reply when an edit line cannot be understood (R-3.5, D97).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_INVALID = (
+    "No entendí «{line}». Escribe cada cambio así: campo=valor, por ejemplo total=45.50. "
+    "Puedes cambiar ruc, serie, numero, fecha, total y cliente."
+)
 
 
 def modes_desc(modes: Sequence[str]) -> str:
