@@ -8,7 +8,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 2   | `whatsapp` (done 2026-11-11)   | E2 (incl. S2.7–S2.9 window and templates)                                                                                           | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                                                      |
 | 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                  | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                                                  |
 | 3b  | `ocr` (done 2026-11-13)        | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                  | M1b        | Tesseract with Spanish on the host; the private samples folder                                                     |
-| 4   | `fetch`                        | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                 | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)                                       |
+| 4   | `fetch` (done 2026-11-13)      | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                 | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)                                       |
 | 5   | `file-b`                       | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                              | M3         | Entra app for the personal account; the Excel template on the host; a test inbox                                   |
 | 6   | `widen-b`                      | rest of E4 and E5; S7.2, S7.4, S7.5; E8 (MVP part); S10.3, S10.4, S10.7, S10.10; S11.9, S11.11, S11.12, S11.14, S11.15, S11.17; E15 | M4         | S0.6 (remaining store pages), S0.8, S0.10, S0.11; Q5 (inbox for the email fallback); the bot's Outlook.com mailbox |
 | 7   | `read-more`                    | S3.4, S3.8–S3.10; E6                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                                                      |
@@ -65,7 +65,12 @@ Each item goes into the named phase's plan.
 
 - **`ops` gate (before live fetching on a shared host):** Chromium runs with `--no-sandbox`, Playwright's default. Enable `chromium_sandbox=True` with user namespaces, or run the browser helper as its own uid or container.
 - **`ops`:** a test that kills the browser helper mid-fetch and then finds no `chrome-headless-shell` process left. Playwright starts the browser detached, so the helper's process group may not hold it.
-- **`ops`:** a hostile page can start many downloads into Playwright's artifacts folder before the page timeout. Cap that folder or the helper's disk.
+- **`ops`:** a hostile page can start many downloads into Playwright's artifacts folder before the page timeout. The folder now sits in the fetch's own `TMPDIR`, which the bot removes after every run, but nothing caps its size during the run. Cap the helper's disk.
+- **`ops` (defense in depth):** run the browser helper in a network namespace or under nftables rules whose only allowed connection is its guard proxy, so a Chromium path that skips the proxy (WebRTC is closed by a launch flag) still reaches nothing.
+- **`ops` (each Playwright upgrade):** loopback goes through the guard proxy only because Playwright adds `--proxy-bypass-list=<-loopback>`. Add a test that reads the launched Chromium's arguments, so an upgrade cannot drop it silently.
+- **`widen-b` (with the next portal):** `check_config` renders each active portal's `pick` and `calendar` selectors from a sample, so a bad selector fails at startup instead of every fetch ending `technical`.
+- **`widen-b` (with the next portal):** a startup check that `retrieval.portal_timeout_s` stays below the worker lease (300 s, `queue/worker.py`), so a fetch never outlives its lease; a second run is already harmless (R-5.1).
+- **`widen-b` (with S10.3, the email fetcher):** `EmailInbox.retry_schedule` is an unvalidated `list[str]`; give it `Portal.retry_schedule`'s delay type.
 
 ## Moved by the `fetch` plan (D82)
 
