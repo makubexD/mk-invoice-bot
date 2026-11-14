@@ -32,11 +32,15 @@ NOT_SENT_STATUS = 0
 #: The most folder-listing pages one call follows before it gives up.
 MAX_LIST_PAGES = 50
 
-#: The hosts an upload session may point at, exactly (D84).
-UPLOAD_HOSTS = ("graph.microsoft.com",)
+#: The hosts an upload session may point at, exactly (D84, D91).
+#: Personal-account sessions use these; the list comes from Microsoft's docs and
+#: must be confirmed by the M3 live run.
+UPLOAD_HOSTS = ("graph.microsoft.com", "api.onedrive.com", "outlook.office.com", "outlook.office365.com")
 
-#: The suffixes an upload session host may end with; Microsoft's regional drives.
-UPLOAD_HOST_SUFFIXES = (".sharepoint.com", ".files.1drv.com", ".office.com")
+#: The suffixes an upload session host may end with, Microsoft's regional drives
+#: (D84, D91). Personal-account sessions use these; the list comes from
+#: Microsoft's docs and must be confirmed by the M3 live run.
+UPLOAD_HOST_SUFFIXES = (".up.1drv.com", ".files.1drv.com")
 
 #: A segment that may not appear in a drive path.
 _FORBIDDEN_SEGMENT_CHARS = "/\\:"
@@ -158,7 +162,10 @@ def _check_upload_url(url: str) -> None:
     Runs before any chunk is sent, so a token or a file never reaches a host the
     account does not own. Raises ``GraphError(NOT_SENT_STATUS)`` on a bad URL.
     """
-    parts = urllib.parse.urlsplit(url)
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as err:
+        raise GraphError(NOT_SENT_STATUS) from err
     host = (parts.hostname or "").lower()
     if (
         parts.scheme != "https"

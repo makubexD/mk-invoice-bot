@@ -266,7 +266,7 @@ async def test_upload_above_four_megabytes_chunks_through_an_upload_session() ->
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://tenant-my.sharepoint.com/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://sn3302.up.1drv.com/up/session"})
         if len(requests) == 2:
             return httpx.Response(202)
         return httpx.Response(200)
@@ -296,7 +296,7 @@ async def test_upload_session_never_confirmed_raises() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://tenant-my.sharepoint.com/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://sn3302.up.1drv.com/up/session"})
         return httpx.Response(202)
 
     async with _make_drive(handler) as drive:
@@ -310,7 +310,7 @@ async def test_upload_rejects_a_non_https_session_url_before_chunking() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(201, json={"uploadUrl": "http://tenant.sharepoint.com/session"})
+        return httpx.Response(201, json={"uploadUrl": "http://sn3302.up.1drv.com/up/session"})
 
     async with _make_drive(handler) as drive:
         with pytest.raises(GraphError):
@@ -322,9 +322,12 @@ async def test_upload_rejects_a_non_https_session_url_before_chunking() -> None:
 @pytest.mark.parametrize(
     "upload_url",
     [
-        "https://tenant-my.sharepoint.com/upload?x=1",
+        "https://sn3302.up.1drv.com/up/abc",
+        "https://api.onedrive.com/rup/abc",
         "https://api.files.1drv.com/up/abc",
         "https://graph.microsoft.com/v1.0/upload/abc",
+        "https://outlook.office.com/api/v2.0/abc",
+        "https://SN3302.UP.1DRV.COM/up/abc",
     ],
 )
 async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
@@ -342,7 +345,7 @@ async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
 
     chunks = [request for request in requests if request.method == "PUT"]
     assert chunks
-    assert all(str(chunk.url) == upload_url for chunk in chunks)
+    assert all(str(chunk.url) == str(httpx.URL(upload_url)) for chunk in chunks)
 
 
 @pytest.mark.parametrize(
@@ -350,8 +353,12 @@ async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
     [
         "https://evil.example/upload",
         "https://sharepoint.com.evil.example/u",
-        "http://tenant.sharepoint.com/u",
-        "https://user@tenant.sharepoint.com/u",
+        "http://sn3302.up.1drv.com/u",
+        "https://user@sn3302.up.1drv.com/u",
+        "https://tenant-my.sharepoint.com/u",
+        "https://evil.office.com/u",
+        "https://up.1drv.com.evil.example/u",
+        "https://evil／up.1drv.com/u",
     ],
 )
 async def test_upload_refuses_a_session_url_outside_microsoft_before_chunking(upload_url: str) -> None:
