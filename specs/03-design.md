@@ -80,7 +80,7 @@ messages(channel TEXT, external_id TEXT, profile_id, kind, received_at, payload_
          invoice_id NULL /*the invoice this message belongs to; resolves a quoted message (R-1.5)*/,
          PRIMARY KEY (channel, external_id))                          -- idempotency (R-1.8)
 invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_id, state,
-         natural_key TEXT UNIQUE NULL,
+         natural_key TEXT UNIQUE NULL /*<profile_id>|ruc_emisor|tipo|serie|numero: unique per profile (D93)*/,
          ruc_emisor, tipo, serie, numero, fecha, moneda, base, igv, total,
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
          sunat_status_json, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,

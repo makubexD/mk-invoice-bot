@@ -19,19 +19,20 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from invoicebot.channels.base import AttachmentKind, ChannelName, OutboundMessage
+from invoicebot.channels.base import AttachmentKind
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.helper import run_helper
 from invoicebot.pipeline.handlers import EXTRACT_STEP
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
+from invoicebot.states import EXTRACTING, StateMoved
 from invoicebot.store.db import Pool
-from invoicebot.store.invoices import get_file_path, load_invoice_head, save_reading, set_state
+from invoicebot.store.invoices import InvoiceHead, get_file_path, load_invoice_head, save_reading, set_state
 
 #: BR-E07 counts megapixels; OpenCV's decode cap counts pixels.
 PIXELS_PER_MEGAPIXEL = 1_000_000
@@ -93,28 +94,30 @@ def make_extract_handler(
             if invoice is None or invoice.state not in ACTIVE_STATES:
                 return
             path = await get_file_path(conn, job.invoice_id, PHOTO_KIND)
-            profile_id = invoice.profile_id
-            channel = invoice.origin_channel
         if path is None:
             # shortcut: PDF and XML input arrive in read-more; until then a non-photo
             # file asks for a photo or typed data (BR-E01).
-            await _finish(pool, job.invoice_id, channel, profile_id, RULE_UNREADABLE, None)
+            await _finish(pool, job.invoice_id, invoice, RULE_UNREADABLE, None, expected=invoice.state)
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
             return
 
         async with pool.connection() as conn, conn.transaction():
-            await set_state(conn, job.invoice_id, "EXTRACTING")
+            try:
+                await set_state(conn, job.invoice_id, "EXTRACTING", expected=invoice.state)
+            except StateMoved:
+                # D95: a /cancelar between the read above and here wins; do not run the helper.
+                return
 
         try:
             result = await _run_helper(path, extraction_cfg, media, rules_path)
         except TimeoutError:
-            await _finish(pool, job.invoice_id, channel, profile_id, RULE_UNREADABLE, None)
+            await _finish(pool, job.invoice_id, invoice, RULE_UNREADABLE, None, expected=EXTRACTING)
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
             return
 
         rule_id, reading = _classify(result, extraction_cfg.supported_tipos)
         if rule_id is not None:
-            await _finish(pool, job.invoice_id, channel, profile_id, rule_id, reading)
+            await _finish(pool, job.invoice_id, invoice, rule_id, reading, expected=EXTRACTING)
             _log_outcome(job.invoice_id, result, rule_id, started)
             return
         if reading is None:
@@ -122,7 +125,7 @@ def make_extract_handler(
 
         async with pool.connection() as conn, conn.transaction():
             await save_reading(conn, job.invoice_id, reading)
-            await set_state(conn, job.invoice_id, "ROUTING")
+            await set_state(conn, job.invoice_id, "ROUTING", expected=EXTRACTING)
             await enqueue(conn, job.invoice_id, ROUTE_STEP)
         _log_outcome(job.invoice_id, result, None, started)
 
@@ -204,22 +207,26 @@ def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId |
 async def _finish(
     pool: Pool,
     invoice_id: int,
-    channel: ChannelName,
-    profile_id: str,
+    invoice: InvoiceHead,
     rule_id: RuleId,
     reading: Reading | None,
+    *,
+    expected: str,
 ) -> None:
-    """Record a failure rule and tell the sender why, in one transaction (BR-E01)."""
-    message = OutboundMessage(
-        channel=channel,
-        recipient=profile_id,
-        profile_id=profile_id,
-        rule_id=rule_id,
-        text=_message(rule_id, reading),
-    )
+    """Record a failure rule and tell the sender why, in one transaction (BR-E01).
+
+    The write only lands while the invoice is still in ``expected``: an invoice moved on
+    by ``/cancelar`` or an edit wins and nothing here is stored (D95).
+    """
     async with pool.connection() as conn, conn.transaction():
-        await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id)
-        await outbox.add(conn, channel, profile_id, message.model_dump(mode="json"))
+        await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
+        await queue_message(
+            conn,
+            Addressee(invoice.origin_channel, invoice.profile_id),
+            invoice_id=invoice_id,
+            rule_id=rule_id,
+            text=_message(rule_id, reading),
+        )
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:

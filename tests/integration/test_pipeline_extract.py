@@ -29,6 +29,7 @@ from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
+from invoicebot.pipeline import extract as extract_module
 from invoicebot.pipeline.extract import (
     MAX_HELPER_OUTPUT_BYTES,
     ROUTE_STEP,
@@ -519,6 +520,41 @@ async def test_pdf_only_invoice_fails_with_br_e01_without_raising(
     assert route_jobs == 0
     assert len(messages) == 1
     assert "No pude leer este comprobante" in messages[0]
+
+
+async def test_cancel_between_read_and_extracting_wins(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D95, D96: a /cancelar committed after the handler read the invoice stops it before the helper."""
+    invoice_id, _ = await _invoice_with_photo(
+        db_pool, _write_qr_photo(VALID_PAYLOAD, tmp_path / f"race{PNG}")
+    )
+    real_get_file_path = extract_module.get_file_path
+    helper_calls: list[tuple[Any, ...]] = []
+
+    async def _get_file_path_then_cancel(conn: AsyncConnection[Any], *args: Any) -> Path | None:
+        path = await real_get_file_path(conn, *args)
+        async with db_pool.connection() as other, other.transaction():
+            await other.execute("UPDATE invoices SET state = 'CANCELLED' WHERE id = %s", (invoice_id,))
+        return path
+
+    async def _no_exec(*args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+        helper_calls.append(args)
+        raise AssertionError("the helper must not run")
+
+    monkeypatch.setattr(extract_module, "get_file_path", _get_file_path_then_cancel)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _no_exec)
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, _rule_id = await _invoice_row(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+
+    assert state == "CANCELLED"
+    assert route_jobs == 0
+    assert helper_calls == []
 
 
 async def test_cancelling_the_handler_leaves_no_helper_process(

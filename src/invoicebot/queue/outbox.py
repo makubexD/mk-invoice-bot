@@ -55,26 +55,80 @@ async def add(
     payload: dict[str, Any],
     *,
     template: str | None = None,
+    invoice_id: int | None = None,
 ) -> int:
     """Insert a pending outbox row in the caller's transaction and return its id.
 
-    The channel is validated before any SQL runs. The caller owns committing,
-    so a rollback enqueues nothing (R-1.8).
+    The channel is validated before any SQL runs. ``invoice_id`` links the row
+    to the invoice it talks about, so a parked invoice's question can be sent
+    again (R-3.7). The caller owns committing, so a rollback enqueues nothing
+    (R-1.8).
     """
     if channel not in VALID_CHANNELS:
         raise ValueError(f"unknown outbox channel: {channel!r}")
     cur = await conn.execute(
         """
-        INSERT INTO outbox (channel, "to", payload_json, template, state)
-        VALUES (%(channel)s, %(to)s, %(payload)s, %(template)s, 'pending')
+        INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
+        VALUES (%(channel)s, %(to)s, %(payload)s, %(template)s, 'pending', %(invoice_id)s)
         RETURNING id
         """,
-        {"channel": channel, "to": to, "payload": Json(payload), "template": template},
+        {
+            "channel": channel,
+            "to": to,
+            "payload": Json(payload),
+            "template": template,
+            "invoice_id": invoice_id,
+        },
     )
     row = await cur.fetchone()
     if row is None:
         raise RuntimeError("INSERT INTO outbox RETURNING id yielded no row")
     return int(row[0])
+
+
+async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
+    """Return the newest stored text for invoice_id whose payload names rule_id.
+
+    ``/estado`` shows the invoice's last question, so an invoice with no stored
+    text for the rule (or none at all) answers None. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text'
+        FROM outbox
+        WHERE invoice_id = %(invoice_id)s AND payload_json->>'rule_id' = %(rule_id)s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"invoice_id": invoice_id, "rule_id": rule_id},
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
+async def requeue_last(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> bool:
+    """Queue the invoice's newest message for rule_id again, returning whether it did.
+
+    ``/pendientes`` sends a parked question again with the same channel, recipient and
+    payload, buttons included, as a new pending row in the caller's transaction
+    (S4.8, D94). An invoice with no stored message for the rule queues nothing, so a
+    missing question is never invented. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
+        SELECT channel, "to", payload_json, template, 'pending', invoice_id
+        FROM outbox
+        WHERE invoice_id = %(invoice_id)s
+          AND payload_json->>'rule_id' = %(rule_id)s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"invoice_id": invoice_id, "rule_id": rule_id},
+    )
+    return cur.rowcount == 1
 
 
 class OutboxSender:

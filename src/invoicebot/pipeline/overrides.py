@@ -7,12 +7,13 @@ on a prepared batch moves the invoice back to ``DELIVERING`` so the deliver job 
 the Excel and the draft in the same folder.
 """
 
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import (
     BATCHED_STATE,
     DONE_STATE,
@@ -21,7 +22,7 @@ from invoicebot.pipeline.actions import (
     send_stale,
 )
 from invoicebot.pipeline.deliver import DELIVER_STEP, DELIVERING_STATE
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import OVERRIDES_SAVED
 from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
@@ -34,19 +35,30 @@ MAX_OVERRIDE_CHARS = 120
 OVERRIDE_KEYS = frozenset({"motivo", "descripcion"})
 
 
-def parse_overrides(text: str) -> dict[str, str]:
-    """Return the overrides in text: ``motivo`` and ``descripcion``, keys case-insensitive.
+def without_accents(text: str) -> str:
+    """Return ``text`` in NFKD with the combining marks removed (D97).
 
-    The value runs to the end of its line and is trimmed. A line without ``=``, a
-    value longer than :data:`MAX_OVERRIDE_CHARS` or one with an unsafe character is
-    ignored (that key is dropped), as is every other key.
+    Edit and override keys share this normalisation, so ``descripción=`` names the
+    same key as ``descripcion=``.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def parse_overrides(text: str) -> dict[str, str]:
+    """Return the overrides in text: ``motivo`` and ``descripcion``.
+
+    Keys are case-insensitive and accent-free after ``strip``. The value runs to the
+    end of its line and is trimmed. A line without ``=``, a value longer than
+    :data:`MAX_OVERRIDE_CHARS` or one with an unsafe character is ignored (that key is
+    dropped), as is every other key.
     """
     overrides: dict[str, str] = {}
     for line in text.splitlines():
         key, separator, value = line.partition("=")
         if not separator:
             continue
-        name = key.strip().lower()
+        name = without_accents(key.strip().lower())
         if name not in OVERRIDE_KEYS:
             continue
         clean = value.strip()
@@ -70,7 +82,7 @@ async def apply_overrides(
     with a ``prepared`` batch moves back to ``DELIVERING`` with a ``deliver`` job, and the
     sender gets a one-line confirmation. Returns the invoice id, or None with no target.
     """
-    invoice_id = await _target(conn, msg)
+    invoice_id = await edit_target(conn, msg)
     if invoice_id is None:
         return None
     current = await get_state_rule(conn, invoice_id)
@@ -90,8 +102,8 @@ async def apply_overrides(
     return invoice_id
 
 
-async def _target(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
-    """Return the invoice the message's overrides apply to, or None (D90)."""
+async def edit_target(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
+    """Return the invoice the message's edit or override applies to, or None (D90, D97)."""
     reply_to = None if msg.reply_to_external_id is None else (msg.channel, msg.reply_to_external_id)
     return await find_override_target(conn, msg.profile_id, reply_to)
 
@@ -106,10 +118,9 @@ def _stored_overrides(flow_data: Mapping[str, Any]) -> dict[str, str]:
 
 async def _confirm(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id: int) -> None:
     """Queue the one-line confirmation for an override in the caller's transaction."""
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        text=OVERRIDES_SAVED.format(id=invoice_id),
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        OVERRIDES_SAVED.format(id=invoice_id),
+        invoice_id=invoice_id,
     )
-    await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))

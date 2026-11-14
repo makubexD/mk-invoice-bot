@@ -1,8 +1,10 @@
-"""Button replies: check a press against the invoice's state (R-3.5, BR-S02).
+"""Button replies: check a press against the invoice's state (R-3.5, BR-S02, D94).
 
 A reply id carries the invoice and the action. The routing phase decides which
-states accept each action; this module only checks the press against them and
-answers a stale button with BR-S02, changing nothing else.
+states accept each action; this module checks the press against them and answers a
+stale button with BR-S02. A press that answers the question a ``PENDING_USER``
+invoice was parked on resumes its waiting state first; any other press leaves it
+parked (D94).
 """
 
 from collections.abc import Mapping
@@ -10,71 +12,87 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
-from invoicebot.channels.whatsapp.payloads import parse_button_id
-from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import MESSAGES, state_desc
-from invoicebot.store.invoices import get_state
-
-#: Rule that tells the sender a button no longer applies (BR-S02).
-RULE_STALE_BUTTON = "BR-S02"
+from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.whatsapp.payloads import ButtonPress, parse_button_id
+from invoicebot.pipeline.outgoing import Addressee, queue_stale
+from invoicebot.states import PENDING_USER
+from invoicebot.store.invoices import get_state, get_waiting, lock_invoice, unpark
 
 
 async def resolve_reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     valid_states: Mapping[str, frozenset[str]],
-) -> tuple[int, str] | None:
-    """Resolve a button press to ``(invoice_id, action)``, or None.
+    asked_rules: Mapping[str, str],
+) -> ButtonPress | None:
+    """Resolve a button press to its :class:`ButtonPress`, choice included, or None.
 
     A missing or malformed id, an unknown action, an unknown invoice or another
-    profile's invoice resolves to None with nothing sent. A button pressed for
-    an invoice outside the action's valid states sends BR-S02 and resolves to
-    None, changing nothing else (R-3.5, BR-S02).
+    profile's invoice resolves to None with nothing sent. A press valid in the
+    invoice's current state resolves at once. A press on a ``PENDING_USER`` invoice
+    resumes it first when the stored ``waiting_state`` accepts the action and the
+    stored ``waiting_rule_id`` is ``asked_rules``' rule for it, so the action then runs
+    against the restored state (D94). Any other press sends BR-S02 and resolves to
+    None, changing nothing else (R-3.5, BR-S02). The invoice row stays locked for the
+    caller's transaction, so the state checked here is the state the action sees (D95).
     """
     pressed = _parse_press(msg, valid_states)
     if pressed is None:
         return None
-    invoice_id, action, states = pressed
+    button_press, states = pressed
+    invoice_id = button_press.invoice_id
+    # The row lock holds the checked state until the caller commits, so the action
+    # cannot act on a state a job moved meanwhile (D95, D96).
+    await lock_invoice(conn, invoice_id)
     invoice = await get_state(conn, invoice_id)
     if invoice is None or invoice[1] != msg.profile_id:
         return None
     state = invoice[0]
     if state in states:
-        return invoice_id, action
-    await _send_stale(conn, msg, invoice_id, state)
+        return button_press
+    if await _resumes_parked(conn, invoice_id, state, button_press.action, states, asked_rules):
+        return button_press
+    await queue_stale(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        invoice_id=invoice_id,
+        state=state,
+    )
     return None
+
+
+async def _resumes_parked(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    state: str,
+    action: str,
+    valid_states: frozenset[str],
+    asked_rules: Mapping[str, str],
+) -> bool:
+    """Unpark invoice_id when the press answers its parked question, and say whether it did (D94)."""
+    if state != PENDING_USER:
+        return False
+    waiting = await get_waiting(conn, invoice_id)
+    if waiting is None:
+        return False
+    waiting_state, waiting_rule_id = waiting
+    asked_rule = asked_rules.get(action)
+    if waiting_state not in valid_states or asked_rule is None or waiting_rule_id != asked_rule:
+        return False
+    return await unpark(conn, invoice_id)
 
 
 def _parse_press(
     msg: InboundMessage,
     valid_states: Mapping[str, frozenset[str]],
-) -> tuple[int, str, frozenset[str]] | None:
-    """Return the pressed invoice, action and its valid states, or None."""
+) -> tuple[ButtonPress, frozenset[str]] | None:
+    """Return the parsed press and its action's valid states, or None."""
     if msg.button_id is None:
         return None
     parsed = parse_button_id(msg.button_id)
     if parsed is None:
         return None
-    invoice_id, action = parsed
-    states = valid_states.get(action)
+    states = valid_states.get(parsed.action)
     if states is None:
         return None
-    return invoice_id, action, states
-
-
-async def _send_stale(
-    conn: AsyncConnection[Any],
-    msg: InboundMessage,
-    invoice_id: int,
-    state: str,
-) -> None:
-    """Queue BR-S02 to the sender of the stale button in the caller's transaction."""
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        rule_id=RULE_STALE_BUTTON,
-        text=MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(state)),
-    )
-    await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))
+    return parsed, states

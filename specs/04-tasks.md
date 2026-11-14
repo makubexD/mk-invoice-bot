@@ -272,18 +272,18 @@ Anything bigger gets split before work starts.
 **S4.6 · Duplicates** · S · Rules BR-E04 · Reqs R-3.6
 - **AC:**
   - A second photo of the same CPE is stopped, with a reference to the first one.
-  - `/reprocesar <id>` bypasses the check.
+  - The second invoice is `CANCELLED`; `/reprocesar <id>` on the first one re-runs it (D93).
 
 **S4.7 · Profile permissions after routing** · S · Rules BR-R05 · Reqs R-3.8
 - **AC:** A limited sender sending a work invoice is rejected with the BR-R05 message.
 
-**S4.8 · Timeouts → PENDING_USER** · S · Reqs R-3.7 · Rules BR-S08
+**S4.8 · Timeouts → PENDING_USER** · S · Reqs R-3.7 · Rules BR-S08 · D94
 - **AC:**
   - An unanswered question in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` parks the invoice after 24 h with BR-S08, storing the waiting state.
   - Answering (directly or from `/pendientes`) returns the invoice to the stored state.
   - `/pendientes` lists it.
 
-**S4.9 · Basic commands** · M · Reqs R-10
+**S4.9 · Basic commands** · M · Reqs R-10 · D96
 - **AC:**
   - `/ayuda`, `/estado <id>` (shows state **and the rule ID and message that explain it**), `/pendientes`, `/cancelar <id>` and `/reprocesar <id>` all work.
 

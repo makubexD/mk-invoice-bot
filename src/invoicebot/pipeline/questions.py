@@ -1,0 +1,105 @@
+"""The questions routing asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06).
+
+Each builder is pure: it returns the es-PE text from the catalog and the buttons that
+carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>]"`` (R-3.5).
+"""
+
+from __future__ import annotations
+
+from collections.abc import Collection, Mapping, Sequence
+
+from invoicebot.channels.base import Button
+from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.config.models import Flow, Store
+from invoicebot.extract.fields import Reading
+from invoicebot.routing.router import RULE_ASK
+from invoicebot.rules.messages_es import (
+    BUTTON_CANCEL,
+    BUTTON_CHANGE,
+    BUTTON_CONTINUE,
+    BUTTON_EDIT,
+    BUTTON_YES,
+    MESSAGES,
+    buyer_desc,
+)
+
+#: The button actions routing asks with (R-3.5); the actions that answer them import these.
+PICK_ACTION = "pick"
+YES_ACTION = "yes"
+CHANGE_ACTION = "change"
+BRAND_ACTION = "brand"
+CONTINUE_ACTION = "continue"
+CANCEL_ACTION = "cancel"
+EDIT_ACTION = "edit"
+#: The rule ids of the questions only routing asks.
+RULE_BUYER = "BR-R04"
+RULE_BRAND = "BR-R09"
+RULE_CAP = "BR-D06"
+
+
+def candidate_flows(
+    profile_flows: Collection[str], flows: Mapping[str, Flow], tipo: str
+) -> list[tuple[str, Flow]]:
+    """Return the sender's flows that accept ``tipo``, in config order (BR-R03)."""
+    return [
+        (flow_id, flow)
+        for flow_id, flow in flows.items()
+        if flow_id in profile_flows and tipo in flow.accepted_tipos
+    ]
+
+
+def flow_question(
+    invoice_id: int, reading: Reading, candidates: Sequence[tuple[str, Flow]]
+) -> tuple[str, list[Button]]:
+    """Return BR-R03's question, one [pick] button per candidate flow, then [Cancelar]."""
+    buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
+    buttons = [
+        Button(id=button_id(invoice_id, PICK_ACTION, choice), title=flow.label)
+        for choice, (_flow_id, flow) in enumerate(candidates)
+    ]
+    buttons.append(Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL))
+    return MESSAGES[RULE_ASK].format(buyer_desc=buyer), buttons
+
+
+def buyer_question(invoice_id: int, reading: Reading, flow: Flow) -> tuple[str, list[Button]]:
+    """Return BR-R04's question and its [Sí] / [Cambiar] / [Cancelar] buttons."""
+    text = MESSAGES[RULE_BUYER].format(num_doc_adq=reading.value("num_doc_adq") or "", flow=flow)
+    buttons = [
+        Button(id=button_id(invoice_id, YES_ACTION), title=BUTTON_YES),
+        Button(id=button_id(invoice_id, CHANGE_ACTION), title=BUTTON_CHANGE),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+    return text, buttons
+
+
+def brand_question(invoice_id: int, store: Store) -> tuple[str, list[Button]]:
+    """Return BR-R09's question for the issuer's store, one [brand] button per comercio, then [Cancelar]."""
+    buttons = [
+        Button(id=button_id(invoice_id, BRAND_ACTION, choice), title=brand.comercio)
+        for choice, brand in enumerate(store.brands)
+    ]
+    buttons.append(Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL))
+    return MESSAGES[RULE_BRAND].format(razon_social=store.razon_social), buttons
+
+
+def cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, list[Button]] | None:
+    """Return BR-D06's question and its two buttons when the total is above the cap (R-7.13)."""
+    if flow.reimbursement is None:
+        return None
+    total = reading.amount("total")
+    if total is None or total <= flow.reimbursement.cap:
+        return None
+    cap = f"{flow.reimbursement.cap:.2f}"
+    buttons = [
+        Button(id=button_id(invoice_id, CONTINUE_ACTION), title=BUTTON_CONTINUE),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+    return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
+
+
+def summary_buttons(invoice_id: int) -> list[Button]:
+    """Return the routed summary's [Editar] and [Cancelar] buttons (R-3.4)."""
+    return [
+        Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]

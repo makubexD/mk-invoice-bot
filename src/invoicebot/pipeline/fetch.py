@@ -21,7 +21,6 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import OutboundMessage
 from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
 from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, Portal, StoreDirectory
@@ -29,9 +28,9 @@ from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
-from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
@@ -238,13 +237,15 @@ async def _record_result(
                     size=fetched.size,
                 ),
             )
-        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE)
+        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE, expected=FETCHING_STATE)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
     elif result.reason is FetchReason.NOT_FOUND_YET:
         run_after = None if delay is None else await _run_after(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
         if first_not_found and delay is not None:
-            await _notify(conn, inputs.head, None, FETCH_WAITING.format(id=inputs.job.invoice_id))
+            await _notify(
+                conn, inputs.head, inputs.job.invoice_id, None, FETCH_WAITING.format(id=inputs.job.invoice_id)
+            )
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
 
@@ -255,21 +256,24 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
-        await set_state(conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED)
-        await _notify(conn, inputs.head, RULE_EXHAUSTED, text)
+        await set_state(
+            conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
+        )
+        await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 
 
-async def _notify(conn: AsyncConnection[Any], head: InvoiceHead, rule_id: str | None, text: str) -> None:
+async def _notify(
+    conn: AsyncConnection[Any], head: InvoiceHead, invoice_id: int, rule_id: str | None, text: str
+) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    message = OutboundMessage(
-        channel=head.origin_channel,
-        recipient=head.profile_id,
-        profile_id=head.profile_id,
+    await queue_message(
+        conn,
+        Addressee(head.origin_channel, head.profile_id),
+        invoice_id=invoice_id,
         rule_id=rule_id,
         text=text,
     )
-    await outbox.add(conn, head.origin_channel, head.profile_id, message.model_dump(mode="json"))
 
 
 async def _run_after(conn: AsyncConnection[Any], delay: timedelta) -> datetime:

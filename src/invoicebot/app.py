@@ -32,6 +32,7 @@ from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler, Worker
@@ -148,7 +149,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
                 settings.parsing_rules_path,
             ),
-            ROUTE_STEP: make_route_handler(pool, cfg, rules),
+            ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
         }
         deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
@@ -168,7 +169,13 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 )
             },
         )
-        async with _background({"worker": worker.run, "outbox": partial(_send_forever, sender)}):
+        async with _background(
+            {
+                "worker": worker.run,
+                "outbox": partial(_send_forever, sender),
+                "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
+            }
+        ):
             yield
 
 
@@ -224,6 +231,13 @@ async def _send_forever(sender: OutboxSender) -> None:
     while True:
         await sender.send_pending()
         await asyncio.sleep(OUTBOX_INTERVAL_S)
+
+
+async def _park_forever(pool: Pool, timeout_h: int) -> None:
+    """Park unanswered questions every ``PARK_SWEEP_S`` seconds (BR-S08)."""
+    while True:
+        await park_stale_questions(pool, timeout_h)
+        await asyncio.sleep(PARK_SWEEP_S)
 
 
 @asynccontextmanager

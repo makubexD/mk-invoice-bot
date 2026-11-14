@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
@@ -22,7 +23,7 @@ from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config as AppConfig
-from invoicebot.config.models import RoutingRule
+from invoicebot.config.models import RoutingRule, StoreDirectory
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import handle_inbound
@@ -97,7 +98,9 @@ ISSUER_RUC = "20000000001"
 WORK_RUC = "51900000000"
 WORK_FLOW = "work_microsoft"
 SERIE = "F001"
-NUMERO = "15160"
+#: Numeros for generated QR payloads; one per payload, in a range no other test file
+#: uses, since the session database keeps every claimed key (BR-E04).
+_NEXT_NUMERO = itertools.count(30000)
 TOTAL = "49.90"
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
 PARSING_RULES_PATH = REPO_ROOT / "config" / "parsing_rules.yaml"
@@ -116,8 +119,13 @@ _TEXT_STEP_PX = 60
 
 
 def _qr_payload(fecha: date) -> str:
-    """Return a SUNAT QR payload for a factura from ISSUER_RUC to WORK_RUC."""
-    return f"{ISSUER_RUC}|01|{SERIE}|{NUMERO}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
+    """Return a SUNAT QR payload for a factura from ISSUER_RUC to WORK_RUC.
+
+    Each payload gets its own numero, so routing never sees one conversation's invoice
+    as a duplicate of another's (BR-E04), whatever order the tests run in.
+    """
+    numero = next(_NEXT_NUMERO)
+    return f"{ISSUER_RUC}|01|{SERIE}|{numero}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
 
 
 def _draw_text(canvas: np.ndarray, lines: Sequence[str]) -> None:
@@ -236,7 +244,9 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             route_jobs = [int(row[0]) for row in await cur.fetchall()]
         rules = compile_rules(cfg.routing)
         for job_id in route_jobs:
-            await make_route_handler(db_pool, cfg, rules)(_job(job_id, invoice_id, ROUTE_STEP))
+            await make_route_handler(db_pool, cfg, StoreDirectory(stores={}, portals={}), rules)(
+                _job(job_id, invoice_id, ROUTE_STEP)
+            )
 
         fake = FakeChannel()
         await OutboxSender(db_pool, {"whatsapp": fake.transport()}).send_pending()

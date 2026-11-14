@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from psycopg import AsyncConnection
+from psycopg.errors import ForeignKeyViolation
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, add
@@ -11,11 +12,24 @@ from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError,
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 TRANSPORT_CHANNELS = ("whatsapp", "telegram", "github", "event")
+#: No identity reaches this, so an outbox row cannot reference it.
+MISSING_INVOICE_ID = 2**31 - 1
 
 
 async def _clear_outbox(conn: AsyncConnection[Any]) -> None:
     """Remove every outbox row so tests cannot depend on each other's leftovers."""
     await conn.execute("DELETE FROM outbox")
+
+
+async def _insert_invoice(conn: AsyncConnection[Any]) -> int:
+    """Insert a minimal invoice and return its id."""
+    cur = await conn.execute(
+        "INSERT INTO invoices (profile_id, origin_channel, state) VALUES (%s, %s, %s) RETURNING id",
+        ("owner", "whatsapp", "parsed"),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 async def _fetch_row(conn: AsyncConnection[Any], outbox_id: int) -> tuple[Any, ...] | None:
@@ -364,3 +378,49 @@ async def test_failing_row_does_not_block_a_later_row(
         cur = await conn.execute("SELECT id, state, attempts FROM outbox ORDER BY id")
         rows = await cur.fetchall()
     assert rows == [(failing_id, "pending", 1), (working_id, "sent", 0)]
+
+
+async def test_add_stores_the_invoice_it_talks_about(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.7: add stores the invoice id so a parked invoice's question can be re-sent."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        invoice_id = await _insert_invoice(conn)
+        outbox_id = await add(conn, "whatsapp", "+51900000009", {"text": "hola"}, invoice_id=invoice_id)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT invoice_id FROM outbox WHERE id = %s", (outbox_id,))
+        row = await cur.fetchone()
+    assert row == (invoice_id,)
+
+
+async def test_add_without_an_invoice_leaves_the_column_null(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.7: a message that names no invoice stores a NULL invoice_id."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "telegram", "42", {"text": "hola"})
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT invoice_id FROM outbox WHERE id = %s", (outbox_id,))
+        row = await cur.fetchone()
+    assert row == (None,)
+
+
+async def test_add_with_an_unknown_invoice_is_rejected(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.7: an outbox row cannot name an invoice that does not exist."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+
+    with pytest.raises(ForeignKeyViolation):
+        async with db_pool.connection() as conn:
+            await add(conn, "whatsapp", "+51900000010", {"text": "hola"}, invoice_id=MISSING_INVOICE_ID)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM outbox")
+        row = await cur.fetchone()
+    assert row == (0,)

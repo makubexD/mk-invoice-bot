@@ -41,8 +41,7 @@ MESSAGES: dict[str, str] = {
     "BR-E02": "El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…",
     "BR-E03": "La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa",
     "BR-E04": (
-        "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). "
-        "Si quieres repetirlo: /reprocesar {id}"
+        "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}."
     ),
     "BR-E05": "Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.",
     "BR-E07": (
@@ -313,12 +312,94 @@ BUTTON_SENT = "Ya lo envié"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
+#: The routed summary's [Editar] button (R-3.4).
+BUTTON_EDIT = "Editar"
+#: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
+BUTTON_YES = "Sí"
+BUTTON_CHANGE = "Cambiar"
+#: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
+LIST_BUTTON = "Elegir"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 CANCELLED_BY_USER = "🚫 Cancelado: no registraré el comprobante #{id}."
 #: One-line confirmation after a chat motivo= / descripcion= override (R-7.4, D70).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 OVERRIDES_SAVED = "📝 Anotado en el comprobante #{id}."
+#: The general reply when an edit line cannot be understood (R-3.5, D97).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_INVALID = (
+    "No entendí «{line}». Escribe cada cambio así: campo=valor, por ejemplo total=45.50. "
+    "Puedes cambiar ruc, serie, numero, fecha, total y cliente."
+)
+#: The reply when an edit arrives in a state that no longer accepts one (R-3.5, D97).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_LATE = "El comprobante #{id} ya está {state_desc}; ya no puedo cambiar sus datos."
+#: What [Editar] on the routed summary asks the sender for (R-3.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_PROMPT = (
+    "Envíame los cambios, uno por línea, así: campo=valor. Por ejemplo: total=45.50 o "
+    "fecha=05/11/2026. Puedes cambiar ruc, serie, numero, fecha, total y cliente."
+)
+#: The first line of the command list (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_HEADER = "Envíame la foto de un comprobante y yo me encargo. También entiendo:"
+#: ``/ayuda``'s own line in the command list (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_AYUDA = "/ayuda: esta lista"
+#: ``/estado``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_ESTADO = "/estado 12: cómo va el comprobante #12"
+#: ``/cancelar``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_CANCELAR = "/cancelar 12: cancela el comprobante #12"
+#: ``/reprocesar``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_REPROCESAR = "/reprocesar 12: reintenta el comprobante #12 si falló"
+#: ``/pendientes``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
+#: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_NONE = "No tienes comprobantes pendientes."
+#: The first line of ``/pendientes``'s list (S4.8).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_HEADER = "Esto espera algo de ti:"
+#: One waiting invoice in ``/pendientes``'s list (S4.8, S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_LINE = "#{id} · {issuer} · {total} · {state_desc}"
+#: ``{issuer}`` for an invoice whose razón social is not read yet (S4.8).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_NO_ISSUER = "emisor sin leer"
+#: One prepared batch in ``/pendientes``'s list (S11.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepared_at:%d/%m}; falta enviarlo"
+#: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_MORE = "…y {count} más."
+#: The first line of ``/estado``'s answer (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+STATUS = "El comprobante #{id} está {state_desc}."
+#: The second line of ``/estado``'s answer, with the last stored question text (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+STATUS_RULE = "Último aviso ({rule_id}): {text}"
+#: The second line of ``/estado``'s answer when the rule left no stored text (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+STATUS_RULE_ONLY = "Motivo: {rule_id}."
+#: The answer when a command that needs an invoice id is sent without one (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
+#: ``/cancelar``'s answer when the invoice is past CANCELLABLE (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+CANCEL_LATE = "El comprobante #{id} ya está {state_desc}; ya no se puede cancelar."
+#: ``/reprocesar``'s answer when it requeued the invoice's step (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+REPROCESS_STARTED = "Vuelvo a intentar el comprobante #{id}."
+#: ``/reprocesar``'s answer when the invoice's state has no step to restart (S4.9, D96).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+REPROCESS_NOT_ALLOWED = (
+    "El comprobante #{id} está {state_desc}. /reprocesar solo sirve para comprobantes "
+    "que fallaron o que esperan sus archivos."
+)
 
 
 def modes_desc(modes: Sequence[str]) -> str:

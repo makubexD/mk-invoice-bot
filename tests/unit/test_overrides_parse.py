@@ -11,6 +11,7 @@ from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, parse_overrides
         ("motivo=Viaje", {"motivo": "Viaje"}),
         ("Motivo=Viaje", {"motivo": "Viaje"}),
         ("DESCRIPCION=Almuerzo", {"descripcion": "Almuerzo"}),
+        ("descripción=Almuerzo", {"descripcion": "Almuerzo"}),
         ("  motivo = Viaje de trabajo  ", {"motivo": "Viaje de trabajo"}),
         ("motivo=Viaje y hotel", {"motivo": "Viaje y hotel"}),
         ("motivo=Viaje\ndescripcion=Almuerzo", {"motivo": "Viaje", "descripcion": "Almuerzo"}),
@@ -18,7 +19,7 @@ from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, parse_overrides
     ],
 )
 def test_parse_overrides_reads_both_keys(text: str, expected: dict[str, str]) -> None:
-    """R-7.4, D70: motivo= and descripcion= are read case-insensitively to the end of their line."""
+    """R-7.4, D70, D97: motivo= and descripcion= are read case- and accent-insensitively."""
     assert parse_overrides(text) == expected
 
 

@@ -2,14 +2,15 @@
 
 Pure functions only: each builder returns the JSON body for ``/messages`` and
 rejects a value outside Meta's documented limits before the caller sends it.
-Reply ids encode the invoice and the action as ``"<invoice_id>:<action>"``.
+Reply ids encode the invoice and the action as ``"<invoice_id>:<action>"`` and
+add an optional digit choice as ``"<invoice_id>:<action>:<choice>"``.
 """
 
 from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from invoicebot.channels.base import Button
 
@@ -25,7 +26,15 @@ ACTION_MAX_CHARS = 32
 
 _MIN_LENGTH = 1
 _ACTION_PATTERN = rf"[a-z_]{{1,{ACTION_MAX_CHARS}}}"
-_BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})"
+_BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})(?::([0-9]))?"
+
+
+class ButtonPress(NamedTuple):
+    """The invoice, action and optional choice a reply button id carries."""
+
+    invoice_id: int
+    action: str
+    choice: int | None
 
 
 def _check_chars(value: str, *, maximum: int, field: str) -> None:
@@ -46,19 +55,28 @@ def _check_unique_ids(buttons: Sequence[Button], *, field: str) -> None:
         raise ValueError(f"{field} ids must be unique")
 
 
-def button_id(invoice_id: int, action: str) -> str:
-    """Encode a reply button id, rejecting an action outside ``[a-z_]{1,32}``."""
+def button_id(invoice_id: int, action: str, choice: int | None = None) -> str:
+    """Encode a reply button id, rejecting a bad action or a choice outside 0-9."""
     if re.fullmatch(_ACTION_PATTERN, action) is None:
         raise ValueError(f"action must match [a-z_]{{1,{ACTION_MAX_CHARS}}}, got {action!r}")
-    return f"{invoice_id}:{action}"
+    if choice is None:
+        return f"{invoice_id}:{action}"
+    if type(choice) is not int or not 0 <= choice <= 9:
+        raise ValueError(f"choice must be an int 0-9, got {choice!r}")
+    return f"{invoice_id}:{action}:{choice}"
 
 
-def parse_button_id(value: str) -> tuple[int, str] | None:
-    """Parse a reply button id back to ``(invoice_id, action)``, or None if malformed."""
+def parse_button_id(value: str) -> ButtonPress | None:
+    """Parse a reply button id, or None if malformed or its choice is not one digit."""
     match = re.fullmatch(_BUTTON_ID_PATTERN, value)
     if match is None:
         return None
-    return int(match.group(1)), match.group(2)
+    choice = match.group(3)
+    return ButtonPress(
+        int(match.group(1)),
+        match.group(2),
+        int(choice) if choice is not None else None,
+    )
 
 
 def text_payload(to: str, body: str) -> dict[str, Any]:

@@ -11,7 +11,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                     | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
 | 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                  | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
 | 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                   | part of M4 | Nothing                                                                          |
-| 6b  | `widen-b-talk`                     | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
+| 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
 | 6c  | `widen-b-fetch`                    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.3, S10.4, S10.7, S10.10, S11.9; portal config checks | part of M4 | S0.6 (remaining store pages); Q5                                                 |
 | 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                             | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
 | 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                    | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
@@ -36,6 +36,17 @@ Each item goes into the named phase's plan.
 - **`ops`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.
 
 Rules for every phase plan: steps of one concern in at most about 3 files, each with its own test command; tests cite requirement and rule IDs; no real RUCs, phone numbers or photos in git (D27).
+
+## Carried over from the `widen-b-talk` review
+
+Each item goes into the `widen-b-fetch` plan unless named otherwise.
+
+- A press on an older menu indexes the newest `choices`: store a menu id in the button.
+- `/pendientes` re-sends parked questions without a rate limit.
+- A resumed press whose action rejects its choice leaves the invoice unparked.
+- `/pendientes` shows the prepared date in UTC (`shortcut:` in `commands.py`).
+- A NUL in an inbound text fails the JSONB insert, so the webhook answers 503 and Meta redelivers it for days. Strip or reject control characters in `parse_webhook`, and answer 200 for a message that can never succeed.
+- Profile ids have no pattern; the per-profile natural key (D93) assumes they never contain `|`. Give them one (`^[a-z0-9_-]+$`) in the config model.
 
 ## Carried over from the `read` review
 
@@ -109,7 +120,8 @@ Each item goes into the named phase's plan.
 - **M3 live run:** the upload-session allow-list (`UPLOAD_HOSTS`, `UPLOAD_HOST_SUFFIXES` in `sinks/onedrive.py`) comes from Microsoft's docs (`*.up.1drv.com`, `api.onedrive.com`, `outlook.office.com`). Record a real personal-account `uploadUrl` for a drive upload and a mail attachment, and pin the list to it.
 - **`widen-b-fetch`:** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
 - **`widen-b-fetch` (with the next portal):** `portal_timeout_s` only has to stay below the 300 s lease (`JOB_LEASE_S`); leave a margin for the helper start and the handler's database work (e.g. 30 s).
-- **`widen-b-talk` or later:** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
+- **`widen-b-talk` (widen-b-talk):** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
+- **`ops`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
 - **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
 
 ## Known drift between code and specs
@@ -119,6 +131,7 @@ The specs run ahead of the code in these places; each has a named story that clo
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
+- `confirm_mode: always`, the `VALIDATING` state and asking in `CONFIRMING` for BR-E03 or a `source=llm` field (spec 03 §4) are not built; routing goes straight to `FETCHING_DOCS`. `read-more` builds them with BR-E03.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global. The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans

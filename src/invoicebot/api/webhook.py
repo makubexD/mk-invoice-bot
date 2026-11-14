@@ -3,7 +3,8 @@
 The body is untrusted: its size is capped while reading, the signature is
 verified over the raw bytes before any JSON parsing, and messages from senders
 outside the profile index are only ever logged through their hash. When
-Postgres is unreachable the route answers 503 so Meta retries the delivery.
+Postgres is unreachable, or the invoice's state moved under the message, the
+route answers 503 so Meta retries the delivery against the new state (D95).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.parse import parse_webhook
 from invoicebot.channels.whatsapp.signature import verify_handshake, verify_signature
 from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
@@ -83,6 +85,10 @@ def make_router(deps: WebhookDeps) -> APIRouter:
             logger.info("ignored sender %s", digest)
         try:
             await _persist(deps, parsed.messages)
+        except StateMoved as moved:
+            # An expected race (D95): the redelivery applies to the new state.
+            logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
+            return Response(status_code=503)
         except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
             logger.exception("webhook database error")
             return Response(status_code=503)
@@ -119,4 +125,9 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
     """Handle each message in its own pooled connection and transaction."""
     for msg in messages:
         async with deps.pool.connection() as conn:
-            await handle_inbound(conn, msg, max_queued_per_sender=deps.max_queued_per_sender)
+            await handle_inbound(
+                conn,
+                msg,
+                max_queued_per_sender=deps.max_queued_per_sender,
+                admins=deps.admin_profiles,
+            )

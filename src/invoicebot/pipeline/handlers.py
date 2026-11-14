@@ -9,12 +9,12 @@ the file row and its ``extract`` job) commit together.
 
 from pathlib import Path
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage, OutboundMessage
+from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
 from invoicebot.channels.media_limits import MediaRejected, RejectionReason, max_bytes_for
 from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import download_media
 from invoicebot.config.models import MediaLimits
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
@@ -117,16 +117,15 @@ async def _reject(
         reason_desc=REJECTION_DESC[reason],
         max_mb=_max_mb(kind, limits),
     )
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        rule_id=RULE_MEDIA_REJECTED,
-        text=text,
-    )
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, "CANCELLED", rule_id=RULE_MEDIA_REJECTED)
-        await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))
+        await queue_message(
+            conn,
+            Addressee(msg.channel, msg.profile_id),
+            invoice_id=invoice_id,
+            rule_id=RULE_MEDIA_REJECTED,
+            text=text,
+        )
 
 
 def _max_mb(kind: AttachmentKind, limits: MediaLimits) -> int:

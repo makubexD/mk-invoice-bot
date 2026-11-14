@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
@@ -434,7 +435,7 @@ def test_portal_retry_schedule_survives_a_json_round_trip() -> None:
     restored = Portal.model_validate_json(portal.model_dump_json())
 
     assert restored == portal
-    assert portal.model_dump()["retry_schedule"] == ["90m", "6h", "1d", "2d"]
+    assert portal.model_dump()["retry_schedule"] == ("90m", "6h", "1d", "2d")
 
 
 def test_parse_delay_minutes() -> None:
@@ -464,7 +465,7 @@ def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
         timedelta(hours=6),
         timedelta(hours=24),
     )
-    assert inbox.model_dump()["retry_schedule"] == ["5m", "1h", "6h", "1d"]
+    assert inbox.model_dump()["retry_schedule"] == ("5m", "1h", "6h", "1d")
 
 
 def test_email_inbox_retry_schedule_with_an_unknown_unit_fails() -> None:
@@ -490,6 +491,49 @@ def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
         timedelta(hours=6),
         timedelta(hours=24),
     )
+
+
+_RETRY_SCHEDULE_MODELS = [
+    pytest.param(
+        lambda schedule: EmailInbox.model_validate({"provider": "gmail", "retry_schedule": schedule}),
+        id="email-inbox",
+    ),
+    pytest.param(
+        lambda schedule: Portal.model_validate(
+            {"key": "synthetic", "adapter": "generic_form", "retry_schedule": schedule}
+        ),
+        id="portal",
+    ),
+]
+
+
+@pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
+def test_retry_schedule_parses_and_dumps_the_same_delay_text(
+    model: Callable[[object], EmailInbox | Portal],
+) -> None:
+    """R-9.6: a retry schedule parses to timedeltas and dumps back as the same text (D65)."""
+    instance = model(["5m", "1h"])
+
+    assert instance.retry_schedule == (timedelta(minutes=5), timedelta(hours=1))
+    assert instance.model_dump()["retry_schedule"] == ("5m", "1h")
+
+
+@pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
+def test_retry_schedule_with_a_non_string_entry_fails(
+    model: Callable[[object], EmailInbox | Portal],
+) -> None:
+    """R-9.6: a non-string delay is a ValidationError, not a TypeError (D65)."""
+    with pytest.raises(ValidationError, match="must be a string"):
+        model([5])
+
+
+@pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
+def test_retry_schedule_with_an_unknown_unit_is_a_validation_error(
+    model: Callable[[object], EmailInbox | Portal],
+) -> None:
+    """R-9.6: a delay outside ``<number><m|h|d>`` fails naming the text (D65)."""
+    with pytest.raises(ValidationError, match="5x"):
+        model(["5x"])
 
 
 def test_file_with_a_list_at_the_root_fails(tmp_path: Path) -> None:

@@ -57,6 +57,7 @@ PROFILE = "yo"
 # From tests/synthetic_rucs.txt; no real RUC appears here.
 STORE_RUC = "20000000001"
 COMERCIO = "LaLena"
+SECOND_COMERCIO = "Local Dos"
 SERIE = "F001"
 NUMERO = "15160"
 FECHA = date(2026, 11, 5)
@@ -177,7 +178,7 @@ class CancellingGraphMode:
     async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
         """Cancel the invoice during the send."""
         async with self._pool.connection() as conn, conn.transaction():
-            await set_state(conn, invoice_id, "CANCELLED")
+            await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-E05")
 
 
 def _field(value: str) -> Field:
@@ -206,6 +207,21 @@ def _directory() -> StoreDirectory:
         razon_social="Comercio Sintetico",
         tipo="01",
         brands=[Brand(comercio=COMERCIO)],
+        portal=None,
+    )
+    return StoreDirectory(stores={STORE_RUC: store}, portals={})
+
+
+def _two_brand_directory() -> StoreDirectory:
+    """Return a store with two brands whose prefixes match neither the tested serie."""
+    store = Store(
+        ruc=STORE_RUC,
+        razon_social="Comercio Sintetico",
+        tipo="01",
+        brands=[
+            Brand(comercio=COMERCIO, serie_prefix=["A"]),
+            Brand(comercio=SECOND_COMERCIO, serie_prefix=["B"]),
+        ],
         portal=None,
     )
     return StoreDirectory(stores={STORE_RUC: store}, portals={})
@@ -285,6 +301,23 @@ def _handler(
         _directory(),
         drive,
         {mode_name: mode or DryRun(data_dir)},
+        data_dir,
+    )
+
+
+def _two_brand_handler(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    cfg: Config,
+    drive: FakeDrive,
+    data_dir: Path,
+) -> Handler:
+    """Build the assisted deliver handler against the two-brand store."""
+    return make_deliver_handler(
+        pool,
+        cfg,
+        _two_brand_directory(),
+        drive,
+        {"dry_run": DryRun(data_dir)},
         data_dir,
     )
 
@@ -415,6 +448,50 @@ async def test_dry_run_batches_the_invoice_with_br_d07(
     assert buttons == [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}]
 
 
+async def test_a_chosen_brand_files_the_invoice_under_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-R09: the brand the sender picked files the invoice when no serie prefix matches."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(
+        db_pool, tmp_path, profile_id, flow_data={"answers": {"comercio": SECOND_COMERCIO}}
+    )
+    drive = FakeDrive()
+
+    await _two_brand_handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+    folder = f"{FOLDER_PREFIX}{flow_data['seq']}_{SECOND_COMERCIO}"
+    assert invoice == ("BATCHED", "BR-D07")
+    assert flow_data["comercio"] == SECOND_COMERCIO
+    assert drive.created == [("/Reembolsos", folder)]
+
+
+async def test_no_answer_for_a_multi_brand_store_errors_for_no_comercio(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-R09: with no answer and no serie match the invoice fails for no comercio as before."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive()
+
+    with pytest.raises(RuntimeError, match="has no comercio"):
+        await _two_brand_handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DELIVERING", None)
+    assert "comercio" not in flow_data
+    assert outbox == []
+    assert drive.created == []
+
+
 async def test_an_assisted_draft_prepares_an_existing_failed_batch(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -537,7 +614,7 @@ async def test_a_cancelled_invoice_still_marks_the_batch_sent(
         invoice = await _invoice_state(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
-    assert invoice == ("CANCELLED", None)
+    assert invoice == ("CANCELLED", "BR-E05")
     assert batch_state == "sent"
     assert outbox == []
 

@@ -141,6 +141,25 @@ class LeavingFetcher(FakeFetcher):
         return result
 
 
+class CancellingFetcher(FakeFetcher):
+    """An ok fetcher that cancels the invoice before the handler commits (D95)."""
+
+    def __init__(
+        self,
+        pool: AsyncConnectionPool[AsyncConnection[Any]],
+        invoice_id: int,
+    ) -> None:
+        super().__init__(FetchReason.OK)
+        self._pool = pool
+        self._invoice_id = invoice_id
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        result = await super().fetch(invoice, out_dir)
+        async with self._pool.connection() as conn, conn.transaction():
+            await set_state(conn, self._invoice_id, "CANCELLED", rule_id="BR-S07")
+        return result
+
+
 class RecordingFetcher:
     """A fetcher that records the folder each run gives it, then fails."""
 
@@ -517,6 +536,29 @@ async def test_run_that_leaves_fetching_after_its_fetch_removes_its_folder(
     assert not out_root.exists() or not any(out_root.rglob("*"))
     assert attempts == []
     assert files == []
+
+
+async def test_invoice_cancelled_mid_fetch_stays_cancelled_and_writes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D95: an invoice cancelled during its fetch keeps CANCELLED with no files or message."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = CancellingFetcher(db_pool, invoice_id)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("CANCELLED", "BR-S07", FLOW)
+    assert files == []
+    assert attempts == []
+    assert deliver_jobs == []
+    assert outbox == []
 
 
 async def test_two_runs_of_one_job_use_different_out_dirs(
