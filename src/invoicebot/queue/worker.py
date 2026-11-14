@@ -19,6 +19,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from invoicebot.config.models import JOB_LEASE_S
 from invoicebot.queue.jobs import Job, claim, complete, fail
 from invoicebot.queue.retry import describe_error
 from invoicebot.store.db import Pool
@@ -41,7 +42,7 @@ class Worker:
         handlers: Mapping[str, Handler],
         *,
         worker_id: str = "worker-1",
-        lease_s: int = 300,
+        lease_s: int = JOB_LEASE_S,
         idle_timeout_s: float = 60.0,
     ) -> None:
         self._pool = pool

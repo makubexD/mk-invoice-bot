@@ -13,6 +13,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast, get_args
 
+from invoicebot.text import replace_unsafe_chars
+
 Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
 Flag = Literal["inferred", "conflict"]
 
@@ -38,12 +40,19 @@ class Field:
 
     ``flag`` is ``"inferred"`` when a reader derived the value instead of reading it, and
     ``"conflict"`` when readers disagree; ``None`` means the reader found it as printed.
+
+    ``value`` never carries an unsafe character (R-12.8): lxml, the ``.eml`` builder and
+    the drive path reject them, so each is replaced with a space and the result is stripped.
     """
 
     value: str
     source: Source
     confidence: float
     flag: Flag | None = None
+
+    def __post_init__(self) -> None:
+        """Replace every unsafe character with a space and strip the edges (R-12.8)."""
+        object.__setattr__(self, "value", replace_unsafe_chars(self.value))
 
 
 @dataclass(frozen=True)

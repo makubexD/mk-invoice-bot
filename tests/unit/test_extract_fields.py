@@ -71,6 +71,34 @@ def test_field_without_flag_loads_with_none() -> None:
 
 
 @pytest.mark.parametrize(
+    ("value", "cleaned"),
+    [
+        pytest.param("ACME\x00 SAC", "ACME  SAC", id="nul"),
+        pytest.param("F001\n", "F001", id="trailing-newline"),
+        pytest.param("Razón\tSocial", "Razón Social", id="tab"),
+        pytest.param("\x1b[31mX", "[31mX", id="escape"),
+        pytest.param("Pollería Ñandú", "Pollería Ñandú", id="no-control-character"),
+        pytest.param("Razón\u202eSocial", "Razón Social", id="bidi-override"),
+    ],
+)
+def test_field_replaces_control_characters_with_spaces(value: str, cleaned: str) -> None:
+    """R-12.8: a field value carries a space where a control character was, and no edges."""
+    assert Field(value=value, source="ocr", confidence=1.0).value == cleaned
+
+
+def test_reading_from_json_cleans_a_control_character() -> None:
+    """R-12.8: a loaded field value carries a space where a control character was."""
+    payload = {
+        "fields": {"razon_social": {"value": "ACME\x07 SAC", "source": "ocr", "confidence": 1.0}},
+        "document_url": None,
+    }
+
+    reading = reading_from_json(payload)
+
+    assert reading.fields["razon_social"].value == "ACME  SAC"
+
+
+@pytest.mark.parametrize(
     ("payload", "match"),
     [
         pytest.param(["not", "a", "dict"], "reading must be an object", id="non-dict"),

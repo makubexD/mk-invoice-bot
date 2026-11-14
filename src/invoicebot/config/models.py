@@ -61,6 +61,7 @@ class WhatsAppChannel(BaseModel):
     phone_number_id: str
     graph_api_version: str
     templates: ChannelTemplates
+    template_language: str = Field(default="es_PE", pattern=r"^[a-z]{2}(_[A-Z]{2})?$")
 
 
 class TelegramChannel(BaseModel):
@@ -339,7 +340,18 @@ class EmailInbox(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Literal["gmail", "graph"]
-    retry_schedule: list[str]
+    retry_schedule: tuple[timedelta, ...]
+
+    @field_validator("retry_schedule", mode="before")
+    @classmethod
+    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
+        """D65: every retry delay is written as ``<number><m|h|d>``."""
+        return tuple(parse_delay(entry) for entry in value)
+
+    @field_serializer("retry_schedule")
+    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
+        """D65: serialize back to ``1h``-style text, so a dumped email inbox validates again."""
+        return [format_delay(delay) for delay in value]
 
 
 class PaidSolver(BaseModel):
@@ -364,6 +376,10 @@ class PaidApi(BaseModel):
     provider: str
 
 
+#: The worker's job lease; a portal fetch must end before it (R-5.1).
+JOB_LEASE_S = 300
+
+
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -372,6 +388,16 @@ class Retrieval(BaseModel):
     email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi
+
+    @model_validator(mode="after")
+    def _portal_fetch_fits_in_job_lease(self) -> Self:
+        """R-5.1: a portal fetch must end before the job lease expires."""
+        if self.portal_timeout_s >= JOB_LEASE_S:
+            raise ValueError(
+                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) must be less than "
+                f"the job lease ({JOB_LEASE_S}s)"
+            )
+        return self
 
 
 class GapsGithub(BaseModel):

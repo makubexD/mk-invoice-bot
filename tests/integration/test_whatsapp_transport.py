@@ -11,10 +11,11 @@ import httpx
 import pytest
 
 from invoicebot.channels.base import Button, OutboundMessage
-from invoicebot.channels.whatsapp.client import WhatsAppClient
-from invoicebot.channels.whatsapp.transport import TemplateMissing, make_transport
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
 from invoicebot.config.models import ChannelTemplates
-from invoicebot.queue.outbox import OutboxRow, OutboxSender, Transport, add
+from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, Transport, add
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.db import Pool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -55,12 +56,12 @@ def _message(**overrides: Any) -> OutboundMessage:
     return OutboundMessage(**fields)
 
 
-def _row(msg: OutboundMessage) -> OutboxRow:
+def _row(msg: OutboundMessage, *, to: str = PROFILE) -> OutboxRow:
     """Wrap an outbound message in the due outbox row the transport receives."""
     return OutboxRow(
         id=1,
         channel="whatsapp",
-        to=PROFILE,
+        to=to,
         payload=msg.model_dump(mode="json"),
         template=None,
         attempts=0,
@@ -89,6 +90,7 @@ async def _transport(
     handler: Handler = _accept,
     *,
     templates: ChannelTemplates = TEMPLATES,
+    language: str = "es_PE",
 ) -> AsyncIterator[tuple[Transport, list[Payload]]]:
     """Yield a transport plus the payloads it sends, answered through ``handler``."""
     sent: list[Payload] = []
@@ -104,7 +106,14 @@ async def _transport(
             graph_api_version=GRAPH_VERSION,
             token=BEARER,
         )
-        yield make_transport(client, pool, numbers={PROFILE: NUMBER}, templates=templates), sent
+        transport = make_transport(
+            client,
+            pool,
+            numbers={PROFILE: NUMBER},
+            templates=templates,
+            language=language,
+        )
+        yield transport, sent
 
 
 async def test_open_window_sends_free_form_text(db_pool: Pool) -> None:
@@ -178,25 +187,87 @@ async def test_window_expired_on_send_falls_back_to_template(db_pool: Pool) -> N
     assert sent[1]["template"]["name"] == "manual_required"
 
 
-async def test_closed_window_without_a_slot_raises_template_missing(db_pool: Pool) -> None:
-    """R-1.10: a closed window for a rule with no template fails without any request."""
+async def test_closed_window_without_a_slot_is_permanent(db_pool: Pool) -> None:
+    """R-1.10, R-11.5: a closed window for a rule with no template fails permanently, no request."""
     await _prepare(db_pool, window_hours_ago=None)
     async with _transport(db_pool) as (transport, sent):
-        with pytest.raises(TemplateMissing):
+        with pytest.raises(PermanentSendError):
             await transport(_row(_message(rule_id="BR-S01")))
 
     assert sent == []
 
 
-async def test_empty_template_name_raises_template_missing(db_pool: Pool) -> None:
-    """R-1.10: a configured slot whose name is empty counts as missing."""
+async def test_empty_template_name_is_permanent(db_pool: Pool) -> None:
+    """R-1.10, R-11.5: a configured slot whose name is empty counts as missing, so it is permanent."""
     await _prepare(db_pool, window_hours_ago=None)
     templates = TEMPLATES.model_copy(update={"manual_required": ""})
     async with _transport(db_pool, templates=templates) as (transport, sent):
-        with pytest.raises(TemplateMissing, match="manual_required"):
+        with pytest.raises(PermanentSendError, match="manual_required"):
             await transport(_row(_message(rule_id="BR-F07")))
 
     assert sent == []
+
+
+async def test_recipient_missing_from_numbers_is_permanent(db_pool: Pool) -> None:
+    """R-11.5: a recipient with no WhatsApp number can never be sent, so no request is made."""
+    await _prepare(db_pool, window_hours_ago=1)
+    async with _transport(db_pool) as (transport, sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(), to="desconocido"))
+
+    assert sent == []
+
+
+async def test_a_permanent_meta_code_is_a_permanent_failure(db_pool: Pool) -> None:
+    """R-11.5: Meta's code 131026 (undeliverable) raises PermanentSendError."""
+    await _prepare(db_pool, window_hours_ago=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": 131026, "message": "Undeliverable"}})
+
+    async with _transport(db_pool, handler) as (transport, _sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(rule_id="BR-F07")))
+
+
+async def test_a_transient_meta_code_stays_a_whatsapp_error(db_pool: Pool) -> None:
+    """R-11.5: Meta's code 1 on a 500 is transient, so it is not a PermanentSendError."""
+    await _prepare(db_pool, window_hours_ago=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": {"code": 1, "message": "Unknown"}})
+
+    async with _transport(db_pool, handler) as (transport, _sent):
+        with pytest.raises(WhatsAppError):
+            await transport(_row(_message(rule_id="BR-F07")))
+
+
+async def test_template_language_comes_from_the_transport(db_pool: Pool) -> None:
+    """R-1.10: a template send uses the configured language, not a hard-coded one."""
+    await _prepare(db_pool, window_hours_ago=None)
+    async with _transport(db_pool, language="en_US") as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07")))
+
+    assert sent[0]["template"]["language"] == {"code": "en_US"}
+
+
+async def test_every_admin_rule_has_the_admin_alert_template() -> None:
+    """R-1.10, BR-S04: an admin alert reaches an admin whose window is closed, not a dead row."""
+    admin_rules = {rule_id for rule_id in MESSAGES if rule_id.endswith("_admin")}
+
+    assert admin_rules
+    assert {rule_id: TEMPLATE_SLOT_BY_RULE.get(rule_id) for rule_id in admin_rules} == dict.fromkeys(
+        admin_rules, "admin_alert"
+    )
+
+
+async def test_closed_window_admin_alert_uses_the_admin_template(db_pool: Pool) -> None:
+    """R-1.10, BR-D03: BR-D03's admin text goes out as the admin_alert template outside the window."""
+    await _prepare(db_pool, window_hours_ago=None)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-D03_admin")))
+
+    assert sent[0]["template"]["name"] == "admin_alert"
 
 
 async def test_message_template_wins_over_the_rule_table(db_pool: Pool) -> None:
@@ -209,8 +280,8 @@ async def test_message_template_wins_over_the_rule_table(db_pool: Pool) -> None:
     assert sent[0]["template"]["name"] == "admin_alert"
 
 
-async def test_outbox_sender_keeps_the_row_after_template_missing(db_pool: Pool) -> None:
-    """R-11.5: TemplateMissing propagates, leaving the row pending with attempts incremented."""
+async def test_outbox_sender_marks_the_row_dead_after_template_missing(db_pool: Pool) -> None:
+    """R-11.5: a missing template is permanent, so the outbox marks the row dead at once."""
     await _prepare(db_pool, window_hours_ago=None)
     async with db_pool.connection() as conn:
         outbox_id = await add(
@@ -232,6 +303,6 @@ async def test_outbox_sender_keeps_the_row_after_template_missing(db_pool: Pool)
         )
         row = await cur.fetchone()
     assert row is not None
-    assert row[0] == "pending"
+    assert row[0] == "dead"
     assert row[1] == 1
-    assert row[2].startswith("TemplateMissing")
+    assert row[2].startswith("PermanentSendError")

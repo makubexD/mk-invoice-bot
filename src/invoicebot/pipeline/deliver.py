@@ -98,6 +98,8 @@ FAILED_BATCH_STATE = "failed"
 DONE_STATE = "DONE"
 #: BR-D03: the rule that reports a mail that could not be sent.
 RULE_SEND_FAILED = "BR-D03"
+#: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
+RULE_SEND_FAILED_ADMIN = "BR-D03_admin"
 #: BR-D10: the rule that reports a filed and mailed invoice (R-7.7).
 RULE_SENT = "BR-D10"
 #: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
@@ -426,7 +428,7 @@ async def _automatic(
     """
     async with context.pool.connection() as conn, conn.transaction():
         if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
-            await _crashed_send(conn, delivery, prepared)
+            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
             return
         batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
         await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
@@ -455,7 +457,12 @@ async def _automatic(
         await asyncio.to_thread(path.unlink, missing_ok=True)
 
 
-async def _crashed_send(conn: AsyncConnection[Any], delivery: _Delivery, prepared: _Values) -> None:
+async def _crashed_send(
+    conn: AsyncConnection[Any],
+    delivery: _Delivery,
+    prepared: _Values,
+    profiles: Mapping[str, Profile],
+) -> None:
     """Fail the batch a previous attempt left ``sending`` and ask the owner to reprocess (D89)."""
     if not await _still_delivering(conn, delivery.invoice_id):
         return
@@ -463,6 +470,12 @@ async def _crashed_send(conn: AsyncConnection[Any], delivery: _Delivery, prepare
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
     await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
     await _notify(conn, delivery.head, RULE_SEND_FAILED, _send_failed_text(prepared, delivery.invoice_id), [])
+    await _notify_admins(
+        conn,
+        profiles,
+        RULE_SEND_FAILED_ADMIN,
+        _send_failed_admin_text(prepared, delivery.invoice_id),
+    )
 
 
 async def _send_failed(
@@ -479,6 +492,12 @@ async def _send_failed(
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
         await _notify(conn, delivery.head, RULE_SEND_FAILED, text, [])
+        await _notify_admins(
+            conn,
+            context.cfg.profiles,
+            RULE_SEND_FAILED_ADMIN,
+            _send_failed_admin_text(prepared, delivery.invoice_id),
+        )
 
 
 def _send_failed_text(prepared: _Values, invoice_id: int) -> str:
@@ -487,6 +506,15 @@ def _send_failed_text(prepared: _Values, invoice_id: int) -> str:
         serie=prepared.values["serie"],
         numero=prepared.values["numero"],
         id=invoice_id,
+    )
+
+
+def _send_failed_admin_text(prepared: _Values, invoice_id: int) -> str:
+    """Return BR-D03's admin alert for the invoice's id, serie and numero (BR-D03)."""
+    return MESSAGES[RULE_SEND_FAILED_ADMIN].format(
+        id=invoice_id,
+        serie=prepared.values["serie"],
+        numero=prepared.values["numero"],
     )
 
 
@@ -499,28 +527,39 @@ async def _pending_auth(context: _Context, invoice: _Invoice) -> None:
             return
         await set_state(conn, invoice.job.invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
         await _notify(conn, invoice.head, RULE_AUTH, text, [])
-        for profile_id, profile in context.cfg.profiles.items():
-            if profile.admin:
-                await _notify_admin(conn, profile_id, profile, admin_text)
+        await _notify_admins(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
+
+
+async def _notify_admins(
+    conn: AsyncConnection[Any],
+    profiles: Mapping[str, Profile],
+    rule_id: str,
+    text: str,
+) -> None:
+    """Queue one rule's admin alert for every admin profile on its preferred channel."""
+    for profile_id, profile in profiles.items():
+        if profile.admin:
+            await _notify_admin(conn, profile_id, profile, rule_id, text)
 
 
 async def _notify_admin(
     conn: AsyncConnection[Any],
     profile_id: str,
     profile: Profile,
+    rule_id: str,
     text: str,
 ) -> None:
-    """Queue BR-D01's admin text for one admin profile on its preferred channel, if it has one (BR-D01)."""
+    """Queue a rule's admin text for one admin profile on its preferred channel, if it has one."""
     channel = profile.preferred_channel
     if channel is None:
-        # One unreachable admin must not undo the PENDING_AUTH move or the other alerts.
-        logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": RULE_AUTH_ADMIN})
+        # One unreachable admin must not undo the state change or the other alerts.
+        logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
         return
     message = OutboundMessage(
         channel=channel,
         recipient=profile_id,
         profile_id=profile_id,
-        rule_id=RULE_AUTH_ADMIN,
+        rule_id=rule_id,
         text=text,
     )
     await outbox.add(conn, channel, profile_id, message.model_dump(mode="json"))

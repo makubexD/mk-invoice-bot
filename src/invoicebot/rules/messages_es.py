@@ -95,6 +95,10 @@ MESSAGES: dict[str, str] = {
         "Ya avisé para corregirlo; reintento automáticamente."
     ),
     "BR-D03": "No pude preparar el correo de {serie}-{numero}. Reintenta con /reprocesar {id}.",
+    "BR-D03_admin": (
+        "📮 No se pudo enviar el correo del comprobante #{id} ({serie}-{numero}). "
+        "Revisa la cuenta y ejecuta /reprocesar {id}."
+    ),
     "BR-D04": "No hay comprobantes pendientes de envío.",
     "BR-D05": (
         "🔑 La GitHub App no puede abrir issues en {repo} ({reason_desc}). Revisa la instalación o la clave."

@@ -11,7 +11,16 @@ import yaml
 from pydantic import ValidationError
 
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import CalendarField, Config, PickField, Portal, parse_delay
+from invoicebot.config.models import (
+    CalendarField,
+    ChannelTemplates,
+    Config,
+    EmailInbox,
+    PickField,
+    Portal,
+    WhatsAppChannel,
+    parse_delay,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -242,6 +251,30 @@ def test_zero_portal_timeout_fails(tmp_path: Path) -> None:
     assert "retrieval.portal_timeout_s" in str(excinfo.value)
 
 
+@pytest.mark.parametrize("timeout_s", [120, 299.5])
+def test_portal_timeout_under_job_lease_is_valid(tmp_path: Path, timeout_s: float) -> None:
+    """R-5.1: a portal fetch shorter than the job lease loads."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["portal_timeout_s"] = timeout_s
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).retrieval.portal_timeout_s == timeout_s
+
+
+@pytest.mark.parametrize("timeout_s", [300, 900])
+def test_portal_timeout_at_or_over_job_lease_fails(tmp_path: Path, timeout_s: float) -> None:
+    """R-5.1: a portal fetch may not outlive the job lease, so it fails to load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["portal_timeout_s"] = timeout_s
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "300" in str(excinfo.value)
+    assert str(timeout_s) in str(excinfo.value)
+
+
 def test_zero_max_image_px_fails(tmp_path: Path) -> None:
     """R-9.6: extraction.max_image_px must be a positive pixel bound."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
@@ -421,6 +454,44 @@ def test_retry_schedule_with_an_unknown_unit_fails() -> None:
         Portal.model_validate({"key": "example", "adapter": "generic_form", "retry_schedule": ["2w"]})
 
 
+def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
+    """D65: an email inbox retry schedule is typed and dumps back as canonical delay text."""
+    inbox = EmailInbox(provider="gmail", retry_schedule=["5m", "1h", "6h", "24h"])
+
+    assert inbox.retry_schedule == (
+        timedelta(minutes=5),
+        timedelta(hours=1),
+        timedelta(hours=6),
+        timedelta(hours=24),
+    )
+    assert inbox.model_dump()["retry_schedule"] == ["5m", "1h", "6h", "1d"]
+
+
+def test_email_inbox_retry_schedule_with_an_unknown_unit_fails() -> None:
+    """D65: an email inbox retry delay only uses minutes, hours or days."""
+    with pytest.raises(ValidationError, match="5 minutes"):
+        EmailInbox(provider="gmail", retry_schedule=["5 minutes"])
+
+
+def test_email_inbox_retry_schedule_may_be_empty() -> None:
+    """D65: an empty email inbox retry schedule is an empty tuple, as for a portal."""
+    inbox = EmailInbox(provider="gmail", retry_schedule=[])
+
+    assert inbox.retry_schedule == ()
+
+
+def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
+    """R-9.6: the shipped example config's email inbox validates with the typed schedule."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.retrieval.email_inbox.retry_schedule == (
+        timedelta(minutes=5),
+        timedelta(hours=1),
+        timedelta(hours=6),
+        timedelta(hours=24),
+    )
+
+
 def test_file_with_a_list_at_the_root_fails(tmp_path: Path) -> None:
     """R-5.8: a directory file is one mapping, so a list root fails naming the file."""
     config_dir = tmp_path / "config"
@@ -439,3 +510,33 @@ def test_portal_file_setting_key_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=r"example\.yaml"):
         load_directory(config_dir)
+
+
+def _whatsapp_channel(**overrides: Any) -> WhatsAppChannel:
+    """Build the WhatsApp channel config the example file carries."""
+    fields: dict[str, Any] = {
+        "kind": "whatsapp_cloud",
+        "phone_number_id": "123456789",
+        "graph_api_version": "v23.0",
+        "templates": ChannelTemplates(
+            completion="invoice_done",
+            manual_required="manual_required",
+            resume_notice="resume_notice",
+            pending_user_reminder="pending_user_reminder",
+            batch_preview="batch_preview",
+            admin_alert="admin_alert",
+        ),
+    }
+    fields.update(overrides)
+    return WhatsAppChannel(**fields)
+
+
+def test_whatsapp_template_language_rejects_a_dashed_locale() -> None:
+    """R-9.6: Meta writes the locale as es_PE, so a dashed tag fails validation."""
+    with pytest.raises(ValidationError, match="template_language"):
+        _whatsapp_channel(template_language="es-PE")
+
+
+def test_whatsapp_template_language_defaults_to_es_pe() -> None:
+    """R-9.6: a channel with no template_language sends templates in Spanish (Peru)."""
+    assert _whatsapp_channel().template_language == "es_PE"

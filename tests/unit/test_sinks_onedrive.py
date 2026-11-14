@@ -12,6 +12,8 @@ import pytest
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
+    MAX_LIST_PAGES,
+    NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
     GraphDrive,
     GraphError,
@@ -126,6 +128,62 @@ async def test_list_names_does_not_follow_a_next_link_to_another_host() -> None:
     assert len(requests) == 1
 
 
+def _page(number: int, *, has_next: bool) -> dict[str, object]:
+    """Return one children page with a graph.microsoft.com next link when asked."""
+    body: dict[str, object] = {"value": [{"name": f"name-{number}"}]}
+    if has_next:
+        body["@odata.nextLink"] = f"{GRAPH_BASE_URL}/me/drive/root:/folder:/children?$skiptoken={number + 1}"
+    return body
+
+
+async def test_list_names_of_three_pages_returns_every_name_in_order() -> None:
+    """R-7.1: a three-page listing collects every name in order and stops at the last page."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = len(requests)
+        return httpx.Response(200, json=_page(page, has_next=page < 3))
+
+    async with _make_drive(handler) as drive:
+        names = await drive.list_names("/folder")
+
+    assert names == ["name-1", "name-2", "name-3"]
+    assert len(requests) == 3
+
+
+async def test_list_names_accepts_exactly_fifty_pages() -> None:
+    """R-7.1: fifty pages whose last has no next link is a complete listing, not a cap error."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = len(requests)
+        return httpx.Response(200, json=_page(page, has_next=page < MAX_LIST_PAGES))
+
+    async with _make_drive(handler) as drive:
+        names = await drive.list_names("/folder")
+
+    assert names == [f"name-{page}" for page in range(1, MAX_LIST_PAGES + 1)]
+    assert len(requests) == MAX_LIST_PAGES
+
+
+async def test_list_names_raises_when_the_fiftieth_page_has_a_next_link() -> None:
+    """R-7.1: the page past the cap is never requested; the listing fails with GraphError."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_page(len(requests), has_next=True))
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphError) as raised:
+            await drive.list_names("/folder")
+
+    assert raised.value.status == NOT_SENT_STATUS
+    assert len(requests) == MAX_LIST_PAGES
+
+
 async def test_create_folder_sends_conflict_behavior_fail_and_accepts_409() -> None:
     """R-7.1: creating a folder asks Graph to fail on a conflict, and a 409 is accepted."""
     requests: list[httpx.Request] = []
@@ -208,7 +266,7 @@ async def test_upload_above_four_megabytes_chunks_through_an_upload_session() ->
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://sn3302.up.1drv.com/up/session"})
         if len(requests) == 2:
             return httpx.Response(202)
         return httpx.Response(200)
@@ -238,7 +296,7 @@ async def test_upload_session_never_confirmed_raises() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://sn3302.up.1drv.com/up/session"})
         return httpx.Response(202)
 
     async with _make_drive(handler) as drive:
@@ -252,13 +310,71 @@ async def test_upload_rejects_a_non_https_session_url_before_chunking() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(201, json={"uploadUrl": "http://upload.example/session"})
+        return httpx.Response(201, json={"uploadUrl": "http://sn3302.up.1drv.com/up/session"})
 
     async with _make_drive(handler) as drive:
         with pytest.raises(GraphError):
             await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
 
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://sn3302.up.1drv.com/up/abc",
+        "https://api.onedrive.com/rup/abc",
+        "https://api.files.1drv.com/up/abc",
+        "https://graph.microsoft.com/v1.0/upload/abc",
+        "https://outlook.office.com/api/v2.0/abc",
+        "https://SN3302.UP.1DRV.COM/up/abc",
+    ],
+)
+async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
+    """R-5.10: an upload session on a Microsoft host receives the chunks."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"uploadUrl": upload_url})
+        return httpx.Response(200)
+
+    async with _make_drive(handler) as drive:
+        await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
+
+    chunks = [request for request in requests if request.method == "PUT"]
+    assert chunks
+    assert all(str(chunk.url) == str(httpx.URL(upload_url)) for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://evil.example/upload",
+        "https://sharepoint.com.evil.example/u",
+        "http://sn3302.up.1drv.com/u",
+        "https://user@sn3302.up.1drv.com/u",
+        "https://tenant-my.sharepoint.com/u",
+        "https://evil.office.com/u",
+        "https://up.1drv.com.evil.example/u",
+        "https://evil\uff0fup.1drv.com/u",
+    ],
+)
+async def test_upload_refuses_a_session_url_outside_microsoft_before_chunking(upload_url: str) -> None:
+    """R-5.10: a session URL that is not HTTPS on a Microsoft host is refused with no PUT."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={"uploadUrl": upload_url})
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphError) as raised:
+            await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
+
+    assert raised.value.status == NOT_SENT_STATUS
+    assert [request.method for request in requests] == ["POST"]
 
 
 async def test_invalid_path_raises_before_any_request() -> None:
@@ -272,6 +388,21 @@ async def test_invalid_path_raises_before_any_request() -> None:
     async with _make_drive(handler) as drive:
         with pytest.raises(ValueError, match="invalid drive path segment"):
             await drive.list_names("/folder/../other")
+
+    assert requests == []
+
+
+async def test_unsafe_character_in_a_path_raises_before_any_request() -> None:
+    """R-12.8: a path segment with a bidi override is rejected before the drive is contacted."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"value": []})
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="invalid drive path segment"):
+            await drive.list_names("/folder/\u202eevil")
 
     assert requests == []
 

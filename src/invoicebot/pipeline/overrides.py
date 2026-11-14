@@ -7,7 +7,6 @@ on a prepared batch moves the invoice back to ``DELIVERING`` so the deliver job 
 the Excel and the draft in the same folder.
 """
 
-import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
@@ -27,6 +26,7 @@ from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import OVERRIDES_SAVED
 from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
 from invoicebot.store.invoices import find_override_target, get_state_rule, set_state
+from invoicebot.text import has_unsafe_char
 
 #: The longest value an override accepts (R-12.8's untrusted-text cap).
 MAX_OVERRIDE_CHARS = 120
@@ -38,7 +38,7 @@ def parse_overrides(text: str) -> dict[str, str]:
     """Return the overrides in text: ``motivo`` and ``descripcion``, keys case-insensitive.
 
     The value runs to the end of its line and is trimmed. A line without ``=``, a
-    value longer than :data:`MAX_OVERRIDE_CHARS` or one with a control character is
+    value longer than :data:`MAX_OVERRIDE_CHARS` or one with an unsafe character is
     ignored (that key is dropped), as is every other key.
     """
     overrides: dict[str, str] = {}
@@ -50,15 +50,10 @@ def parse_overrides(text: str) -> dict[str, str]:
         if name not in OVERRIDE_KEYS:
             continue
         clean = value.strip()
-        if not clean or len(clean) > MAX_OVERRIDE_CHARS or _has_control(clean):
+        if not clean or len(clean) > MAX_OVERRIDE_CHARS or has_unsafe_char(clean):
             continue
         overrides[name] = clean
     return overrides
-
-
-def _has_control(value: str) -> bool:
-    """Return True when value has a control character, as untrusted text may not (R-12.8)."""
-    return any(unicodedata.category(char) == "Cc" for char in value)
 
 
 async def apply_overrides(

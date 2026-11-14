@@ -46,10 +46,11 @@ def test_parse_overrides_ignores_other_text(text: str) -> None:
         "Viaje\tida",
         "Viaje\x07vuelta",
         "Viaje\x00final",
+        "Viaje\u202evuelta",
     ],
 )
 def test_parse_overrides_drops_a_bad_value(value: str) -> None:
-    """R-7.4, R-12.8: a value over 120 characters or with a control character is dropped."""
+    """R-7.4, R-12.8: a value over 120 characters or with an unsafe character is dropped."""
     assert parse_overrides(f"motivo={value}") == {}
 
 

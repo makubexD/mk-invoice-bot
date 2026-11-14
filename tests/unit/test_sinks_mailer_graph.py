@@ -79,7 +79,7 @@ def _large_path_handler(requests: list[httpx.Request], *, message_id: str = "mes
         if request.method == "POST" and path.endswith("/me/messages"):
             return httpx.Response(201, json={"id": message_id})
         if request.method == "POST" and path.endswith("/attachments/createUploadSession"):
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://outlook.office.com/api/v2.0/session"})
         if request.method == "PUT":
             end, total = request.headers["Content-Range"].split(" ")[1].split("/")
             return httpx.Response(200 if int(end.split("-")[1]) + 1 == int(total) else 202)
@@ -166,8 +166,8 @@ async def test_a_large_mail_goes_through_draft_upload_session_and_send() -> None
     assert [request.url.path for request in requests] == [
         "/v1.0/me/messages",
         "/v1.0/me/messages/message-id/attachments/createUploadSession",
-        "/session",
-        "/session",
+        "/api/v2.0/session",
+        "/api/v2.0/session",
         "/v1.0/me/messages/message-id/send",
     ]
     assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
@@ -286,7 +286,25 @@ async def test_a_non_https_upload_session_url_sends_no_chunk() -> None:
         requests.append(request)
         if request.url.path.endswith("/me/messages"):
             return httpx.Response(201, json={"id": "message-id"})
-        return httpx.Response(201, json={"uploadUrl": "http://upload.example/session"})
+        return httpx.Response(201, json={"uploadUrl": "http://outlook.office.com/api/v2.0/session"})
+
+    async with _make_mailer(handler) as mailer:
+        with pytest.raises(GraphError) as raised:
+            await mailer.send(LARGE_MAIL)
+
+    assert raised.value.status == NOT_SENT_STATUS
+    assert [request.method for request in requests] == ["POST", "POST"]
+
+
+async def test_an_upload_session_outside_microsoft_sends_no_chunk_and_no_send() -> None:
+    """R-7.6: an attachment upload session on a non-Microsoft host is refused, so no PUT and no send."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/me/messages"):
+            return httpx.Response(201, json={"id": "message-id"})
+        return httpx.Response(201, json={"uploadUrl": "https://evil.example/u"})
 
     async with _make_mailer(handler) as mailer:
         with pytest.raises(GraphError) as raised:
@@ -381,7 +399,7 @@ async def test_a_failed_send_of_the_draft_maps_the_error_status() -> None:
         if path.endswith("/me/messages"):
             return httpx.Response(201, json={"id": "message-id"})
         if path.endswith("/attachments/createUploadSession"):
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://outlook.office.com/api/v2.0/session"})
         return httpx.Response(400)
 
     async with _make_mailer(handler) as mailer:
