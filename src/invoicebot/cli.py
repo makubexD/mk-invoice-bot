@@ -20,13 +20,13 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
+from invoicebot.auth.providers import build_token_provider, scopes_for
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, MailerSink, StoreDirectory
+from invoicebot.config.models import Config, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.queue.jobs import enqueue
-from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
@@ -34,42 +34,16 @@ from invoicebot.store.invoices import resume_pending_auth
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: The verdict line for each reason that says something about the XML itself.
 _XML_VERDICT = {FetchReason.OK: "yes", FetchReason.XML_MISMATCH: "no"}
-#: The scopes every account signs in with: token refresh and OneDrive writes (R-7.9).
-BASE_SCOPES = ("offline_access", "Files.ReadWrite")
-#: The scope the invoice email needs; only a Graph mailer from the account adds it (R-7.9).
-MAIL_SEND_SCOPE = "Mail.Send"
-#: The mail mode that sends through Graph (R-7.6).
-GRAPH_MODE = "graph"
-#: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
-TOKENS_DIRECTORY = "tokens"
 
 #: Builds the account's provider from settings, config, the account and its scopes (R-7.9).
 type TokenProviderFactory = Callable[[Settings, Config, str, Sequence[str]], TokenProvider]
-
-
-def _build_token_provider(
-    settings: Settings,
-    cfg: Config,
-    account: str,
-    scopes: Sequence[str],
-) -> TokenProvider:
-    """Build the real provider: client id from config, cache under ``data_dir/tokens`` (D85)."""
-    if settings.age_identity_path is None:
-        raise ValueError("AGE_IDENTITY_PATH must be set to sign in (R-7.9)")
-    return TokenProvider(
-        client_id=cfg.microsoft.client_id,
-        account=account,
-        scopes=scopes,
-        cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
-        identity=load_identity(settings.age_identity_path),
-    )
 
 
 def main(
     argv: Sequence[str] | None = None,
     *,
     helper_command: Sequence[str] = DEFAULT_HELPER_COMMAND,
-    token_provider_factory: TokenProviderFactory = _build_token_provider,
+    token_provider_factory: TokenProviderFactory = build_token_provider,
     settings: Settings | None = None,
 ) -> int:
     """Parse ``argv`` and run the chosen command, returning its exit status (S10.5)."""
@@ -117,7 +91,7 @@ def _auth_microsoft(
     """
     if settings.database_url is None:
         parser.error("DATABASE_URL must be set to resume waiting invoices")
-    provider = provider_factory(settings, cfg, account, _scopes(cfg, account))
+    provider = provider_factory(settings, cfg, account, scopes_for(cfg, account))
     try:
         provider.login_device_code(_show)
     except AuthRequired as error:
@@ -126,18 +100,6 @@ def _auth_microsoft(
     count = asyncio.run(_resume_pending_auth(settings.database_url))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0
-
-
-def _scopes(cfg: Config, account: str) -> tuple[str, ...]:
-    """Return the scopes the account needs; add ``Mail.Send`` only for a Graph mailer (R-7.9)."""
-    scopes = list(BASE_SCOPES)
-    if any(
-        isinstance(sink, MailerSink) and sink.account == account and GRAPH_MODE in sink.modes
-        for flow in cfg.flows.values()
-        for sink in flow.sinks
-    ):
-        scopes.append(MAIL_SEND_SCOPE)
-    return tuple(scopes)
 
 
 def _show(message: str) -> None:

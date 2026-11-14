@@ -43,6 +43,7 @@ from invoicebot.config.models import (
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.actions import SENT_ACTION
+from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
@@ -77,8 +78,6 @@ from invoicebot.store.invoices import (
 
 logger = logging.getLogger(__name__)
 
-#: The job step this handler runs.
-DELIVER_STEP = "deliver"
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
 DELIVERING_STATE = "DELIVERING"
 #: Where the assisted mode leaves the invoice after the draft is ready (R-7.7).
