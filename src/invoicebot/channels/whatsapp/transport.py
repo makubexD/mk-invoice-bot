@@ -32,6 +32,10 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-S08": "pending_user_reminder",
     "BR-S04": "admin_alert",
     "BR-O01": "admin_alert",
+    "BR-D01_admin": "admin_alert",
+    "BR-D03_admin": "admin_alert",
+    "BR-E08_admin": "admin_alert",
+    "BR-S03_admin": "admin_alert",
 }
 
 #: Meta caps one template body parameter at 1024 characters.

@@ -12,9 +12,10 @@ import pytest
 
 from invoicebot.channels.base import Button, OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
-from invoicebot.channels.whatsapp.transport import make_transport
+from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
 from invoicebot.config.models import ChannelTemplates
 from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, Transport, add
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.db import Pool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -248,6 +249,25 @@ async def test_template_language_comes_from_the_transport(db_pool: Pool) -> None
         await transport(_row(_message(rule_id="BR-F07")))
 
     assert sent[0]["template"]["language"] == {"code": "en_US"}
+
+
+async def test_every_admin_rule_has_the_admin_alert_template() -> None:
+    """R-1.10, BR-S04: an admin alert reaches an admin whose window is closed, not a dead row."""
+    admin_rules = {rule_id for rule_id in MESSAGES if rule_id.endswith("_admin")}
+
+    assert admin_rules
+    assert {rule_id: TEMPLATE_SLOT_BY_RULE.get(rule_id) for rule_id in admin_rules} == dict.fromkeys(
+        admin_rules, "admin_alert"
+    )
+
+
+async def test_closed_window_admin_alert_uses_the_admin_template(db_pool: Pool) -> None:
+    """R-1.10, BR-D03: BR-D03's admin text goes out as the admin_alert template outside the window."""
+    await _prepare(db_pool, window_hours_ago=None)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-D03_admin")))
+
+    assert sent[0]["template"]["name"] == "admin_alert"
 
 
 async def test_message_template_wins_over_the_rule_table(db_pool: Pool) -> None:
