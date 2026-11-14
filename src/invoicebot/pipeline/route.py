@@ -1,7 +1,8 @@
 """Job handler that routes a read invoice through its questions and sends its summary.
 
 :func:`make_route_handler` builds the handler of the ``route`` job step. In ``ROUTING`` it
-runs D92's ordered, resumable checks over the stored answers: flow (rule match, else BR-R03),
+first claims the invoice's natural key (BR-E04, D93), then runs D92's ordered, resumable
+checks over the stored answers: flow (rule match, else BR-R03),
 buyer confidence (BR-R04), reimbursement cap (BR-D06) and brand (BR-R09). The first
 unanswered check moves the invoice to ``CONFIRMING`` with its rule and its question; when
 every check passes the invoice stores its flow, gets one summary, queues its ``fetch`` job
@@ -17,6 +18,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal, cast
+from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
@@ -63,10 +65,22 @@ from invoicebot.rules.messages_es import (
 from invoicebot.sinks.folders import comercio_for
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
-from invoicebot.store.invoices import InvoiceHead, load_invoice_head, load_reading, set_flow, set_state
+from invoicebot.store.invoices import (
+    Duplicate,
+    InvoiceHead,
+    claim_natural_key,
+    load_invoice_head,
+    load_reading,
+    set_flow,
+    set_state,
+)
 
 logger = logging.getLogger(__name__)
 
+#: The rule that cancels an invoice whose natural key another invoice holds (BR-E04, D93).
+RULE_DUPLICATE = "BR-E04"
+#: The reading fields that make up an invoice's natural key, in key order (D93).
+NATURAL_KEY_FIELDS = ("ruc_emisor", "tipo", "serie", "numero")
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
 ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; its ``fetch`` job is queued with this state change.
@@ -145,26 +159,32 @@ def make_route_handler(
             raise RuntimeError(f"invoice {job.invoice_id} has an unknown profile")
         raw_answers = flow_data.get("answers")
         answers: Mapping[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
-        step = _decide(
-            _Decision(
-                invoice_id=job.invoice_id,
-                reading=reading,
-                profile=profile,
-                cfg=cfg,
-                rules=rules,
-                answers=answers,
-                directory=directory,
-                today=today,
-            )
-        )
         async with pool.connection() as conn, conn.transaction():
-            await _write(conn, invoice, job.invoice_id, step)
+            duplicate = await _claim(conn, job.invoice_id, reading)
+            if duplicate is not None:
+                await _cancel_duplicate(conn, invoice, job.invoice_id, duplicate, cfg.owner.timezone)
+                rule_id = RULE_DUPLICATE
+            else:
+                step = _decide(
+                    _Decision(
+                        invoice_id=job.invoice_id,
+                        reading=reading,
+                        profile=profile,
+                        cfg=cfg,
+                        rules=rules,
+                        answers=answers,
+                        directory=directory,
+                        today=today,
+                    )
+                )
+                await _write(conn, invoice, job.invoice_id, step)
+                rule_id = step.rule_id
         logger.info(
             "step done",
             extra={
                 "step": ROUTE_STEP,
                 "invoice_id": job.invoice_id,
-                "rule_id": step.rule_id,
+                "rule_id": rule_id,
                 "duration_ms": int((time.perf_counter() - started) * 1000),
             },
         )
@@ -320,6 +340,42 @@ def _brand_check(
             choices=tuple(brand.comercio for brand in store.brands),
         )
     return None
+
+
+async def _claim(conn: AsyncConnection[Any], invoice_id: int, reading: Reading) -> Duplicate | None:
+    """Claim the reading's natural key before the checks decide (BR-E04, D93).
+
+    An incomplete key is not claimed: without all four parts it cannot identify an
+    invoice, so the checks run as before.
+    """
+    key = _natural_key(reading)
+    if key is None:
+        return None
+    return await claim_natural_key(conn, invoice_id, key)
+
+
+def _natural_key(reading: Reading) -> str | None:
+    """Return ``ruc_emisor|tipo|serie|numero``, or None when a part is missing (D93)."""
+    parts = tuple(reading.value(name) for name in NATURAL_KEY_FIELDS)
+    if any(not part for part in parts):
+        return None
+    return "|".join(cast(tuple[str, ...], parts))
+
+
+async def _cancel_duplicate(
+    conn: AsyncConnection[Any],
+    invoice: InvoiceHead,
+    invoice_id: int,
+    duplicate: Duplicate,
+    timezone: str,
+) -> None:
+    """Cancel invoice_id with BR-E04, pointing at the invoice that holds its key (BR-E04)."""
+    text = MESSAGES[RULE_DUPLICATE].format(
+        created_at=duplicate.created_at.astimezone(ZoneInfo(timezone)),
+        id=duplicate.invoice_id,
+    )
+    await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_DUPLICATE, expected=ROUTING_STATE)
+    await _reply(conn, invoice, invoice_id, RULE_DUPLICATE, text)
 
 
 async def _write(

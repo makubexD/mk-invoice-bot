@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -44,6 +45,8 @@ RULES = (
 FACTURA = "01"
 BOLETA = "03"
 OLD_INVOICE_DAYS = 400
+#: Each invoice gets its own numero, so one test's natural key never hides another's (D93).
+_NEXT_NUMERO = itertools.count(20000)
 
 
 def _config(profile_id: str, template: str) -> Config:
@@ -70,13 +73,13 @@ def _reading(
     tipo_flag: Flag | None = None,
     total: str = "49.90",
 ) -> Reading:
-    """Build a reading of an invoice to ``buyer``."""
+    """Build a reading of an invoice to ``buyer`` with its own numero."""
     return Reading(
         fields={
             "ruc_emisor": _field(OWNER_RUC),
             "tipo": _field(tipo, flag=tipo_flag),
             "serie": _field("F001"),
-            "numero": _field("15160"),
+            "numero": _field(str(next(_NEXT_NUMERO))),
             "igv": _field("7.61"),
             "total": _field(total),
             "fecha_emision": _field(fecha.isoformat()),
@@ -158,6 +161,14 @@ async def _invoice(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, st
     return row[0], row[1], row[2]
 
 
+async def _stored_key(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
+    """Return the natural key stored on invoice_id, or None when it holds none (D93)."""
+    cur = await conn.execute("SELECT natural_key FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
 async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     """Return the steps of the invoice's queued jobs, in insertion order."""
     cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
@@ -212,13 +223,14 @@ async def test_work_factura_is_routed_with_one_summary(
 ) -> None:
     """R-3.1, R-3.4: a factura to the work RUC is routed, waits in FETCHING_DOCS, and gets one summary."""
     today = await _today(db_pool)
+    reading = _reading(today)
 
-    row, texts = await _route_one(db_pool, _reading(today))
+    row, texts = await _route_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert len(texts) == 1
     assert "Trabajo (Microsoft)" in texts[0]
-    assert texts[0].startswith(f"🧾 Factura F001-15160 · {today:%d/%m/%Y}")
+    assert texts[0].startswith(f"🧾 Factura F001-{reading.value('numero')} · {today:%d/%m/%Y}")
     assert "Revisa" not in texts[0]
     assert "Deducido" not in texts[0]
 
@@ -298,7 +310,7 @@ async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     """D80: a summary for a reading with one conflict still routes, naming that field's label."""
     base = _reading(await _today(db_pool))
     reading = Reading(
-        fields={**base.fields, "numero": _field("15160", flag="conflict")},
+        fields={**base.fields, "numero": _field(base.value("numero") or "", flag="conflict")},
         document_url=None,
     )
 
@@ -382,7 +394,8 @@ async def test_total_above_cap_waits_for_confirmation(
     """R-7.13, BR-D06: a total above the cap waits in CONFIRMING with the question and two buttons."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
-    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool), total="63.50"))
+    reading = _reading(await _today(db_pool), total="63.50")
+    invoice_id = await _routing_invoice(db_pool, profile_id, reading)
 
     await _run(db_pool, cfg, invoice_id)
 
@@ -395,7 +408,7 @@ async def test_total_above_cap_waits_for_confirmation(
     assert len(outbox) == 1
     text, rule_id, buttons = outbox[0]
     assert rule_id == "BR-D06"
-    assert text.startswith("🧾 Factura F001-15160")
+    assert text.startswith(f"🧾 Factura F001-{reading.value('numero')}")
     assert text.endswith(
         "Esta factura es de S/ 63.50 y el tope es S/ 50.00: se reembolsarán S/ 50.00. ¿Continúo?"
     )
@@ -754,3 +767,100 @@ async def test_stale_comercio_is_dropped_and_reasked(
     _text, rule_id, buttons = outbox[0]
     assert rule_id == "BR-R09"
     assert [button["title"] for button in buttons] == ["Local Uno", "Local Dos", "Cancelar"]
+
+
+async def test_second_invoice_with_a_done_key_is_cancelled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-E04: a second invoice whose key a non-terminal invoice holds is cancelled."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading(await _today(db_pool))
+    first = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, first)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, first, "DONE")
+
+    second = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, second)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, second)
+        texts = await _texts(conn, profile_id, "BR-E04")
+        jobs = await _jobs(conn, second)
+        second_key = await _stored_key(conn, second)
+    assert row == ("CANCELLED", "BR-E04", None)
+    assert jobs == []
+    assert second_key is None
+    assert len(texts) == 1
+    assert f"(#{first})" in texts[0]
+    assert f"/estado {first}" in texts[0]
+
+
+async def test_failed_holder_gives_the_key_up(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: a FAILED holder releases the key, so the next invoice routes and holds it."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading(await _today(db_pool))
+    first = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, first)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, first, "FAILED", rule_id="BR-E07")
+
+    second = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, second)
+
+    key = f"{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, second)
+        first_key = await _stored_key(conn, first)
+        second_key = await _stored_key(conn, second)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert first_key is None
+    assert second_key == key
+
+
+async def test_rerouted_invoice_is_not_its_own_duplicate(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: an invoice re-routed after an answer keeps its key and is not its own duplicate."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading(await _today(db_pool), buyer=DNI_BUYER, buyer_type="1")
+    invoice_id = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, invoice_id)
+    invoice_id = await _routing_invoice(
+        db_pool, profile_id, reading, invoice_id=invoice_id, answers={"flow": WORK_FLOW}
+    )
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        duplicates = await _texts(conn, profile_id, "BR-E04")
+        stored = await _stored_key(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
+    assert duplicates == []
+    assert stored == f"{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
+
+
+async def test_edited_numero_changes_the_stored_key(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: an edited numero makes the invoice's re-route store the new natural key."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+    await _run(db_pool, cfg, invoice_id)
+    edited = _reading(await _today(db_pool))
+    await _routing_invoice(db_pool, profile_id, edited, invoice_id=invoice_id)
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        stored = await _stored_key(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert stored == f"{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"

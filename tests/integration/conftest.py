@@ -2,6 +2,7 @@
 
 import asyncio
 import hashlib
+import itertools
 import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, date, datetime
@@ -97,7 +98,9 @@ ISSUER_RUC = "20000000001"
 WORK_RUC = "51900000000"
 WORK_FLOW = "work_microsoft"
 SERIE = "F001"
-NUMERO = "15160"
+#: Numeros for generated QR payloads; one per payload, in a range no other test file
+#: uses, since the session database keeps every claimed key (BR-E04).
+_NEXT_NUMERO = itertools.count(30000)
 TOTAL = "49.90"
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
 PARSING_RULES_PATH = REPO_ROOT / "config" / "parsing_rules.yaml"
@@ -116,8 +119,13 @@ _TEXT_STEP_PX = 60
 
 
 def _qr_payload(fecha: date) -> str:
-    """Return a SUNAT QR payload for a factura from ISSUER_RUC to WORK_RUC."""
-    return f"{ISSUER_RUC}|01|{SERIE}|{NUMERO}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
+    """Return a SUNAT QR payload for a factura from ISSUER_RUC to WORK_RUC.
+
+    Each payload gets its own numero, so routing never sees one conversation's invoice
+    as a duplicate of another's (BR-E04), whatever order the tests run in.
+    """
+    numero = next(_NEXT_NUMERO)
+    return f"{ISSUER_RUC}|01|{SERIE}|{numero}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
 
 
 def _draw_text(canvas: np.ndarray, lines: Sequence[str]) -> None:
