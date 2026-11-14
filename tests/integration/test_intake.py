@@ -447,7 +447,7 @@ async def test_caller_rollback_leaves_nothing_behind(
 async def test_edit_reroutes_a_confirming_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.5, D97: total=10.00 on a CONFIRMING invoice is stored as the user's and routes again."""
+    """R-3.5, D97: total=10.00 is stored as the user's, drops only the cap answer and routes again."""
     profile_id = _profile()
     invoice_id = await _invoice_in(
         db_pool,
@@ -455,7 +455,7 @@ async def test_edit_reroutes_a_confirming_invoice(
         "CONFIRMING",
         _reading(await _today(db_pool)),
         rule_id="BR-R03",
-        answers={"flow": WORK_FLOW},
+        answers={"flow": WORK_FLOW, "cap_ok": True},
     )
     msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
 
@@ -473,7 +473,32 @@ async def test_edit_reroutes_a_confirming_invoice(
     assert state_rule == ("ROUTING", None)
     assert jobs == ["route"]
     assert total == ("10.00", "user")
-    assert row == (Decimal("10.00"), {})
+    assert row == (Decimal("10.00"), {"flow": WORK_FLOW})
+
+
+async def test_buyer_edit_drops_the_flow_and_buyer_answers(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D92: cliente=<RUC> changes the buyer, so the picked flow and buyer check go."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "CONFIRMING",
+        _reading(await _today(db_pool)),
+        rule_id="BR-R03",
+        answers={"flow": WORK_FLOW, "buyer_ok": True, "cap_ok": True},
+    )
+    msg = _message(profile_id, external_id=_external_id(), text="cliente=20000000001")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        cur = await conn.execute(
+            "SELECT flow_data_json->'answers' FROM invoices WHERE id = %s", (invoice_id,)
+        )
+        row = await cur.fetchone()
+
+    assert row == ({"cap_ok": True},)
 
 
 async def test_complete_edit_reroutes_an_extract_failed_invoice(

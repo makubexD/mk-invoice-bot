@@ -31,7 +31,7 @@ from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, OVERRIDE_KEYS, edi
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
 from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
-from invoicebot.store.flow_b import merge_flow_data
+from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state, unpark
 
 #: The most edit lines one message may carry; later lines each get an error.
@@ -44,6 +44,14 @@ ALIASES: Mapping[str, str] = {
 }
 #: The document type implied by a serie's first letter (R-3.5, D97).
 TIPO_BY_SERIE_PREFIX: Mapping[str, str] = {"F": "01", "B": "03"}
+#: The stored routing answers (D92) each edited field invalidates: the flow and the buyer
+#: check follow the buyer, the brand the issuer and serie, the cap the total (R-3.5).
+STALE_ANSWERS: Mapping[str, frozenset[str]] = {
+    "num_doc_adq": frozenset({"flow", "buyer_ok"}),
+    "ruc_emisor": frozenset({"comercio"}),
+    "serie": frozenset({"comercio"}),
+    "total": frozenset({"cap_ok"}),
+}
 
 _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
 _TOTAL_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]{1,2})?")
@@ -113,8 +121,9 @@ async def apply_edits(
     edit applies to the state it was waiting in (D94). A state outside ``EDITABLE`` gets
     ``EDIT_LATE``. From ``EXTRACT_FAILED`` a reading still missing a required field gets
     BR-E01 and stays; any other accepted edit stores its fields with source ``user``,
-    clears the stored answers (so routing asks again) and moves to ``ROUTING`` with a
-    ``route`` job, all in the caller's transaction.
+    drops the stored answers that depended on an edited field (so routing asks only those
+    again, R-3.5) and moves to ``ROUTING`` with a ``route`` job, all in the caller's
+    transaction.
     """
     invoice_id = await edit_target(conn, msg)
     if invoice_id is None:
@@ -142,13 +151,27 @@ async def apply_edits(
         return invoice_id
     reading = _edited_reading(await load_reading(conn, invoice_id), edits.fields)
     await save_reading(conn, invoice_id, reading)
-    await merge_flow_data(conn, invoice_id, {"answers": {}})
+    await _drop_stale_answers(conn, invoice_id, edits.fields)
     if state == EXTRACT_FAILED and reading.missing_required():
         await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)
         return invoice_id
     await set_state(conn, invoice_id, ROUTING, expected=state)
     await enqueue(conn, invoice_id, ROUTE_STEP)
     return invoice_id
+
+
+async def _drop_stale_answers(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    edited: Mapping[str, str],
+) -> None:
+    """Remove the routing answers an edited field invalidates; keep the rest (R-3.5, D92)."""
+    stale = frozenset().union(*(STALE_ANSWERS.get(name, frozenset()) for name in edited))
+    stored = (await load_flow_data(conn, invoice_id)).get("answers")
+    if not stale or not isinstance(stored, dict):
+        return
+    kept = {key: value for key, value in stored.items() if key not in stale}
+    await merge_flow_data(conn, invoice_id, {"answers": kept})
 
 
 def _edited_reading(reading: Reading | None, edits: Mapping[str, str]) -> Reading:
