@@ -355,6 +355,27 @@ HELP_CANCELAR = "/cancelar 12: cancela el comprobante #12"
 #: ``/reprocesar``'s own line in the command list (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_REPROCESAR = "/reprocesar 12: reintenta el comprobante #12 si falló"
+#: ``/pendientes``'s own line in the command list (S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
+#: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_NONE = "No tienes comprobantes pendientes."
+#: The first line of ``/pendientes``'s list (S4.8).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_HEADER = "Esto espera algo de ti:"
+#: One waiting invoice in ``/pendientes``'s list (S4.8, S4.9).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_LINE = "#{id} · {issuer} · {total} · {state_desc}"
+#: ``{issuer}`` for an invoice whose razón social is not read yet (S4.8).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_NO_ISSUER = "emisor sin leer"
+#: One prepared batch in ``/pendientes``'s list (S11.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepared_at:%d/%m}; falta enviarlo"
+#: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_MORE = "…y {count} más."
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."

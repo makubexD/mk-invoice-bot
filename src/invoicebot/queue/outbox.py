@@ -108,6 +108,29 @@ async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -
     return str(row[0])
 
 
+async def requeue_last(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> bool:
+    """Queue the invoice's newest message for rule_id again, returning whether it did.
+
+    ``/pendientes`` sends a parked question again with the same channel, recipient and
+    payload, buttons included, as a new pending row in the caller's transaction
+    (S4.8, D94). An invoice with no stored message for the rule queues nothing, so a
+    missing question is never invented. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
+        SELECT channel, "to", payload_json, template, 'pending', invoice_id
+        FROM outbox
+        WHERE invoice_id = %(invoice_id)s
+          AND payload_json->>'rule_id' = %(rule_id)s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"invoice_id": invoice_id, "rule_id": rule_id},
+    )
+    return cur.rowcount == 1
+
+
 class OutboxSender:
     """Deliver pending outbox rows through per-channel transports.
 

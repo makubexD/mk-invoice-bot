@@ -16,7 +16,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import cancel_invoice
-from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE
+from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue import outbox
@@ -28,8 +28,15 @@ from invoicebot.rules.messages_es import (
     HELP_CANCELAR,
     HELP_ESTADO,
     HELP_HEADER,
+    HELP_PENDIENTES,
     HELP_REPROCESAR,
     MESSAGES,
+    PENDING_BATCH_LINE,
+    PENDING_HEADER,
+    PENDING_LINE,
+    PENDING_MORE,
+    PENDING_NO_ISSUER,
+    PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     STATUS,
@@ -44,11 +51,14 @@ from invoicebot.states import (
     FAILED,
     FETCHING_DOCS,
     MANUAL_REQUIRED,
+    PENDING_USER,
 )
 from invoicebot.store.flow_b import get_batch_state
 from invoicebot.store.invoices import (
     InvoiceHead,
+    PendingRow,
     get_state_rule,
+    list_pending,
     load_flow,
     load_invoice_head,
     set_state,
@@ -58,6 +68,12 @@ from invoicebot.store.invoices import (
 RULE_NOT_FOUND = "BR-S07"
 #: The most digits an invoice id may have; any 18-digit number fits a BIGINT (R-12.8).
 MAX_ID_DIGITS = 18
+#: How long a prepared batch waits before ``/pendientes`` mentions it (S11.4).
+PREPARED_REMIND_DAYS = 2
+#: The most lines ``/pendientes`` lists before it counts the rest (S11.4).
+MAX_PENDING_LINES = 20
+#: How many parked questions ``/pendientes`` sends again in one answer (S4.8).
+PENDING_REQUEUES = 3
 
 #: A command applied in the caller's transaction: its connection, sender, argument and
 #: the admin profile ids (R-10.1).
@@ -245,6 +261,64 @@ async def _retry_delivery(conn: AsyncConnection[Any], invoice_id: int) -> bool:
     return True
 
 
+async def _pendientes(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    _arg: str,
+    _admins: frozenset[str],
+) -> None:
+    """List what waits on the sender and send their parked questions again (S4.8, S4.9, S11.4).
+
+    Only the sender's own invoices are listed; a parked row shows the state it was
+    waiting in (D94). The first :data:`PENDING_REQUEUES` parked invoices get their
+    question sent again with the same buttons, so a lapsed question comes back.
+    """
+    rows, total = await list_pending(
+        conn,
+        msg.profile_id,
+        limit=MAX_PENDING_LINES,
+        remind_days=PREPARED_REMIND_DAYS,
+        prepared_batch_state=PREPARED_BATCH_STATE,
+    )
+    if not rows:
+        await _reply(conn, msg, None, PENDING_NONE)
+        return
+    lines = [PENDING_HEADER, *(_pending_line(row) for row in rows)]
+    if total > len(rows):
+        lines.append(PENDING_MORE.format(count=total - len(rows)))
+    await _reply(conn, msg, None, "\n".join(lines))
+    await _requeue_parked(conn, rows)
+
+
+def _pending_line(row: PendingRow) -> str:
+    """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
+    issuer = row.razon_social or PENDING_NO_ISSUER
+    if row.state == BATCHED:
+        # shortcut: prepared_at is the database session's date, not the owner's timezone,
+        # so late evenings in Lima show the next day; commands get no timezone yet.
+        return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
+    total = "—" if row.total is None else f"{row.total:.2f}"
+    state = row.waiting_state if row.state == PENDING_USER and row.waiting_state else row.state
+    return PENDING_LINE.format(
+        id=row.id,
+        issuer=issuer,
+        total=total,
+        state_desc=state_desc(state),
+    )
+
+
+async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) -> None:
+    """Queue the stored question again for the first few parked invoices (S4.8, D94)."""
+    requeued = 0
+    for row in rows:
+        if requeued == PENDING_REQUEUES:
+            return
+        if row.state != PENDING_USER or row.waiting_rule_id is None:
+            continue
+        await outbox.requeue_last(conn, row.id, row.waiting_rule_id)
+        requeued += 1
+
+
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -261,4 +335,5 @@ COMMANDS: Mapping[str, Command] = {
     "estado": Command(_estado, HELP_ESTADO),
     "cancelar": Command(_cancelar, HELP_CANCELAR),
     "reprocesar": Command(_reprocesar, HELP_REPROCESAR),
+    "pendientes": Command(_pendientes, HELP_PENDIENTES),
 }

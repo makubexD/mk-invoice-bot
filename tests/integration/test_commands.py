@@ -4,25 +4,34 @@ Commands are reached through :func:`handle_inbound` and :func:`resolve_target`, 
 real Postgres; every test uses its own profile, so no outbox row leaks between them.
 """
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Any
+from decimal import Decimal
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.pipeline.commands import COMMANDS, parse_command, resolve_target
 from invoicebot.pipeline.intake import handle_inbound
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.rules.messages_es import (
+    BUTTON_CANCEL,
     CANCEL_LATE,
     CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
     HELP_AYUDA,
     HELP_HEADER,
     MESSAGES,
+    PENDING_BATCH_LINE,
+    PENDING_HEADER,
+    PENDING_LINE,
+    PENDING_MORE,
+    PENDING_NO_ISSUER,
+    PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     STATUS,
@@ -115,16 +124,116 @@ async def _question(
     profile_id: str,
     rule_id: str,
     text: str,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Store a question outbox row linked to invoice_id and naming rule_id."""
     async with pool.connection() as conn, conn.transaction():
-        await outbox.add(
+        await queue_message(
             conn,
-            "whatsapp",
-            profile_id,
-            {"text": text, "rule_id": rule_id},
+            Addressee("whatsapp", profile_id),
+            text,
             invoice_id=invoice_id,
+            rule_id=rule_id,
+            buttons=buttons,
         )
+
+
+async def _parked_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    rule_id: str,
+    *,
+    waiting_state: str = "CONFIRMING",
+) -> int:
+    """Create a PENDING_USER invoice parked while waiting on rule_id (D94)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET state = 'PENDING_USER',
+                rule_id = 'BR-S08',
+                waiting_state = %s,
+                waiting_rule_id = %s
+            WHERE id = %s
+            """,
+            (waiting_state, rule_id, invoice_id),
+        )
+    return invoice_id
+
+
+async def _set_amount(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    razon_social: str,
+    total: Decimal,
+) -> None:
+    """Store the issuer and total ``/pendientes`` shows for invoice_id."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE invoices SET razon_social = %s, total = %s WHERE id = %s",
+            (razon_social, total, invoice_id),
+        )
+
+
+async def _prepared_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    *,
+    days: int,
+    razon_social: str,
+    total: Decimal,
+) -> int:
+    """Create a BATCHED invoice on a prepared batch, stamped days ago (S11.4)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_flow(conn, invoice_id, FLOW)
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "prepared")
+        await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET razon_social = %s,
+                total = %s,
+                updated_at = now() - make_interval(days => %s)
+            WHERE id = %s
+            """,
+            (razon_social, total, days, invoice_id),
+        )
+    return invoice_id
+
+
+async def _pending_invoices(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    count: int,
+) -> list[int]:
+    """Create count parked invoices without a stored question in one transaction."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_ids = []
+        for _ in range(count):
+            invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+            await set_state(conn, invoice_id, "PENDING_USER", rule_id="BR-S08")
+            invoice_ids.append(invoice_id)
+    return invoice_ids
+
+
+async def _updated_at(conn: AsyncConnection[Any], invoice_id: int) -> datetime:
+    """Return the stored updated_at of invoice_id."""
+    cur = await conn.execute("SELECT updated_at FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return cast(datetime, row[0])
+
+
+async def _invoice_payloads(conn: AsyncConnection[Any], invoice_id: int) -> list[dict[str, Any]]:
+    """Return the outbox payloads linked to invoice_id, oldest first."""
+    cur = await conn.execute(
+        "SELECT payload_json FROM outbox WHERE invoice_id = %s ORDER BY id",
+        (invoice_id,),
+    )
+    return [cast(dict[str, Any], payload) for (payload,) in await cur.fetchall()]
 
 
 async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -539,3 +648,140 @@ async def test_cancel_and_reprocess_on_another_profiles_invoice_answer_br_s07(
     assert head.state == "CONFIRMING"
     assert jobs == []
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
+
+
+async def test_pendientes_with_nothing_waiting_answers_pending_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.8: a profile with nothing pending gets PENDING_NONE."""
+    profile_id = _profile()
+    msg = _message(profile_id, "/pendientes")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(PENDING_NONE, None)]
+
+
+async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.8: a parked BR-R03 invoice is listed and its question is queued again with its buttons."""
+    profile_id = _profile()
+    invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
+    await _set_amount(db_pool, invoice_id, "Ferretería El Sol", Decimal("45.50"))
+    buttons = [
+        Button(id=f"{invoice_id}:pick:0", title="Trabajo"),
+        Button(id=f"{invoice_id}:cancel", title=BUTTON_CANCEL),
+    ]
+    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT, buttons)
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer="Ferretería El Sol",
+        total="45.50",
+        state_desc=state_desc("CONFIRMING"),
+    )
+    expected = f"{PENDING_HEADER}\n{line}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+        payloads = await _invoice_payloads(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert replies == [
+        (QUESTION_TEXT, "BR-R03"),
+        (expected, None),
+        (QUESTION_TEXT, "BR-R03"),
+    ]
+    original, requeued = payloads
+    assert original["buttons"] == requeued["buttons"]
+    assert requeued["text"] == original["text"]
+
+
+async def test_pendientes_lists_a_prepared_batch_older_than_the_reminder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S11.4: a batch prepared 3 days ago gets the batch line."""
+    profile_id = _profile()
+    invoice_id = await _prepared_invoice(
+        db_pool, profile_id, days=3, razon_social="Ferretería El Sol", total=Decimal("45.50")
+    )
+    msg = _message(profile_id, "/pendientes")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+        prepared_at = await _updated_at(conn, invoice_id)
+
+    line = PENDING_BATCH_LINE.format(
+        id=invoice_id,
+        issuer="Ferretería El Sol",
+        prepared_at=prepared_at,
+    )
+    assert result.status == "stored"
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_skips_a_prepared_batch_inside_the_reminder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S11.4: a batch prepared 1 day ago is not listed yet."""
+    profile_id = _profile()
+    await _prepared_invoice(
+        db_pool, profile_id, days=1, razon_social="Ferretería El Sol", total=Decimal("45.50")
+    )
+    msg = _message(profile_id, "/pendientes")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(PENDING_NONE, None)]
+
+
+async def test_pendientes_skips_another_profiles_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.8: another profile's pending invoices are not listed."""
+    other_profile = _profile()
+    await _pending_invoices(db_pool, other_profile, 1)
+    profile_id = _profile()
+    msg = _message(profile_id, "/pendientes")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(PENDING_NONE, None)]
+
+
+async def test_pendientes_caps_the_list_and_counts_the_rest(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S11.4: 25 pending invoices list 20 lines and then ``…y 5 más.``"""
+    profile_id = _profile()
+    invoice_ids = await _pending_invoices(db_pool, profile_id, 25)
+    msg = _message(profile_id, "/pendientes")
+    lines = [
+        PENDING_LINE.format(
+            id=invoice_id,
+            issuer=PENDING_NO_ISSUER,
+            total="—",
+            state_desc=state_desc("PENDING_USER"),
+        )
+        for invoice_id in invoice_ids[:20]
+    ]
+    expected = "\n".join([PENDING_HEADER, *lines, PENDING_MORE.format(count=5)])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]

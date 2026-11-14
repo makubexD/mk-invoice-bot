@@ -6,6 +6,7 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Literal, cast
 
 from psycopg import AsyncConnection
@@ -15,8 +16,10 @@ from invoicebot.channels.base import AttachmentKind, ChannelName
 from invoicebot.extract.fields import Reading, reading_from_json, reading_to_json
 from invoicebot.rules.catalog import RULES
 from invoicebot.states import (
+    BATCHED,
     CANCELLED,
     FAILED,
+    MANUAL_REQUIRED,
     NEEDS_RULE,
     PENDING_USER,
     WAITING_FOR_USER,
@@ -68,6 +71,19 @@ class InvoiceRef:
     id: int
     profile_id: str
     origin_channel: ChannelName
+
+
+@dataclass(frozen=True)
+class PendingRow:
+    """An invoice that waits on the sender, for ``/pendientes`` (S4.8, S11.4)."""
+
+    id: int
+    state: str
+    waiting_state: str | None
+    waiting_rule_id: str | None
+    razon_social: str | None
+    total: Decimal | None
+    batch_prepared_at: datetime | None
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -308,6 +324,72 @@ async def unpark(conn: AsyncConnection[Any], invoice_id: int) -> bool:
         (invoice_id, PENDING_USER),
     )
     return cur.rowcount == 1
+
+
+async def list_pending(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    *,
+    limit: int,
+    remind_days: int,
+    prepared_batch_state: str,
+) -> tuple[list[PendingRow], int]:
+    """Return the profile's invoices that wait on it, oldest first, and how many match.
+
+    A row waits on the sender when it is ``PENDING_USER``, ``WAITING_FOR_USER`` or
+    ``MANUAL_REQUIRED``, or when it is ``BATCHED`` on a ``prepared_batch_state`` batch
+    that has sat at least ``remind_days`` days (S4.8, S11.4). ``limit`` caps the rows
+    returned; the count covers every match. The database clock measures a batch's age,
+    and ``updated_at`` stamps it because nothing updates a ``BATCHED`` invoice until it
+    leaves that state. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT i.id,
+               i.state,
+               i.waiting_state,
+               i.waiting_rule_id,
+               i.razon_social,
+               i.total,
+               i.updated_at,
+               count(*) OVER () AS total_count
+        FROM invoices AS i
+        LEFT JOIN batches AS b ON b.id = i.batch_id
+        WHERE i.profile_id = %s
+          AND (
+                i.state = ANY(%s)
+                OR (
+                    i.state = %s
+                    AND b.state = %s
+                    AND i.updated_at <= now() - make_interval(days => %s)
+                )
+              )
+        ORDER BY i.updated_at ASC, i.id ASC
+        LIMIT %s
+        """,
+        (
+            profile_id,
+            [PENDING_USER, MANUAL_REQUIRED, *WAITING_FOR_USER],
+            BATCHED,
+            prepared_batch_state,
+            remind_days,
+            limit,
+        ),
+    )
+    raw = await cur.fetchall()
+    rows = [
+        PendingRow(
+            id=int(row[0]),
+            state=str(row[1]),
+            waiting_state=None if row[2] is None else str(row[2]),
+            waiting_rule_id=None if row[3] is None else str(row[3]),
+            razon_social=None if row[4] is None else str(row[4]),
+            total=cast(Decimal | None, row[5]),
+            batch_prepared_at=cast(datetime, row[6]) if str(row[1]) == BATCHED else None,
+        )
+        for row in raw
+    ]
+    return rows, (int(raw[0][7]) if raw else 0)
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
