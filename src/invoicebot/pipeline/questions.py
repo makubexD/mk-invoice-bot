@@ -17,6 +17,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
     BUTTON_CHANGE,
     BUTTON_CONTINUE,
+    BUTTON_EDIT,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -29,6 +30,7 @@ CHANGE_ACTION = "change"
 BRAND_ACTION = "brand"
 CONTINUE_ACTION = "continue"
 CANCEL_ACTION = "cancel"
+EDIT_ACTION = "edit"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
@@ -93,3 +95,11 @@ def cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, li
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
     ]
     return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
+
+
+def summary_buttons(invoice_id: int) -> list[Button]:
+    """Return the routed summary's [Editar] and [Cancelar] buttons (R-3.4)."""
+    return [
+        Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]

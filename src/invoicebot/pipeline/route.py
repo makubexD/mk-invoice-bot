@@ -38,6 +38,7 @@ from invoicebot.pipeline.questions import (
     candidate_flows,
     cap_question,
     flow_question,
+    summary_buttons,
 )
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
@@ -437,7 +438,7 @@ async def _routed(
     """Queue the fetch job and move the invoice to ``FETCHING_DOCS`` with its summary (R-3.4)."""
     await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING_STATE)
     await enqueue(conn, invoice_id, FETCH_STEP)
-    await _reply(conn, invoice, invoice_id, rule_id, text)
+    await _reply(conn, invoice, invoice_id, rule_id, text, summary_buttons(invoice_id))
 
 
 def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:

@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.pipeline.intake import handle_inbound
-from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES, state_desc
+from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES, state_desc
 from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data, open_batch
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, get_file_path, set_flow, set_state
 
@@ -322,6 +322,48 @@ async def test_cancel_in_fetching_docs_cancels_the_invoice(
     assert invoice == ("CANCELLED", RULE_CAP)
     assert jobs == []
     assert texts == [(None, CANCELLED_BY_USER.format(id=invoice_id))]
+
+
+async def test_edit_in_fetching_docs_sends_the_edit_prompt(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4: [Editar] in FETCHING_DOCS queues EDIT_PROMPT and changes no state."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, FETCHING_DOCS)
+    msg = _press(invoice_id, "edit", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (FETCHING_DOCS, None)
+    assert jobs == []
+    assert texts == [(None, EDIT_PROMPT)]
+
+
+async def test_edit_in_done_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4, BR-S02: [Editar] in DONE answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, DONE)
+    msg = _press(invoice_id, "edit", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (DONE, None)
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE)))]
 
 
 async def test_cancel_in_delivering_is_stale(

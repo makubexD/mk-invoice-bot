@@ -312,6 +312,8 @@ BUTTON_SENT = "Ya lo envié"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
+#: The routed summary's [Editar] button (R-3.4).
+BUTTON_EDIT = "Editar"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
 BUTTON_CHANGE = "Cambiar"
@@ -332,6 +334,12 @@ EDIT_INVALID = (
 #: The reply when an edit arrives in a state that no longer accepts one (R-3.5, D97).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 EDIT_LATE = "El comprobante #{id} ya está {state_desc}; ya no puedo cambiar sus datos."
+#: What [Editar] on the routed summary asks the sender for (R-3.4).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_PROMPT = (
+    "Envíame los cambios, uno por línea, así: campo=valor. Por ejemplo: total=45.50 o "
+    "fecha=05/11/2026. Puedes cambiar ruc, serie, numero, fecha, total y cliente."
+)
 
 
 def modes_desc(modes: Sequence[str]) -> str:

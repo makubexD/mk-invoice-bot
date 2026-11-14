@@ -32,6 +32,7 @@ from invoicebot.pipeline.questions import (
     CANCEL_ACTION,
     CHANGE_ACTION,
     CONTINUE_ACTION,
+    EDIT_ACTION,
     PICK_ACTION,
     RULE_BRAND,
     RULE_BUYER,
@@ -41,8 +42,8 @@ from invoicebot.pipeline.questions import (
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
-from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES
-from invoicebot.states import CANCELLABLE
+from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES
+from invoicebot.states import CANCELLABLE, EDITABLE
 from invoicebot.store.flow_b import (
     get_batch_state,
     load_flow_data,
@@ -75,6 +76,7 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     BRAND_ACTION: frozenset({CONFIRMING_STATE}),
     CONTINUE_ACTION: frozenset({CONFIRMING_STATE}),
     CANCEL_ACTION: CANCELLABLE,
+    EDIT_ACTION: EDITABLE,
     SENT_ACTION: frozenset({BATCHED_STATE}),
 }
 
@@ -184,6 +186,14 @@ async def _cancel(
     return ()
 
 
+async def _edit(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
+    """Ask the sender for ``campo=valor`` edits, leaving the invoice as it is (R-3.4, D97)."""
+    await _reply(conn, msg, invoice_id, None, EDIT_PROMPT)
+    return ()
+
+
 async def _sent(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
 ) -> tuple[Path, ...]:
@@ -287,5 +297,6 @@ ACTIONS: Mapping[str, Action] = {
     BRAND_ACTION: _brand,
     CONTINUE_ACTION: _continue,
     CANCEL_ACTION: _cancel,
+    EDIT_ACTION: _edit,
     SENT_ACTION: _sent,
 }

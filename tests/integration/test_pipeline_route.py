@@ -436,7 +436,10 @@ async def test_total_at_cap_routes_without_a_question(
     assert jobs == ["fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
-    assert outbox[0][2] == []
+    assert outbox[0][2] == [
+        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
 
 
 async def test_flow_without_reimbursement_is_not_asked(
@@ -459,7 +462,29 @@ async def test_flow_without_reimbursement_is_not_asked(
     assert jobs == ["fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
-    assert outbox[0][2] == []
+    assert outbox[0][2] == [
+        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
+
+
+async def test_routed_summary_has_edit_and_cancel_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4: a routed invoice's summary carries [Editar] then [Cancelar]."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert len(outbox) == 1
+    assert outbox[0][2] == [
+        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
 
 
 async def test_dni_buyer_asks_which_flow(
