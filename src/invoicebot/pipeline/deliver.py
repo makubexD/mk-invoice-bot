@@ -5,8 +5,10 @@ an invoice in ``DELIVERING`` whose flow has a OneDrive folder sink: it picks the
 sequence number, fills the pinned Excel and builds the mail from the step-6 values. The
 flow's first mail mode then takes over. The assisted mode writes the ``.eml`` and, in one
 transaction, opens a ``prepared`` batch, records the draft file and moves the invoice to
-``BATCHED`` with BR-D07 and its [Ya lo envié] button (R-8.1). The automatic mode is not wired
-yet.
+``BATCHED`` with BR-D07 and its [Ya lo envié] button (R-8.1). The automatic mode opens a
+``sending`` batch, sends once, then closes the invoice as ``DONE`` with BR-D10 and deletes the
+photo. A batch a previous attempt left ``sending`` is not sent again: it is marked ``failed``
+and BR-D03 asks the owner to reprocess (D89).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
@@ -46,7 +48,15 @@ from invoicebot.sinks.folders import comercio_for
 from invoicebot.sinks.mailer import MailMode, build_mail
 from invoicebot.sinks.onedrive_folder import file_folder
 from invoicebot.store.db import Pool
-from invoicebot.store.flow_b import claim_seq, load_flow_data, merge_flow_data, open_batch
+from invoicebot.store.flow_b import (
+    claim_seq,
+    get_batch_state,
+    load_flow_data,
+    merge_flow_data,
+    open_batch,
+    set_batch_state,
+    take_photo_paths,
+)
 from invoicebot.store.invoices import (
     FileRecord,
     InvoiceHead,
@@ -68,6 +78,18 @@ DELIVERING_STATE = "DELIVERING"
 BATCHED_STATE = "BATCHED"
 #: BR-D07: the rule that reports a filed invoice whose mail waits for the owner.
 RULE_BATCHED = "BR-D07"
+#: The batch state committed before the automatic mode sends, so a crash never resends (D89).
+SENDING_BATCH_STATE: Literal["sending"] = "sending"
+#: The batch state of a completed automatic send (R-7.5).
+SENT_BATCH_STATE = "sent"
+#: The batch state of a send that a previous attempt crashed during (D89).
+FAILED_BATCH_STATE = "failed"
+#: Where the automatic mode leaves the invoice once the mail is sent (R-7.7).
+DONE_STATE = "DONE"
+#: BR-D03: the rule that reports a mail that could not be sent.
+RULE_SEND_FAILED = "BR-D03"
+#: BR-D10: the rule that reports a filed and mailed invoice (R-7.7).
+RULE_SENT = "BR-D10"
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
 #: The button action that confirms the owner sent the draft (R-7.8, R-8.1).
@@ -147,7 +169,8 @@ def make_deliver_handler(
 
     A flow without a OneDrive folder sink is left alone (flow A is ``flow-a``'s). An invoice
     outside ``DELIVERING`` is left untouched (R-9.4). The folder and sequence claim are saved
-    before the mail is built, so a retry after a crash reuses them (D88).
+    before the mail is built, so a retry after a crash reuses them (D88). An automatic mode
+    commits its batch as ``sending`` before it sends, so a retry never sends twice (D89).
     """
     context = _Context(pool, cfg, directory, drive, modes, data_dir)
 
@@ -167,9 +190,9 @@ def make_deliver_handler(
         delivery = await _prepare(context, invoice, sinks, prepared)
         mode_name, mode = _mode(context.modes, sinks.mailer)
         if mode.automatic:
-            # shortcut: part B adds the automatic graph path (batch sending/sent, D89).
-            raise NotImplementedError(f"mail mode {mode_name!r} arrives with part B")
-        await _assisted(context, delivery, mode)
+            await _automatic(context, delivery, prepared, mode)
+        else:
+            await _assisted(context, delivery, mode)
         logger.info(
             "step done",
             extra={
@@ -353,6 +376,50 @@ async def _assisted(context: _Context, delivery: _Delivery, mode: MailMode) -> N
         )
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
         await _notify(conn, delivery.head, RULE_BATCHED, text, [button])
+
+
+async def _automatic(
+    context: _Context,
+    delivery: _Delivery,
+    prepared: _Values,
+    mode: MailMode,
+) -> None:
+    """Send the mail once and close the delivery, or report a crashed send (R-7.5, D89).
+
+    The first transaction records the batch as ``sending`` before the external call. A batch
+    already ``sending`` means a previous attempt died mid-send, so it is never sent again: the
+    batch fails and BR-D03 asks the owner to reprocess it (D89).
+    """
+    async with context.pool.connection() as conn, conn.transaction():
+        if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
+            await _crashed_send(conn, delivery, prepared)
+            return
+        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
+
+    await mode.deliver(delivery.invoice_id, delivery.mail)
+
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, delivery.invoice_id):
+            return
+        await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
+        await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=RULE_SENT)
+        await _notify(conn, delivery.head, RULE_SENT, MESSAGES[RULE_SENT].format(folder=delivery.folder), [])
+        photos = await take_photo_paths(conn, delivery.invoice_id)
+
+    for path in photos:
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+async def _crashed_send(conn: AsyncConnection[Any], delivery: _Delivery, prepared: _Values) -> None:
+    """Fail the batch a previous attempt left ``sending`` and ask the owner to reprocess (D89)."""
+    batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
+    await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+    text = MESSAGES[RULE_SEND_FAILED].format(
+        serie=prepared.values["serie"],
+        numero=prepared.values["numero"],
+        id=delivery.invoice_id,
+    )
+    await _notify(conn, delivery.head, RULE_SEND_FAILED, text, [])
 
 
 async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool:

@@ -1,7 +1,9 @@
-"""Integration tests for the deliver job handler (R-7.1 to R-7.8, R-8.1, R-9.4, BR-D07, D88).
+"""Integration tests for the deliver job handler (R-7.1 to R-7.8, R-8.1, R-9.4, BR-D03, BR-D07,
+BR-D10, D88, D89).
 
-The folder is an in-memory fake :class:`Drive`; the mail mode is the real assisted
-:class:`DryRun` writing under ``tmp_path``. Postgres is real.
+The folder is an in-memory fake :class:`Drive`; the assisted mode is the real :class:`DryRun`
+writing under ``tmp_path`` and the automatic mode is a fake that records its sends. Postgres is
+real.
 """
 
 from __future__ import annotations
@@ -26,11 +28,12 @@ from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.mailer import DryRun
-from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
+from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data, open_batch
 from invoicebot.store.invoices import (
     FileRecord,
     add_file,
     create_invoice,
+    get_file_path,
     save_reading,
     set_flow,
     set_state,
@@ -106,6 +109,19 @@ class CrashingMode:
         raise RuntimeError("synthetic crash before the mail step")
 
 
+class FakeGraphMode:
+    """An automatic mode that records each send instead of reaching Graph (D89)."""
+
+    automatic = True
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[int, OutgoingMail]] = []
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+        """Record the send; an automatic mode sends once per call (D89)."""
+        self.calls.append((invoice_id, mail))
+
+
 def _field(value: str) -> Field:
     return Field(value=value, source="qr", confidence=1.0)
 
@@ -137,8 +153,8 @@ def _directory() -> StoreDirectory:
     return StoreDirectory(stores={STORE_RUC: store}, portals={})
 
 
-def _config(tmp_path: Path, profile_id: str) -> Config:
-    """Return example.yaml with a synthetic template, the assisted mode and one profile."""
+def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run") -> Config:
+    """Return example.yaml with a synthetic template, one mail mode and one profile."""
     cfg = load_config(EXAMPLE)
     template = build_template()
     template_path = tmp_path / "template.xlsx"
@@ -153,7 +169,7 @@ def _config(tmp_path: Path, profile_id: str) -> Config:
                 }
             )
         elif isinstance(sink, MailerSink):
-            sink = sink.model_copy(update={"modes": ["dry_run"]})
+            sink = sink.model_copy(update={"modes": [mail_mode]})
         sinks.append(sink)
     flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
     return cfg.model_copy(
@@ -182,14 +198,15 @@ def _handler(
     drive: FakeDrive,
     data_dir: Path,
     mode: Any = None,
+    mode_name: str = "dry_run",
 ) -> Handler:
-    """Build the deliver handler with the assisted mode."""
+    """Build the deliver handler with the given mode, assisted by default."""
     return make_deliver_handler(
         pool,
         cfg,
         _directory(),
         drive,
-        {"dry_run": mode or DryRun(data_dir)},
+        {mode_name: mode or DryRun(data_dir)},
         data_dir,
     )
 
@@ -228,6 +245,27 @@ async def _delivering_invoice(
         if flow_data:
             await merge_flow_data(conn, invoice_id, flow_data)
     return invoice_id
+
+
+async def _add_photo(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, tmp_path: Path
+) -> Path:
+    """Store a synthetic photo file for the invoice and return its local path."""
+    photo = tmp_path / f"{uuid4().hex}.jpg"
+    photo.write_bytes(b"\xff\xd8\xff synthetic photo\n")
+    async with pool.connection() as conn, conn.transaction():
+        await add_file(
+            conn,
+            invoice_id,
+            FileRecord(
+                kind="photo",
+                local_path=str(photo),
+                remote_ref=None,
+                sha256=hashlib.sha256(photo.read_bytes()).hexdigest(),
+                size=photo.stat().st_size,
+            ),
+        )
+    return photo
 
 
 async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -356,6 +394,89 @@ async def test_retry_after_a_crash_reuses_the_saved_folder(
     assert drive.created == [("/Reembolsos", first_data["folder"])]
     assert invoice == ("BATCHED", "BR-D07")
     assert batch_state == "prepared"
+
+
+async def test_graph_sends_once_and_closes_as_done(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.5, R-7.7, R-9.7, BR-D10, D89: the automatic mode sends once, closes and deletes the photo."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    photo = await _add_photo(db_pool, invoice_id, tmp_path)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        photo_path = await get_file_path(conn, invoice_id, "photo")
+    folder = f"{FOLDER_PREFIX}{flow_data['seq']}_{COMERCIO}"
+    assert invoice == ("DONE", "BR-D10")
+    assert batch_state == "sent"
+    assert [call[0] for call in mode.calls] == [invoice_id]
+    assert outbox == [(MESSAGES["BR-D10"].format(folder=folder), "BR-D10", [])]
+    assert not photo.exists()
+    assert photo_path is None
+
+
+async def test_rerunning_after_done_sends_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.4, D89: rerunning the deliver job on a DONE invoice sends nothing more."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive()
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, cfg, drive, tmp_path, mode, mode_name="graph")
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        first_outbox = await _outbox(conn, profile_id)
+    created = list(drive.created)
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DONE", "BR-D10")
+    assert len(mode.calls) == 1
+    assert outbox == first_outbox
+    assert drive.created == created
+
+
+async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D03, D89: a batch left sending is never resent; it fails and asks for a reprocess."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await open_batch(conn, invoice_id, FLOW, "sending")
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert mode.calls == []
+    assert invoice == ("DELIVERING", None)
+    assert batch_state == "failed"
+    assert outbox == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            [],
+        )
+    ]
 
 
 async def test_flow_without_a_folder_sink_is_a_no_op(
