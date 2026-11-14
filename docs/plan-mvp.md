@@ -78,6 +78,14 @@ Each item goes into the named phase's plan.
 - S10.8's brand choice by serie prefix (and its one-tap question) goes to `file-b`; its `SIGHUP` reload goes to `ops`.
 - The `BrowserPool` of spec 03 §8 is replaced by a browser helper process per fetch (D82).
 
+## Moved by the `file-b` plan (D84–D90)
+
+- BR-R09's one-tap brand question goes to `widen-b` with reply handling (D80): no store in `config/stores/` has two brands yet. `file-b` picks the brand by serie prefix, or the only brand.
+- The PKCE loopback login and the work-account attempt (S11.1, S0.8) go to `widen-b` with `inbox_rule`: the personal account allows device code.
+- The `_Sent` rename goes to `widen-b` with S11.12; `payments` and `payment_id` go there with S11.11.
+- `/pendientes` listing a batch `prepared` for 2 days (S11.4) goes with the commands of `widen-b`.
+- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E15, `widen-b`).
+
 ## Known drift between code and specs
 
 The specs run ahead of the code in these places; each has a named story that closes it.
