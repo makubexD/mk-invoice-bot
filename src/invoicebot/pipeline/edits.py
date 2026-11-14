@@ -36,7 +36,14 @@ from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
 from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
-from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state, unpark
+from invoicebot.store.invoices import (
+    clear_editing,
+    get_state_rule,
+    load_reading,
+    save_reading,
+    set_state,
+    unpark,
+)
 from invoicebot.text import replace_unsafe_chars
 
 #: The most edit lines one message may carry; later lines each get an error.
@@ -129,7 +136,7 @@ async def apply_edits(
     BR-E01 and stays; any other accepted edit stores its fields with source ``user``,
     drops the stored answers that depended on an edited field (so routing asks only those
     again, R-3.5) and moves to ``ROUTING`` with a ``route`` job, all in the caller's
-    transaction.
+    transaction. An [Editar] pin on the invoice is cleared once its fields are stored (D90).
     """
     invoice_id = await edit_target(conn, msg)
     if invoice_id is None:
@@ -157,6 +164,7 @@ async def apply_edits(
         return invoice_id
     reading = _edited_reading(await load_reading(conn, invoice_id), edits.fields)
     await save_reading(conn, invoice_id, reading)
+    await clear_editing(conn, invoice_id)
     await _drop_stale_answers(conn, invoice_id, edits.fields)
     if state == EXTRACT_FAILED and reading.missing_required():
         await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)

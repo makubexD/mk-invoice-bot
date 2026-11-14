@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, ChannelName, InboundMessage
+from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, RoutingRule, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
@@ -78,6 +79,18 @@ def _message(
         sender_role="owner",
         text=text,
         attachments=[] if attachments is None else attachments,
+        received_at=datetime.now(UTC),
+    )
+
+
+def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
+    """Build a canonical button press for the invoice."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=_external_id(),
+        profile_id=profile_id,
+        sender_role="owner",
+        button_id=button_id(invoice_id, action),
         received_at=datetime.now(UTC),
     )
 
@@ -170,9 +183,20 @@ def _config(profile_id: str) -> Config:
 
 
 async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, invoice_id: int) -> None:
-    """Run the route handler on ``invoice_id`` as the queue would."""
+    """Run the route handler on ``invoice_id``'s newest route job, as the queue would (D95)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT max(id) FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, ROUTE_STEP)
+        )
+        row = await cur.fetchone()
+    job_id = 1 if row is None or row[0] is None else int(row[0])
     job = Job(
-        id=1, invoice_id=invoice_id, step=ROUTE_STEP, attempts=0, crashes=0, lease_until=datetime.now(UTC)
+        id=job_id,
+        invoice_id=invoice_id,
+        step=ROUTE_STEP,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
     )
     handler = make_route_handler(pool, cfg, StoreDirectory(stores={}, portals={}), compile_rules(cfg.routing))
     await handler(job)
@@ -214,6 +238,14 @@ async def _fields_json(conn: AsyncConnection[Any], invoice_id: int) -> str:
     assert row is not None
     assert row[0] is not None
     return str(row[0])
+
+
+async def _flow_data(conn: AsyncConnection[Any], invoice_id: int) -> dict[str, Any]:
+    """Return the invoice's flow data."""
+    cur = await conn.execute("SELECT flow_data_json FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return cast(dict[str, Any], row[0])
 
 
 async def _field(conn: AsyncConnection[Any], invoice_id: int, name: str) -> tuple[str | None, str | None]:
@@ -476,10 +508,54 @@ async def test_edit_reroutes_a_confirming_invoice(
     assert row == (Decimal("10.00"), {"flow": WORK_FLOW})
 
 
+async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D90: an unquoted edit goes to the [Editar] invoice until it is stored, then to the newest."""
+    profile_id = _profile()
+    older = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    newer = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED
+        )
+        older_flow = await _flow_data(conn, older)
+        newer_flow = await _flow_data(conn, newer)
+
+    assert result.invoice_id == older
+    assert older_flow == {"editing": True}
+    assert newer_flow == {}
+
+    first = _message(profile_id, external_id=_external_id(), text="total=45.50")
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED)
+        older_total = await _field(conn, older, "total")
+        newer_total = await _field(conn, newer, "total")
+        older_flow = await _flow_data(conn, older)
+
+    assert result.invoice_id == older
+    assert older_total == ("45.50", "user")
+    assert newer_total == ("49.90", "qr")
+    assert older_flow == {}
+
+    second = _message(profile_id, external_id=_external_id(), text="total=46.00")
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED)
+        newer_total = await _field(conn, newer, "total")
+
+    assert result.invoice_id == newer
+    assert newer_total == ("46.00", "user")
+
+
 async def test_buyer_edit_drops_the_flow_and_buyer_answers(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.5, D92: cliente=<RUC> changes the buyer, so the picked flow and buyer check go."""
+    """R-3.5, D92: cliente=<RUC> changes the buyer, so the flow, buyer and cap answers go."""
     profile_id = _profile()
     invoice_id = await _invoice_in(
         db_pool,
@@ -487,7 +563,7 @@ async def test_buyer_edit_drops_the_flow_and_buyer_answers(
         "CONFIRMING",
         _reading(await _today(db_pool)),
         rule_id="BR-R03",
-        answers={"flow": WORK_FLOW, "buyer_ok": True, "cap_ok": True},
+        answers={"flow": WORK_FLOW, "buyer_ok": True, "cap_ok": True, "comercio": "Local Uno"},
     )
     msg = _message(profile_id, external_id=_external_id(), text="cliente=20000000001")
 
@@ -498,7 +574,7 @@ async def test_buyer_edit_drops_the_flow_and_buyer_answers(
         )
         row = await cur.fetchone()
 
-    assert row == ({"cap_ok": True},)
+    assert row == ({"comercio": "Local Uno"},)
 
 
 async def test_complete_edit_reroutes_an_extract_failed_invoice(

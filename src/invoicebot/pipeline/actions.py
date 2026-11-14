@@ -54,7 +54,13 @@ from invoicebot.store.flow_b import (
     set_batch_state,
     take_photo_paths,
 )
-from invoicebot.store.invoices import get_state_rule, load_flow, load_invoice_head, set_state
+from invoicebot.store.invoices import (
+    get_state_rule,
+    load_flow,
+    load_invoice_head,
+    mark_editing,
+    set_state,
+)
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
@@ -216,7 +222,8 @@ async def _cancel(
 async def _edit(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
 ) -> tuple[Path, ...]:
-    """Ask the sender for ``campo=valor`` edits, leaving the invoice as it is (R-3.4, D97)."""
+    """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90)."""
+    await mark_editing(conn, msg.profile_id, invoice_id)
     await _reply(conn, msg, invoice_id, None, EDIT_PROMPT)
     return ()
 

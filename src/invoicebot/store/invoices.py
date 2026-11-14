@@ -420,6 +420,45 @@ async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     return int(row[0])
 
 
+#: The flow-data key an [Editar] press sets on its invoice (R-3.5, D90).
+EDITING_KEY = "editing"
+
+
+async def mark_editing(conn: AsyncConnection[Any], profile_id: str, invoice_id: int) -> None:
+    """Pin invoice_id as its profile's edit target, clearing the profile's other pins (R-3.5, D90).
+
+    A ``campo=valor`` message without a quote reaches the pinned invoice even when a newer
+    one is open. Does not commit.
+    """
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET flow_data_json = flow_data_json - %s
+        WHERE profile_id = %s
+          AND id <> %s
+          AND flow_data_json ? %s
+        """,
+        (EDITING_KEY, profile_id, invoice_id, EDITING_KEY),
+    )
+    await conn.execute(
+        "UPDATE invoices SET flow_data_json = flow_data_json || %s::jsonb WHERE id = %s",
+        (Jsonb({EDITING_KEY: True}), invoice_id),
+    )
+
+
+async def clear_editing(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Remove the edit pin from the invoice's flow data; does not commit (R-3.5, D90)."""
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET flow_data_json = flow_data_json - %s
+        WHERE id = %s
+          AND flow_data_json ? %s
+        """,
+        (EDITING_KEY, invoice_id, EDITING_KEY),
+    )
+
+
 async def find_override_target(
     conn: AsyncConnection[Any],
     profile_id: str,
@@ -427,11 +466,11 @@ async def find_override_target(
 ) -> int | None:
     """Return the invoice a chat override applies to, or None (D90).
 
-    The quoted message's invoice wins when it belongs to the same profile; otherwise the
-    profile's most recent invoice that is not ``CANCELLED``/``FAILED``/``DONE`` and whose
-    batch is not ``sent`` (a finished invoice is only reached by quoting it). A quote of a
-    message that is not stored (the bot's own summary) falls back the same way. Does not
-    commit.
+    The quoted message's invoice wins when it belongs to the same profile; otherwise an
+    invoice pinned by [Editar] comes first (R-3.5), then the profile's most recent invoice
+    that is not ``CANCELLED``/``FAILED``/``DONE`` and whose batch is not ``sent`` (a
+    finished invoice is only reached by quoting it). A quote of a message that is not
+    stored (the bot's own summary) falls back the same way. Does not commit.
     """
     if reply_to is not None:
         channel, external_id = reply_to
@@ -457,10 +496,10 @@ async def find_override_target(
         WHERE i.profile_id = %s
           AND i.state NOT IN ('CANCELLED', 'FAILED', 'DONE')
           AND (b.state IS NULL OR b.state <> 'sent')
-        ORDER BY i.created_at DESC, i.id DESC
+        ORDER BY (i.flow_data_json ? %s) DESC, i.created_at DESC, i.id DESC
         LIMIT 1
         """,
-        (profile_id,),
+        (profile_id, EDITING_KEY),
     )
     row = await cur.fetchone()
     return None if row is None else int(row[0])
