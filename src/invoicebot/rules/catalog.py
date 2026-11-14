@@ -37,7 +37,7 @@ RULES: dict[str, Rule] = {
     "BR-E01": Rule("BR-E01", "EXTRACT_FAILED", "BR-E01"),
     "BR-E02": Rule("BR-E02", "EXTRACT_FAILED", "BR-E02"),
     "BR-E03": Rule("BR-E03", "CONFIRMING", "BR-E03"),
-    "BR-E04": Rule("BR-E04", None, "BR-E04"),
+    "BR-E04": Rule("BR-E04", "CANCELLED", "BR-E04"),
     "BR-E05": Rule("BR-E05", "CANCELLED", "BR-E05"),
     "BR-E06": Rule("BR-E06", None, None),
     "BR-E07": Rule("BR-E07", "CANCELLED", "BR-E07"),

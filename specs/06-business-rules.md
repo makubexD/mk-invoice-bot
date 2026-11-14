@@ -50,7 +50,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-E01 | No QR, and OCR is missing required fields | `EXTRACT_FAILED` (waits for the user) | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` |
 | BR-E02 | The issuer RUC fails the check digit | Same as E01, with the field highlighted | `El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…` |
 | BR-E03 | The date is in the future or older than `max_invoice_age_days` | `CONFIRMING` | `La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa` |
-| BR-E04 | The natural key already exists and isn't failed | Stop | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Si quieres repetirlo: /reprocesar {id}` |
+| BR-E04 | The natural key already exists and isn't failed or cancelled (D93) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}.` |
 | BR-E05 | Not a supported CPE (`tipo` ∉ config) | `CANCELLED` | `Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.` |
 | BR-E06 | OCR fails 2 or more times on photos from the same issuer | Raises gap `PARSER_MISS` | *(no extra message; E01 already asked the user)* |
 | BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported, or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) o el PDF del comprobante, de hasta {max_mb} MB.` |
@@ -121,7 +121,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-S05 | An API or MCP client asks for a write (`cancel_invoice`, `reprocess_invoice`, `attach_document`) | Pending action; nothing changes until the owner decides (expires in 24 h) | Owner: `🔐 {client} pide {action_desc} del comprobante #{id}. ¿Lo apruebo?` [Aprobar] [Rechazar] |
 | BR-S06 | A sender teaches a portal link (BR-F02 answer or `/portal`) | Stored as `proposed`; used only after the owner approves | Owner: `🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?` [Aprobar] [Rechazar]. Sender: `Gracias. Lo revisará el administrador antes de usarlo.` |
 | BR-S07 | A command names an invoice id that doesn't exist or belongs to another profile (sender not admin) | No change | `No encontré el comprobante #{id}.` |
-| BR-S08 | A question isn't answered within `question_timeout` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
+| BR-S08 | A question isn't answered within `limits.question_timeout_h` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
 | BR-S09 | An allowlisted sender sends a photo and it is queued (R-1.1) | Invoice created in `RECEIVED`; job enqueued | `📥 Recibido. Estoy leyendo tu comprobante #{id}.` |
 
 ### Operations (O) · admin-only

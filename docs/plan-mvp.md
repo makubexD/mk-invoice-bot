@@ -109,7 +109,8 @@ Each item goes into the named phase's plan.
 - **M3 live run:** the upload-session allow-list (`UPLOAD_HOSTS`, `UPLOAD_HOST_SUFFIXES` in `sinks/onedrive.py`) comes from Microsoft's docs (`*.up.1drv.com`, `api.onedrive.com`, `outlook.office.com`). Record a real personal-account `uploadUrl` for a drive upload and a mail attachment, and pin the list to it.
 - **`widen-b-fetch`:** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
 - **`widen-b-fetch` (with the next portal):** `portal_timeout_s` only has to stay below the 300 s lease (`JOB_LEASE_S`); leave a margin for the helper start and the handler's database work (e.g. 30 s).
-- **`widen-b-talk` or later:** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
+- **`widen-b-talk` (widen-b-talk):** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
+- **`ops`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
 - **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
 
 ## Known drift between code and specs
@@ -119,6 +120,7 @@ The specs run ahead of the code in these places; each has a named story that clo
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
+- `confirm_mode: always`, the `VALIDATING` state and asking in `CONFIRMING` for BR-E03 or a `source=llm` field (spec 03 §4) are not built; routing goes straight to `FETCHING_DOCS`. `read-more` builds them with BR-E03.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global. The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans
