@@ -6,7 +6,7 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
@@ -17,12 +17,15 @@ from invoicebot.extract.fields import Reading, reading_from_json, reading_to_jso
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
 
+#: The kinds an invoice's file may have: the channel attachments plus flow B's own files.
+type FileKind = AttachmentKind | Literal["eml", "manifest"]
+
 
 @dataclass(frozen=True)
 class FileRecord:
     """A file to attach to an invoice: where it came from and what it is (R-1.4)."""
 
-    kind: AttachmentKind
+    kind: FileKind
     local_path: str | None
     remote_ref: str | None
     sha256: str
@@ -241,7 +244,7 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     return reading_from_json(row[0])
 
 
-async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: AttachmentKind) -> str | None:
+async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: FileKind) -> str | None:
     """Return the local path of the invoice's first file of ``kind``, or None."""
     cur = await conn.execute(
         """

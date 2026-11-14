@@ -299,3 +299,16 @@ def docs_desc(kinds: Sequence[str]) -> str:
     if len(words) < 2:
         return "".join(words)
     return f"{', '.join(words[:-1])} y {words[-1]}"
+
+
+# --- Delivery texts (docs/plan-mvp-file-b.md step 19) --------------------------------------
+#: BR-D07's ``{modes_desc}`` per mail mode (R-7.7). The copy is pending the owner's review.
+MAIL_MODE_DESC: dict[str, str] = {"dry_run": "borrador .eml"}
+
+
+def modes_desc(modes: Sequence[str]) -> str:
+    """Return BR-D07's ``{modes_desc}``: the es-PE name of each mail mode (R-7.7)."""
+    words = [MAIL_MODE_DESC.get(mode, mode) for mode in modes]
+    if len(words) < 2:
+        return "".join(words)
+    return f"{', '.join(words[:-1])} y {words[-1]}"

@@ -1,0 +1,383 @@
+"""Integration tests for the deliver job handler (R-7.1 to R-7.8, R-8.1, R-9.4, BR-D07, D88).
+
+The folder is an in-memory fake :class:`Drive`; the mail mode is the real assisted
+:class:`DryRun` writing under ``tmp_path``. Postgres is real.
+"""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import UTC, date, datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import pytest
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
+
+from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.config.loader import load_config
+from invoicebot.config.models import Brand, Config, ExcelTemplateSink, MailerSink, Store, StoreDirectory
+from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
+from invoicebot.queue.jobs import Job
+from invoicebot.queue.worker import Handler
+from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.sinks.base import OutgoingMail
+from invoicebot.sinks.mailer import DryRun
+from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
+from invoicebot.store.invoices import (
+    FileRecord,
+    add_file,
+    create_invoice,
+    save_reading,
+    set_flow,
+    set_state,
+)
+from xlsx_factory import build_template
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+FLOW = "work_microsoft"
+FLOW_WITHOUT_FOLDER = "personal_google"
+PROFILE = "yo"
+# From tests/synthetic_rucs.txt; no real RUC appears here.
+STORE_RUC = "20000000001"
+COMERCIO = "LaLena"
+SERIE = "F001"
+NUMERO = "15160"
+FECHA = date(2026, 11, 5)
+FOLDER_PREFIX = "2026-11-Support_"
+PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
+XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
+  <ID>F001-15160</ID>
+  <IssueDate>2026-11-05</IssueDate>
+  <InvoiceTypeCode>01</InvoiceTypeCode>
+  <AccountingSupplierParty>
+    <Party>
+      <PartyIdentification><ID>20000000001</ID></PartyIdentification>
+      <PartyLegalEntity><RegistrationName>Restaurante La Lena S.A.C.</RegistrationName></PartyLegalEntity>
+    </Party>
+  </AccountingSupplierParty>
+  <TaxTotal><TaxAmount>7.61</TaxAmount></TaxTotal>
+  <LegalMonetaryTotal>
+    <LineExtensionAmount>40.00</LineExtensionAmount>
+    <ChargeTotalAmount>4.00</ChargeTotalAmount>
+    <PayableAmount>51.61</PayableAmount>
+  </LegalMonetaryTotal>
+</Invoice>
+"""
+
+
+class FakeDrive:
+    """An in-memory Drive: folders hold their entry names and uploads keep their bytes."""
+
+    def __init__(self, folders: dict[str, list[str]] | None = None) -> None:
+        self.folders = {path: list(names) for path, names in (folders or {}).items()}
+        self.listings: list[str] = []
+        self.created: list[tuple[str, str]] = []
+        self.uploads: dict[str, bytes] = {}
+
+    async def list_names(self, path: str) -> list[str]:
+        """Return the entries of a folder; a path that does not exist has none."""
+        self.listings.append(path)
+        return list(self.folders.get(path, []))
+
+    async def create_folder(self, parent: str, name: str) -> None:
+        """Record the creation and list the new folder under its parent."""
+        self.created.append((parent, name))
+        self.folders.setdefault(parent, []).append(name)
+
+    async def upload(self, path: str, data: bytes) -> None:
+        """Keep the file's bytes at its absolute path."""
+        self.uploads[path] = data
+
+
+class CrashingMode:
+    """An assisted mode that fails after the folder is filed, standing in for a crash."""
+
+    automatic = False
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
+        """Raise before writing any draft."""
+        raise RuntimeError("synthetic crash before the mail step")
+
+
+def _field(value: str) -> Field:
+    return Field(value=value, source="qr", confidence=1.0)
+
+
+def _reading() -> Reading:
+    """Build a complete synthetic reading for a flow B invoice."""
+    return Reading(
+        fields={
+            "ruc_emisor": _field(STORE_RUC),
+            "tipo": _field("01"),
+            "serie": _field(SERIE),
+            "numero": _field(NUMERO),
+            "total": _field("51.61"),
+            "fecha_emision": _field(FECHA.isoformat()),
+        },
+        document_url=None,
+    )
+
+
+def _directory() -> StoreDirectory:
+    """Return a store directory with one store whose only brand is COMERCIO."""
+    store = Store(
+        ruc=STORE_RUC,
+        razon_social="Comercio Sintetico",
+        tipo="01",
+        brands=[Brand(comercio=COMERCIO)],
+        portal=None,
+    )
+    return StoreDirectory(stores={STORE_RUC: store}, portals={})
+
+
+def _config(tmp_path: Path, profile_id: str) -> Config:
+    """Return example.yaml with a synthetic template, the assisted mode and one profile."""
+    cfg = load_config(EXAMPLE)
+    template = build_template()
+    template_path = tmp_path / "template.xlsx"
+    template_path.write_bytes(template)
+    sinks: list[Any] = []
+    for sink in cfg.flows[FLOW].sinks:
+        if isinstance(sink, ExcelTemplateSink):
+            sink = sink.model_copy(
+                update={
+                    "template": template_path,
+                    "template_sha256": hashlib.sha256(template).hexdigest(),
+                }
+            )
+        elif isinstance(sink, MailerSink):
+            sink = sink.model_copy(update={"modes": ["dry_run"]})
+        sinks.append(sink)
+    flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
+    return cfg.model_copy(
+        update={
+            "flows": {**cfg.flows, FLOW: flow},
+            "profiles": {profile_id: cfg.profiles[PROFILE]},
+        }
+    )
+
+
+def _job(invoice_id: int) -> Job:
+    """Build the deliver job the handler receives."""
+    return Job(
+        id=1,
+        invoice_id=invoice_id,
+        step=DELIVER_STEP,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
+    )
+
+
+def _handler(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    cfg: Config,
+    drive: FakeDrive,
+    data_dir: Path,
+    mode: Any = None,
+) -> Handler:
+    """Build the deliver handler with the assisted mode."""
+    return make_deliver_handler(
+        pool,
+        cfg,
+        _directory(),
+        drive,
+        {"dry_run": mode or DryRun(data_dir)},
+        data_dir,
+    )
+
+
+async def _delivering_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    profile_id: str,
+    *,
+    state: str = "DELIVERING",
+    flow: str = FLOW,
+    flow_data: dict[str, Any] | None = None,
+) -> int:
+    """Create an invoice with a reading, a PDF and an XML, and return its id."""
+    pdf = tmp_path / f"{uuid4().hex}.pdf"
+    pdf.write_bytes(PDF_BYTES)
+    xml = tmp_path / f"{uuid4().hex}.xml"
+    xml.write_bytes(XML_BYTES)
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, _reading())
+        await set_flow(conn, invoice_id, flow)
+        await set_state(conn, invoice_id, state)
+        for kind, path, data in (("pdf", pdf, PDF_BYTES), ("xml", xml, XML_BYTES)):
+            await add_file(
+                conn,
+                invoice_id,
+                FileRecord(
+                    kind=kind,
+                    local_path=str(path),
+                    remote_ref=None,
+                    sha256=hashlib.sha256(data).hexdigest(),
+                    size=len(data),
+                ),
+            )
+        if flow_data:
+            await merge_flow_data(conn, invoice_id, flow_data)
+    return invoice_id
+
+
+async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
+    cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0]), row[1]
+
+
+async def _eml_files(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    cur = await conn.execute(
+        "SELECT local_path FROM files WHERE invoice_id = %s AND kind = 'eml' ORDER BY id",
+        (invoice_id,),
+    )
+    return [str(row[0]) for row in await cur.fetchall()]
+
+
+async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None, Any]]:
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text', payload_json->>'rule_id', payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    rows = await cur.fetchall()
+    return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
+
+
+async def test_dry_run_batches_the_invoice_with_br_d07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.1, R-7.5, R-7.7, R-8.1, BR-D07, D88: the assisted mode files, drafts and batches."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive()
+
+    await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        emls = await _eml_files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    folder = f"{FOLDER_PREFIX}{flow_data['seq']}_{COMERCIO}"
+    path = f"/Reembolsos/{folder}"
+    legal_name = cfg.profiles[profile_id].legal_name
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "prepared"
+    assert flow_data["folder"] == folder
+    assert isinstance(flow_data["seq"], int)
+    assert drive.created == [("/Reembolsos", folder)]
+    assert set(drive.uploads) == {
+        f"{path}/{legal_name}.pdf",
+        f"{path}/{legal_name}.xml",
+        f"{path}/.invoicebot.json",
+        f"{path}/Formato de reembolsos.xlsx",
+    }
+    eml = tmp_path / "mail" / f"{invoice_id}.eml"
+    assert emls == [str(eml)]
+    assert eml.is_file()
+    text, rule_id, buttons = outbox[0]
+    assert text == MESSAGES["BR-D07"].format(folder=folder, modes_desc="borrador .eml")
+    assert rule_id == "BR-D07"
+    assert buttons == [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}]
+
+
+async def test_invoice_outside_delivering_is_left_untouched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.4: an invoice already DONE is not filed, mailed or batched again."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id, state="DONE")
+    drive = FakeDrive()
+
+    await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        emls = await _eml_files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DONE", None)
+    assert batch_state is None
+    assert emls == []
+    assert outbox == []
+    assert drive.listings == []
+    assert drive.created == []
+    assert drive.uploads == {}
+
+
+async def test_retry_after_a_crash_reuses_the_saved_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D88, R-7.1: a retry after a crash before the mail step reuses folder and seq without claiming."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive()
+
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        await _handler(db_pool, cfg, drive, tmp_path, CrashingMode())(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        first_state = await _invoice_state(conn, invoice_id)
+        first_data = await load_flow_data(conn, invoice_id)
+    assert first_state == ("DELIVERING", None)
+    assert first_data["folder"].startswith(FOLDER_PREFIX)
+    assert isinstance(first_data["seq"], int)
+    drive.listings.clear()
+    drive.created.clear()
+
+    await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+    assert (flow_data["folder"], flow_data["seq"]) == (first_data["folder"], first_data["seq"])
+    assert drive.listings == []
+    assert drive.created == [("/Reembolsos", first_data["folder"])]
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "prepared"
+
+
+async def test_flow_without_a_folder_sink_is_a_no_op(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.4: a flow whose sinks have no onedrive_folder is left untouched."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id, flow=FLOW_WITHOUT_FOLDER)
+    drive = FakeDrive()
+
+    await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        emls = await _eml_files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DELIVERING", None)
+    assert batch_state is None
+    assert emls == []
+    assert outbox == []
+    assert drive.listings == []
+    assert drive.created == []
+    assert drive.uploads == {}
