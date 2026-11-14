@@ -21,6 +21,7 @@ from invoicebot.store.invoices import (
     Duplicate,
     FileRecord,
     InvoiceHead,
+    InvoiceRef,
     add_file,
     claim_natural_key,
     count_active_jobs,
@@ -31,6 +32,7 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    park_stale,
     save_reading,
     set_flow,
     set_state,
@@ -264,6 +266,51 @@ async def test_count_active_jobs_ignores_parked_jobs(
 
         # Leave no jobs for the config profiles: later tests count them per profile.
         await conn.execute("DELETE FROM jobs WHERE invoice_id = ANY(%s)", ([first, second, other],))
+
+
+async def test_park_stale_parks_only_old_waiting_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S08: an unanswered CONFIRMING old enough is parked; a recent wait and FETCHING_DOCS are not."""
+    async with db_pool.connection() as conn:
+        stale = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, stale, "CONFIRMING", rule_id="BR-R03")
+        recent = await create_invoice(conn, "asistente", CHANNEL)
+        await set_state(conn, recent, "CONFIRMING", rule_id="BR-R03")
+        fetching = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, fetching, "FETCHING_DOCS")
+
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - interval '25 hours' WHERE id = %s",
+            (stale,),
+        )
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - interval '23 hours' WHERE id = %s",
+            (recent,),
+        )
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - interval '48 hours' WHERE id = %s",
+            (fetching,),
+        )
+
+        refs = await park_stale(conn, 24)
+        cur = await conn.execute(
+            """
+            SELECT state, waiting_state, waiting_rule_id, rule_id
+            FROM invoices
+            WHERE id = ANY(%s)
+            ORDER BY id
+            """,
+            ([stale, recent, fetching],),
+        )
+        rows = await cur.fetchall()
+
+    assert refs == [InvoiceRef(id=stale, profile_id="yo", origin_channel=CHANNEL)]
+    assert rows == [
+        ("PENDING_USER", "CONFIRMING", "BR-R03", "BR-S08"),
+        ("CONFIRMING", None, None, "BR-R03"),
+        ("FETCHING_DOCS", None, None, None),
+    ]
 
 
 async def test_add_file_stores_sha256_and_size(

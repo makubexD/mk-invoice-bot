@@ -14,10 +14,20 @@ from psycopg.types.json import Jsonb
 from invoicebot.channels.base import AttachmentKind, ChannelName
 from invoicebot.extract.fields import Reading, reading_from_json, reading_to_json
 from invoicebot.rules.catalog import RULES
-from invoicebot.states import CANCELLED, FAILED, NEEDS_RULE, StateMoved
+from invoicebot.states import (
+    CANCELLED,
+    FAILED,
+    NEEDS_RULE,
+    PENDING_USER,
+    WAITING_FOR_USER,
+    StateMoved,
+)
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
+
+#: Rule that parks an invoice whose question went unanswered (BR-S08).
+RULE_PARKED = "BR-S08"
 
 #: The kinds an invoice's file may have: the channel attachments plus flow B's own files.
 type FileKind = AttachmentKind | Literal["eml", "manifest"]
@@ -49,6 +59,15 @@ class Duplicate:
 
     invoice_id: int
     created_at: datetime
+
+
+@dataclass(frozen=True)
+class InvoiceRef:
+    """A parked invoice and who to tell about it (BR-S08)."""
+
+    id: int
+    profile_id: str
+    origin_channel: ChannelName
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -222,6 +241,38 @@ async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
         """
     )
     return [int(row[0]) for row in await cur.fetchall()]
+
+
+async def park_stale(conn: AsyncConnection[Any], timeout_h: int) -> list[InvoiceRef]:
+    """Park invoices whose question went unanswered for ``timeout_h`` hours (BR-S08).
+
+    Each invoice still in ``WAITING_FOR_USER`` whose last update is older than the
+    timeout moves to ``PENDING_USER``, keeping the state and rule it was waiting in
+    so an answer can resume it (D94). The database clock decides the age. Returns the
+    invoices moved, for the caller to tell their senders. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE invoices
+        SET waiting_state = state,
+            waiting_rule_id = rule_id,
+            state = %s,
+            rule_id = %s,
+            updated_at = now()
+        WHERE state = ANY(%s)
+          AND updated_at < now() - make_interval(hours => %s)
+        RETURNING id, profile_id, origin_channel
+        """,
+        (PENDING_USER, RULE_PARKED, list(WAITING_FOR_USER), timeout_h),
+    )
+    return [
+        InvoiceRef(
+            id=int(row[0]),
+            profile_id=str(row[1]),
+            origin_channel=cast(ChannelName, row[2]),
+        )
+        for row in await cur.fetchall()
+    ]
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
