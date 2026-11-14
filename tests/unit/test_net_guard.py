@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 import pytest
 
 from invoicebot.net.guard import GuardReason, Resolver, check_addresses, check_url, resolve_and_check
@@ -52,13 +54,14 @@ def test_check_url(url: str, expected: GuardReason | None) -> None:
         (("::1",), GuardReason.PRIVATE_ADDRESS),
         (("::ffff:127.0.0.1",), GuardReason.PRIVATE_ADDRESS),
         (("fe80::1",), GuardReason.PRIVATE_ADDRESS),
+        (("fec0::1",), GuardReason.PRIVATE_ADDRESS),
         (("not-an-address",), GuardReason.BAD_URL),
         ((PUBLIC_ADDRESS,), None),
         ((PUBLIC_ADDRESS, "10.0.0.1"), GuardReason.PRIVATE_ADDRESS),
     ],
 )
 def test_check_addresses(addresses: tuple[str, ...], expected: GuardReason | None) -> None:
-    """BR-F08: private, loopback, link-local, CGNAT and mapped addresses are refused."""
+    """BR-F08: private, loopback, link-local, site-local, CGNAT and mapped addresses are refused."""
     assert check_addresses(addresses) == expected
 
 
@@ -91,4 +94,19 @@ async def test_resolve_and_check_returns_the_first_public_address() -> None:
     assert await resolve_and_check("portal.example", FakeResolver([PUBLIC_ADDRESS])) == (
         PUBLIC_ADDRESS,
         None,
+    )
+
+
+def _refuse_all(addresses: Iterable[str]) -> GuardReason:
+    """Refuse any answer."""
+    del addresses
+    return GuardReason.PRIVATE_ADDRESS
+
+
+async def test_resolve_and_check_uses_the_given_check() -> None:
+    """R-5.10: the caller's check judges the answer, so the proxy shares this one resolve path."""
+    resolver = FakeResolver([PUBLIC_ADDRESS])
+    assert await resolve_and_check("portal.example", resolver, _refuse_all) == (
+        PUBLIC_ADDRESS,
+        GuardReason.PRIVATE_ADDRESS,
     )

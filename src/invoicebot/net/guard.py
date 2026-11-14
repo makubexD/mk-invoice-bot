@@ -7,7 +7,7 @@ and return a reason code, so the same checks run in tests and in the browser hel
 from __future__ import annotations
 
 import ipaddress
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import Protocol
 from urllib.parse import urlsplit
@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 CGNAT_NETWORK = ipaddress.ip_network("100.64.0.0/10")
 #: NAT64; the last 32 bits are the IPv4 address the request would really reach.
 NAT64_NETWORK = ipaddress.ip_network("64:ff9b::/96")
+#: IPv6 site-local; deprecated, not ``is_private``, but some legacy networks still route it.
+SITE_LOCAL_NETWORK = ipaddress.ip_network("fec0::/10")
 _IPV4_MASK = 0xFFFFFFFF
 #: Schemes that may reach the network at all; everything else is blocked outright.
 NETWORK_SCHEMES = frozenset({"http", "https"})
@@ -71,12 +73,20 @@ def check_addresses(addresses: Iterable[str]) -> GuardReason | None:
     return None
 
 
-async def resolve_and_check(host: str, resolver: Resolver) -> tuple[str, GuardReason | None]:
-    """Resolve ``host`` once and return the first address to pin, or the reason to refuse."""
+type CheckAddresses = Callable[[Iterable[str]], GuardReason | None]
+
+
+async def resolve_and_check(
+    host: str, resolver: Resolver, check: CheckAddresses = check_addresses
+) -> tuple[str, GuardReason | None]:
+    """Resolve ``host`` once and return the first address to pin, or the reason to refuse.
+
+    ``check`` judges the whole answer; tests pass their own to allow loopback servers.
+    """
     addresses = await resolver.resolve(host)
     if not addresses:
         return "", GuardReason.UNRESOLVABLE
-    return addresses[0], check_addresses(addresses)
+    return addresses[0], check(addresses)
 
 
 def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -92,6 +102,7 @@ def _is_blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
         or address.is_reserved
         or address.is_unspecified
         or address in CGNAT_NETWORK
+        or address in SITE_LOCAL_NETWORK
     )
 
 
