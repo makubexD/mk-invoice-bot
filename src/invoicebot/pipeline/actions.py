@@ -3,9 +3,13 @@
 A button id names the invoice and the action (R-3.5). :func:`handle_press` checks the
 press against :data:`VALID_STATES` and runs the handler in :data:`ACTIONS`; adding an
 action is a new entry in both mappings, not a new branch. ``replies.resolve_reply``
-answers a stale or foreign press with BR-S02 (BR-S02). [Continuar] resumes a BR-D06
-invoice (R-7.13), [Cancelar] cancels it, and [Ya lo envié] closes a prepared batch as
-sent (R-7.8, BR-D08).
+answers a stale or foreign press with BR-S02 (BR-S02).
+
+A routing question's answer is stored in the invoice's flow data under ``answers``; the
+action puts the invoice back in ``ROUTING`` and enqueues the route step, which validates
+the answer again on its next run (D92). [Continuar] answers BR-D06's cap question,
+[Cancelar] cancels the invoice from any cancellable state (R-3.4), and [Ya lo envié]
+closes a prepared batch as sent (R-7.8, BR-D08).
 
 Everything here happens in the caller's transaction. The photo files [Ya lo envié]
 releases are returned, not deleted: the caller removes them after committing (R-9.7).
@@ -21,21 +25,40 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
-from invoicebot.pipeline.fetch import FETCH_STEP
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
-from invoicebot.pipeline.questions import CANCEL_ACTION, CONTINUE_ACTION, RULE_CAP
+from invoicebot.pipeline.questions import (
+    BRAND_ACTION,
+    CANCEL_ACTION,
+    CHANGE_ACTION,
+    CONTINUE_ACTION,
+    PICK_ACTION,
+    RULE_BRAND,
+    RULE_BUYER,
+    RULE_CAP,
+    YES_ACTION,
+)
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import enqueue
+from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES
-from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state, take_photo_paths
+from invoicebot.states import CANCELLABLE
+from invoicebot.store.flow_b import (
+    get_batch_state,
+    load_flow_data,
+    merge_flow_data,
+    open_batch,
+    set_batch_state,
+    take_photo_paths,
+)
 from invoicebot.store.invoices import get_state_rule, load_flow, set_state
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
 
 CONFIRMING_STATE = "CONFIRMING"
+ROUTING_STATE = "ROUTING"
 BATCHED_STATE = "BATCHED"
-FETCHING_STATE = "FETCHING_DOCS"
 CANCELLED_STATE = "CANCELLED"
 DONE_STATE = "DONE"
 
@@ -46,8 +69,12 @@ SENT_BATCH_STATE = "sent"
 
 #: The invoice states each action applies to; another state gets BR-S02 (R-3.5, BR-S02).
 VALID_STATES: Mapping[str, frozenset[str]] = {
+    PICK_ACTION: frozenset({CONFIRMING_STATE}),
+    YES_ACTION: frozenset({CONFIRMING_STATE}),
+    CHANGE_ACTION: frozenset({CONFIRMING_STATE}),
+    BRAND_ACTION: frozenset({CONFIRMING_STATE}),
     CONTINUE_ACTION: frozenset({CONFIRMING_STATE}),
-    CANCEL_ACTION: frozenset({CONFIRMING_STATE}),
+    CANCEL_ACTION: CANCELLABLE,
     SENT_ACTION: frozenset({BATCHED_STATE}),
 }
 
@@ -78,26 +105,80 @@ async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> Press
     return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 
 
+async def _pick(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, choice: int | None
+) -> tuple[Path, ...]:
+    """Store the flow the sender picked from BR-R03's menu and re-run routing (BR-R03).
+
+    A missing menu or an out-of-range choice is a stale button: BR-S02, no change.
+    """
+    if not await _still_asks(conn, invoice_id, msg, RULE_ASK):
+        return ()
+    picked = await _choice_at(conn, invoice_id, choice)
+    if picked is None:
+        await send_stale(conn, msg, invoice_id)
+        return ()
+    await _record_answer(conn, invoice_id, RULE_ASK, {"flow": picked})
+    return ()
+
+
+async def _yes(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
+    """Record that the buyer is right, so routing skips BR-R04 (BR-R04)."""
+    if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
+        return ()
+    await _record_answer(conn, invoice_id, RULE_BUYER, {"buyer_ok": True})
+    return ()
+
+
+async def _change(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
+    """Record that the buyer is wrong, so routing asks BR-R03 again (BR-R04)."""
+    if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
+        return ()
+    await _record_answer(conn, invoice_id, RULE_BUYER, {"buyer_ok": False})
+    return ()
+
+
+async def _brand(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, choice: int | None
+) -> tuple[Path, ...]:
+    """Store the comercio the sender picked from BR-R09's menu and re-run routing (BR-R09).
+
+    A missing menu or an out-of-range choice is a stale button: BR-S02, no change.
+    """
+    if not await _still_asks(conn, invoice_id, msg, RULE_BRAND):
+        return ()
+    comercio = await _choice_at(conn, invoice_id, choice)
+    if comercio is None:
+        await send_stale(conn, msg, invoice_id)
+        return ()
+    await _record_answer(conn, invoice_id, RULE_BRAND, {"comercio": comercio})
+    return ()
+
+
 async def _continue(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
 ) -> tuple[Path, ...]:
-    """Continue a BR-D06 invoice into its fetch step (R-7.13).
-
-    Any other CONFIRMING invoice gets BR-S02 instead, whatever button it shows.
-    """
-    _, rule_id = await _invoice_state(conn, invoice_id)
-    if rule_id != RULE_CAP:
-        await send_stale(conn, msg, invoice_id)
+    """Record that the sender accepted BR-D06's cap and re-run routing (BR-D06)."""
+    if not await _still_asks(conn, invoice_id, msg, RULE_CAP):
         return ()
-    await set_state(conn, invoice_id, FETCHING_STATE, rule_id=RULE_CAP)
-    await enqueue(conn, invoice_id, FETCH_STEP)
+    await _record_answer(conn, invoice_id, RULE_CAP, {"cap_ok": True})
     return ()
 
 
 async def _cancel(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
 ) -> tuple[Path, ...]:
-    """Cancel a BR-D06 invoice and tell its sender in one line (R-7.13)."""
+    """Cancel the invoice from any CANCELLABLE state and tell its sender (R-3.4, BR-D06).
+
+    CANCELLED is in ``NEEDS_RULE`` and the catalog has no sender-cancel rule, so this
+    keeps recording BR-D06's id, as it did when [Cancelar] only answered BR-D06.
+    """
+    # shortcut: spec 06 has no sender-cancel rule, so a cancel outside BR-D06 still records
+    # BR-D06; it needs its own catalogued rule before reports read rule_id.
     await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP)
     await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
     return ()
@@ -120,6 +201,43 @@ async def _sent(
     await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_SENT)
     await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
     return tuple(await take_photo_paths(conn, invoice_id))
+
+
+async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rule_id: str) -> bool:
+    """Return whether the invoice still waits on rule_id's question (BR-S02).
+
+    A button from another question is stale: it is answered BR-S02 and changes nothing.
+    """
+    _, current_rule = await _invoice_state(conn, invoice_id)
+    if current_rule == rule_id:
+        return True
+    await send_stale(conn, msg, invoice_id)
+    return False
+
+
+async def _choice_at(conn: AsyncConnection[Any], invoice_id: int, choice: int | None) -> Any | None:
+    """Return ``choices[choice]`` from the invoice's flow data, or None when it is absent (BR-S02)."""
+    choices = (await load_flow_data(conn, invoice_id)).get("choices")
+    if choice is None or not isinstance(choices, list) or not 0 <= choice < len(choices):
+        return None
+    return choices[choice]
+
+
+async def _record_answer(
+    conn: AsyncConnection[Any], invoice_id: int, rule_id: str, answer: Mapping[str, Any]
+) -> None:
+    """Store one answer, put the invoice back in ROUTING and enqueue the route step (D92).
+
+    ``||`` is a shallow merge, so the answers stored before this one are read first and
+    kept. The route step validates the answer again on its next run.
+    """
+    flow_data = await load_flow_data(conn, invoice_id)
+    existing = flow_data.get("answers")
+    answers: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    answers.update(answer)
+    await merge_flow_data(conn, invoice_id, {"answers": answers})
+    await set_state(conn, invoice_id, ROUTING_STATE, rule_id=rule_id, expected=CONFIRMING_STATE)
+    await enqueue(conn, invoice_id, ROUTE_STEP)
 
 
 async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -163,6 +281,10 @@ async def _reply(
 
 #: The action each button runs; its keys match :data:`VALID_STATES`.
 ACTIONS: Mapping[str, Action] = {
+    PICK_ACTION: _pick,
+    YES_ACTION: _yes,
+    CHANGE_ACTION: _change,
+    BRAND_ACTION: _brand,
     CONTINUE_ACTION: _continue,
     CANCEL_ACTION: _cancel,
     SENT_ACTION: _sent,

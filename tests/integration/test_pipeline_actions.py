@@ -16,7 +16,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES, state_desc
-from invoicebot.store.flow_b import get_batch_state, open_batch
+from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data, open_batch
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, get_file_path, set_flow, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -24,11 +24,18 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 MAX_QUEUED = 10
 FLOW = "work_microsoft"
 CONFIRMING = "CONFIRMING"
+ROUTING = "ROUTING"
+FETCHING_DOCS = "FETCHING_DOCS"
+DELIVERING = "DELIVERING"
 BATCHED = "BATCHED"
+DONE = "DONE"
+RULE_ASK = "BR-R03"
+RULE_BUYER = "BR-R04"
+RULE_BRAND = "BR-R09"
 RULE_CAP = "BR-D06"
 RULE_BATCHED = "BR-D07"
 RULE_SENT = "BR-D08"
-DONE = "DONE"
+FLOW_CHOICES = ("flow_a", "flow_b")
 
 
 def _profile() -> str:
@@ -36,25 +43,53 @@ def _profile() -> str:
     return f"press-{uuid4().hex}"
 
 
-def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
+def _press(invoice_id: int, action: str, profile_id: str, choice: int | None = None) -> InboundMessage:
     """Build a canonical button press for the invoice."""
     return InboundMessage(
         channel="whatsapp",
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
-        button_id=button_id(invoice_id, action),
+        button_id=button_id(invoice_id, action, choice),
         received_at=datetime.now(UTC),
     )
 
 
-async def _waiting_invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str) -> int:
-    """Create a BR-D06 invoice in CONFIRMING and return its id."""
+async def _confirming_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    rule_id: str,
+    *,
+    choices: tuple[str, ...] | None = None,
+    answers: dict[str, Any] | None = None,
+) -> int:
+    """Create a CONFIRMING invoice waiting on rule_id, with the offered choices."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await set_flow(conn, invoice_id, FLOW)
-        await set_state(conn, invoice_id, CONFIRMING, rule_id=RULE_CAP)
+        flow_data: dict[str, Any] = {}
+        if choices is not None:
+            flow_data["choices"] = list(choices)
+        if answers is not None:
+            flow_data["answers"] = answers
+        if flow_data:
+            await merge_flow_data(conn, invoice_id, flow_data)
+        await set_state(conn, invoice_id, CONFIRMING, rule_id=rule_id)
     return invoice_id
+
+
+async def _invoice_in(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, state: str) -> int:
+    """Create an invoice in state, which needs no rule id."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_flow(conn, invoice_id, FLOW)
+        await set_state(conn, invoice_id, state)
+    return invoice_id
+
+
+async def _waiting_invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str) -> int:
+    """Create a BR-D06 invoice in CONFIRMING and return its id."""
+    return await _confirming_invoice(pool, profile_id, RULE_CAP)
 
 
 async def _batched_invoice(
@@ -112,10 +147,10 @@ async def _texts(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str 
     return [(rule_id, str(text)) for rule_id, text in await cur.fetchall()]
 
 
-async def test_continue_moves_the_invoice_to_fetching_docs(
+async def test_continue_stores_the_cap_answer_and_reroutes(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.13, BR-D06: [Continuar] on a BR-D06 invoice moves it on with a fetch job."""
+    """BR-D06: [Continuar] stores cap_ok, sets ROUTING and queues a route job."""
     profile_id = _profile()
     invoice_id = await _waiting_invoice(db_pool, profile_id)
     msg = _press(invoice_id, "continue", profile_id)
@@ -123,14 +158,128 @@ async def test_continue_moves_the_invoice_to_fetching_docs(
     async with db_pool.connection() as conn:
         result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
         invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
 
     assert result.status == "stored"
     assert result.invoice_id == invoice_id
-    assert invoice == ("FETCHING_DOCS", RULE_CAP)
-    assert jobs == ["fetch"]
+    assert flow_data["answers"]["cap_ok"] is True
+    assert invoice == (ROUTING, RULE_CAP)
+    assert jobs == ["route"]
     assert texts == []
+
+
+async def test_pick_stores_the_chosen_flow_and_reroutes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-R03: [pick] choice 1 stores the second candidate, sets ROUTING and queues a route job."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    msg = _press(invoice_id, "pick", profile_id, choice=1)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert flow_data["answers"]["flow"] == FLOW_CHOICES[1]
+    assert invoice == (ROUTING, RULE_ASK)
+    assert jobs == ["route"]
+    assert texts == []
+
+
+async def test_pick_on_a_buyer_question_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: [pick] on a BR-R04 invoice answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BUYER)
+    msg = _press(invoice_id, "pick", profile_id, choice=0)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert invoice == (CONFIRMING, RULE_BUYER)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(CONFIRMING)))]
+
+
+@pytest.mark.parametrize(("action", "buyer_ok"), [("yes", True), ("change", False)])
+async def test_yes_and_change_store_the_buyer_answer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    action: str,
+    buyer_ok: bool,
+) -> None:
+    """BR-R04: [Sí] stores buyer_ok true and [Cambiar] stores it false, then re-routes."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BUYER)
+    msg = _press(invoice_id, action, profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert flow_data["answers"]["buyer_ok"] is buyer_ok
+    assert invoice == (ROUTING, RULE_BUYER)
+    assert jobs == ["route"]
+
+
+async def test_brand_with_an_out_of_range_choice_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-R09: [brand] choice 5 of 2 answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BRAND, choices=FLOW_CHOICES)
+    msg = _press(invoice_id, "brand", profile_id, choice=5)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert invoice == (CONFIRMING, RULE_BRAND)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(CONFIRMING)))]
+
+
+async def test_an_answer_keeps_the_answers_stored_before_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D92: a later flow answer keeps the buyer_ok stored before it."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BUYER)
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _press(invoice_id, "yes", profile_id), max_queued_per_sender=MAX_QUEUED)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await merge_flow_data(conn, invoice_id, {"choices": list(FLOW_CHOICES)})
+        await set_state(conn, invoice_id, CONFIRMING, rule_id=RULE_ASK)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, _press(invoice_id, "pick", profile_id, choice=0), max_queued_per_sender=MAX_QUEUED
+        )
+        flow_data = await load_flow_data(conn, invoice_id)
+
+    assert flow_data["answers"] == {"buyer_ok": True, "flow": FLOW_CHOICES[0]}
 
 
 async def test_cancel_cancels_the_invoice_and_replies(
@@ -152,6 +301,48 @@ async def test_cancel_cancels_the_invoice_and_replies(
     assert invoice == ("CANCELLED", RULE_CAP)
     assert jobs == []
     assert texts == [(None, CANCELLED_BY_USER.format(id=invoice_id))]
+
+
+async def test_cancel_in_fetching_docs_cancels_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D06: [Cancelar] in FETCHING_DOCS moves the invoice to CANCELLED and replies."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, FETCHING_DOCS)
+    msg = _press(invoice_id, "cancel", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == ("CANCELLED", RULE_CAP)
+    assert jobs == []
+    assert texts == [(None, CANCELLED_BY_USER.format(id=invoice_id))]
+
+
+async def test_cancel_in_delivering_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: [Cancelar] in DELIVERING answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, DELIVERING)
+    msg = _press(invoice_id, "cancel", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (DELIVERING, None)
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DELIVERING)))]
 
 
 async def test_sent_closes_a_prepared_batch_and_deletes_the_photo(
