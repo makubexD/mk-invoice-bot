@@ -28,6 +28,8 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import Job
+from invoicebot.rules.catalog import RULES
+from invoicebot.states import NEEDS_RULE
 from invoicebot.store.invoices import create_invoice, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -149,7 +151,10 @@ async def _invoice_in_state(
     async with pool.connection() as conn:
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         if state != "RECEIVED":
-            await set_state(conn, invoice_id, state)
+            rule_id = None
+            if state in NEEDS_RULE:
+                rule_id = next(rule.id for rule in RULES.values() if rule.state == state)
+            await set_state(conn, invoice_id, state, rule_id=rule_id)
     return invoice_id
 
 

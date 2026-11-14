@@ -177,7 +177,7 @@ class CancellingGraphMode:
     async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
         """Cancel the invoice during the send."""
         async with self._pool.connection() as conn, conn.transaction():
-            await set_state(conn, invoice_id, "CANCELLED")
+            await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-E05")
 
 
 def _field(value: str) -> Field:
@@ -537,7 +537,7 @@ async def test_a_cancelled_invoice_still_marks_the_batch_sent(
         invoice = await _invoice_state(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
-    assert invoice == ("CANCELLED", None)
+    assert invoice == ("CANCELLED", "BR-E05")
     assert batch_state == "sent"
     assert outbox == []
 

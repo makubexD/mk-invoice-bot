@@ -16,6 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import ChannelName
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
+from invoicebot.states import StateMoved
 from invoicebot.store.invoices import (
     FileRecord,
     InvoiceHead,
@@ -157,6 +158,75 @@ async def test_set_state_records_state_rule_and_error(
         row = await cur.fetchone()
 
     assert row == ("CANCELLED", "BR-E07", "too_large")
+
+
+async def test_set_state_rejects_a_needs_rule_state_without_a_rule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S5.2: entering CANCELLED without a rule id is refused before any write."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        with pytest.raises(ValueError, match="CANCELLED needs a rule id"):
+            await set_state(conn, invoice_id, "CANCELLED")
+        state = await get_state(conn, invoice_id)
+
+    assert state == ("RECEIVED", "yo")
+
+
+async def test_set_state_rejects_an_unknown_rule_id(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S5.2: a rule id that is not in the catalog is refused before any write."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        with pytest.raises(ValueError, match="unknown rule id 'BR-X99'"):
+            await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-X99")
+        state = await get_state(conn, invoice_id)
+
+    assert state == ("RECEIVED", "yo")
+
+
+async def test_set_state_allows_a_rule_free_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S5.2: DELIVERING is not in NEEDS_RULE, so it moves without a rule id."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, "DELIVERING")
+        cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+
+    assert row == ("DELIVERING", None)
+
+
+async def test_set_state_with_a_stale_expected_state_raises_state_moved(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D95: a transition expected from FETCHING_DOCS loses to the CANCELLED row and changes nothing."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-E07")
+        with pytest.raises(StateMoved) as raised:
+            await set_state(conn, invoice_id, "DELIVERING", expected="FETCHING_DOCS")
+        state = await get_state(conn, invoice_id)
+
+    assert raised.value.invoice_id == invoice_id
+    assert raised.value.expected == "FETCHING_DOCS"
+    assert raised.value.actual == "CANCELLED"
+    assert state == ("CANCELLED", "yo")
+
+
+async def test_set_state_with_a_matching_expected_state_moves_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D95: the UPDATE matches a row still in the expected state and moves it."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, "FETCHING_DOCS")
+        await set_state(conn, invoice_id, "DELIVERING", expected="FETCHING_DOCS")
+        state = await get_state(conn, invoice_id)
+
+    assert state == ("DELIVERING", "yo")
 
 
 async def test_count_active_jobs_ignores_parked_jobs(

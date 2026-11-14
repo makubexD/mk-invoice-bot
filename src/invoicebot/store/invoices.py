@@ -13,6 +13,8 @@ from psycopg.types.json import Jsonb
 
 from invoicebot.channels.base import AttachmentKind, ChannelName
 from invoicebot.extract.fields import Reading, reading_from_json, reading_to_json
+from invoicebot.rules.catalog import RULES
+from invoicebot.states import NEEDS_RULE, StateMoved
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -110,9 +112,33 @@ async def set_state(
     *,
     rule_id: str | None = None,
     error: str | None = None,
+    expected: str | None = None,
 ) -> None:
-    """Move invoice_id to state, record rule_id and error, and stamp updated_at."""
-    await conn.execute(
+    """Move invoice_id to state, record rule_id and error, and stamp updated_at.
+
+    A state in ``NEEDS_RULE`` requires a catalogued rule id (S5.2), and any rule id
+    given must be in :data:`invoicebot.rules.catalog.RULES`. With ``expected``, the
+    UPDATE only matches a row still in that state; when it moved on, :class:`StateMoved`
+    carries the state found and the row is left unchanged (D95). Does not commit.
+    """
+    if state in NEEDS_RULE and rule_id is None:
+        raise ValueError(f"{state} needs a rule id")
+    if rule_id is not None and rule_id not in RULES:
+        raise ValueError(f"unknown rule id {rule_id!r}")
+    if expected is None:
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET state = %s,
+                rule_id = %s,
+                error = %s,
+                updated_at = now()
+            WHERE id = %s
+            """,
+            (state, rule_id, error, invoice_id),
+        )
+        return
+    cur = await conn.execute(
         """
         UPDATE invoices
         SET state = %s,
@@ -120,9 +146,19 @@ async def set_state(
             error = %s,
             updated_at = now()
         WHERE id = %s
+          AND state = %s
         """,
-        (state, rule_id, error, invoice_id),
+        (state, rule_id, error, invoice_id, expected),
     )
+    if cur.rowcount == 0:
+        raise StateMoved(invoice_id, expected, await _read_state(conn, invoice_id))
+
+
+async def _read_state(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
+    """Return the stored state of invoice_id, or None when the row does not exist."""
+    cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    return None if row is None else str(row[0])
 
 
 async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
