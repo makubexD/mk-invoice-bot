@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Iterable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 
@@ -22,6 +23,10 @@ from invoicebot.net.guard import GuardReason
 
 _HEAD_END = b"\r\n\r\n"
 _IDLE_TIMEOUT_S = 30
+#: A short idle timeout, so the deadline tests do not wait the real one out.
+_SHORT_IDLE_TIMEOUT_S = 0.2
+#: How long a test waits for a request that must never be forwarded.
+_SETTLE_S = 0.2
 _START_HOST = "start.test"
 _EVIL_HOST = "evil.test"
 _ALLOWED_ADDRESS = "127.0.0.1"
@@ -39,6 +44,19 @@ class _FakeResolver:
     async def resolve(self, host: str) -> list[str]:
         """Return the canned addresses for ``host``."""
         return self._answers.get(host, [])
+
+
+class _SlowResolver:
+    """A resolver that answers only after a delay, so the lookup deadline can cancel it."""
+
+    def __init__(self, delay_s: float) -> None:
+        self._delay_s = delay_s
+
+    async def resolve(self, host: str) -> list[str]:
+        """Sleep for the delay, then answer with the allowed address."""
+        del host
+        await asyncio.sleep(self._delay_s)
+        return [_ALLOWED_ADDRESS]
 
 
 def _allow(_addresses: Iterable[str]) -> None:
@@ -77,6 +95,43 @@ async def echo_port() -> AsyncIterator[int]:
 async def _connect(port: int) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
     """Open a client connection to the proxy on 127.0.0.1."""
     return await asyncio.open_connection("127.0.0.1", port)
+
+
+@dataclass
+class _CountedSite:
+    """An http origin on loopback that counts the request heads it receives."""
+
+    port: int
+    requests: int = 0
+
+
+@pytest_asyncio.fixture
+async def counted_site() -> AsyncIterator[_CountedSite]:
+    """An http origin on 127.0.0.1 that ignores ``Connection: close`` and keeps answering.
+
+    Keeping the connection open is what lets a two-way pipe carry a second request to it.
+    """
+    site = _CountedSite(port=0)
+
+    async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            while True:
+                await reader.readuntil(_HEAD_END)
+                site.requests += 1
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok")
+                await writer.drain()
+        except (asyncio.IncompleteReadError, asyncio.LimitOverrunError, OSError):
+            pass
+        finally:
+            writer.close()
+
+    server = await asyncio.start_server(handle, _ALLOWED_ADDRESS, 0)
+    site.port = server.sockets[0].getsockname()[1]
+    try:
+        yield site
+    finally:
+        server.close()
+        await server.wait_closed()
 
 
 async def test_connect_to_loopback_is_refused_as_private() -> None:
@@ -151,6 +206,63 @@ async def test_get_to_listed_http_host_is_forwarded_in_origin_form(echo_port: in
     assert forwarded == b"GET /x?a=1 HTTP/1.1\r\nHost: listed.test\r\nConnection: close\r\n\r\n"
 
 
+async def test_forwarded_get_never_forwards_a_second_request(counted_site: _CountedSite) -> None:
+    """R-5.10: after the forwarded GET, a second request on the connection never reaches the upstream."""
+    resolver = _FakeResolver({"listed.test": [_ALLOWED_ADDRESS]})
+    async with GuardProxy(
+        frozenset({"listed.test"}), resolver, idle_timeout_s=_SHORT_IDLE_TIMEOUT_S, check_addresses=_allow
+    ) as proxy:
+        reader, writer = await _connect(proxy.port)
+        try:
+            writer.write(
+                f"GET http://listed.test:{counted_site.port}/one HTTP/1.1\r\n"
+                "Host: listed.test\r\nConnection: keep-alive\r\n\r\n".encode()
+            )
+            await writer.drain()
+            await reader.readuntil(_HEAD_END)
+            with suppress(OSError):
+                writer.write(
+                    f"GET http://listed.test:{counted_site.port}/two HTTP/1.1\r\n"
+                    "Host: listed.test\r\nConnection: keep-alive\r\n\r\n".encode()
+                )
+                await writer.drain()
+            await asyncio.sleep(_SETTLE_S)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    assert counted_site.requests == 1
+
+
+async def test_client_that_sends_nothing_is_closed_by_the_idle_timeout() -> None:
+    """R-5.10: a client that sends no request head is closed after the idle timeout."""
+    resolver = _FakeResolver({})
+    async with GuardProxy(frozenset(), resolver, idle_timeout_s=_SHORT_IDLE_TIMEOUT_S) as proxy:
+        reader, writer = await _connect(proxy.port)
+        try:
+            async with asyncio.timeout(_SHORT_IDLE_TIMEOUT_S * 10):
+                received = await reader.read(1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    assert received == b""
+
+
+async def test_slow_resolution_is_refused_as_unresolvable() -> None:
+    """R-5.10: a DNS lookup that outlasts the idle timeout is refused and recorded."""
+    resolver = _SlowResolver(delay_s=_SHORT_IDLE_TIMEOUT_S * 5)
+    async with GuardProxy(frozenset(), resolver, idle_timeout_s=_SHORT_IDLE_TIMEOUT_S) as proxy:
+        reader, writer = await _connect(proxy.port)
+        try:
+            writer.write(b"CONNECT slow.test:443 HTTP/1.1\r\n\r\n")
+            await writer.drain()
+            response = await reader.readuntil(_HEAD_END)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+    assert response.startswith(b"HTTP/1.1 403")
+    assert proxy.blocked == {"slow.test": GuardReason.UNRESOLVABLE}
+
+
 async def test_malformed_head_is_bad_request() -> None:
     """R-5.10: a head that is not a request line is refused with 400."""
     resolver = _FakeResolver({})
@@ -192,6 +304,33 @@ async def test_thirty_third_tunnel_is_refused(echo_port: int) -> None:
                 await tunnel.wait_closed()
     assert response.startswith(b"HTTP/1.1 429")
     assert proxy.blocked == {}
+
+
+async def test_concurrent_connects_never_exceed_the_slot_cap(echo_port: int) -> None:
+    """R-5.10: 40 concurrent CONNECTs reserve slots before opening, so at most 32 get 200."""
+    resolver = _FakeResolver({"loopback.test": ["127.0.0.1"]})
+    async with GuardProxy(
+        frozenset(), resolver, idle_timeout_s=_IDLE_TIMEOUT_S, check_addresses=_allow, https_port=echo_port
+    ) as proxy:
+        writers: list[asyncio.StreamWriter] = []
+
+        async def connect() -> bytes:
+            reader, writer = await _connect(proxy.port)
+            writers.append(writer)
+            writer.write(f"CONNECT loopback.test:{echo_port} HTTP/1.1\r\n\r\n".encode())
+            await writer.drain()
+            return await reader.readuntil(_HEAD_END)
+
+        try:
+            responses = await asyncio.gather(*(connect() for _ in range(40)))
+        finally:
+            for writer in writers:
+                writer.close()
+            for writer in writers:
+                await writer.wait_closed()
+
+    established = [response for response in responses if response.startswith(b"HTTP/1.1 200")]
+    assert len(established) <= 32
 
 
 async def test_head_over_16_kib_is_bad_request() -> None:

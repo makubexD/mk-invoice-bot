@@ -12,11 +12,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from types import TracebackType
 from urllib.parse import SplitResult, urlsplit
 
-from invoicebot.net.guard import GuardReason, Resolver, check_addresses, check_url
+from invoicebot.net.guard import (
+    CheckAddresses,
+    GuardReason,
+    Resolver,
+    check_addresses,
+    check_url,
+    resolve_and_check,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +44,6 @@ _HTTP_429 = b"HTTP/1.1 429 Too Many Requests\r\n\r\n"
 _HTTP_502 = b"HTTP/1.1 502 Bad Gateway\r\n\r\n"
 _ESTABLISHED = b"HTTP/1.1 200 Connection Established\r\n\r\n"
 _CLOSE_HEADER = b"Connection: close\r\n"
-
-type CheckAddresses = Callable[[Iterable[str]], GuardReason | None]
 
 
 class GuardProxy:
@@ -72,6 +77,7 @@ class GuardProxy:
         self.blocked: dict[str, GuardReason] = {}
         self._server: asyncio.Server | None = None
         self._open: set[asyncio.StreamWriter] = set()
+        self._opening = 0
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
@@ -113,7 +119,8 @@ class GuardProxy:
         """Read one request head and dispatch it, closing the client in every case."""
         try:
             try:
-                head = await reader.readuntil(_HEAD_END)
+                async with asyncio.timeout(self._idle_timeout_s):
+                    head = await reader.readuntil(_HEAD_END)
             except (asyncio.IncompleteReadError, asyncio.LimitOverrunError):
                 head = None
             if head is None:
@@ -179,7 +186,11 @@ class GuardProxy:
         version: bytes,
         header_block: bytes,
     ) -> None:
-        """Serve an absolute-form GET: check the URL, then forward to the pinned address."""
+        """Serve one absolute-form GET: check the URL, forward it once and relay the answer.
+
+        Only the upstream's answer is relayed: a second request written on the same client
+        connection ends it instead of reaching the pinned upstream unchecked.
+        """
         try:
             url = target.decode("ascii")
         except UnicodeDecodeError:
@@ -205,7 +216,7 @@ class GuardProxy:
         try:
             upstream_writer.write(_forward_request(version, origin, header_block))
             await upstream_writer.drain()
-            await _pipe(reader, writer, upstream_reader, upstream_writer, self._idle_timeout_s)
+            await _relay_response(reader, writer, upstream_reader, self._idle_timeout_s)
         finally:
             self._open.discard(upstream_writer)
             upstream_writer.close()
@@ -213,28 +224,39 @@ class GuardProxy:
     async def _open_upstream(
         self, writer: asyncio.StreamWriter, host: str, port: int
     ) -> tuple[asyncio.StreamReader, asyncio.StreamWriter] | None:
-        """Open the pinned upstream, answering 429 when full and 502 when it cannot connect."""
-        if len(self._open) >= _MAX_OPEN:
+        """Open the pinned upstream, answering 429 when full and 502 when it cannot connect.
+
+        The slot is reserved before the awaited open, so open plus opening never exceeds
+        ``_MAX_OPEN`` even when requests arrive together.
+        """
+        if len(self._open) + self._opening >= _MAX_OPEN:
             await _write(writer, _HTTP_429)
             return None
+        self._opening += 1
         try:
             async with asyncio.timeout(self._idle_timeout_s):
-                upstream_reader, upstream_writer = await asyncio.open_connection(host, port)
+                upstream = await asyncio.open_connection(host, port)
         except (OSError, TimeoutError):
+            upstream = None
+        finally:
+            self._opening -= 1
+        if upstream is None:
             await _write(writer, _HTTP_502)
             return None
+        upstream_reader, upstream_writer = upstream
         self._open.add(upstream_writer)
         return upstream_reader, upstream_writer
 
     async def _resolve_pin(self, host: str) -> tuple[str, GuardReason | None]:
-        """Resolve ``host`` once and return the address to pin, or the reason to refuse."""
-        addresses = await self._resolver.resolve(host)
-        if not addresses:
+        """Resolve ``host`` once and return the address to pin, or the reason to refuse.
+
+        A lookup that outlasts the idle timeout is refused as unresolvable.
+        """
+        try:
+            async with asyncio.timeout(self._idle_timeout_s):
+                return await resolve_and_check(host, self._resolver, self._check_addresses)
+        except TimeoutError:
             return "", GuardReason.UNRESOLVABLE
-        reason = self._check_addresses(addresses)
-        if reason is not None:
-            return "", reason
-        return addresses[0], None
 
     async def _refuse(self, writer: asyncio.StreamWriter, reason: GuardReason, host: str | None) -> None:
         """Answer 403 and keep the host's first refusal reason, up to ``_MAX_BLOCKED_HOSTS``."""
@@ -325,6 +347,45 @@ async def _write(writer: asyncio.StreamWriter, response: bytes) -> None:
     await writer.drain()
 
 
+async def _pump(source: asyncio.StreamReader, sink: asyncio.StreamWriter, idle_timeout_s: float) -> None:
+    """Copy ``source`` into ``sink`` until it closes or a read idles out."""
+    while True:
+        async with asyncio.timeout(idle_timeout_s):
+            chunk = await source.read(_PIPE_CHUNK)
+        if not chunk:
+            return
+        sink.write(chunk)
+        await sink.drain()
+
+
+async def _relay_response(
+    client_reader: asyncio.StreamReader,
+    client_writer: asyncio.StreamWriter,
+    upstream_reader: asyncio.StreamReader,
+    idle_timeout_s: float,
+) -> None:
+    """Copy the upstream's answer to the client, one way, until either side ends.
+
+    The client's bytes are never forwarded: anything it sends after the first request (a
+    second request on a kept-alive connection) or its close ends the relay (R-5.10).
+    """
+    tasks = [
+        asyncio.create_task(_pump(upstream_reader, client_writer, idle_timeout_s)),
+        asyncio.create_task(_until_readable(client_reader)),
+    ]
+    try:
+        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            task.result()
+    finally:
+        await _cancel_and_await(tasks)
+
+
+async def _until_readable(reader: asyncio.StreamReader) -> None:
+    """Return once ``reader`` has a byte or reaches its end; the byte is discarded."""
+    await reader.read(1)
+
+
 async def _pipe(
     client_reader: asyncio.StreamReader,
     client_writer: asyncio.StreamWriter,
@@ -333,19 +394,9 @@ async def _pipe(
     idle_timeout_s: float,
 ) -> None:
     """Pipe bytes both ways until one side closes or an idle read times out."""
-
-    async def pump(source: asyncio.StreamReader, sink: asyncio.StreamWriter) -> None:
-        while True:
-            async with asyncio.timeout(idle_timeout_s):
-                chunk = await source.read(_PIPE_CHUNK)
-            if not chunk:
-                return
-            sink.write(chunk)
-            await sink.drain()
-
     pumps = [
-        asyncio.create_task(pump(client_reader, upstream_writer)),
-        asyncio.create_task(pump(upstream_reader, client_writer)),
+        asyncio.create_task(_pump(client_reader, upstream_writer, idle_timeout_s)),
+        asyncio.create_task(_pump(upstream_reader, client_writer, idle_timeout_s)),
     ]
     try:
         done, _pending = await asyncio.wait(pumps, return_when=asyncio.FIRST_COMPLETED)
