@@ -6,7 +6,28 @@ another drive later, is a new module that implements these protocols.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Protocol
+
+
+@dataclass(frozen=True)
+class Attachment:
+    """One file in an outgoing mail: its file name, bytes and MIME type."""
+
+    name: str
+    data: bytes
+    mime: str
+
+
+@dataclass(frozen=True)
+class OutgoingMail:
+    """One mail to send: its recipients, subject, body and attachments."""
+
+    to: tuple[str, ...]
+    cc: tuple[str, ...]
+    subject: str
+    body: str
+    attachments: tuple[Attachment, ...]
 
 
 class Drive(Protocol):
