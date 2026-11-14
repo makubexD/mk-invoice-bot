@@ -365,6 +365,10 @@ class PaidApi(BaseModel):
     provider: str
 
 
+#: The worker's job lease; a portal fetch must end before it (R-5.1).
+JOB_LEASE_S = 300
+
+
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -373,6 +377,16 @@ class Retrieval(BaseModel):
     email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi
+
+    @model_validator(mode="after")
+    def _portal_fetch_fits_in_job_lease(self) -> Self:
+        """R-5.1: a portal fetch must end before the job lease expires."""
+        if self.portal_timeout_s >= JOB_LEASE_S:
+            raise ValueError(
+                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) must be less than "
+                f"the job lease ({JOB_LEASE_S}s)"
+            )
+        return self
 
 
 class GapsGithub(BaseModel):
