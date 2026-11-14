@@ -154,14 +154,15 @@ Test: `uv run pytest -q tests/integration/test_pipeline_route.py`.
 
 ## Step 12: Button answers (S4.3, S4.4, BR-R09, D92) `[worker]`
 
-Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/store/flow_b.py` (only if a helper is missing), tests in `tests/integration/test_pipeline_actions.py`.
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/pipeline/questions.py`, `src/invoicebot/pipeline/route.py`, `src/invoicebot/store/flow_b.py` (only if a helper is missing), tests in `tests/integration/test_pipeline_actions.py` and `tests/integration/test_pipeline_route.py`. Sent as two parts: (a) choices and constants, (b) the actions.
 
-- New actions, each valid only in `CONFIRMING` with the given `rule_id` (otherwise BR-S02, as stale buttons are answered today):
-  - `pick` (BR-R03): `answers.flow` = the id of candidate `choice` (recompute `candidate_flows`; out of range → BR-S02).
+- (a) Routing stores what it offered: when it asks BR-R03 it merges `flow_data["choices"] = [flow ids]` (the candidates, in button order); when it asks BR-R09, `flow_data["choices"] = [comercios]`. The button-action names and `RULE_CAP` move from `actions.py` to `questions.py` (the questions own their buttons), and `actions.py` imports them, so the two modules never import each other. (Amended 2026-11-14: replaces a config factory that would have threaded config through intake, the webhook and the app.)
+- (b) New actions, each valid only in `CONFIRMING` with the given `rule_id` (otherwise BR-S02, as stale buttons are answered today):
+  - `pick` (BR-R03): `answers.flow` = `choices[choice]` (missing or out of range → BR-S02).
   - `yes` (BR-R04): `answers.buyer_ok = true`. `change` (BR-R04): `answers.buyer_ok = false`.
-  - `brand` (BR-R09): `answers.comercio` = the brand at `choice` (out of range → BR-S02).
+  - `brand` (BR-R09): `answers.comercio` = `choices[choice]` (missing or out of range → BR-S02).
   - `continue` (BR-D06): now `answers.cap_ok = true` instead of moving to `FETCHING_DOCS` itself.
-- Each stores the answer with `merge_flow_data`, sets `ROUTING` (`expected="CONFIRMING"`) and enqueues the route step. The actions that need config (`pick`, `brand`) get it through the action registry's construction (a factory taking `flows`, `profiles` and the store directory), not a global.
+- Each stores the answer with `merge_flow_data`, sets `ROUTING` (`expected="CONFIRMING"`) and enqueues the route step. No action reads config: the route step validates the answer again on its next run (D92).
 - `cancel` becomes valid in every `CANCELLABLE` state (the summary's [Cancelar], R-3.4).
 
 Test cases: `pick` choice 1 on BR-R03 → `answers.flow` = second candidate, `ROUTING`, one route job; `pick` on a BR-R04 invoice → BR-S02, no change; `yes`/`change` store `buyer_ok`; `brand` choice 5 of 2 → BR-S02; `continue` on BR-D06 → `cap_ok`, `ROUTING`; `cancel` in `FETCHING_DOCS` → `CANCELLED`; `cancel` in `DELIVERING` → BR-S02.
