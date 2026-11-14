@@ -69,9 +69,14 @@ jobs:
       - name: Pytest
         run: uv run pytest -q --cov --cov-fail-under=90
 
+      # R-11.6: a todo/broken portal fails only the pull request that adds or changes its file.
       - name: Check config (pull request)
         if: github.event_name == 'pull_request'
-        run: uv run python scripts/check_config.py --pr
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git diff --name-only "origin/${BASE_REF}...HEAD" -- config/portals > "$RUNNER_TEMP/changed.txt"
+          xargs -a "$RUNNER_TEMP/changed.txt" -d '\n' uv run python scripts/check_config.py --pr
 
       - name: Check config
         if: github.event_name != 'pull_request'

@@ -29,15 +29,17 @@ class Problem:
     blocking: bool
 
 
-def run_checks(cfg: Config, directory: StoreDirectory, *, pr_mode: bool) -> list[Problem]:
+def run_checks(cfg: Config, directory: StoreDirectory, *, changed_portals: frozenset[str]) -> list[Problem]:
     """Return every problem found in ``cfg`` and ``directory`` (R-11.6, R-5.8, D43).
 
     Portal problems point at ``portals/<key>.yaml:<field>`` and store problems
     at ``stores/<ruc>.yaml:<field>``. A blocking problem fails CI.
+    ``changed_portals`` holds the keys of the portal files a pull request adds or
+    changes; only those block while todo/broken. On ``main`` it is empty.
     """
     problems: list[Problem] = []
     for key, portal in directory.portals.items():
-        problems.extend(_portal_problems(key, portal, pr_mode=pr_mode))
+        problems.extend(_portal_problems(key, portal, changed=key in changed_portals))
     for ruc, store in directory.stores.items():
         problems.extend(_store_problems(ruc, store, directory.portals))
     problems.extend(_llm_fallback_problems(cfg))
@@ -45,7 +47,7 @@ def run_checks(cfg: Config, directory: StoreDirectory, *, pr_mode: bool) -> list
     return problems
 
 
-def _portal_problems(key: str, portal: Portal, *, pr_mode: bool) -> list[Problem]:
+def _portal_problems(key: str, portal: Portal, *, changed: bool) -> list[Problem]:
     problems: list[Problem] = []
     if portal.status != "active":
         problems.append(
@@ -53,7 +55,7 @@ def _portal_problems(key: str, portal: Portal, *, pr_mode: bool) -> list[Problem
                 code="PORTAL_NOT_ACTIVE",
                 path=f"portals/{key}.yaml:status",
                 message=f"portal '{portal.key}' has status '{portal.status}'; only active portals are used",
-                blocking=pr_mode,
+                blocking=changed,
             )
         )
     adapter_problem = _adapter_problem(key, portal)

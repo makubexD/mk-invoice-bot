@@ -72,7 +72,7 @@ Anything bigger gets split before work starts.
   - Unknown keys are rejected.
   - `{owner.ruc}` placeholders are resolved.
   - `check_config.py` exits ≠ 0 on an invalid config, and lists the problems.
-  - With `--pr`, it also exits ≠ 0 on any portal with `status: todo|broken`; without it (on `main`), it only lists them.
+  - With `--pr FILE...` (the pull request's changed files), it also exits ≠ 0 on a portal with `status: todo|broken` whose `portals/<key>.yaml` is among them; any other todo/broken portal, and every one on `main`, is only listed.
   - A `python:` adapter outside `invoicebot.fetchers.portals.*` is rejected (R-5.8).
   - `llm_fallback` enabled for `work_microsoft` is rejected while the provider is `deepseek` (D43).
   - YAML is loaded only with `yaml.safe_load`.
