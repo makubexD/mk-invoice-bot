@@ -5,8 +5,8 @@ an invoice in ``DELIVERING`` whose flow has a OneDrive folder sink: it picks the
 sequence number, fills the pinned Excel and builds the mail from the step-6 values. The
 flow's first mail mode then takes over. The assisted mode writes the ``.eml`` and, in one
 transaction, opens a ``prepared`` batch, records the draft file and moves the invoice to
-``BATCHED`` with BR-D07 and its [Ya lo envié] button (R-8.1). The automatic mode arrives in
-part B of the plan.
+``BATCHED`` with BR-D07 and its [Ya lo envié] button (R-8.1). The automatic mode is not wired
+yet.
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, modes_desc
+from invoicebot.rules.messages_es import MESSAGES, SENT_BUTTON_TITLE, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import build_excel
 from invoicebot.sinks.expr import render
@@ -72,8 +72,6 @@ RULE_BATCHED = "BR-D07"
 DRY_RUN_MODE = "dry_run"
 #: The button action that confirms the owner sent the draft (R-7.8, R-8.1).
 SENT_ACTION = "sent"
-#: The [Ya lo envié] button's label (R-8.1).
-SENT_BUTTON_TITLE = "Ya lo envié"
 
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"

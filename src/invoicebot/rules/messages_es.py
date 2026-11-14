@@ -246,10 +246,7 @@ def tipo_phrase(tipo: str) -> str:
 
 def tipos_desc(tipos: Sequence[str]) -> str:
     """Return BR-R08's ``{accepted_desc}``: "facturas", "facturas y boletas"."""
-    words = [TIPO_PLURAL_DESC.get(tipo, tipo) for tipo in tipos]
-    if len(words) < 2:
-        return "".join(words)
-    return f"{', '.join(words[:-1])} y {words[-1]}"
+    return _join_es([TIPO_PLURAL_DESC.get(tipo, tipo) for tipo in tipos])
 
 
 def fields_desc(names: Sequence[str]) -> str:
@@ -293,22 +290,24 @@ def fetcher_desc(name: str) -> str:
     return FETCHER_DESC.get(name, name)
 
 
-def docs_desc(kinds: Sequence[str]) -> str:
-    """Return BR-F07's ``{manual_docs_desc}``: "el PDF", "el PDF y el XML"."""
-    words = [DOC_DESC.get(kind, kind) for kind in kinds]
+def _join_es(words: Sequence[str]) -> str:
+    """Join words as "a", "a y b" or "a, b y c"."""
     if len(words) < 2:
         return "".join(words)
     return f"{', '.join(words[:-1])} y {words[-1]}"
 
 
-# --- Delivery texts (docs/plan-mvp-file-b.md step 19) --------------------------------------
-#: BR-D07's ``{modes_desc}`` per mail mode (R-7.7). The copy is pending the owner's review.
+def docs_desc(kinds: Sequence[str]) -> str:
+    """Return BR-F07's ``{manual_docs_desc}``: "el PDF", "el PDF y el XML"."""
+    return _join_es([DOC_DESC.get(kind, kind) for kind in kinds])
+
+
+#: BR-D07's ``{modes_desc}`` per mail mode (R-7.7).
 MAIL_MODE_DESC: dict[str, str] = {"dry_run": "borrador .eml"}
+#: The [Ya lo envié] button's label (R-8.1).
+SENT_BUTTON_TITLE = "Ya lo envié"
 
 
 def modes_desc(modes: Sequence[str]) -> str:
     """Return BR-D07's ``{modes_desc}``: the es-PE name of each mail mode (R-7.7)."""
-    words = [MAIL_MODE_DESC.get(mode, mode) for mode in modes]
-    if len(words) < 2:
-        return "".join(words)
-    return f"{', '.join(words[:-1])} y {words[-1]}"
+    return _join_es([MAIL_MODE_DESC.get(mode, mode) for mode in modes])
