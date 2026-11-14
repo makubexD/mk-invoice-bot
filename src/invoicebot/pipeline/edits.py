@@ -13,7 +13,6 @@ a ``PENDING_USER`` invoice is unparked first (D94).
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -27,12 +26,18 @@ from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
 from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, OVERRIDE_KEYS, edit_target
+from invoicebot.pipeline.overrides import (
+    MAX_OVERRIDE_CHARS,
+    OVERRIDE_KEYS,
+    edit_target,
+    without_accents,
+)
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
 from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state, unpark
+from invoicebot.text import replace_unsafe_chars
 
 #: The most edit lines one message may carry; later lines each get an error.
 MAX_EDIT_LINES = 10
@@ -44,17 +49,18 @@ ALIASES: Mapping[str, str] = {
 }
 #: The document type implied by a serie's first letter (R-3.5, D97).
 TIPO_BY_SERIE_PREFIX: Mapping[str, str] = {"F": "01", "B": "03"}
-#: The stored routing answers (D92) each edited field invalidates: the flow and the buyer
-#: check follow the buyer, the brand the issuer and serie, the cap the total (R-3.5).
+#: The stored routing answers (D92) each edited field invalidates: the flow, the buyer
+#: check and the cap follow the buyer, the brand the issuer and serie, the cap the total (R-3.5).
 STALE_ANSWERS: Mapping[str, frozenset[str]] = {
-    "num_doc_adq": frozenset({"flow", "buyer_ok"}),
+    "num_doc_adq": frozenset({"flow", "buyer_ok", "cap_ok"}),
     "ruc_emisor": frozenset({"comercio"}),
     "serie": frozenset({"comercio"}),
     "total": frozenset({"cap_ok"}),
 }
 
 _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
-_TOTAL_PATTERN = re.compile(r"[0-9]+(?:[.,][0-9]{1,2})?")
+#: At most 10 integer digits, since ``invoices.total`` is ``NUMERIC(12,2)`` (R-3.5).
+_TOTAL_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
 
 _Validator = Callable[[str], tuple[str | None, str | None]]
 
@@ -185,6 +191,21 @@ def _edited_reading(reading: Reading | None, edits: Mapping[str, str]) -> Readin
     return Reading(fields={**base.fields, **user_fields}, document_url=base.document_url)
 
 
+def error_text(error: EditError) -> str:
+    """Return the reply text for one rejected edit line (BR-E02, BR-E03, R-3.5, R-12.8).
+
+    The invalid-line reply echoes the line with its unsafe characters replaced and
+    capped at :data:`MAX_OVERRIDE_CHARS`, so untrusted text cannot carry controls into
+    the answer (R-12.8).
+    """
+    if error.rule_id == RULE_BAD_RUC:
+        return MESSAGES[RULE_BAD_RUC].format(ruc=error.value)
+    if error.rule_id == RULE_BAD_DATE:
+        return MESSAGES[RULE_BAD_DATE].format(fecha=error.value)
+    echoed = replace_unsafe_chars(error.line)[:MAX_OVERRIDE_CHARS]
+    return EDIT_INVALID.format(line=echoed)
+
+
 async def _reply_error(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -192,13 +213,7 @@ async def _reply_error(
     error: EditError,
 ) -> None:
     """Queue the text for the first rejected edit line (BR-E02, BR-E03, R-3.5)."""
-    if error.rule_id == RULE_BAD_RUC:
-        text = MESSAGES[RULE_BAD_RUC].format(ruc=error.value)
-    elif error.rule_id == RULE_BAD_DATE:
-        text = MESSAGES[RULE_BAD_DATE].format(fecha=error.value)
-    else:
-        text = EDIT_INVALID.format(line=error.line)
-    await _reply(conn, msg, invoice_id, text, rule_id=error.rule_id)
+    await _reply(conn, msg, invoice_id, error_text(error), rule_id=error.rule_id)
 
 
 async def _reply(
@@ -246,16 +261,10 @@ def _infer_tipo(fields: dict[str, str]) -> None:
 
 def _canonical_key(key: str) -> str | None:
     """Return the canonical field name for ``key``, or None when the key is unknown (D97)."""
-    name = _without_accents(key.strip().lower())
+    name = without_accents(key.strip().lower())
     if name in OVERRIDE_KEYS or name in _VALIDATORS:
         return name
     return ALIASES.get(name)
-
-
-def _without_accents(text: str) -> str:
-    """Return ``text`` in NFKD with the combining marks removed (D97)."""
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(char for char in decomposed if not unicodedata.combining(char))
 
 
 def _ruc(value: str) -> tuple[str | None, str | None]:

@@ -7,6 +7,7 @@ on a prepared batch moves the invoice back to ``DELIVERING`` so the deliver job 
 the Excel and the draft in the same folder.
 """
 
+import unicodedata
 from collections.abc import Mapping
 from typing import Any
 
@@ -34,19 +35,30 @@ MAX_OVERRIDE_CHARS = 120
 OVERRIDE_KEYS = frozenset({"motivo", "descripcion"})
 
 
-def parse_overrides(text: str) -> dict[str, str]:
-    """Return the overrides in text: ``motivo`` and ``descripcion``, keys case-insensitive.
+def without_accents(text: str) -> str:
+    """Return ``text`` in NFKD with the combining marks removed (D97).
 
-    The value runs to the end of its line and is trimmed. A line without ``=``, a
-    value longer than :data:`MAX_OVERRIDE_CHARS` or one with an unsafe character is
-    ignored (that key is dropped), as is every other key.
+    Edit and override keys share this normalisation, so ``descripción=`` names the
+    same key as ``descripcion=``.
+    """
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(char for char in decomposed if not unicodedata.combining(char))
+
+
+def parse_overrides(text: str) -> dict[str, str]:
+    """Return the overrides in text: ``motivo`` and ``descripcion``.
+
+    Keys are case-insensitive and accent-free after ``strip``. The value runs to the
+    end of its line and is trimmed. A line without ``=``, a value longer than
+    :data:`MAX_OVERRIDE_CHARS` or one with an unsafe character is ignored (that key is
+    dropped), as is every other key.
     """
     overrides: dict[str, str] = {}
     for line in text.splitlines():
         key, separator, value = line.partition("=")
         if not separator:
             continue
-        name = key.strip().lower()
+        name = without_accents(key.strip().lower())
         if name not in OVERRIDE_KEYS:
             continue
         clean = value.strip()

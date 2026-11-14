@@ -2,8 +2,9 @@
 
 import pytest
 
-from invoicebot.pipeline.edits import EditError, Edits, parse_edits
+from invoicebot.pipeline.edits import EditError, Edits, error_text, parse_edits
 from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS
+from invoicebot.text import has_unsafe_char
 
 VALID_RUC = "20000000001"
 BAD_RUC = "20000000002"
@@ -102,18 +103,33 @@ def test_parse_edits_accepts_a_four_digit_serie_without_tipo() -> None:
     assert parse_edits("serie=0001").fields == {"serie": "0001"}
 
 
-@pytest.mark.parametrize(("value", "expected"), [("45,50", "45.50"), ("45.5", "45.5"), ("45", "45")])
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("45,50", "45.50"), ("45.5", "45.5"), ("45", "45"), ("9999999999.99", "9999999999.99")],
+)
 def test_parse_edits_normalises_a_total(value: str, expected: str) -> None:
-    """R-3.5: a total accepts a dot or a comma and at most two decimals, kept as given."""
+    """R-3.5: a total accepts a dot or a comma, at most two decimals and 10 integer digits."""
     assert parse_edits(f"total={value}").fields == {"total": expected}
 
 
-@pytest.mark.parametrize("value", ["45.500", "45,", ".50", "1.2.3", "45 reais", ""])
+@pytest.mark.parametrize("value", ["45.500", "45,", ".50", "1.2.3", "45 reais", "", "99999999999"])
 def test_parse_edits_reports_a_bad_total(value: str) -> None:
     """R-3.5: a total outside the amount shape is an error with no rule id."""
     edits = parse_edits(f"total={value}")
     assert edits.fields == {}
     assert edits.errors == (EditError(None, f"total={value}", "total", value),)
+
+
+def test_edit_error_echoes_an_unknown_key_safely_and_capped() -> None:
+    """R-3.5, R-12.8: the echoed line loses its zero-width space and is at most 120 characters."""
+    key = "k" * 10 + "​" + "k" * 489
+    edits = parse_edits(f"{key}=x")
+    assert edits.fields == {}
+    error = edits.errors[0]
+    text = error_text(error)
+    echoed = text.partition("«")[2].partition("»")[0]
+    assert not has_unsafe_char(text)
+    assert 0 < len(echoed) <= 120
 
 
 @pytest.mark.parametrize(("value", "expected"), [("000123", "123"), ("12345678", "12345678")])
