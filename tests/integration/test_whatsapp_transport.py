@@ -15,7 +15,7 @@ from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
 from invoicebot.config.models import ChannelTemplates
 from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, Transport, add
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import LIST_BUTTON, MESSAGES
 from invoicebot.store.db import Pool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -138,6 +138,42 @@ async def test_open_window_with_buttons_sends_interactive(db_pool: Pool) -> None
     assert len(sent) == 1
     assert sent[0]["type"] == "interactive"
     assert len(sent[0]["interactive"]["action"]["buttons"]) == 2
+
+
+async def test_three_buttons_send_a_button_message(db_pool: Pool) -> None:
+    """BR-R03: three choices still fit Meta's button cap, so they send as reply buttons."""
+    await _prepare(db_pool, window_hours_ago=1)
+    buttons = [
+        Button(id="1:pick:0", title="Facturas"),
+        Button(id="1:pick:1", title="Boletas"),
+        Button(id="1:pick:2", title="Notas"),
+    ]
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(text="¿En qué flujo lo registro?", buttons=buttons)))
+
+    assert len(sent) == 1
+    assert sent[0]["type"] == "interactive"
+    assert sent[0]["interactive"]["type"] == "button"
+    assert len(sent[0]["interactive"]["action"]["buttons"]) == 3
+
+
+async def test_four_buttons_send_a_list_message(db_pool: Pool) -> None:
+    """BR-R03: four choices exceed the button cap, so they send as an interactive list."""
+    await _prepare(db_pool, window_hours_ago=1)
+    buttons = [
+        Button(id="1:pick:0", title="Facturas"),
+        Button(id="1:pick:1", title="Boletas"),
+        Button(id="1:pick:2", title="Notas"),
+        Button(id="1:pick:3", title="Otros"),
+    ]
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(text="¿En qué flujo lo registro?", buttons=buttons)))
+
+    assert len(sent) == 1
+    assert sent[0]["type"] == "interactive"
+    assert sent[0]["interactive"]["type"] == "list"
+    assert sent[0]["interactive"]["action"]["button"] == LIST_BUTTON
+    assert len(sent[0]["interactive"]["action"]["sections"][0]["rows"]) == 4
 
 
 async def test_closed_window_sends_the_rule_template(db_pool: Pool) -> None:

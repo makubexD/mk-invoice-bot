@@ -16,9 +16,16 @@ from typing import Any
 
 from invoicebot.channels.base import OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError, WindowExpired
-from invoicebot.channels.whatsapp.payloads import buttons_payload, template_payload, text_payload
+from invoicebot.channels.whatsapp.payloads import (
+    BUTTONS_MAX_COUNT,
+    buttons_payload,
+    list_payload,
+    template_payload,
+    text_payload,
+)
 from invoicebot.config.models import ChannelTemplates
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, Transport
+from invoicebot.rules.messages_es import LIST_BUTTON
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import window_open
 
@@ -107,7 +114,9 @@ async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: st
 
 
 def _free_form_payload(to: str, msg: OutboundMessage) -> dict[str, Any]:
-    """Build the in-window payload: reply buttons when present, else plain text."""
+    """Build the in-window payload: a list past Meta's button cap, reply buttons, else plain text."""
+    if len(msg.buttons) > BUTTONS_MAX_COUNT:
+        return list_payload(to, msg.text, LIST_BUTTON, msg.buttons)
     if msg.buttons:
         return buttons_payload(to, msg.text, msg.buttons)
     return text_payload(to, msg.text)
