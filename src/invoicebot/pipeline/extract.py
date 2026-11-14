@@ -19,14 +19,14 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from invoicebot.channels.base import AttachmentKind, OutboundMessage
+from invoicebot.channels.base import AttachmentKind
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.helper import run_helper
 from invoicebot.pipeline.handlers import EXTRACT_STEP
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
@@ -214,16 +214,15 @@ async def _finish(
     The write only lands while the invoice is still in ``expected``: an invoice moved on
     by ``/cancelar`` or an edit wins and nothing here is stored (D95).
     """
-    message = OutboundMessage(
-        channel=invoice.origin_channel,
-        recipient=invoice.profile_id,
-        profile_id=invoice.profile_id,
-        rule_id=rule_id,
-        text=_message(rule_id, reading),
-    )
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
-        await outbox.add(conn, invoice.origin_channel, invoice.profile_id, message.model_dump(mode="json"))
+        await queue_message(
+            conn,
+            Addressee(invoice.origin_channel, invoice.profile_id),
+            invoice_id=invoice_id,
+            rule_id=rule_id,
+            text=_message(rule_id, reading),
+        )
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:
