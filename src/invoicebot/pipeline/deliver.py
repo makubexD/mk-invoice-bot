@@ -31,7 +31,7 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import (
     Config,
@@ -45,8 +45,8 @@ from invoicebot.config.models import (
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.actions import SENT_ACTION
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
-from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import BUTTON_SENT, MESSAGES, modes_desc
@@ -407,7 +407,7 @@ async def _assisted(context: _Context, delivery: _Delivery, mode: MailMode) -> N
             ),
         )
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
-        await _notify(conn, delivery.head, RULE_BATCHED, text, [button])
+        await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
 
 
 async def _automatic(
@@ -450,7 +450,14 @@ async def _automatic(
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=RULE_SENT)
-        await _notify(conn, delivery.head, RULE_SENT, MESSAGES[RULE_SENT].format(folder=delivery.folder), [])
+        await _notify(
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            RULE_SENT,
+            MESSAGES[RULE_SENT].format(folder=delivery.folder),
+            [],
+        )
         photos = await take_photo_paths(conn, delivery.invoice_id)
 
     for path in photos:
@@ -469,7 +476,14 @@ async def _crashed_send(
     batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
     await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
-    await _notify(conn, delivery.head, RULE_SEND_FAILED, _send_failed_text(prepared, delivery.invoice_id), [])
+    await _notify(
+        conn,
+        delivery.head,
+        delivery.invoice_id,
+        RULE_SEND_FAILED,
+        _send_failed_text(prepared, delivery.invoice_id),
+        [],
+    )
     await _notify_admins(
         conn,
         profiles,
@@ -491,7 +505,7 @@ async def _send_failed(
         await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
-        await _notify(conn, delivery.head, RULE_SEND_FAILED, text, [])
+        await _notify(conn, delivery.head, delivery.invoice_id, RULE_SEND_FAILED, text, [])
         await _notify_admins(
             conn,
             context.cfg.profiles,
@@ -526,7 +540,7 @@ async def _pending_auth(context: _Context, invoice: _Invoice) -> None:
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
         await set_state(conn, invoice.job.invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
-        await _notify(conn, invoice.head, RULE_AUTH, text, [])
+        await _notify(conn, invoice.head, invoice.job.invoice_id, RULE_AUTH, text, [])
         await _notify_admins(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
 
 
@@ -555,14 +569,7 @@ async def _notify_admin(
         # One unreachable admin must not undo the state change or the other alerts.
         logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
         return
-    message = OutboundMessage(
-        channel=channel,
-        recipient=profile_id,
-        profile_id=profile_id,
-        rule_id=rule_id,
-        text=text,
-    )
-    await outbox.add(conn, channel, profile_id, message.model_dump(mode="json"))
+    await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id)
 
 
 async def _template_invalid(context: _Context, invoice: _Invoice) -> None:
@@ -571,7 +578,14 @@ async def _template_invalid(context: _Context, invoice: _Invoice) -> None:
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
         await set_state(conn, invoice.job.invoice_id, MANUAL_REQUIRED_STATE, rule_id=RULE_TEMPLATE_INVALID)
-        await _notify(conn, invoice.head, RULE_TEMPLATE_INVALID, MESSAGES[RULE_TEMPLATE_INVALID], [])
+        await _notify(
+            conn,
+            invoice.head,
+            invoice.job.invoice_id,
+            RULE_TEMPLATE_INVALID,
+            MESSAGES[RULE_TEMPLATE_INVALID],
+            [],
+        )
     # shortcut: the TEMPLATE_INVALID gap is not filed yet, so a fixed template does not resume it.
     logger.warning(
         "shortcut: the TEMPLATE_INVALID gap is not filed yet",
@@ -588,20 +602,20 @@ async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool
 async def _notify(
     conn: AsyncConnection[Any],
     head: InvoiceHead,
+    invoice_id: int,
     rule_id: str,
     text: str,
     buttons: Sequence[Button],
 ) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    message = OutboundMessage(
-        channel=head.origin_channel,
-        recipient=head.profile_id,
-        profile_id=head.profile_id,
+    await queue_message(
+        conn,
+        Addressee(head.origin_channel, head.profile_id),
+        text,
+        invoice_id=invoice_id,
         rule_id=rule_id,
-        text=text,
-        buttons=list(buttons),
+        buttons=buttons,
     )
-    await outbox.add(conn, head.origin_channel, head.profile_id, message.model_dump(mode="json"))
 
 
 def _values(

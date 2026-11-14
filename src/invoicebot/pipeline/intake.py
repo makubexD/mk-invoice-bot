@@ -12,10 +12,10 @@ from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import handle_press
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
-from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.flow_b import merge_flow_data
@@ -128,11 +128,4 @@ async def _add_outbox(
     text: str,
 ) -> None:
     """Queue one reply to the message's sender in the caller's transaction."""
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        rule_id=rule_id,
-        text=text,
-    )
-    await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))
+    await queue_message(conn, Addressee(msg.channel, msg.profile_id), text, rule_id=rule_id)

@@ -12,7 +12,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import (
     BATCHED_STATE,
     DONE_STATE,
@@ -21,7 +21,7 @@ from invoicebot.pipeline.actions import (
     send_stale,
 )
 from invoicebot.pipeline.deliver import DELIVER_STEP, DELIVERING_STATE
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import OVERRIDES_SAVED
 from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
@@ -106,10 +106,9 @@ def _stored_overrides(flow_data: Mapping[str, Any]) -> dict[str, str]:
 
 async def _confirm(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id: int) -> None:
     """Queue the one-line confirmation for an override in the caller's transaction."""
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        text=OVERRIDES_SAVED.format(id=invoice_id),
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        OVERRIDES_SAVED.format(id=invoice_id),
+        invoice_id=invoice_id,
     )
-    await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))
