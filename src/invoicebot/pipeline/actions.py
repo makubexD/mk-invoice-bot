@@ -55,7 +55,7 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
 
 #: An action applied to its invoice in the caller's transaction; it returns the photo
 #: files whose rows it cleared, for the caller to delete after commit (R-9.7).
-type Action = Callable[[AsyncConnection[Any], int, InboundMessage], Awaitable[tuple[Path, ...]]]
+type Action = Callable[[AsyncConnection[Any], int, InboundMessage, int | None], Awaitable[tuple[Path, ...]]]
 
 
 @dataclass(frozen=True)
@@ -76,12 +76,13 @@ async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> Press
     resolved = await resolve_reply(conn, msg, VALID_STATES)
     if resolved is None:
         return PressResult(invoice_id=None)
-    invoice_id, action = resolved
-    photo_paths = await ACTIONS[action](conn, invoice_id, msg)
-    return PressResult(invoice_id=invoice_id, photo_paths=photo_paths)
+    photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved.choice)
+    return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 
 
-async def _continue(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> tuple[Path, ...]:
+async def _continue(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
     """Continue a BR-D06 invoice into its fetch step (R-7.13).
 
     Any other CONFIRMING invoice gets BR-S02 instead, whatever button it shows.
@@ -95,14 +96,18 @@ async def _continue(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMes
     return ()
 
 
-async def _cancel(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> tuple[Path, ...]:
+async def _cancel(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
     """Cancel a BR-D06 invoice and tell its sender in one line (R-7.13)."""
     await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP)
     await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
     return ()
 
 
-async def _sent(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> tuple[Path, ...]:
+async def _sent(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+) -> tuple[Path, ...]:
     """Close the invoice's prepared batch as sent and clear its photos (R-7.8, BR-D08).
 
     A BATCHED invoice whose batch is not ``prepared`` (a failed send, for example) gets

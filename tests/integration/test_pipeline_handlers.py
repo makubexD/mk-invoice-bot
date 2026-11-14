@@ -23,6 +23,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.whatsapp.payloads import ButtonPress
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound
@@ -373,7 +374,7 @@ async def test_media_info_failure_raises_and_changes_nothing(
 async def test_confirm_button_in_confirming_resolves_to_the_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.5: a button pressed in a valid state resolves to (invoice_id, action) and sends nothing."""
+    """R-3.5: a button pressed in a valid state resolves to its press and sends nothing."""
     profile_id = _profile()
     invoice_id = await _invoice_in_state(db_pool, profile_id, "CONFIRMING")
     msg = _message(
@@ -386,7 +387,27 @@ async def test_confirm_button_in_confirming_resolves_to_the_invoice(
         resolved = await resolve_reply(conn, msg, VALID_STATES)
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
 
-    assert resolved == (invoice_id, "confirm")
+    assert resolved == ButtonPress(invoice_id, "confirm", None)
+    assert outbox_rows == []
+
+
+async def test_confirm_button_with_choice_resolves_to_the_choice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5: a button id with a digit choice resolves to a press that carries it."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in_state(db_pool, profile_id, "CONFIRMING")
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        button_id=f"{invoice_id}:confirm:2",
+    )
+
+    async with db_pool.connection() as conn:
+        resolved = await resolve_reply(conn, msg, VALID_STATES)
+        outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
+
+    assert resolved == ButtonPress(invoice_id, "confirm", 2)
     assert outbox_rows == []
 
 
