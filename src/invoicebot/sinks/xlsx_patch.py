@@ -16,7 +16,7 @@ from decimal import Decimal, InvalidOperation
 
 from lxml import etree
 
-from invoicebot.sinks.xlsx_formula import UnsupportedFormula, parse
+from invoicebot.sinks.xlsx_formula import UnsupportedFormula, parse, range_refs
 
 _MAX_ENTRIES = 200
 _MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -32,6 +32,7 @@ _XML_NS = "http://www.w3.org/XML/1998/namespace"
 
 _R10_ESCAPE_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 _CELL_REF_RE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d+")
+_RANGE_REF_RE = re.compile(r"(\$?[A-Za-z]{1,3}\$?\d+):(\$?[A-Za-z]{1,3}\$?\d+)")
 
 
 class TemplateError(ValueError):
@@ -326,11 +327,21 @@ def _formula_text(cell: etree._Element) -> str:
 
 
 def _formula_refs(text: str) -> frozenset[str]:
-    """Return the cells ``text`` reads, falling back to a reference scan when unsupported."""
+    """Return the cells ``text`` reads, falling back to a single-ref and range scan when unsupported.
+
+    The scan expands each ``REF:REF`` range so a write anywhere inside it counts as a dependency;
+    a range past the 1000-cell cap raises ``TemplateError`` rather than leave a value stale.
+    """
     try:
         return parse(text).refs()
     except UnsupportedFormula:
-        return frozenset(_normalize_ref(match) for match in _CELL_REF_RE.findall(text))
+        refs = {_normalize_ref(match) for match in _CELL_REF_RE.findall(text)}
+        try:
+            for start, end in _RANGE_REF_RE.findall(text):
+                refs.update(range_refs(start, end))
+        except UnsupportedFormula as exc:
+            raise TemplateError(f"cannot scan formula {text!r}: {exc}") from exc
+        return frozenset(refs)
 
 
 def _reject_shared_or_array(f_el: etree._Element | None, ref: str) -> None:

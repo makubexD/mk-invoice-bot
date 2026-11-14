@@ -109,6 +109,11 @@ def parse(formula: str) -> Formula:
     return Formula(_Parser(_tokenize(formula)).parse())
 
 
+def range_refs(start: str, end: str) -> frozenset[str]:
+    """Return every cell between two references, raising ``UnsupportedFormula`` past the 1000-cell cap."""
+    return frozenset(_range(start, end).cells)
+
+
 def _refs(node: Node) -> frozenset[str]:
     """Return every cell ``node`` reads."""
     match node:

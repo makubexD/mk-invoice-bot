@@ -83,6 +83,22 @@ def _replace_sheet(template: bytes, old: bytes, new: bytes) -> bytes:
     return buffer.getvalue()
 
 
+_RANGE_FORMULA = "ROUND(SUM(B1:B5),2)"
+_RANGE_CACHED = "15"
+
+
+def _range_template(formula: str = _RANGE_FORMULA) -> bytes:
+    """Return the template with B1..B5 = 1..5 and C1 holding ``formula`` with a cached value."""
+    row = (
+        '<row r="1">'
+        '<c r="B1"><v>1</v></c><c r="B2"><v>2</v></c><c r="B3"><v>3</v></c>'
+        '<c r="B4"><v>4</v></c><c r="B5"><v>5</v></c>'
+        f'<c r="C1"><f>{formula}</f><v>{_RANGE_CACHED}</v></c>'
+        "</row>"
+    )
+    return _replace_sheet(build_template(), b"<sheetData>", f"<sheetData>{row}".encode())
+
+
 def test_patch_cells_keeps_untouched_parts_byte_identical() -> None:
     """D71: every part except the sheet and calcChain is copied byte-for-byte."""
     original = _zip_entries(build_template())
@@ -216,6 +232,28 @@ def test_dependent_unsupported_formula_raises() -> None:
 
     with pytest.raises(TemplateError, match="cannot recompute I16"):
         patch_cells(template, SHEET_NAME, {CELL_BASE: Decimal("40")})
+
+
+def test_write_inside_an_unsupported_formula_range_raises() -> None:
+    """R-7.4, BR-D02: a write inside a range read by an unsupported formula is refused, not left stale."""
+    with pytest.raises(TemplateError, match="cannot recompute C1"):
+        patch_cells(_range_template(), SHEET_NAME, {"B3": Decimal("9")})
+
+
+def test_write_outside_an_unsupported_formula_range_keeps_cached_value() -> None:
+    """R-7.4, BR-D02: a write outside the range leaves the unsupported formula's cached value alone."""
+    output = patch_cells(_range_template(), SHEET_NAME, {"D9": Decimal("1")})
+    root = _parse(_zip_entries(output)[SHEET_PART])
+
+    assert _cached_value(root, "C1") == _RANGE_CACHED
+
+
+def test_unsupported_formula_range_past_the_cap_raises() -> None:
+    """R-7.4, BR-D02: a range past the 1000-cell cap on an unsupported formula fails closed."""
+    template = _range_template("ROUND(SUM(A1:Z100),2)")
+
+    with pytest.raises(TemplateError, match="at most 1000"):
+        patch_cells(template, SHEET_NAME, {"D9": Decimal("1")})
 
 
 def test_dependent_shared_formula_raises() -> None:
