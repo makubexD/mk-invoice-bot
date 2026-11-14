@@ -18,6 +18,7 @@ from invoicebot.rules.catalog import RULES
 from invoicebot.states import (
     BATCHED,
     CANCELLED,
+    EDITABLE,
     FAILED,
     MANUAL_REQUIRED,
     NEEDS_RULE,
@@ -441,8 +442,13 @@ async def mark_editing(conn: AsyncConnection[Any], profile_id: str, invoice_id: 
         (EDITING_KEY, profile_id, invoice_id, EDITING_KEY),
     )
     await conn.execute(
-        "UPDATE invoices SET flow_data_json = flow_data_json || %s::jsonb WHERE id = %s",
-        (Jsonb({EDITING_KEY: True}), invoice_id),
+        """
+        UPDATE invoices
+        SET flow_data_json = flow_data_json || %s::jsonb
+        WHERE id = %s
+          AND profile_id = %s
+        """,
+        (Jsonb({EDITING_KEY: True}), invoice_id, profile_id),
     )
 
 
@@ -467,10 +473,11 @@ async def find_override_target(
     """Return the invoice a chat override applies to, or None (D90).
 
     The quoted message's invoice wins when it belongs to the same profile; otherwise an
-    invoice pinned by [Editar] comes first (R-3.5), then the profile's most recent invoice
-    that is not ``CANCELLED``/``FAILED``/``DONE`` and whose batch is not ``sent`` (a
-    finished invoice is only reached by quoting it). A quote of a message that is not
-    stored (the bot's own summary) falls back the same way. Does not commit.
+    invoice pinned by [Editar] comes first while it is still ``EDITABLE`` (R-3.5, D90),
+    then the profile's most recent invoice that is not ``CANCELLED``/``FAILED``/``DONE``
+    and whose batch is not ``sent`` (a finished invoice is only reached by quoting it). A
+    quote of a message that is not stored (the bot's own summary) falls back the same
+    way. Does not commit.
     """
     if reply_to is not None:
         channel, external_id = reply_to
@@ -496,10 +503,10 @@ async def find_override_target(
         WHERE i.profile_id = %s
           AND i.state NOT IN ('CANCELLED', 'FAILED', 'DONE')
           AND (b.state IS NULL OR b.state <> 'sent')
-        ORDER BY (i.flow_data_json ? %s) DESC, i.created_at DESC, i.id DESC
+        ORDER BY (i.flow_data_json ? %s AND i.state = ANY(%s)) DESC, i.created_at DESC, i.id DESC
         LIMIT 1
         """,
-        (profile_id, EDITING_KEY),
+        (profile_id, EDITING_KEY, sorted(EDITABLE)),
     )
     row = await cur.fetchone()
     return None if row is None else int(row[0])

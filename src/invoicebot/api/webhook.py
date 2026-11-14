@@ -85,8 +85,12 @@ def make_router(deps: WebhookDeps) -> APIRouter:
             logger.info("ignored sender %s", digest)
         try:
             await _persist(deps, parsed.messages)
-        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed, StateMoved):
-            logger.exception("webhook database error or invoice moved")
+        except StateMoved as moved:
+            # An expected race (D95): the redelivery applies to the new state.
+            logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
+            return Response(status_code=503)
+        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
+            logger.exception("webhook database error")
             return Response(status_code=503)
         return JSONResponse({"status": "ok"})
 

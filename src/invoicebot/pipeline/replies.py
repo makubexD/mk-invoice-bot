@@ -16,7 +16,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import ButtonPress, parse_button_id
 from invoicebot.pipeline.outgoing import Addressee, queue_stale
 from invoicebot.states import PENDING_USER
-from invoicebot.store.invoices import get_state, get_waiting, unpark
+from invoicebot.store.invoices import get_state, get_waiting, lock_invoice, unpark
 
 
 async def resolve_reply(
@@ -33,13 +33,17 @@ async def resolve_reply(
     resumes it first when the stored ``waiting_state`` accepts the action and the
     stored ``waiting_rule_id`` is ``asked_rules``' rule for it, so the action then runs
     against the restored state (D94). Any other press sends BR-S02 and resolves to
-    None, changing nothing else (R-3.5, BR-S02).
+    None, changing nothing else (R-3.5, BR-S02). The invoice row stays locked for the
+    caller's transaction, so the state checked here is the state the action sees (D95).
     """
     pressed = _parse_press(msg, valid_states)
     if pressed is None:
         return None
     button_press, states = pressed
     invoice_id = button_press.invoice_id
+    # The row lock holds the checked state until the caller commits, so the action
+    # cannot act on a state a job moved meanwhile (D95, D96).
+    await lock_invoice(conn, invoice_id)
     invoice = await get_state(conn, invoice_id)
     if invoice is None or invoice[1] != msg.profile_id:
         return None

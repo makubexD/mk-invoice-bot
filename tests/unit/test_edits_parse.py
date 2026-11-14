@@ -208,3 +208,14 @@ def test_parse_edits_keeps_good_lines_next_to_errors() -> None:
     edits = parse_edits(f"total=10\nruc={BAD_RUC}\nnumero=7")
     assert edits.fields == {"total": "10", "numero": "7"}
     assert edits.errors == (EditError("BR-E02", f"ruc={BAD_RUC}", "ruc_emisor", BAD_RUC),)
+
+
+@pytest.mark.parametrize(
+    ("line", "rule_id"), [("ruc=\u202e2000000000", "BR-E02"), ("fecha=31/02/2025\u200b", "BR-E03")]
+)
+def test_edit_error_echoes_a_bad_ruc_or_date_safely(line: str, rule_id: str) -> None:
+    """BR-E02, BR-E03, R-12.8: a rejected ruc or fecha is echoed without its unsafe characters."""
+    edits = parse_edits(line)
+    error = edits.errors[0]
+    assert error.rule_id == rule_id
+    assert not has_unsafe_char(error_text(error))

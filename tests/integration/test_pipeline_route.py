@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import itertools
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -963,3 +964,28 @@ async def test_edit_during_routing_wins(
         stored = await _stored_key(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
+
+
+async def test_route_waits_for_an_uncommitted_edit_and_yields_to_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D95: a route job blocks on the invoice row while an edit is open, then sees the edit's job."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+    async with db_pool.connection() as conn, conn.transaction():
+        first_id = await enqueue(conn, invoice_id, ROUTE_STEP)
+
+    async with db_pool.connection() as edit_conn:
+        async with edit_conn.transaction():
+            await save_reading(edit_conn, invoice_id, _reading(await _today(db_pool)))
+            await enqueue(edit_conn, invoice_id, ROUTE_STEP)
+            route = asyncio.create_task(_run(db_pool, cfg, invoice_id, job=_job(first_id, invoice_id)))
+            await asyncio.sleep(0.3)
+            assert not route.done()
+        await route
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("ROUTING", None, None)
+        assert await _outbox(conn, profile_id) == []
+        assert await _stored_key(conn, invoice_id) is None

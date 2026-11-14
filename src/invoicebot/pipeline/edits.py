@@ -164,11 +164,12 @@ async def apply_edits(
         return invoice_id
     reading = _edited_reading(await load_reading(conn, invoice_id), edits.fields)
     await save_reading(conn, invoice_id, reading)
-    await clear_editing(conn, invoice_id)
     await _drop_stale_answers(conn, invoice_id, edits.fields)
     if state == EXTRACT_FAILED and reading.missing_required():
+        # The pin stays: BR-E01 asks for more fields of this same invoice (D90).
         await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)
         return invoice_id
+    await clear_editing(conn, invoice_id)
     await set_state(conn, invoice_id, ROUTING, expected=state)
     await enqueue(conn, invoice_id, ROUTE_STEP)
     return invoice_id
@@ -207,11 +208,15 @@ def error_text(error: EditError) -> str:
     the answer (R-12.8).
     """
     if error.rule_id == RULE_BAD_RUC:
-        return MESSAGES[RULE_BAD_RUC].format(ruc=error.value)
+        return MESSAGES[RULE_BAD_RUC].format(ruc=_echo(error.value))
     if error.rule_id == RULE_BAD_DATE:
-        return MESSAGES[RULE_BAD_DATE].format(fecha=error.value)
-    echoed = replace_unsafe_chars(error.line)[:MAX_OVERRIDE_CHARS]
-    return EDIT_INVALID.format(line=echoed)
+        return MESSAGES[RULE_BAD_DATE].format(fecha=_echo(error.value))
+    return EDIT_INVALID.format(line=_echo(error.line))
+
+
+def _echo(text: str) -> str:
+    """Return untrusted ``text`` with unsafe characters replaced, capped for a reply (R-12.8)."""
+    return replace_unsafe_chars(text)[:MAX_OVERRIDE_CHARS]
 
 
 async def _reply_error(

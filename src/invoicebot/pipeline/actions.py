@@ -55,6 +55,7 @@ from invoicebot.store.flow_b import (
     take_photo_paths,
 )
 from invoicebot.store.invoices import (
+    clear_editing,
     get_state_rule,
     load_flow,
     load_invoice_head,
@@ -120,6 +121,8 @@ async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> Press
     resolved = await resolve_reply(conn, msg, VALID_STATES, ASKED_RULES)
     if resolved is None:
         return PressResult(invoice_id=None)
+    # Any press ends a pending [Editar] on its invoice; [Editar] itself pins it again (D90).
+    await clear_editing(conn, resolved.invoice_id)
     photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved.choice)
     return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 

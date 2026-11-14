@@ -3,6 +3,7 @@
 Covers R-1.1, R-1.6, R-1.8, R-1.10, R-3.5, BR-S01 and BR-E01 against real Postgres.
 """
 
+import asyncio
 import itertools
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -26,7 +27,7 @@ from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
 from invoicebot.store.flow_b import merge_flow_data
-from invoicebot.store.invoices import create_invoice, save_reading, set_state
+from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -552,6 +553,90 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
     assert newer_total == ("46.00", "user")
 
 
+async def test_editar_pin_is_cleared_by_another_press_on_its_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D90: a press after [Editar] on the same invoice ends the pin."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _press(invoice_id, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, _press(invoice_id, "cancel", profile_id), max_queued_per_sender=MAX_QUEUED)
+        flow = await _flow_data(conn, invoice_id)
+
+    assert "editing" not in flow
+
+
+async def test_editar_pin_is_ignored_once_its_invoice_is_not_editable(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D90: a pinned invoice that moved past EDITABLE no longer takes unquoted edits."""
+    profile_id = _profile()
+    older = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    newer = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute("UPDATE invoices SET state = 'DELIVERING' WHERE id = %s", (older,))
+
+    msg = _message(profile_id, external_id=_external_id(), text="total=45.50")
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        newer_total = await _field(conn, newer, "total")
+
+    assert result.invoice_id == newer
+    assert newer_total == ("45.50", "user")
+
+
+async def test_editar_pin_stays_while_br_e01_asks_for_more(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-E01, D90: an incomplete edit on the pinned invoice keeps the pin for the next line."""
+    profile_id = _profile()
+    older = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
+    await _invoice_in(db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03")
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
+
+    first = _message(profile_id, external_id=_external_id(), text="total=10.00")
+    second = _message(profile_id, external_id=_external_id(), text=f"ruc={OWNER_RUC}")
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED)
+        ruc = await _field(conn, older, "ruc_emisor")
+
+    assert result.invoice_id == older
+    assert ruc == (OWNER_RUC, "user")
+
+
+async def test_editar_pin_leaves_other_profiles_pins_alone(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-10.1, D90: [Editar] clears only its own profile's other pins."""
+    mine = _profile()
+    theirs = _profile()
+    my_invoice = await _invoice_in(
+        db_pool, mine, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    their_invoice = await _invoice_in(
+        db_pool, theirs, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _press(their_invoice, "edit", theirs), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, _press(my_invoice, "edit", mine), max_queued_per_sender=MAX_QUEUED)
+        their_flow = await _flow_data(conn, their_invoice)
+
+    assert their_flow == {"editing": True}
+
+
 async def test_buyer_edit_drops_the_flow_and_buyer_answers(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -733,3 +818,35 @@ async def test_cliente_edit_reroutes_a_br_r03_invoice(
 
     assert final_state == ("FETCHING_DOCS", "BR-R02")
     assert row == (WORK_FLOW,)
+
+
+async def test_press_checks_the_state_under_the_row_lock(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D95, D96, BR-S02: a [Cancelar] racing a job's move waits for it and answers as stale."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+
+    async def press() -> None:
+        async with db_pool.connection() as conn:
+            await handle_inbound(
+                conn, _press(invoice_id, "cancel", profile_id), max_queued_per_sender=MAX_QUEUED
+            )
+
+    async with db_pool.connection() as job_conn:
+        async with job_conn.transaction():
+            await lock_invoice(job_conn, invoice_id)
+            pressing = asyncio.create_task(press())
+            await asyncio.sleep(0.3)
+            assert not pressing.done()
+            await set_state(job_conn, invoice_id, "DELIVERING", expected="CONFIRMING")
+        await pressing
+
+    async with db_pool.connection() as conn:
+        state_rule = await _state_rule(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert state_rule[0] == "DELIVERING"
+    assert [rule_id for _text, rule_id in replies] == ["BR-S02"]
