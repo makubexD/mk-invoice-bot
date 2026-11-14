@@ -2,23 +2,23 @@
 
 Source of truth: `specs/` (constitution, requirements, design, backlog in `specs/04-tasks.md`). Each phase becomes its own step plan, `docs/plan-mvp-<phase>.md`, written when the previous phase finishes. A phase is done when its milestone demo in spec 04 passes.
 
-| #   | Phase (plan file)              | Backlog                                                                                                                 | Milestone  | Needs from the owner first                                                       |
-| --- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
-| 1   | `foundation` (done 2026-11-11) | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                            | part of M1 | Nothing                                                                          |
-| 2   | `whatsapp` (done 2026-11-11)   | E2 (incl. S2.7–S2.9 window and templates)                                                                               | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
-| 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                      | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
-| 3b  | `ocr` (done 2026-11-13)        | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                      | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
-| 4   | `fetch` (done 2026-11-13)      | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                     | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
-| 5   | `file-b` (done 2026-11-14)     | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                  | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
-| 6a  | `widen-b-harden`               | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                   | part of M4 | Nothing                                                                          |
-| 6b  | `widen-b-talk`                 | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
-| 6c  | `widen-b-fetch`                | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.3, S10.4, S10.7, S10.10, S11.9; portal config checks | part of M4 | S0.6 (remaining store pages); Q5                                                 |
-| 6d  | `widen-b-deliver`              | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                             | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
-| 7   | `read-more`                    | S3.4, S3.8–S3.10; E6                                                                                                    | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
-| 8   | `flow-a`                       | E9, S10.6                                                                                                               | M6         | S0.4, Google OAuth app in production status                                      |
-| 9   | `ops`                          | E12, then S12.7 (repo private), then S16.2                                                                              | M7         | VPS chosen (D42)                                                                 |
-| –   | v1.1 `contract`                | E13, E14                                                                                                                | M8         | —                                                                                |
-| –   | optional `llm-fallback`        | E3b                                                                                                                     | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
+| #   | Phase (plan file)                  | Backlog                                                                                                                 | Milestone  | Needs from the owner first                                                       |
+| --- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
+| 1   | `foundation` (done 2026-11-11)     | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                            | part of M1 | Nothing                                                                          |
+| 2   | `whatsapp` (done 2026-11-11)       | E2 (incl. S2.7–S2.9 window and templates)                                                                               | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
+| 3   | `read` (done 2026-11-13)           | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                      | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
+| 3b  | `ocr` (done 2026-11-13)            | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                      | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
+| 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                     | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
+| 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                  | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
+| 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                   | part of M4 | Nothing                                                                          |
+| 6b  | `widen-b-talk`                     | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
+| 6c  | `widen-b-fetch`                    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.3, S10.4, S10.7, S10.10, S11.9; portal config checks | part of M4 | S0.6 (remaining store pages); Q5                                                 |
+| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                             | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
+| 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                    | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
+| 8   | `flow-a`                           | E9, S10.6                                                                                                               | M6         | S0.4, Google OAuth app in production status                                      |
+| 9   | `ops`                              | E12, then S12.7 (repo private), then S16.2                                                                              | M7         | VPS chosen (D42)                                                                 |
+| –   | v1.1 `contract`                    | E13, E14                                                                                                                | M8         | —                                                                                |
+| –   | optional `llm-fallback`            | E3b                                                                                                                     | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
 
 **Why this order (D64):** the first three phases are a thin slice of the work flow for one real store, so the riskiest pieces (the store's site, the Excel, the mail) are proven before anything is widened. PDF input, the padrón and the synthetic generator wait for `read-more`, because a readable QR plus the downloaded XML already give every field the work flow needs. OCR moved forward to phase 3b (D81), because the QR decodes on only half of real photos.
 
@@ -31,7 +31,7 @@ Order changed on 2026-11-12 (D52, D64): flow B (work, Microsoft) comes before fl
 Each item goes into the named phase's plan.
 
 - ~~**`routing` (before the first live trial):** keyed sender hash.~~ Done 2026-11-13 in `docs/plan-sender-hash.md`: HMAC-SHA256 keyed by the age-store secret `sender_hash_key`; an empty secret now counts as missing.
-- **`routing` (widen-b-harden):** an outbox row that can never succeed (a text over Meta's limit, a recipient with no WhatsApp number) is retried 8 times. Mark it dead at once. Make the template language configurable instead of the `es_PE` default.
+- ~~**`routing` (widen-b-harden):** an outbox row that can never succeed (a text over Meta's limit, a recipient with no WhatsApp number) is retried 8 times. Mark it dead at once. Make the template language configurable instead of the `es_PE` default.~~ Done in `widen-b-harden`.
 - **Telegram (`ops` or whenever a second channel lands):** `pipeline/handlers.py` and `pipeline/replies.py` import the WhatsApp adapter, as the plan asked. When the second channel arrives, put the download behind a per-channel media port and move the `<id>:<action>` button codec to a channel-neutral module. Check the media id against its pattern at the parse boundary, so a bad id cancels the invoice instead of being retried.
 - **`ops`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.
 
@@ -72,8 +72,8 @@ Each item goes into the named phase's plan.
 - **`ops` (defense in depth):** run the browser helper in a network namespace or under nftables rules whose only allowed connection is its guard proxy, so a Chromium path that skips the proxy (WebRTC is closed by a launch flag) still reaches nothing.
 - **`ops` (each Playwright upgrade):** loopback goes through the guard proxy only because Playwright adds `--proxy-bypass-list=<-loopback>`. Add a test that reads the launched Chromium's arguments, so an upgrade cannot drop it silently.
 - **`widen-b-fetch` (with the next portal):** `check_config` renders each active portal's `pick` and `calendar` selectors from a sample, so a bad selector fails at startup instead of every fetch ending `technical`.
-- **`widen-b` (widen-b-harden):** a startup check that `retrieval.portal_timeout_s` stays below the worker lease (300 s, `queue/worker.py`), so a fetch never outlives its lease; a second run is already harmless (R-5.1).
-- **`widen-b` (widen-b-harden):** `EmailInbox.retry_schedule` is an unvalidated `list[str]`; give it `Portal.retry_schedule`'s delay type.
+- ~~**`widen-b` (widen-b-harden):** a startup check that `retrieval.portal_timeout_s` stays below the worker lease (300 s, `queue/worker.py`), so a fetch never outlives its lease; a second run is already harmless (R-5.1).~~ Done in `widen-b-harden`.
+- ~~**`widen-b` (widen-b-harden):** `EmailInbox.retry_schedule` is an unvalidated `list[str]`; give it `Portal.retry_schedule`'s delay type.~~ Done in `widen-b-harden`.
 
 ## Moved by the `fetch` plan (D82)
 
@@ -94,13 +94,23 @@ Each item goes into the named phase's plan.
 
 Each item goes into the named phase's plan.
 
-- **`widen-b` (widen-b-harden; the admin text is now in spec 06):** BR-D03 says "admin alert", but spec 06 has no admin text for it, so a failed or crashed send only tells the sender. Add a `BR-D03_admin` text and send it through the same admin loop as BR-D01.
-- **`widen-b` (widen-b-harden):** check the host of Graph upload-session URLs (`sinks/onedrive.py`, `sinks/mailer_graph.py`) against an allow-list (`*.sharepoint.com`, `*.files.1drv.com`, `graph.microsoft.com`, `*.office.com`), so the PDF, XML and Excel bytes are never PUT elsewhere.
-- **`widen-b` (widen-b-harden):** cap the pages `Drive.list_names` follows through `@odata.nextLink` (e.g. 50) and raise `GraphError` past it.
+- ~~**`widen-b` (widen-b-harden; the admin text is now in spec 06):** BR-D03 says "admin alert", but spec 06 has no admin text for it, so a failed or crashed send only tells the sender. Add a `BR-D03_admin` text and send it through the same admin loop as BR-D01.~~ Done in `widen-b-harden`.
+- ~~**`widen-b` (widen-b-harden):** check the host of Graph upload-session URLs (`sinks/onedrive.py`, `sinks/mailer_graph.py`) against an allow-list (`*.sharepoint.com`, `*.files.1drv.com`, `graph.microsoft.com`, `*.office.com`), so the PDF, XML and Excel bytes are never PUT elsewhere.~~ Done in `widen-b-harden`.
+- ~~**`widen-b` (widen-b-harden):** cap the pages `Drive.list_names` follows through `@odata.nextLink` (e.g. 50) and raise `GraphError` past it.~~ Done in `widen-b-harden`.
 - ~~**`widen-b` (with the work account, S11.1):** `auth-microsoft --account` becomes a choice of the configured accounts, and a sign-in resumes only that account's `PENDING_AUTH` invoices.~~ Dropped by D91.
-- **`widen-b` (widen-b-harden):** a control character in a reading's text (`razon_social`, `serie`) makes lxml, the `.eml` builder or the drive path raise `ValueError`; map it to BR-D02 or strip it when the reading is stored.
+- ~~**`widen-b` (widen-b-harden):** a control character in a reading's text (`razon_social`, `serie`) makes lxml, the `.eml` builder or the drive path raise `ValueError`; map it to BR-D02 or strip it when the reading is stored.~~ Done in `widen-b-harden`.
 - **`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.
 - **Known, accepted (D89):** a transient Graph error during an automatic send leaves the batch `sending`, so the retry ends with BR-D03 instead of resending, even for a 429 that sent nothing.
+
+## Carried over from the `widen-b-harden` review
+
+Each item goes into the named phase's plan.
+
+- **M3 live run:** the upload-session allow-list (`UPLOAD_HOSTS`, `UPLOAD_HOST_SUFFIXES` in `sinks/onedrive.py`) comes from Microsoft's docs (`*.up.1drv.com`, `api.onedrive.com`, `outlook.office.com`). Record a real personal-account `uploadUrl` for a drive upload and a mail attachment, and pin the list to it.
+- **`widen-b-fetch`:** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
+- **`widen-b-fetch` (with the next portal):** `portal_timeout_s` only has to stay below the 300 s lease (`JOB_LEASE_S`); leave a margin for the helper start and the handler's database work (e.g. 30 s).
+- **`widen-b-talk` or later:** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
+- **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
 
 ## Known drift between code and specs
 
