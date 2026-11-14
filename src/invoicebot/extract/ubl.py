@@ -3,7 +3,9 @@
 Only the fields the R-5.6 match needs and the amounts of R-2.7 are read (D57). Every XML,
 whatever its source, goes through the same parser: no entity resolution, no DTD loading and
 no network access, and a ``DOCTYPE``, a UTF-16 or UTF-32 byte-order mark (where the byte
-scan for ``DOCTYPE`` would not see it) or a document over 2 MB is rejected before lxml sees it.
+scan for ``DOCTYPE`` would not see it), a document over 2 MB, one whose first byte after an
+optional UTF-8 BOM and ASCII whitespace is not ``<``, or one holding a NUL byte is rejected
+before lxml sees it.
 A single-byte declared encoding such as ISO-8859-1, common in SUNAT XML, is read. Elements
 are found by local name, so the namespace prefix does not matter. A namespace declaration
 libxml2 rejects for a backslash URI, seen in real SUNAT XML, is dropped on a retry, but only
@@ -22,6 +24,9 @@ from invoicebot.extract.qr_payload import canonical_numero
 
 MAX_XML_BYTES = 2 * 1024 * 1024
 DOCTYPE_MARKER = b"<!doctype"
+#: A UTF-8 BOM is allowed before the document's first element (R-2.12).
+UTF8_BOM = b"\xef\xbb\xbf"
+ASCII_WHITESPACE = b" \t\r\n"
 # A UTF-16 LE BOM also starts a UTF-32 LE document; UTF-32 BE needs its own entry.
 REJECTED_BOMS = (b"\xff\xfe", b"\xfe\xff", b"\x00\x00\xfe\xff")
 INVOICE_ROOT = "Invoice"
@@ -81,6 +86,11 @@ def parse_invoice_xml(data: bytes) -> Reading:
         raise XmlRejected(XmlReason.TOO_LARGE)
     if data.startswith(REJECTED_BOMS) or DOCTYPE_MARKER in data.lower():
         raise XmlRejected(XmlReason.DOCTYPE)
+    leading = data.removeprefix(UTF8_BOM).lstrip(ASCII_WHITESPACE)
+    # A NUL cannot occur in XML. XML requires a BOM on UTF-16 and UTF-32, so a BOM-less
+    # document that reaches here with one is rejected rather than auto-detected by lxml.
+    if not leading.startswith(b"<") or b"\x00" in leading:
+        raise XmlRejected(XmlReason.MALFORMED)
 
     try:
         root = _parse_root(data)

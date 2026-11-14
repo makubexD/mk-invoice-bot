@@ -6,10 +6,13 @@ silently ignored.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
+from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 class Owner(BaseModel):
@@ -276,6 +279,8 @@ class PaidApi(BaseModel):
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Sized for a portal fetch, not for OCR; extraction.helper_timeout_s covers the OCR helper.
+    portal_timeout_s: float = Field(gt=0)
     email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi
@@ -418,13 +423,59 @@ class Config(BaseModel):
         return self
 
 
-class PortalMatch(BaseModel):
-    """Issuer match rules for a portal registry entry (R-5.8)."""
+class Brand(BaseModel):
+    """One comercio a store runs; ``serie_prefix`` picks its invoices apart (D47, R-5.8)."""
 
     model_config = ConfigDict(extra="forbid")
 
-    ruc: list[str] = Field(default_factory=list)
-    url_contains: list[str] = Field(default_factory=list)
+    comercio: str
+    serie_prefix: list[str] = Field(default_factory=list)
+
+
+class Store(BaseModel):
+    """One issuer in ``config/stores/<ruc>.yaml``, keyed by its RUC (D47, R-5.8)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    ruc: str = Field(pattern=r"^\d{11}$")
+    razon_social: str
+    tipo: str
+    brands: list[Brand] = Field(min_length=1)
+    portal: str | None
+    notes: str = ""
+
+
+class SelectField(BaseModel):
+    """A native ``<select>``: select the option the rendered template names (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    select: str
+
+
+class PickField(BaseModel):
+    """A custom dropdown: click the field, then the rendered option (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    pick: str
+
+
+class CalendarSpec(BaseModel):
+    """Selectors for a read-only date picker (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    cell: str
+    prev: str
+
+
+class CalendarField(BaseModel):
+    """A date picker: step back with ``prev`` until ``cell`` shows, then click it (spec 03 §6)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    calendar: CalendarSpec
 
 
 class PortalCaptcha(BaseModel):
@@ -446,17 +497,77 @@ class PortalDownloads(BaseModel):
     pdf: str | None = None
 
 
-class Portal(BaseModel):
-    """One entry of the portal registry in ``config/portals.yaml`` (R-5.8)."""
+_DELAY = re.compile(r"(\d+)([mhd])")
+_MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
 
-    model_config = ConfigDict(extra="forbid")
+
+def parse_delay(text: str) -> timedelta:
+    """Parse a portal's interval such as ``90m``, ``6h`` or ``2d``."""
+    match = _DELAY.fullmatch(text)
+    if match is None:
+        raise ValueError(f"invalid delay: {text!r}")
+    amount, unit = match.groups()
+    return timedelta(minutes=int(amount) * _MINUTES[unit])
+
+
+def format_delay(delay: timedelta) -> str:
+    """Write ``delay`` back in ``parse_delay``'s form, in the largest whole unit."""
+    minutes = int(delay.total_seconds()) // 60
+    for unit in ("d", "h"):
+        if minutes % _MINUTES[unit] == 0:
+            return f"{minutes // _MINUTES[unit]}{unit}"
+    return f"{minutes}m"
+
+
+#: D65: a portal's default "not found yet" retry delays, in order.
+DEFAULT_RETRY_SCHEDULE: tuple[timedelta, ...] = (
+    timedelta(hours=1),
+    timedelta(hours=6),
+    timedelta(hours=24),
+    timedelta(hours=72),
+)
+
+
+class Portal(BaseModel):
+    """One portal site in ``config/portals/<key>.yaml`` (R-5.8, D82).
+
+    The ``key`` is the file name, never a field of the file itself. A
+    ``retry_schedule`` entry is a D65 delay such as ``1h``. ``captcha`` is
+    ``"none"`` unless the site presents one.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     key: str
-    status: Literal["active", "todo", "broken"] = "active"
-    match: PortalMatch = Field(default_factory=PortalMatch)
     adapter: str
     url: str | None = None
-    fields: dict[str, str | dict[str, str]] = Field(default_factory=dict)
-    captcha: PortalCaptcha | None = None
+    status: Literal["active", "todo", "broken"] = "todo"
+    fields: dict[str, str | SelectField | PickField | CalendarField] = Field(default_factory=dict)
+    captcha: Literal["none", "image", "recaptcha"] | PortalCaptcha = "none"
     submit: str | None = None
     downloads: PortalDownloads | None = None
+    not_found: str | None = None
+    tipo_labels: dict[str, str] = Field(default_factory=dict)
+    allow_http: bool = False
+    retry_schedule: tuple[timedelta, ...] = DEFAULT_RETRY_SCHEDULE
+    notes: str = ""
+
+    @field_validator("retry_schedule", mode="before")
+    @classmethod
+    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
+        """D65: every retry delay is written as ``<number><m|h|d>``."""
+        return tuple(parse_delay(entry) for entry in value)
+
+    @field_serializer("retry_schedule")
+    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
+        """D65: serialize back to ``1h``-style text, so a dumped portal validates again."""
+        return [format_delay(delay) for delay in value]
+
+
+class StoreDirectory(BaseModel):
+    """The two-folder store directory: stores by RUC and portals by key (D47, R-5.8)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stores: dict[str, Store]
+    portals: dict[str, Portal]

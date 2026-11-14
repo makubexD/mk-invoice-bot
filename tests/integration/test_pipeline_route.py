@@ -116,6 +116,12 @@ async def _invoice(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, st
     return row[0], row[1], row[2]
 
 
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the steps of the invoice's queued jobs, in insertion order."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
+
+
 async def _texts(conn: AsyncConnection[Any], profile_id: str, rule_id: str | None = None) -> list[str]:
     """Return the outbox texts for ``profile_id``, optionally only under ``rule_id``."""
     cur = await conn.execute(
@@ -270,6 +276,34 @@ async def test_low_confidence_without_flag_is_not_named(
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert "Deducido" not in texts[0]
+
+
+async def test_routed_invoice_enqueues_one_fetch_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.2, R-5.1: a routed invoice leaves exactly one queued job, the ``fetch`` step for it."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _jobs(conn, invoice_id) == ["fetch"]
+
+
+async def test_refused_invoice_enqueues_no_fetch_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.2, R-5.1: a refused invoice is cancelled with no ``fetch`` job queued."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool), tipo=BOLETA))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert "fetch" not in await _jobs(conn, invoice_id)
 
 
 async def test_second_run_changes_nothing(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:

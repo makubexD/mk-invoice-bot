@@ -1,5 +1,24 @@
 url: "https://comprobantes.facturactiva.com/LA-LENA/visorComprobantes"
 adapter: generic_form
 captcha: none
-status: todo  # fields, submit and downloads are added when the adapter is built (S10.2)
-notes: "Asks: tipo, serie, correlativo, fecha, monto total. A real lookup on 2026-11-12 returned PDF, XML and CDR buttons."
+status: active
+# The site's own name for each SUNAT tipo, shown in its tipo dropdown.
+tipo_labels: { "01": "Factura", "03": "Boleta de venta" }
+fields:
+  # Ant Design dropdown: click the field, then the option.
+  "#tipoComprobante": { pick: ".ant-select-item-option[title='{tipo_label}']" }
+  "#serie": "{serie}"
+  "#correlativo": "{numero}"
+  # Read-only Ant Design date picker: step back a month until the day's cell shows, then click it.
+  "#fecha":
+    calendar:
+      cell: ".ant-picker-dropdown td[title='{fecha:%Y-%m-%d}']"
+      prev: ".ant-picker-dropdown .ant-picker-header-prev-btn"
+  "#montoTotal": "{total:.2f}"
+submit: "button[type=submit]"
+downloads:
+  pdf: "button:has-text('Descargar PDF')"
+  xml: "button:has-text('Descargar XML')"
+not_found: ".ant-message-notice:has-text('No se encontró')"
+retry_schedule: ["1h", "6h", "24h", "72h"]
+notes: "Checked 2026-11-13 with a real invoice: the result page has PDF, XML and CDR buttons; the XML matched. An unknown número shows a toast within 1 s."

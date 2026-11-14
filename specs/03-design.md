@@ -211,7 +211,7 @@ The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 
 
 ## 6. Fetcher chain
 Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, files[], reason)`. `reason` is an enum code, never response text. The `FetchContext` gives access to:
-- the shared browser (lazy),
+- the browser, which runs in a helper process per fetch (D82),
 - `ask_user(image, prompt, timeout)` for captchas,
 - the HTTP client, wrapped by the request guard (R-5.10),
 - **only the secrets the adapter declares** (R-9.10).
@@ -257,7 +257,9 @@ status: active                          # active | todo | broken
   - Parse the XML with the hardened parser (R-2.12) and match it against the invoice (R-5.6).
   - Retry schedule: +5 min, +1 h, +6 h, +24 h, because issuers send asynchronously. Each retry is a scheduled job, so nothing waits in the worker; meanwhile the invoice stays in `FETCHING_DOCS` with "esperando correo". After the last retry fails, the chain moves to the **next fetcher** (with the default order, `manual`).
 - **XML handling (R-2.12, D57):** every XML, whatever its source, is parsed with the hardened parser (§2) and accepted only if it matches the invoice (R-5.6). Signature checks and BR-F10 are post-MVP.
-- **Not found yet (D65):** a portal's "no such invoice" is a scheduled retry (`retry_schedule`, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
+- **Not found yet (D65):** a portal's "no such invoice" (its file's `not_found` selector) is a scheduled retry (`retry_schedule` in the portal file, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
+- **Chain position (D82):** read from the invoice's `fetch_attempts`, not stored: an `ok` attempt ends the chain, a final failure moves to the next fetcher, and `not_found_yet` attempts up to the length of `retry_schedule` mean wait. A fetcher not built yet is skipped.
+- **Portal file keys beyond the example above** (found on La Leña's site, `specs/spikes/portals.md`): `not_found`; `tipo_labels` (SUNAT tipo → the site's label, as `{tipo_label}`); `allow_http` (D76); `retry_schedule`; and two field kinds besides text and `select`: `pick: <option selector>` (click the field, then the option) and `calendar: {cell, prev}` (a read-only date picker: step back with `prev` until `cell` shows). `captcha: none` is the default.
 - **Request guard (R-5.10):** one module, `net/guard.py`, used by `httpx` (a custom transport) and by Chromium (route interception): `https` only (or `http` to the host of a portal whose file sets `allow_http`, D76), DNS resolved once and the connection pinned to a public IP, private/loopback/link-local/CGNAT ranges blocked, every redirect re-checked, `file:`/`data:` blocked. The browser container's network allows internet egress only. A block returns an enum reason (BR-F08).
 - **`manual`:** marks the state and composes the message listing the failed fetchers and reasons.
 
@@ -305,7 +307,7 @@ work_microsoft:
 
 ## 8. Resource budget and efficiency tactics
 - **One uvicorn worker.** CPU work (OpenCV) runs in `asyncio.to_thread`, guarded by `HEAVY = asyncio.Semaphore(1)`. Tesseract and Chromium run as subprocesses, so their memory is returned to the OS when they exit.
-- **Browser lifecycle:** `BrowserPool(max=1, idle_close=60s)` with one context per fetch.
+- **Browser lifecycle (D82):** no `BrowserPool`. Each fetch starts `python -m invoicebot.fetchers.browser`, which launches Chromium's headless shell with one context and exits with it, so Chromium is never resident while idle (S0.9: 224 MB peak, about 4 s cold start).
   - Launch flags: `--disable-dev-shm-usage --no-zygote --renderer-process-limit=1 --disable-gpu --blink-settings=imagesEnabled=false` (images are re-enabled only for captcha pages).
   - Block fonts, media and analytics with route interception.
 - **Heavy libraries stay out of the bot process:** image reading runs in a helper process per photo (`python -m invoicebot.extract`, D78), like Tesseract and Chromium, so `cv2` and `zxingcpp` are never imported by the app and their memory returns to the system. The same rule applies to any later heavy library (Playwright, the OCR preprocessing). Idle RSS target: about 60 MB, to be measured in `ops` (S12.1).
@@ -406,7 +408,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
   - Before creating anything, the issue search uses the label `gap` plus a hidden marker `<!-- gap:fingerprint -->` in the body, so a lost DB row never duplicates an issue.
 - **Issue text (R-11.12):** rendered from `gaps/templates/gap_issue.md` with typed fields only: the 11-digit issuer RUC, the padrón business name, the CPE type, fetcher reason codes, and the URL (if any) reduced to `https://host/path` with characters in `[A-Za-z0-9._~/-]`, inside a code fence. `@` is stripped. No OCR text, no sender text, no counts or dates. A snapshot test covers the template.
 - **Lifecycle:** the bot opens the issue (REPORTED). The owner fixes the capability in the main repo and merges; CI deploys (§15). After the `SIGHUP` reload, `GapService.reevaluate()` marks the gap FIXED and re-enqueues the linked invoices. When one of them gets past the failing step (or, with no linked invoice left, right after the re-check), the gap is CLOSED and the bot closes the issue with a comment (spec 06 §3).
-- **CI and portal status (R-11.6):** `ci.yml` runs lint, typecheck, tests, the rules↔catalog parity test (R-11.1) and `check_config.py`, which validates all YAML with the same pydantic models as the app. `todo`/`broken` portal entries fail **pull requests** only; on `main` they are listed in the job summary, so deploys never freeze. The owner sets `status: broken` by hand when BR-F03 reports a broken portal.
+- **CI and portal status (R-11.6):** `ci.yml` runs lint, typecheck, tests, the rules↔catalog parity test (R-11.1) and `check_config.py`, which validates all YAML with the same pydantic models as the app. A `todo`/`broken` portal entry fails only a **pull request that adds or changes its file** (CI passes the PR's changed files to `check_config.py --pr`); elsewhere it is listed in the job summary, so deploys and unrelated PRs never freeze (D83). The owner sets `status: broken` by hand when BR-F03 reports a broken portal.
 - **Owner alert (chat):** `🧩 Falta configurar: {kind_desc} — {subject}. Issue: {issue_url}`. Sent once per fingerprint per `realert_days`; "digest" kinds are batched into one daily message. It goes to each `admins` profile on its preferred channel. On WhatsApp it is a free-form service message inside the 24 h window, and the approved **utility template** `admin_alert` outside it (R-1.10).
 - **Credential (D45):** a **GitHub App** installed only on the ops repo, with the **Issues** permission only. The bot signs a JWT with the App's private key (from the encrypted secrets file) and exchanges it for a short-lived installation token, cached in `kv` until shortly before it expires. Failure to get a token (key revoked, App uninstalled, permission missing) raises BR-D05.
 - **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.

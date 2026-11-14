@@ -72,7 +72,7 @@ Anything bigger gets split before work starts.
   - Unknown keys are rejected.
   - `{owner.ruc}` placeholders are resolved.
   - `check_config.py` exits ≠ 0 on an invalid config, and lists the problems.
-  - With `--pr`, it also exits ≠ 0 on any portal with `status: todo|broken`; without it (on `main`), it only lists them.
+  - With `--pr FILE...` (the pull request's changed files), it also exits ≠ 0 on a portal with `status: todo|broken` whose `portals/<key>.yaml` is among them; any other todo/broken portal, and every one on `main`, is only listed.
   - A `python:` adapter outside `invoicebot.fetchers.portals.*` is rejected (R-5.8).
   - `llm_fallback` enabled for `work_microsoft` is rejected while the provider is `deepseek` (D43).
   - YAML is loaded only with `yaml.safe_load`.
@@ -316,11 +316,11 @@ Anything bigger gets split before work starts.
 | ID | Story | Size | Key AC | Reqs / rules |
 |---|---|---|---|---|
 | S7.1 | Chain of responsibility + `FetchResult` + `fetch_attempts` stats | M | Per-flow order from config; stops when the flow's `required_docs` are found; a portal's "not found yet" is retried on its schedule (D65); a fetcher's final failure passes to the next fetcher; retries are scheduled jobs; every attempt is recorded with an enum reason | R-5.1, R-5.7 |
-| S7.2 | `qr_url` fetcher | S | Follows the QR or printed URL through the request guard (S7.6); httpx streaming; size limits | R-5.2 |
+| S7.2 | `qr_url` fetcher (`widen-b`) | S | Follows the QR or printed URL through the request guard (S7.6); httpx streaming; size limits. Brings the guard's `httpx` transport and the `document_url` host allowlist (SUNAT and the store directory's hosts), moved here from `fetch` because this is their first caller | R-5.2 |
 | S7.3 | *Moved to E3 (phase 3, D55).* | | | |
 | S7.4 | `manual` terminal step (BR-F07 message, built from the attempt reasons) | S | One `•` line per fetcher, using the BR-F texts (F01 for flow B) | R-5.5 |
 | S7.5 | Accept sender-sent documents for `MANUAL_REQUIRED` | S | A quoted or most-recent open invoice of the same profile (any channel) is matched; only kinds in the flow's `manual_uploads` are taken; an XML is parsed and matched (R-5.6); delivery resumes when `required_docs` are complete, otherwise BR-D09 names what is missing (D66) | R-1.5 |
-| S7.6 | Outbound request guard (`net/guard.py`) for httpx and Chromium | M | Blocks non-https (except the host of a portal with `allow_http: true`, D76), `file:`/`data:`, private/loopback/link-local/CGNAT IPs, and redirects into them (table-driven tests, including DNS rebinding); pins the resolved IP; failures are enum codes (BR-F08); the browser container has internet-only egress | R-5.10 |
+| S7.6 | Outbound request guard (`net/guard.py`) for httpx and Chromium | M | Blocks non-https (except the host of a portal with `allow_http: true`, D76), `file:`/`data:`, private/loopback/link-local/CGNAT IPs, and redirects into them (table-driven tests, including DNS rebinding); pins the resolved IP; failures are enum codes (BR-F08); the browser container has internet-only egress. Phase `fetch` builds the checks and the Chromium side; the `httpx` transport comes with S7.2 | R-5.10 |
 | S7.7 | *Moved to E3 (phase 3, D55).* | | | |
 
 ## E8 · Gaps, GitHub and admin alerts
@@ -399,14 +399,14 @@ Anything bigger gets split before work starts.
 ## E10 · Browser fetchers
 | ID | Story | Size | Key AC | Reqs |
 |---|---|---|---|---|
-| S10.1 | BrowserPool (lazy, idle close, resource blocking) | M | Chromium is never resident while idle; peak RSS < budget (S0.9) | R-9.1 |
+| S10.1 | Browser helper process per fetch (D82; replaces the BrowserPool), with resource blocking | M | Chromium is never resident while idle; peak RSS < budget (S0.9) | R-9.1 |
 | S10.2 | `generic_form` adapter driven by a `portals/<key>.yaml` file | M | Fills, submits and downloads using only YAML; ≥ 3 seeded portals pass `portal-test` | R-5.8 |
 | S10.3 | Captcha: local OCR attempts | S | ≤ 2 attempts, then hand over to S10.4 | R-5.3 |
 | S10.4 | Captcha: ask the user in chat | M | Sends the image, waits up to 5 min, BR-F05 on timeout; reCAPTCHA → BR-F04 | R-5.3, R-5.4 |
 | S10.5 | `invoicebot portal-test <key>` CLI | S | Runs one portal end to end against a sample; used in the runbook's "add a portal" steps | R-5.7 |
 | S10.6 | `sunat_sol` fetcher (flow A only; blocked by S0.4) | M | Secondary SOL user; selectors in a file; credentials typed only when `page.url` matches the hard-coded SUNAT origins (test with a look-alike page); skipped in flow B with BR-F01 | R-5.2, R-9.10 |
 | S10.7 | Custom adapters for the 2–3 portals the generic adapter can't handle | M each | Each passes `portal-test` | R-5.8 |
-| S10.8 | Store directory loader (D47): `stores/` + `portals/`, brand by serie prefix, files in `config/` | M | `check_config.py` validates both folders; an unknown portal key, a duplicate RUC, or overlapping prefixes are rejected; several brands and no prefix match → a one-tap question; reload on `SIGHUP`; the config code moves off `portals.yaml` | R-5.8, R-11.9 |
+| S10.8 | Store directory loader (D47): `stores/` + `portals/`, brand by serie prefix, files in `config/` | M | `check_config.py` validates both folders; an unknown portal key, a duplicate RUC, or overlapping prefixes are rejected; several brands and no prefix match → a one-tap question; reload on `SIGHUP`; the config code moves off `portals.yaml`. Phase `fetch` builds the loader and checks; the brand choice by prefix and its question move to `file-b` (first use of `comercio`), and the `SIGHUP` reload to `ops` | R-5.8, R-11.9 |
 | S10.9 | Portal "not found yet" retries (D65) | S | A portal's "no such invoice" schedules the next try from `retry_schedule` (default 1 h, 6 h, 24 h, 72 h); the invoice shows "esperando al portal"; after the last try the chain moves on; a technical error is not retried this way | R-5.1 |
 | S10.10 | Stores without a website (D73) | S | `portal: manual` skips the portal with BR-F11 in the F07 list; the store's contact is read from the private config and never logged or sent to GitHub | R-5.8 |
 

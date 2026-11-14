@@ -174,6 +174,35 @@ async def complete(conn: AsyncConnection[Any], job: Job) -> bool:
     return cur.rowcount == 1
 
 
+async def is_superseded(conn: AsyncConnection[Any], job: Job) -> bool:
+    """Return True when a newer job for the same invoice and step exists (R-5.1).
+
+    Locks ``job``'s own row first, so two runs of the same job serialize; a
+    missing row is not an error because the worker deletes a job after its
+    handler commits. A crash before that delete redelivers the job, and the
+    next job the handler enqueued (a higher ``id``) makes this one stale. The
+    caller owns the transaction and commits.
+    """
+    await conn.execute(
+        "SELECT id FROM jobs WHERE id = %(job_id)s FOR UPDATE",
+        {"job_id": job.id},
+    )
+    cur = await conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1
+            FROM jobs
+            WHERE invoice_id = %(invoice_id)s
+              AND step = %(step)s
+              AND id > %(job_id)s
+        )
+        """,
+        {"invoice_id": job.invoice_id, "step": job.step, "job_id": job.id},
+    )
+    row = await cur.fetchone()
+    return row is not None and bool(row[0])
+
+
 async def fail(conn: AsyncConnection[Any], job: Job, error: str) -> bool:
     """Record a failed attempt for ``job`` (R-9.4).
 

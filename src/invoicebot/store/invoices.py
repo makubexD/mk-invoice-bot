@@ -84,6 +84,13 @@ async def set_flow(conn: AsyncConnection[Any], invoice_id: int, flow: str) -> No
     await conn.execute("UPDATE invoices SET flow_id = %s WHERE id = %s", (flow, invoice_id))
 
 
+async def load_flow(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
+    """Return the flow the invoice was routed to, or None before routing or when it does not exist."""
+    cur = await conn.execute("SELECT flow_id FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    return None if row is None or row[0] is None else str(row[0])
+
+
 async def set_state(
     conn: AsyncConnection[Any],
     invoice_id: int,

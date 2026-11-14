@@ -29,6 +29,17 @@ tesseract --version                      # 5.x
 tesseract --list-langs | grep -x spa     # the Spanish model is present
 ```
 
+## Browser for portals (D82)
+
+Portal fetchers drive Chromium's headless shell through Playwright, in a helper
+process started per fetch. The image installs it into `/opt/ms-playwright` with its
+system libraries; CI installs it before pytest. On a development machine:
+
+```sh
+uv run playwright install --only-shell --with-deps chromium
+uv run python -c "import playwright.async_api"   # the Python package loads
+```
+
 ## Environment variables
 
 | Variable | Default | Purpose |

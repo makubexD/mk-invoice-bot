@@ -10,7 +10,8 @@ zxing live here and are released when the process exits (D78). Nothing else is p
 is discarded by the handler because it could carry decoded text (R-9.16). A path or rules file
 that cannot be read exits non-zero, so the caller raises and the queue retries. The process caps
 its own address space, CPU time and file writes before it decodes anything, and an input above
-the byte cap prints the same "unreadable" result as an undecodable image.
+the byte cap prints the same "unreadable" result as an undecodable image. An OpenCV error while
+reading the image is reported the same way, as an unreadable photo (BR-E01).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import cv2
 import yaml
 
 from invoicebot.config.models import Ocr
@@ -58,6 +60,9 @@ def _limit_resources() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     """Read the photo named by ``argv`` and print the helper result (R-2.1, R-2.13)."""
+    # Single-threaded cv2: a preexec_fn after fork must not meet a lock held by a cv2 worker
+    # thread, or the child deadlocks (R-9.2).
+    cv2.setNumThreads(0)
     _limit_resources()
     args = sys.argv[1:] if argv is None else argv
     if len(args) != ARGUMENT_COUNT:
@@ -77,12 +82,13 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         gray = load_gray(data, max_px)
-    except ImageUnreadable:
+        hit = read_invoice_qr(gray)
+        processed = preprocess(gray)
+    except (ImageUnreadable, cv2.error):
         _emit(_unreadable(ocr=False))
         return 0
 
-    hit = read_invoice_qr(gray)
-    text = read_text(preprocess(gray), ocr_cfg)
+    text = read_text(processed, ocr_cfg)
     ocr_reading = None if text is None else parse_ocr(text, rules).reading
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     if not reading.fields:

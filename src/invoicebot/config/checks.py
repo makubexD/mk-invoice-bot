@@ -7,12 +7,16 @@ are only reported, so ``main`` never freezes a deploy (R-11.6).
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import combinations
 
-from invoicebot.config.models import Config, Portal
+from invoicebot.config.models import Config, Portal, Store, StoreDirectory
 from invoicebot.rules import RULES
 
 PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
+MANUAL_PORTAL = "manual"
 _PYTHON_ADAPTER_PREFIX = "python:"
+_GENERIC_FORM_ADAPTER = "generic_form"
+_URL_TEMPLATE_MARKER = "{"
 
 
 @dataclass(frozen=True)
@@ -25,37 +29,67 @@ class Problem:
     blocking: bool
 
 
-def run_checks(cfg: Config, portals: list[Portal], *, pr_mode: bool) -> list[Problem]:
-    """Return every problem found in ``cfg`` and ``portals`` (R-11.6, R-5.8, D43)."""
+def run_checks(cfg: Config, directory: StoreDirectory, *, changed_portals: frozenset[str]) -> list[Problem]:
+    """Return every problem found in ``cfg`` and ``directory`` (R-11.6, R-5.8, D43).
+
+    Portal problems point at ``portals/<key>.yaml:<field>`` and store problems
+    at ``stores/<ruc>.yaml:<field>``. A blocking problem fails CI.
+    ``changed_portals`` holds the keys of the portal files a pull request adds or
+    changes; only those block while todo/broken. On ``main`` it is empty.
+    """
     problems: list[Problem] = []
-    for index, portal in enumerate(portals):
-        problems.extend(_portal_problems(index, portal, pr_mode=pr_mode))
+    for key, portal in directory.portals.items():
+        problems.extend(_portal_problems(key, portal, changed=key in changed_portals))
+    for ruc, store in directory.stores.items():
+        problems.extend(_store_problems(ruc, store, directory.portals))
     problems.extend(_llm_fallback_problems(cfg))
     problems.extend(_routing_problems(cfg))
     return problems
 
 
-def _portal_problems(index: int, portal: Portal, *, pr_mode: bool) -> list[Problem]:
+def _portal_problems(key: str, portal: Portal, *, changed: bool) -> list[Problem]:
     problems: list[Problem] = []
     if portal.status != "active":
         problems.append(
             Problem(
                 code="PORTAL_NOT_ACTIVE",
-                path=f"portals[{index}].status",
+                path=f"portals/{key}.yaml:status",
                 message=f"portal '{portal.key}' has status '{portal.status}'; only active portals are used",
-                blocking=pr_mode,
+                blocking=changed,
             )
         )
-    adapter_problem = _adapter_problem(index, portal)
+    adapter_problem = _adapter_problem(key, portal)
     if adapter_problem is not None:
         problems.append(adapter_problem)
+    template_problem = _url_template_problem(key, portal)
+    if template_problem is not None:
+        problems.append(template_problem)
+    incomplete_problem = _form_incomplete_problem(key, portal)
+    if incomplete_problem is not None:
+        problems.append(incomplete_problem)
     return problems
 
 
-def _adapter_problem(index: int, portal: Portal) -> Problem | None:
-    path = f"portals[{index}].adapter"
+def _url_template_problem(key: str, portal: Portal) -> Problem | None:
+    """R-5.8: an active portal must carry a real URL, not a template the fetcher cannot fill."""
+    # shortcut: URL templates such as {ruc_emisor} come with the first portal that needs one.
+    if portal.status != "active" or portal.url is None or _URL_TEMPLATE_MARKER not in portal.url:
+        return None
+    return Problem(
+        code="PORTAL_URL_TEMPLATE",
+        path=f"portals/{key}.yaml:url",
+        message=(
+            f"portal '{portal.key}' is active but its url is a template; "
+            "URL templates are not supported yet (R-5.8)"
+        ),
+        blocking=True,
+    )
+
+
+def _adapter_problem(key: str, portal: Portal) -> Problem | None:
+    path = f"portals/{key}.yaml:adapter"
     adapter = portal.adapter
-    if adapter == "generic_form":
+    if adapter == _GENERIC_FORM_ADAPTER:
         return None
     if not adapter.startswith(_PYTHON_ADAPTER_PREFIX):
         return Problem(
@@ -80,6 +114,77 @@ def _adapter_problem(index: int, portal: Portal) -> Problem | None:
             blocking=True,
         )
     return None
+
+
+def _form_incomplete_problem(key: str, portal: Portal) -> Problem | None:
+    """R-5.8: an active generic_form portal must carry every form field it reads."""
+    if portal.adapter != _GENERIC_FORM_ADAPTER or portal.status != "active":
+        return None
+    missing = _missing_form_fields(portal)
+    if not missing:
+        return None
+    return Problem(
+        code="PORTAL_FORM_INCOMPLETE",
+        path=f"portals/{key}.yaml",
+        message=f"portal '{portal.key}' is an active generic_form portal but lacks {', '.join(missing)}",
+        blocking=True,
+    )
+
+
+def _missing_form_fields(portal: Portal) -> list[str]:
+    return [
+        name
+        for name, value in (
+            ("url", portal.url),
+            ("submit", portal.submit),
+            ("downloads", portal.downloads),
+            ("not_found", portal.not_found),
+        )
+        if value is None
+    ]
+
+
+def _store_problems(ruc: str, store: Store, portals: dict[str, Portal]) -> list[Problem]:
+    problems: list[Problem] = []
+    if store.portal not in (None, MANUAL_PORTAL) and store.portal not in portals:
+        problems.append(
+            Problem(
+                code="STORE_PORTAL_UNKNOWN",
+                path=f"stores/{ruc}.yaml:portal",
+                message=(
+                    f"store {ruc} names portal '{store.portal}', "
+                    f"but there is no portals/{store.portal}.yaml file (R-5.8)"
+                ),
+                blocking=True,
+            )
+        )
+    problems.extend(_serie_prefix_problems(ruc, store))
+    return problems
+
+
+def _serie_prefix_problems(ruc: str, store: Store) -> list[Problem]:
+    """R-5.8: series match by prefix, so prefixes of different brands may not overlap."""
+    problems: list[Problem] = []
+    for first, second in combinations(store.brands, 2):
+        for first_prefix in first.serie_prefix:
+            for second_prefix in second.serie_prefix:
+                if _prefixes_overlap(first_prefix, second_prefix):
+                    problems.append(
+                        Problem(
+                            code="STORE_SERIE_PREFIX_OVERLAP",
+                            path=f"stores/{ruc}.yaml:serie_prefix",
+                            message=(
+                                f"store {ruc}: serie prefix '{first_prefix}' ({first.comercio}) "
+                                f"overlaps '{second_prefix}' ({second.comercio})"
+                            ),
+                            blocking=True,
+                        )
+                    )
+    return problems
+
+
+def _prefixes_overlap(first: str, second: str) -> bool:
+    return first.startswith(second) or second.startswith(first)
 
 
 def _routing_problems(cfg: Config) -> list[Problem]:

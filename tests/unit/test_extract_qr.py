@@ -1,12 +1,20 @@
-"""Tests for reading a SUNAT QR out of a photo (R-2.1, R-2.8)."""
+"""Tests for reading a SUNAT QR out of a photo (R-2.1, R-2.8, R-9.16)."""
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import get_args
 
 import cv2
 import numpy as np
 import pytest
+from pydantic import TypeAdapter, ValidationError
 
-from invoicebot.extract.qr import read_invoice_qr
+from invoicebot.extract import __main__ as helper
+from invoicebot.extract.image import variants
+from invoicebot.extract.names import QrDecoder, QrVariant
+from invoicebot.extract.qr import OPENCV_DECODER, ZXING_DECODER, read_invoice_qr
 from invoicebot.extract.qr_payload import parse_qr_payload
 
 # Synthetic RUC from tests/synthetic_rucs.txt. No real RUC may appear here.
@@ -127,3 +135,51 @@ def test_read_invoice_qr_url_only_is_kept() -> None:
 def test_read_invoice_qr_blank_image_returns_none() -> None:
     """R-2.1: a photo with no code yields no hit."""
     assert read_invoice_qr(_canvas(*CANVAS)) is None
+
+
+def test_helper_opencv_error_reports_unreadable_and_exits_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """BR-E01, R-2.1: an OpenCV error while reading a photo is an unreadable result, exit 0."""
+
+    def explode(_data: bytes, _max_px: int) -> np.ndarray:
+        raise cv2.error("boom")
+
+    monkeypatch.setattr(helper, "_limit_resources", lambda: None)
+    monkeypatch.setattr(helper, "load_gray", explode)
+    photo = tmp_path / "photo.jpg"
+    photo.write_bytes(b"not an image")
+    argv = [
+        str(photo),
+        "2000",
+        "10000",
+        "tesseract",
+        "spa",
+        "6",
+        "5",
+        "config/parsing_rules.yaml",
+    ]
+
+    exit_code = helper.main(argv)
+
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] == "unreadable"
+    assert payload["reading"] is None
+
+
+def test_variant_and_decoder_names_are_the_closed_sets() -> None:
+    """R-9.16: variants() yields exactly the QrVariant names and the decoders are the closed set."""
+    gray = np.zeros((40, 40), dtype=np.uint8)
+
+    yielded = {name for name, _image in variants(gray)}
+
+    assert yielded == set(get_args(QrVariant))
+    assert {ZXING_DECODER, OPENCV_DECODER} == set(get_args(QrDecoder))
+
+
+@pytest.mark.parametrize("type_", [QrVariant | None, QrDecoder | None])
+def test_unknown_variant_or_decoder_name_is_rejected(type_: object) -> None:
+    """R-9.16: a variant or decoder name outside the closed set fails validation."""
+    with pytest.raises(ValidationError):
+        TypeAdapter(type_).validate_python("other")

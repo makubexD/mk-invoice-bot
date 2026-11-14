@@ -1,6 +1,6 @@
 [importlinter]
 root_package = invoicebot
-# OpenCV and zxing are graphed so the heavy-in-helper-only contract can forbid them (D78).
+# OpenCV, zxing and Playwright are graphed so the helper-only contracts can forbid them (D78, D82).
 include_external_packages = True
 
 [importlinter:contract:zero-consumer]
@@ -14,9 +14,21 @@ source_modules =
     invoicebot.rules
     invoicebot.extract
     invoicebot.routing
+    invoicebot.net
+    invoicebot.fetchers
 forbidden_modules =
     invoicebot.api
     invoicebot.events
+
+[importlinter:contract:fetchers-are-low]
+name = Fetchers never import the layers that use them
+type = forbidden
+source_modules =
+    invoicebot.fetchers
+forbidden_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
 
 [importlinter:contract:leaf-packages]
 name = Rules and config are leaves: they import nothing else from the app
@@ -24,6 +36,7 @@ type = forbidden
 source_modules =
     invoicebot.rules
     invoicebot.config
+    invoicebot.net
 forbidden_modules =
     invoicebot.api
     invoicebot.events
@@ -74,3 +87,30 @@ forbidden_modules =
     cv2
     zxingcpp
     invoicebot.extract.ocr
+
+[importlinter:contract:browser-in-helper-only]
+name = Playwright loads only in the browser helper process (D82)
+type = forbidden
+source_modules =
+    invoicebot.api
+    invoicebot.app
+    invoicebot.channels
+    invoicebot.config
+    invoicebot.events
+    invoicebot.extract
+    invoicebot.fetchers
+    invoicebot.logging
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.routing
+    invoicebot.rules
+    invoicebot.secrets
+    invoicebot.settings
+    invoicebot.store
+forbidden_modules =
+    playwright
+ignore_imports =
+    invoicebot.fetchers.browser.** -> playwright
+    invoicebot.fetchers.browser -> playwright
+# The browser helper lands in a later step of plan-mvp-fetch; until then the ignores match nothing.
+unmatched_ignore_imports_alerting = none

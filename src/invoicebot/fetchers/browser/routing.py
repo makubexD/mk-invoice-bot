@@ -1,0 +1,88 @@
+"""Route interception for the browser helper's one context (S7.6, R-5.10, D82).
+
+Every request Chromium makes passes through :class:`RouteGuard`, which drops resources no
+portal needs and aborts any URL whose scheme cannot reach the network. Address checks are
+not done here: the helper's guard proxy checks every hop and pins the address it checked
+(D82), so a redirect or a rebinding answer cannot skip the check.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+from urllib.parse import urlsplit
+
+from playwright.async_api import Route
+
+from invoicebot.net.guard import NETWORK_SCHEMES
+
+#: Resource types a portal page never needs: glyphs and audio/video downloads.
+BLOCKED_RESOURCE_TYPES = frozenset({"font", "media"})
+#: Analytics and tracking hosts blocked outright (spec 03 §8).
+ANALYTICS_HOSTS = frozenset(
+    {
+        "google-analytics.com",
+        "googletagmanager.com",
+        "doubleclick.net",
+        "connect.facebook.net",
+        "hotjar.com",
+        "clarity.ms",
+    }
+)
+#: Chromium's abort code for a request a client-side rule refused.
+BLOCKED_BY_CLIENT = "blockedbyclient"
+
+
+class RouteGuard:
+    """Refuse unneeded and non-network requests in the helper's context (R-5.10).
+
+    Fonts, media, analytics hosts and (unless a captcha needs them) images are aborted,
+    as is any URL whose scheme is not in ``NETWORK_SCHEMES``: a ``file:`` URL never
+    reaches the guard proxy, so it is refused here. Addresses are checked by the proxy
+    (D82), not in this guard.
+    """
+
+    def __init__(self, *, allow_images: bool) -> None:
+        self._allow_images = allow_images
+
+    async def on_route(self, route: Route) -> None:
+        """Abort a refused request or let it continue (R-5.10)."""
+        url = route.request.url
+        resource_type = route.request.resource_type
+        try:
+            parts = urlsplit(url)
+        except ValueError:
+            parts = None
+        if (
+            parts is None
+            or parts.scheme.lower() not in NETWORK_SCHEMES
+            or resource_type in BLOCKED_RESOURCE_TYPES
+            or _is_analytics_host(parts.hostname or "")
+            or (resource_type == "image" and not self._allow_images)
+        ):
+            await route.abort(BLOCKED_BY_CLIENT)
+            return
+        await route.continue_()
+
+
+class SystemResolver:
+    """Resolve hosts through the operating system's resolver (R-5.10)."""
+
+    async def resolve(self, host: str) -> list[str]:
+        """Return the host's unique address strings in answer order; none if it fails."""
+        loop = asyncio.get_running_loop()
+        try:
+            answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except socket.gaierror:
+            return []
+        addresses: list[str] = []
+        for answer in answers:
+            address = answer[4][0]
+            if isinstance(address, str) and address not in addresses:
+                addresses.append(address)
+        return addresses
+
+
+def _is_analytics_host(host: str) -> bool:
+    """Whether ``host`` is an analytics host or one of its subdomains."""
+    return any(host == blocked or host.endswith(f".{blocked}") for blocked in ANALYTICS_HOSTS)

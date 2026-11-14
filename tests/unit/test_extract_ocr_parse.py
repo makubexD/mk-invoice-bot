@@ -20,6 +20,8 @@ SYNTHETIC_RUC = "20000000001"
 SYNTHETIC_RUC_OTHER = "51900000000"
 WRONG_CHECK_DIGIT_RUC = "20000000002"
 DEFAULT_CONFIDENCE = 0.95
+LONG_FILLER = "A" * 100_000
+RULE_MATCH_CAP = 50
 
 
 @pytest.fixture(scope="module")
@@ -301,3 +303,35 @@ def test_parse_ocr_serie_without_type_keyword_infers_tipo(rules: ParsingRules) -
     assert fields["tipo"].value == "01"
     assert fields["tipo"].flag == "inferred"
     assert fields["tipo"].confidence == fields["serie"].confidence
+
+
+def test_parse_ocr_ruc_after_text_cap_is_not_read(rules: ParsingRules) -> None:
+    """R-9.2: a RUC printed after the 64 KB text cap is never parsed."""
+    fields = _fields(_ocr(f"{LONG_FILLER} {SYNTHETIC_RUC}"), rules)
+
+    assert "ruc_emisor" not in fields
+
+
+def test_parse_ocr_ruc_before_text_cap_is_read(rules: ParsingRules) -> None:
+    """R-9.2: a RUC printed before the 64 KB text cap is still read."""
+    fields = _fields(_ocr(f"{SYNTHETIC_RUC} {LONG_FILLER}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+
+
+def test_parse_ocr_rule_with_sixty_rejected_matches_stops_at_cap(rules: ParsingRules) -> None:
+    """R-9.2: a rule stops after 50 matches, so a valid 60th candidate is never read."""
+    rejected = " ".join([WRONG_CHECK_DIGIT_RUC] * (RULE_MATCH_CAP + 10))
+
+    fields = _fields(_ocr(f"{rejected} {SYNTHETIC_RUC}"), rules)
+
+    assert "ruc_emisor" not in fields
+
+
+def test_parse_ocr_rule_with_forty_nine_rejected_matches_reads_next(rules: ParsingRules) -> None:
+    """R-9.2: a valid candidate within the first 50 rule matches is read."""
+    rejected = " ".join([WRONG_CHECK_DIGIT_RUC] * (RULE_MATCH_CAP - 1))
+
+    fields = _fields(_ocr(f"{rejected} {SYNTHETIC_RUC}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
