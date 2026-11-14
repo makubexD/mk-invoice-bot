@@ -10,6 +10,7 @@ import re
 from collections.abc import Sequence
 from datetime import timedelta
 from decimal import Decimal
+from pathlib import Path
 from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
@@ -34,11 +35,11 @@ class Profile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str
+    legal_name: str
     whatsapp: str | None = None
     telegram_user_id: int | None = None
     preferred_channel: Literal["whatsapp", "telegram"] | None = None
     flows: list[str]
-    can_send_batch: bool
     admin: bool = False
 
 
@@ -165,6 +166,26 @@ class Routing(BaseModel):
     unmatched: Literal["ask", "reject"]
 
 
+class Mail(BaseModel):
+    """Flow mail switches; real sending only in production (R-7.7, D89)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    send_enabled: bool = False
+
+
+class Microsoft(BaseModel):
+    """The Entra app the bot signs in with for Graph (R-7.9, D84)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    # A public client's app id, so it is config and not a secret (D84).
+    client_id: str = Field(
+        pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+    )
+    timeout_s: float = Field(gt=0)
+
+
 class GoogleDriveSink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -185,55 +206,121 @@ class GoogleSheetsSink(BaseModel):
     columns: dict[str, str]
 
 
-class OneDriveSink(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class SinkFiles(BaseModel):
+    """File-name templates for the fetched documents in an invoice folder (R-7.2)."""
 
-    kind: Literal["onedrive"]
-    account: str
-    path: str
-    filename: str
-    upload: list[str]
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    pdf: str
+    xml: str
+
+
+class OneDriveFolderSink(BaseModel):
+    """One folder per invoice on the configured storage targets (R-7.1, R-7.2, R-7.3)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["onedrive_folder"]
+    targets: list[Literal["onedrive_personal"]] = Field(min_length=1)
+    root: str = Field(pattern=r"^/")
+    folder: str
+    files: SinkFiles
+    manifest: str = ".invoicebot.json"
+
+
+class ExcelDefaults(BaseModel):
+    """Default reason and description when the sender gives none (R-7.4, D70)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    motivo: str
+    descripcion: str
+
+
+_CELL_REFERENCE = re.compile(r"^[A-Z]{1,3}[1-9][0-9]{0,6}$")
 
 
 class ExcelTemplateSink(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """The pinned Excel template and the cells patched into it (R-7.4, R-7.10, D71, D86)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["excel_template"]
-    template: str
-    template_sha256: str
-    allow_macros: bool
+    template: Path
+    template_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    allow_macros: bool = False
     output: str
     sheet: str
     cells: dict[str, str]
+    defaults: ExcelDefaults
+
+    @field_validator("cells")
+    @classmethod
+    def _cell_keys_are_references(cls, value: dict[str, str]) -> dict[str, str]:
+        """R-7.10: every key is an A1-style cell reference, so a bad mapping fails at load."""
+        for key in value:
+            if _CELL_REFERENCE.fullmatch(key) is None:
+                raise ValueError(f"cell key {key!r} is not an A1-style cell reference")
+        return value
+
+    @model_validator(mode="after")
+    def _xlsm_requires_allow_macros(self) -> Self:
+        """R-7.10: a macro-enabled template is only used with an explicit opt-in."""
+        if self.template.suffix.lower() == ".xlsm" and not self.allow_macros:
+            raise ValueError(f"template {self.template} is macro-enabled; set allow_macros: true")
+        return self
 
 
-class MailerTrigger(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+type MailMode = Literal["dry_run", "graph"]
 
-    modes: list[Literal["on_command", "per_invoice", "scheduled"]]
-    confirm_before_send: bool
-    min_items: int
+_EMAIL_ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+$")
 
 
 class MailerSink(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    """The invoice email: trigger, modes in order, account and templates (R-7.5 to R-7.7)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     kind: Literal["mailer"]
-    provider: Literal["graph", "gmail"]
-    batch_aware: bool
-    trigger: MailerTrigger
-    to: list[str]
-    cc: list[str]
+    trigger: Literal["per_invoice"]
+    modes: list[MailMode] = Field(min_length=1)
+    account: Literal["personal"]
+    to: list[str] = Field(min_length=1)
+    cc: list[str] = Field(default_factory=list)
     subject: str
-    body_template: str
-    attach: list[str]
-    zip_if_over_mb: int
+    body: str
+    attach: list[Literal["excel_template", "pdf", "xml"]]
+
+    @field_validator("modes")
+    @classmethod
+    def _modes_are_unique(cls, value: list[MailMode]) -> list[MailMode]:
+        """R-7.7: each mail mode appears once, so its order is unambiguous."""
+        if len(set(value)) != len(value):
+            raise ValueError("mail modes must be unique")
+        return value
+
+    @field_validator("to")
+    @classmethod
+    def _recipients_are_addresses(cls, value: list[str]) -> list[str]:
+        """R-7.6: a recipient is one plain address, so a mistyped one fails at load."""
+        for address in value:
+            if _EMAIL_ADDRESS.fullmatch(address) is None:
+                raise ValueError(f"recipient {address!r} is not an email address")
+        return value
 
 
 type Sink = Annotated[
-    GoogleDriveSink | GoogleSheetsSink | OneDriveSink | ExcelTemplateSink | MailerSink,
+    GoogleDriveSink | GoogleSheetsSink | OneDriveFolderSink | ExcelTemplateSink | MailerSink,
     Field(discriminator="kind"),
 ]
+
+
+class Reimbursement(BaseModel):
+    """A flow's reimbursement settings; ``cap`` drives BR-D06 (R-7.13)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    cap: Decimal = Field(gt=0)
 
 
 class Flow(BaseModel):
@@ -244,6 +331,7 @@ class Flow(BaseModel):
     fetchers: list[str]
     required_docs: list[str]
     deliver_without_docs: bool
+    reimbursement: Reimbursement | None = None
     sinks: list[Sink]
 
 
@@ -389,6 +477,9 @@ class Config(BaseModel):
 
     owner: Owner
     work: Work
+    env: Literal["development", "production"]
+    mail: Mail
+    microsoft: Microsoft
     profiles: dict[str, Profile]
     channels: list[Channel]
     sunat: Sunat
@@ -412,6 +503,13 @@ class Config(BaseModel):
                     f"flow '{name}' accepts tipos {unsupported} outside "
                     f"extraction.supported_tipos ({sorted(supported)})"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _real_mail_needs_production(self) -> Self:
+        """R-7.7: sending real mail is only allowed in production."""
+        if self.mail.send_enabled and self.env != "production":
+            raise ValueError(f"mail.send_enabled requires env: production, got {self.env!r}")
         return self
 
     @model_validator(mode="after")

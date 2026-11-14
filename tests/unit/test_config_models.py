@@ -58,6 +58,83 @@ def test_example_config_loads() -> None:
     assert cfg.owner.ruc == "20XXXXXXXXX"
 
 
+def test_flow_without_reimbursement_loads_with_none() -> None:
+    """D53: a flow that does not reimburse carries no cap."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.flows["personal_google"].reimbursement is None
+
+
+def test_mail_send_enabled_outside_production_fails(tmp_path: Path) -> None:
+    """R-7.7: real mail needs production, so development refuses send_enabled."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["mail"]["send_enabled"] = True
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="send_enabled"):
+        load_config(path)
+
+
+def test_mail_send_enabled_in_production_loads(tmp_path: Path) -> None:
+    """R-7.7: production is the one environment where real mail may be enabled."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["env"] = "production"
+    document["mail"]["send_enabled"] = True
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).mail.send_enabled is True
+
+
+def test_xlsm_template_without_allow_macros_fails(tmp_path: Path) -> None:
+    """R-7.10: a macro-enabled template needs an explicit opt-in."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][1]["template"] = "/data/templates/reembolsos.xlsm"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="allow_macros"):
+        load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("override", "match"),
+    [
+        ({"modes": ["on_command"]}, "modes"),
+        ({"modes": ["graph", "graph"]}, "unique"),
+        ({"to": []}, "to"),
+    ],
+)
+def test_mailer_sink_rejects_bad_modes_and_recipients(
+    tmp_path: Path, override: dict[str, Any], match: str
+) -> None:
+    """R-7.7: a mail mode is known and unique, and an invoice mail names a recipient."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][2].update(override)
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=match):
+        load_config(path)
+
+
+def test_excel_cell_key_that_is_not_a_reference_fails(tmp_path: Path) -> None:
+    """R-7.10: a cell key is A1-style, so a reversed key fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][1]["cells"] = {"16B": "{total}"}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="16B"):
+        load_config(path)
+
+
+def test_zero_reimbursement_cap_fails(tmp_path: Path) -> None:
+    """R-7.13: a reimbursement cap is positive, so a zero cap fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["reimbursement"]["cap"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="reimbursement"):
+        load_config(path)
+
+
 def test_unknown_key_fails_naming_path(tmp_path: Path) -> None:
     """R-9.6: an unknown key anywhere is rejected and the error names its dotted path."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

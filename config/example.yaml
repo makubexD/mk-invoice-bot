@@ -18,17 +18,17 @@ work:
 profiles:
   yo:
     name: "Yo"
+    legal_name: "PERSONA DE EJEMPLO"  # used in flow B file names (R-7.2)
     whatsapp: "51999999999"
     telegram_user_id: 100000001
     preferred_channel: whatsapp       # where admin alerts go
     flows: [personal_google, work_microsoft]
-    can_send_batch: true
     admin: true
   asistente:
     name: "Asistente"
+    legal_name: "ASISTENTE DE EJEMPLO"
     whatsapp: "51988888888"
     flows: [personal_google]
-    can_send_batch: false
 
 channels:
   - kind: whatsapp_cloud
@@ -89,6 +89,11 @@ routing:
     #   flow: second_company
   unmatched: ask                # ask (BR-R03) | reject (BR-R07)
 
+# Flow B's mail (R-7.7, D89) and the Graph app id (D84). The client id is public, not a secret.
+env: development                         # production is required for mail.send_enabled: true
+mail: { send_enabled: false }            # false turns every mail mode into dry_run at startup
+microsoft: { client_id: "00000000-0000-0000-0000-000000000000", timeout_s: 30 }
+
 flows:
   personal_google:
     label: "Mi empresa (Google)"
@@ -127,38 +132,39 @@ flows:
     fetchers: [qr_url, portal_registry, email_inbox, manual]   # no sunat_sol: no access to work RUC
     required_docs: [xml, pdf]
     deliver_without_docs: false
+    reimbursement: { cap: 50.00 }       # BR-D06, R-7.13
     sinks:
-      - kind: onedrive
-        account: personal               # MSAL cache name
-        path: "/Facturas Trabajo/{fecha:%Y}/{fecha:%m}"
-        filename: "{fecha:%Y-%m-%d}_{ruc_emisor}_{serie}-{numero}"
-        upload: [photo, pdf, xml]
+      - kind: onedrive_folder
+        targets: [onedrive_personal]    # later: onedrive_work
+        root: "/Reembolsos"
+        folder: "{fecha:%Y}-{fecha:%m}-Support_{seq}_{comercio}"
+        files: { pdf: "{profile.legal_name}.pdf", xml: "{profile.legal_name}.xml" }
+        # manifest defaults to .invoicebot.json
       - kind: excel_template
-        template: "/Plantillas/rendicion.xlsx"   # OneDrive path of your template
+        template: "/data/templates/reembolsos.xlsx"   # a local host file, never in git (D86)
         template_sha256: "0000000000000000000000000000000000000000000000000000000000000000"   # pinned (R-7.10)
-        allow_macros: false                       # .xlsm (keep_vba) only with explicit opt-in
-        output: "/Facturas Trabajo/{fecha:%Y}/{fecha:%m}/{serie}-{numero}.xlsx"
-        sheet: "Hoja1"
-        cells:                          # fixed cells you said need updating
-          C4: "{fecha:%d/%m/%Y}"
-          C5: "{ruc_emisor}"
-          C6: "{razon_social}"
-          C7: "{serie}-{numero}"
-          C8: "{total}"
+        allow_macros: false
+        output: "Formato de reembolsos.xlsx"
+        sheet: "Template"
+        cells:
+          C13: "{motivo}"
+          B16: "{fecha:%d/%m/%Y}"
+          C16: "{descripcion}"
+          E16: "{serie}-{numero}"
+          F16: "{base}"
+          G16: "{igv}"
+          H16: "{service_charge}"
+          I16: "{total}"
+        defaults: { motivo: "Support release", descripcion: "Cena en {comercio}" }
       - kind: mailer
-        provider: graph                 # graph (MVP) | gmail (post-MVP)
-        batch_aware: true               # invoices wait as BATCHED; DONE when the batch is sent
-        trigger:
-          modes: [on_command]           # MVP: on_command. Post-MVP: per_invoice | scheduled
-          # schedule: "0 18 * * 5"      # post-MVP: Fridays 18:00 Lima
-          confirm_before_send: true
-          min_items: 1
-        to: ["contabilidad@empresa.pe"]
+        trigger: per_invoice
+        modes: [graph]                  # MVP. Later: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
+        account: personal
+        to: ["me@example.com"]          # MVP: the owner's test inbox (D68)
         cc: []
-        subject: "Rendición de gastos {batch.from:%d/%m} - {batch.to:%d/%m} ({batch.count} comprobantes)"
-        body_template: "templates/email_rendicion.html.j2"
-        attach: [pdf, xml, excel_template]
-        zip_if_over_mb: 3
+        subject: "Support release {fecha:%d/%m/%Y}"
+        body: "Hola,\nAdjunto los documentos solicitados para el reembolso."
+        attach: [excel_template, pdf, xml]
 
 retrieval:
   portal_timeout_s: 120                 # one portal fetch, browser helper included; OCR has its own timeout
