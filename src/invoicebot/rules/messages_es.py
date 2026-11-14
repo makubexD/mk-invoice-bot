@@ -329,6 +329,9 @@ EDIT_INVALID = (
     "No entendí «{line}». Escribe cada cambio así: campo=valor, por ejemplo total=45.50. "
     "Puedes cambiar ruc, serie, numero, fecha, total y cliente."
 )
+#: The reply when an edit arrives in a state that no longer accepts one (R-3.5, D97).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+EDIT_LATE = "El comprobante #{id} ya está {state_desc}; ya no puedo cambiar sus datos."
 
 
 def modes_desc(modes: Sequence[str]) -> str:

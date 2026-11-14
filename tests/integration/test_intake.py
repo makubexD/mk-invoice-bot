@@ -1,10 +1,13 @@
-"""Integration tests for intake: storage, queueing, back-pressure and rollback.
+"""Integration tests for intake: storage, edits, queueing, back-pressure and rollback.
 
-Covers R-1.1, R-1.6, R-1.8, R-1.10 and BR-S01 against real Postgres.
+Covers R-1.1, R-1.6, R-1.8, R-1.10, R-3.5, BR-S01 and BR-E01 against real Postgres.
 """
 
-from datetime import UTC, datetime
-from typing import Any
+import itertools
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, cast
 from uuid import uuid4
 
 import pytest
@@ -12,13 +15,32 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, ChannelName, InboundMessage
+from invoicebot.config.loader import load_config
+from invoicebot.config.models import Config, RoutingRule, StoreDirectory
+from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.route import make_route_handler
 from invoicebot.queue.jobs import Job, claim
+from invoicebot.routing.router import compile_rules
+from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
+from invoicebot.store.flow_b import merge_flow_data
+from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 MAX_QUEUED = 10
 LEASE_S = 60
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+# From tests/synthetic_rucs.txt; 20000000002 fails its check digit.
+OWNER_RUC = "20000000001"
+BAD_RUC = "20000000002"
+WORK_RUC = "51900000000"
+WORK_FLOW = "work_microsoft"
+DNI_BUYER = "40382716"
+FULL_PROFILE = "yo"
+#: One unique numero per reading, so no test claims another's natural key (D93).
+_NEXT_NUMERO = itertools.count(40000)
 
 
 class _Rollback(Exception):
@@ -58,6 +80,129 @@ def _message(
         attachments=[] if attachments is None else attachments,
         received_at=datetime.now(UTC),
     )
+
+
+async def _today(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> date:
+    """Return today in Lima from the database clock, as the route handler sees it."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT (now() AT TIME ZONE 'America/Lima')::date")
+        row = await cur.fetchone()
+    assert row is not None
+    return cast(date, row[0])
+
+
+def _reading(fecha: date, *, buyer: str = WORK_RUC, buyer_type: str = "6") -> Reading:
+    """Build a complete reading for one invoice, with its own numero (D93)."""
+    return Reading(
+        fields={
+            "ruc_emisor": Field(OWNER_RUC, "qr", 1.0),
+            "tipo": Field("01", "qr", 1.0),
+            "serie": Field("F001", "qr", 1.0),
+            "numero": Field(str(next(_NEXT_NUMERO)), "qr", 1.0),
+            "igv": Field("7.61", "qr", 1.0),
+            "total": Field("49.90", "qr", 1.0),
+            "fecha_emision": Field(fecha.isoformat(), "qr", 1.0),
+            "tipo_doc_adq": Field(buyer_type, "qr", 1.0),
+            "num_doc_adq": Field(buyer, "qr", 1.0),
+        },
+        document_url=None,
+    )
+
+
+async def _invoice_in(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    state: str,
+    reading: Reading | None,
+    *,
+    rule_id: str | None = None,
+    answers: dict[str, Any] | None = None,
+) -> int:
+    """Create an invoice in ``state`` with ``reading`` and stored answers."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        if reading is not None:
+            await save_reading(conn, invoice_id, reading)
+        if answers:
+            await merge_flow_data(conn, invoice_id, {"answers": answers})
+        await set_state(conn, invoice_id, state, rule_id=rule_id)
+    return invoice_id
+
+
+def _config(profile_id: str) -> Config:
+    """Return the example config with ``profile_id`` as the full profile and both buyer rules."""
+    cfg = load_config(EXAMPLE)
+    routing = cfg.routing.model_copy(
+        update={
+            "rules": [
+                RoutingRule(id="BR-R01", when={"num_doc_adq": [OWNER_RUC]}, flow="personal_google"),
+                RoutingRule(id="BR-R02", when={"num_doc_adq": [WORK_RUC]}, flow=WORK_FLOW),
+            ]
+        }
+    )
+    return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles[FULL_PROFILE]}, "routing": routing})
+
+
+async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, invoice_id: int) -> None:
+    """Run the route handler on ``invoice_id`` as the queue would."""
+    job = Job(
+        id=1, invoice_id=invoice_id, step=ROUTE_STEP, attempts=0, crashes=0, lease_until=datetime.now(UTC)
+    )
+    handler = make_route_handler(pool, cfg, StoreDirectory(stores={}, portals={}), compile_rules(cfg.routing))
+    await handler(job)
+
+
+async def _state_rule(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
+    """Return ``(state, rule_id)`` of an invoice."""
+    cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0]), None if row[1] is None else str(row[1])
+
+
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the steps of the invoice's queued jobs, in insertion order."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
+
+
+async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
+    """Return the outbox's ``(text, rule_id)`` rows for ``profile_id``, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text', payload_json->>'rule_id'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    rows = await cur.fetchall()
+    return [(str(text), rule_id) for text, rule_id in rows]
+
+
+async def _fields_json(conn: AsyncConnection[Any], invoice_id: int) -> str:
+    """Return the invoice's stored reading as text, for an unchanged comparison."""
+    cur = await conn.execute("SELECT fields_json::text FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None
+    return str(row[0])
+
+
+async def _field(conn: AsyncConnection[Any], invoice_id: int, name: str) -> tuple[str | None, str | None]:
+    """Return ``(value, source)`` of one stored reading field."""
+    cur = await conn.execute(
+        """
+        SELECT fields_json->'fields'->%s->>'value', fields_json->'fields'->%s->>'source'
+        FROM invoices
+        WHERE id = %s
+        """,
+        (name, name, invoice_id),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0], row[1]
 
 
 async def _counts(conn: AsyncConnection[Any], profile_id: str) -> tuple[int, int, int, int]:
@@ -271,3 +416,167 @@ async def test_caller_rollback_leaves_nothing_behind(
     assert row is not None
     assert row[0] == 0
     assert counts == (0, 0, 0, 0)
+
+
+async def test_edit_reroutes_a_confirming_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D97: total=10.00 on a CONFIRMING invoice is stored as the user's and routes again."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "CONFIRMING",
+        _reading(await _today(db_pool)),
+        rule_id="BR-R03",
+        answers={"flow": WORK_FLOW},
+    )
+    msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        total = await _field(conn, invoice_id, "total")
+        cur = await conn.execute(
+            "SELECT total, flow_data_json->'answers' FROM invoices WHERE id = %s", (invoice_id,)
+        )
+        row = await cur.fetchone()
+
+    assert result.invoice_id == invoice_id
+    assert state_rule == ("ROUTING", None)
+    assert jobs == ["route"]
+    assert total == ("10.00", "user")
+    assert row == (Decimal("10.00"), {})
+
+
+async def test_complete_edit_reroutes_an_extract_failed_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-E01: a complete typed reading on an EXTRACT_FAILED invoice goes to ROUTING."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        text=f"ruc={OWNER_RUC}\nserie=F001\nnumero=4321\nfecha=01/02/2025\ntotal=45.50",
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        cur = await conn.execute(
+            "SELECT ruc_emisor, tipo, serie, numero, fecha, total FROM invoices WHERE id = %s",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+        source = await _field(conn, invoice_id, "ruc_emisor")
+
+    assert state_rule == ("ROUTING", None)
+    assert jobs == ["route"]
+    assert row == (20000000001, "01", "F001", "4321", date(2025, 2, 1), Decimal("45.50"))
+    assert source == (OWNER_RUC, "user")
+
+
+async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-E01: only total=10.00 leaves a required field missing, so BR-E01 repeats."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
+    msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert state_rule == ("EXTRACT_FAILED", "BR-E01")
+    assert jobs == []
+    assert replies == [(MESSAGES["BR-E01"], "BR-E01")]
+
+
+async def test_edit_in_delivering_is_refused_as_late(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, D97: an edit in DELIVERING gets EDIT_LATE and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "DELIVERING", _reading(await _today(db_pool)))
+    msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
+
+    async with db_pool.connection() as conn:
+        before = await _fields_json(conn, invoice_id)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+        after = await _fields_json(conn, invoice_id)
+
+    expected = EDIT_LATE.format(id=invoice_id, state_desc=state_desc("DELIVERING"))
+    assert state_rule == ("DELIVERING", None)
+    assert jobs == []
+    assert replies == [(expected, None)]
+    assert after == before
+
+
+async def test_bad_ruc_edit_answers_br_e02_and_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-E02: ruc=<bad> answers BR-E02 and leaves the invoice and its reading as they were."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    msg = _message(profile_id, external_id=_external_id(), text=f"ruc={BAD_RUC}")
+
+    async with db_pool.connection() as conn:
+        before = await _fields_json(conn, invoice_id)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+        after = await _fields_json(conn, invoice_id)
+
+    assert state_rule == ("CONFIRMING", "BR-R03")
+    assert jobs == []
+    assert replies == [(MESSAGES["BR-E02"].format(ruc=BAD_RUC), "BR-E02")]
+    assert after == before
+
+
+async def test_cliente_edit_reroutes_a_br_r03_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-R03: cliente=<work RUC> on a BR-R03 invoice lands in the work flow."""
+    profile_id = _profile()
+    cfg = _config(profile_id)
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "ROUTING",
+        _reading(await _today(db_pool), buyer=DNI_BUYER, buyer_type="1"),
+    )
+    await _run_route(db_pool, cfg, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text=f"cliente={WORK_RUC}")
+
+    async with db_pool.connection() as conn:
+        assert await _state_rule(conn, invoice_id) == ("CONFIRMING", "BR-R03")
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        buyer = await _field(conn, invoice_id, "num_doc_adq")
+
+    assert result.invoice_id == invoice_id
+    assert state_rule == ("ROUTING", None)
+    assert jobs == ["route"]
+    assert buyer == (WORK_RUC, "user")
+
+    await _run_route(db_pool, cfg, invoice_id)
+    async with db_pool.connection() as conn:
+        final_state = await _state_rule(conn, invoice_id)
+        cur = await conn.execute("SELECT flow_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+
+    assert final_state == ("FETCHING_DOCS", "BR-R02")
+    assert row == (WORK_FLOW,)

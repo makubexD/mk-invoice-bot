@@ -70,7 +70,7 @@ async def apply_overrides(
     with a ``prepared`` batch moves back to ``DELIVERING`` with a ``deliver`` job, and the
     sender gets a one-line confirmation. Returns the invoice id, or None with no target.
     """
-    invoice_id = await _target(conn, msg)
+    invoice_id = await edit_target(conn, msg)
     if invoice_id is None:
         return None
     current = await get_state_rule(conn, invoice_id)
@@ -90,8 +90,8 @@ async def apply_overrides(
     return invoice_id
 
 
-async def _target(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
-    """Return the invoice the message's overrides apply to, or None (D90)."""
+async def edit_target(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
+    """Return the invoice the message's edit or override applies to, or None (D90, D97)."""
     reply_to = None if msg.reply_to_external_id is None else (msg.channel, msg.reply_to_external_id)
     return await find_override_target(conn, msg.profile_id, reply_to)
 

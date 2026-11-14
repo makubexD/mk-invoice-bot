@@ -1,10 +1,12 @@
-"""Parse the ``campo=valor`` edits a sender types in chat (R-3.5, D97).
+"""Parse and apply the ``campo=valor`` edits a sender types in chat (R-3.5, D97).
 
 An edit line names one invoice field and its new value. Aliases shorten the field's
 name, ``motivo``/``descripcion`` stay with :mod:`invoicebot.pipeline.overrides`, and
 each value is normalised here so the caller stores a canonical reading field. A value
 the field's rule rejects becomes an :class:`EditError` that names the business rule
 when there is one; the caller answers with the first error and changes nothing.
+:func:`apply_edits` stores the accepted fields on the invoice the message targets and
+re-routes it, so the route handler validates the new values and sends the summary again.
 """
 
 from __future__ import annotations
@@ -15,9 +17,21 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 from types import MappingProxyType
+from typing import Any
 
+from psycopg import AsyncConnection
+
+from invoicebot.channels.base import InboundMessage
+from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
-from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, OVERRIDE_KEYS
+from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
+from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, OVERRIDE_KEYS, edit_target
+from invoicebot.queue.jobs import enqueue
+from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
+from invoicebot.states import EDITABLE, EXTRACT_FAILED, ROUTING
+from invoicebot.store.flow_b import merge_flow_data
+from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state
 
 #: The most edit lines one message may carry; later lines each get an error.
 MAX_EDIT_LINES = 10
@@ -83,6 +97,95 @@ def parse_edits(text: str) -> Edits:
             _apply(fields, errors, name, line, value)
     _infer_tipo(fields)
     return Edits(MappingProxyType(fields), tuple(errors))
+
+
+async def apply_edits(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    edits: Edits,
+) -> int | None:
+    """Store accepted edits on their target invoice and send it back to routing (R-3.5, D97).
+
+    The target is the message's edit target (the quoted invoice, else the profile's newest
+    open one). No target changes nothing and returns None. A rejected line gets the first
+    error's text and changes nothing. A state outside ``EDITABLE`` gets ``EDIT_LATE``. From
+    ``EXTRACT_FAILED`` a reading still missing a required field gets BR-E01 and stays; any
+    other accepted edit stores its fields with source ``user``, clears the stored answers
+    (so routing asks again) and moves to ``ROUTING`` with a ``route`` job, all in the
+    caller's transaction.
+    """
+    invoice_id = await edit_target(conn, msg)
+    if invoice_id is None:
+        return None
+    current = await get_state_rule(conn, invoice_id)
+    if current is None:
+        raise RuntimeError(f"invoice {invoice_id} does not exist")
+    state, _ = current
+    if edits.errors:
+        await _reply_error(conn, msg, invoice_id, edits.errors[0])
+        return invoice_id
+    if state not in EDITABLE:
+        await _reply(
+            conn,
+            msg,
+            invoice_id,
+            EDIT_LATE.format(id=invoice_id, state_desc=state_desc(state)),
+        )
+        return invoice_id
+    reading = _edited_reading(await load_reading(conn, invoice_id), edits.fields)
+    await save_reading(conn, invoice_id, reading)
+    await merge_flow_data(conn, invoice_id, {"answers": {}})
+    if state == EXTRACT_FAILED and reading.missing_required():
+        await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)
+        return invoice_id
+    await set_state(conn, invoice_id, ROUTING, expected=state)
+    await enqueue(conn, invoice_id, ROUTE_STEP)
+    return invoice_id
+
+
+def _edited_reading(reading: Reading | None, edits: Mapping[str, str]) -> Reading:
+    """Return the stored reading with each edited field given source ``user`` (D97).
+
+    An invoice with no stored reading, such as one in ``EXTRACT_FAILED`` for an unreadable
+    photo, starts from an empty reading and keeps no document URL.
+    """
+    base = Reading(fields={}, document_url=None) if reading is None else reading
+    user_fields = {name: Field(value, "user", FULL_CONFIDENCE) for name, value in edits.items()}
+    return Reading(fields={**base.fields, **user_fields}, document_url=base.document_url)
+
+
+async def _reply_error(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    invoice_id: int,
+    error: EditError,
+) -> None:
+    """Queue the text for the first rejected edit line (BR-E02, BR-E03, R-3.5)."""
+    if error.rule_id == RULE_BAD_RUC:
+        text = MESSAGES[RULE_BAD_RUC].format(ruc=error.value)
+    elif error.rule_id == RULE_BAD_DATE:
+        text = MESSAGES[RULE_BAD_DATE].format(fecha=error.value)
+    else:
+        text = EDIT_INVALID.format(line=error.line)
+    await _reply(conn, msg, invoice_id, text, rule_id=error.rule_id)
+
+
+async def _reply(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    invoice_id: int,
+    text: str,
+    *,
+    rule_id: str | None = None,
+) -> None:
+    """Queue one reply to the message's sender in the caller's transaction."""
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        text,
+        invoice_id=invoice_id,
+        rule_id=rule_id,
+    )
 
 
 def _apply(
