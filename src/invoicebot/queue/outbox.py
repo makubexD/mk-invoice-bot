@@ -6,7 +6,9 @@ exists exactly when the state change that produced it commits (R-1.8).
 transport for the row's channel while holding the row lock and marks it
 ``sent``. A failure increments ``attempts``, stores ``last_error`` and
 reschedules the row with exponential backoff; once ``max_attempts`` is reached
-the row becomes ``dead`` and is logged. All scheduling uses the database clock.
+the row becomes ``dead`` and is logged. A :class:`PermanentSendError` marks the
+row ``dead`` at once, whatever the attempt count. All scheduling uses the
+database clock.
 """
 
 import logging
@@ -40,6 +42,10 @@ class OutboxRow:
 
 #: A coroutine that delivers one outbox row; raising means the send failed.
 Transport = Callable[[OutboxRow], Awaitable[None]]
+
+
+class PermanentSendError(Exception):
+    """The row can never be sent; retrying is pointless."""
 
 
 async def add(
@@ -115,25 +121,30 @@ class OutboxSender:
                     if raw is None:
                         return sent
                     row = _outbox_row(raw)
-                    error = await self._deliver(row)
-                    if error is None:
+                    failure = await self._deliver(row)
+                    if failure is None:
                         await conn.execute(
                             "UPDATE outbox SET state = 'sent', sent_at = now() WHERE id = %(id)s",
                             {"id": row.id},
                         )
                         sent += 1
                     else:
-                        await self._record_failure(conn, row, error)
+                        error, permanent = failure
+                        await self._record_failure(conn, row, error, permanent=permanent)
 
-    async def _deliver(self, row: OutboxRow) -> str | None:
-        """Call the row's transport; return an error description or None."""
+    async def _deliver(self, row: OutboxRow) -> tuple[str, bool] | None:
+        """Call the row's transport.
+
+        Return the error description and whether it is permanent, or None when
+        the row was delivered.
+        """
         transport = self._transports.get(row.channel)
         if transport is None:
-            return f"no transport for channel {row.channel}"
+            return f"no transport for channel {row.channel}", False
         try:
             await transport(row)
         except Exception as exc:  # CancelledError is a BaseException and propagates
-            return describe_error(exc)
+            return describe_error(exc), isinstance(exc, PermanentSendError)
         return None
 
     async def _record_failure(
@@ -141,10 +152,12 @@ class OutboxSender:
         conn: AsyncConnection[Any],
         row: OutboxRow,
         error: str,
+        *,
+        permanent: bool,
     ) -> None:
         """Increment ``attempts`` and reschedule the row, or mark it dead."""
         attempts = row.attempts + 1
-        if attempts >= self._max_attempts:
+        if permanent or attempts >= self._max_attempts:
             await conn.execute(
                 """
                 UPDATE outbox

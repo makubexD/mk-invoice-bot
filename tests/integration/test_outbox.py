@@ -6,7 +6,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.queue.outbox import OutboxRow, OutboxSender, add
+from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, add
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -247,6 +247,96 @@ async def test_missing_transport_is_recorded_as_a_failure(
     assert row[0] == "pending"
     assert row[1] == 1
     assert row[2] == "no transport for channel whatsapp"
+
+
+async def test_permanent_failure_marks_the_row_dead_on_the_first_attempt(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5: a PermanentSendError kills the row at once, whatever max_attempts."""
+    calls = 0
+
+    async def transport(row: OutboxRow) -> None:
+        nonlocal calls
+        calls += 1
+        raise PermanentSendError("no number")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "whatsapp", "+51900000006", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"whatsapp": transport}, max_attempts=3)
+    assert await sender.send_pending() == 0
+
+    async with db_pool.connection() as conn:
+        row = await _fetch_row(conn, outbox_id)
+    assert row is not None
+    assert row[0] == "dead"
+    assert row[1] == 1
+    assert row[2] == "PermanentSendError: no number"
+
+    assert await sender.send_pending() == 0
+    assert calls == 1
+
+
+async def test_transient_failure_still_reschedules_the_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5: a RuntimeError leaves the row pending, attempts 1 and rescheduled."""
+
+    async def transport(row: OutboxRow) -> None:
+        raise RuntimeError("boom")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "whatsapp", "+51900000007", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"whatsapp": transport})
+    assert await sender.send_pending() == 0
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT state, attempts, last_error, run_after > now() FROM outbox WHERE id = %s",
+            (outbox_id,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == "pending"
+    assert row[1] == 1
+    assert row[2] == "RuntimeError: boom"
+    assert row[3] is True
+
+
+async def test_permanent_failure_after_a_transient_one_marks_the_row_dead(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5: a PermanentSendError on the second attempt kills the row with attempts 2."""
+    calls = 0
+
+    async def transport(row: OutboxRow) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("boom")
+        raise PermanentSendError("no number")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "whatsapp", "+51900000008", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"whatsapp": transport})
+    assert await sender.send_pending() == 0
+    async with db_pool.connection() as conn:
+        await conn.execute("UPDATE outbox SET run_after = now() WHERE id = %s", (outbox_id,))
+
+    assert await sender.send_pending() == 0
+
+    async with db_pool.connection() as conn:
+        row = await _fetch_row(conn, outbox_id)
+    assert row is not None
+    assert row[0] == "dead"
+    assert row[1] == 2
+    assert row[2] == "PermanentSendError: no number"
+    assert calls == 2
 
 
 async def test_failing_row_does_not_block_a_later_row(
