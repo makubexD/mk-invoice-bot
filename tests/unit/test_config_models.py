@@ -264,7 +264,8 @@ def test_repo_directory_loads_and_la_lena_store_resolves_portal() -> None:
     """R-5.8: the repo directory loads and La Leña's store resolves to its portal."""
     directory = load_directory(CONFIG_DIR)
 
-    store = directory.stores["20486765454"]
+    # The store's RUC lives only in config/stores/ (D47), so find the store by its brand.
+    (store,) = [s for s in directory.stores.values() if s.razon_social.startswith("A C INVERSIONES")]
     assert store.portal is not None
     portal = directory.portals[store.portal]
     assert portal.key == "facturactiva-la-lena"

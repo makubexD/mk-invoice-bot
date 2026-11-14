@@ -8,14 +8,18 @@ from pathlib import Path
 import pytest
 
 from invoicebot.cli import main
+from invoicebot.config.loader import load_directory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config" / "example.yaml"
-# config/portals/facturactiva-la-lena.yaml is the only active portal; its store is 20486765454.
+# config/portals/facturactiva-la-lena.yaml is the only active portal.
 PORTAL_KEY = "facturactiva-la-lena"
 # config/portals/infofact.yaml is still todo, so ``portal-test`` must activate it for the run.
 TODO_PORTAL_KEY = "infofact"
-STORE_RUC = "20486765454"
+# The store's RUC lives only in config/stores/ (D47), so the test reads it from there.
+(STORE_RUC,) = [
+    ruc for ruc, store in load_directory(REPO_ROOT / "config").stores.items() if store.portal == PORTAL_KEY
+]
 UNKNOWN_KEY = "no-such-portal"
 TIPO = "01"
 SERIE = "F001"
