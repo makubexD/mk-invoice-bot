@@ -12,6 +12,7 @@ import pytest
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
+    NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
     GraphDrive,
     GraphError,
@@ -208,7 +209,7 @@ async def test_upload_above_four_megabytes_chunks_through_an_upload_session() ->
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://tenant-my.sharepoint.com/session"})
         if len(requests) == 2:
             return httpx.Response(202)
         return httpx.Response(200)
@@ -238,7 +239,7 @@ async def test_upload_session_never_confirmed_raises() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         if request.method == "POST":
-            return httpx.Response(201, json={"uploadUrl": "https://upload.example/session"})
+            return httpx.Response(201, json={"uploadUrl": "https://tenant-my.sharepoint.com/session"})
         return httpx.Response(202)
 
     async with _make_drive(handler) as drive:
@@ -252,13 +253,64 @@ async def test_upload_rejects_a_non_https_session_url_before_chunking() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        return httpx.Response(201, json={"uploadUrl": "http://upload.example/session"})
+        return httpx.Response(201, json={"uploadUrl": "http://tenant.sharepoint.com/session"})
 
     async with _make_drive(handler) as drive:
         with pytest.raises(GraphError):
             await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
 
     assert len(requests) == 1
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://tenant-my.sharepoint.com/upload?x=1",
+        "https://api.files.1drv.com/up/abc",
+        "https://graph.microsoft.com/v1.0/upload/abc",
+    ],
+)
+async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
+    """R-5.10: an upload session on a Microsoft host receives the chunks."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"uploadUrl": upload_url})
+        return httpx.Response(200)
+
+    async with _make_drive(handler) as drive:
+        await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
+
+    chunks = [request for request in requests if request.method == "PUT"]
+    assert chunks
+    assert all(str(chunk.url) == upload_url for chunk in chunks)
+
+
+@pytest.mark.parametrize(
+    "upload_url",
+    [
+        "https://evil.example/upload",
+        "https://sharepoint.com.evil.example/u",
+        "http://tenant.sharepoint.com/u",
+        "https://user@tenant.sharepoint.com/u",
+    ],
+)
+async def test_upload_refuses_a_session_url_outside_microsoft_before_chunking(upload_url: str) -> None:
+    """R-5.10: a session URL that is not HTTPS on a Microsoft host is refused with no PUT."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={"uploadUrl": upload_url})
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphError) as raised:
+            await drive.upload("/folder/invoice.pdf", b"x" * (5 * 1024 * 1024))
+
+    assert raised.value.status == NOT_SENT_STATUS
+    assert [request.method for request in requests] == ["POST"]
 
 
 async def test_invalid_path_raises_before_any_request() -> None:

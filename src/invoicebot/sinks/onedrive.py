@@ -29,6 +29,12 @@ UPLOAD_CHUNK_BYTES = 10 * 320 * 1024
 #: The status of an error raised before any follow-up request was sent.
 NOT_SENT_STATUS = 0
 
+#: The hosts an upload session may point at, exactly (D84).
+UPLOAD_HOSTS = ("graph.microsoft.com",)
+
+#: The suffixes an upload session host may end with; Microsoft's regional drives.
+UPLOAD_HOST_SUFFIXES = (".sharepoint.com", ".files.1drv.com", ".office.com")
+
 #: A segment that may not appear in a drive path.
 _FORBIDDEN_SEGMENT_CHARS = "/\\:"
 
@@ -143,6 +149,23 @@ def _upload_url(body: object) -> str | None:
     return url if isinstance(url, str) else None
 
 
+def _check_upload_url(url: str) -> None:
+    """Reject an upload session URL that is not HTTPS on a Microsoft upload host.
+
+    Runs before any chunk is sent, so a token or a file never reaches a host the
+    account does not own. Raises ``GraphError(NOT_SENT_STATUS)`` on a bad URL.
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = (parts.hostname or "").lower()
+    if (
+        parts.scheme != "https"
+        or parts.username is not None
+        or parts.password is not None
+        or not (host in UPLOAD_HOSTS or host.endswith(UPLOAD_HOST_SUFFIXES))
+    ):
+        raise GraphError(NOT_SENT_STATUS)
+
+
 async def upload_chunks(
     client: httpx.AsyncClient,
     upload_url: str,
@@ -153,14 +176,15 @@ async def upload_chunks(
 ) -> None:
     """Upload ``data`` to a Graph upload session in fixed-size chunks (R-7.2, R-5.10).
 
-    The session URL must be HTTPS; it is used as given and its ``PUT``s carry no
-    bearer header, so a token never reaches a host other than the prefix Graph
-    chose. A chunk answering 200 or 201 means Graph stored the file; 202 means
-    continue. A session that only ever answered 202 never confirmed the file and
-    raises ``GraphError`` rather than reporting success.
+    The session URL must be HTTPS on a Microsoft upload host
+    (:data:`UPLOAD_HOSTS` or :data:`UPLOAD_HOST_SUFFIXES`); it is used as given
+    and its ``PUT``s carry no bearer header, so a token never reaches a host
+    other than one Microsoft chose. A chunk answering 200 or 201 means Graph
+    stored the file; 202 means continue. A session that only ever answered 202
+    never confirmed the file and raises ``GraphError`` rather than reporting
+    success.
     """
-    if not upload_url.startswith("https://"):
-        raise GraphError(NOT_SENT_STATUS)
+    _check_upload_url(upload_url)
     total = len(data)
     for start in range(0, total, UPLOAD_CHUNK_BYTES):
         chunk = data[start : start + UPLOAD_CHUNK_BYTES]
