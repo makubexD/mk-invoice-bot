@@ -65,7 +65,8 @@ def raise_graph_error(response: httpx.Response, account: str) -> None:
     raise GraphError(status)
 
 
-def _auth_headers(token: str) -> dict[str, str]:
+def auth_headers(token: str) -> dict[str, str]:
+    """Return the bearer header for one Graph call (D84)."""
     return {"Authorization": f"Bearer {token}"}
 
 
@@ -142,6 +143,45 @@ def _upload_url(body: object) -> str | None:
     return url if isinstance(url, str) else None
 
 
+async def upload_chunks(
+    client: httpx.AsyncClient,
+    upload_url: str,
+    data: bytes,
+    *,
+    timeout_s: float,
+    account: str,
+) -> None:
+    """Upload ``data`` to a Graph upload session in fixed-size chunks (R-7.2, R-5.10).
+
+    The session URL must be HTTPS; it is used as given and its ``PUT``s carry no
+    bearer header, so a token never reaches a host other than the prefix Graph
+    chose. A chunk answering 200 or 201 means Graph stored the file; 202 means
+    continue. A session that only ever answered 202 never confirmed the file and
+    raises ``GraphError`` rather than reporting success.
+    """
+    if not upload_url.startswith("https://"):
+        raise GraphError(NOT_SENT_STATUS)
+    total = len(data)
+    for start in range(0, total, UPLOAD_CHUNK_BYTES):
+        chunk = data[start : start + UPLOAD_CHUNK_BYTES]
+        end = start + len(chunk) - 1
+        chunk_response = await client.put(
+            upload_url,
+            content=chunk,
+            headers={
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end}/{total}",
+            },
+            timeout=timeout_s,
+        )
+        if chunk_response.status_code in (200, 201):
+            return
+        if chunk_response.status_code != 202:
+            raise_graph_error(chunk_response, account)
+    # Every chunk answered 202, so Graph never confirmed the file: never report that as success.
+    raise GraphError(202)
+
+
 class GraphDrive:
     """One Microsoft account's drive, over Graph and an injected HTTP client (D84).
 
@@ -167,7 +207,7 @@ class GraphDrive:
         token = await self._tokens.token()
         names: list[str] = []
         while True:
-            response = await self._client.get(url, headers=_auth_headers(token), timeout=self._timeout_s)
+            response = await self._client.get(url, headers=auth_headers(token), timeout=self._timeout_s)
             if response.status_code == 404:
                 return []
             raise_graph_error(response, self._account)
@@ -200,7 +240,7 @@ class GraphDrive:
             response = await self._client.put(
                 f"{GRAPH_BASE_URL}/me/drive/root:{encoded}:/content",
                 content=data,
-                headers=_auth_headers(token),
+                headers=auth_headers(token),
                 timeout=self._timeout_s,
             )
             raise_graph_error(response, self._account)
@@ -233,7 +273,7 @@ class GraphDrive:
                 "folder": {},
                 "@microsoft.graph.conflictBehavior": "fail",
             },
-            headers=_auth_headers(token),
+            headers=auth_headers(token),
             timeout=self._timeout_s,
         )
 
@@ -241,29 +281,11 @@ class GraphDrive:
         response = await self._client.post(
             f"{GRAPH_BASE_URL}/me/drive/root:{encoded_path}:/createUploadSession",
             json={"item": {"@microsoft.graph.conflictBehavior": "replace"}},
-            headers=_auth_headers(token),
+            headers=auth_headers(token),
             timeout=self._timeout_s,
         )
         raise_graph_error(response, self._account)
         upload_url = _upload_url(_json_body(response))
-        if upload_url is None or not upload_url.startswith("https://"):
+        if upload_url is None:
             raise GraphError(NOT_SENT_STATUS)
-        total = len(data)
-        for start in range(0, total, UPLOAD_CHUNK_BYTES):
-            chunk = data[start : start + UPLOAD_CHUNK_BYTES]
-            end = start + len(chunk) - 1
-            chunk_response = await self._client.put(
-                upload_url,
-                content=chunk,
-                headers={
-                    "Content-Length": str(len(chunk)),
-                    "Content-Range": f"bytes {start}-{end}/{total}",
-                },
-                timeout=self._timeout_s,
-            )
-            if chunk_response.status_code in (200, 201):
-                return
-            if chunk_response.status_code != 202:
-                raise_graph_error(chunk_response, self._account)
-        # Every chunk answered 202, so Graph never confirmed the file: never report that as success.
-        raise GraphError(202)
+        await upload_chunks(self._client, upload_url, data, timeout_s=self._timeout_s, account=self._account)
