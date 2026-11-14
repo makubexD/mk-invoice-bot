@@ -22,7 +22,7 @@ from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.queue.jobs import Job
 from invoicebot.routing.router import CompiledRule
-from invoicebot.store.flow_b import merge_flow_data
+from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -465,6 +465,7 @@ async def test_dni_buyer_asks_which_flow(
         row = await _invoice(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
     assert row == ("CONFIRMING", "BR-R03", None)
     assert jobs == []
     assert len(outbox) == 1
@@ -476,6 +477,7 @@ async def test_dni_buyer_asks_which_flow(
         {"id": button_id(invoice_id, "pick", 1), "title": "Trabajo (Microsoft)"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
+    assert flow_data["choices"] == [OWNER_FLOW, WORK_FLOW]
 
 
 async def test_answered_flow_is_routed_to_summary(
@@ -497,10 +499,12 @@ async def test_answered_flow_is_routed_to_summary(
         row = await _invoice(conn, invoice_id)
         texts = await _texts(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
     assert jobs == ["fetch"]
     assert len(texts) == 1
     assert "➡️ Trabajo (Microsoft)" in texts[0]
+    assert "choices" not in flow_data
 
 
 async def test_no_candidate_for_the_tipo_is_cancelled(
@@ -637,6 +641,7 @@ async def test_two_brand_store_with_unknown_serie_asks_brand(
         row = await _invoice(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
     assert row == ("CONFIRMING", "BR-R09", WORK_FLOW)
     assert jobs == []
     assert len(outbox) == 1
@@ -648,6 +653,7 @@ async def test_two_brand_store_with_unknown_serie_asks_brand(
         {"id": button_id(invoice_id, "brand", 1), "title": "Local Dos"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
+    assert flow_data["choices"] == ["Local Uno", "Local Dos"]
 
 
 async def test_answered_comercio_skips_the_brand_question(

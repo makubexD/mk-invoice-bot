@@ -24,13 +24,13 @@ from invoicebot.channels.base import Button
 from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
-from invoicebot.pipeline.actions import RULE_CAP
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import (
     RULE_BRAND,
     RULE_BUYER,
+    RULE_CAP,
     brand_question,
     buyer_question,
     candidate_flows,
@@ -62,7 +62,7 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.sinks.folders import comercio_for
 from invoicebot.store.db import Pool
-from invoicebot.store.flow_b import load_flow_data
+from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import InvoiceHead, load_invoice_head, load_reading, set_flow, set_state
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,8 @@ class _Step:
     text: str
     buttons: Sequence[Button] = ()
     flow_id: str | None = None
+    #: What a question's buttons offer, in button order, stored for its answer (BR-R03, BR-R09).
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -240,7 +242,7 @@ def _resolve_flow(
         if not candidates:
             return _Step("cancel", RULE_UNMATCHED, _refusal(RULE_UNMATCHED, reading, None))
         text, buttons = flow_question(invoice_id, reading, candidates)
-        return _Step("ask", RULE_ASK, text, buttons)
+        return _Step("ask", RULE_ASK, text, buttons, choices=tuple(flow_id for flow_id, _ in candidates))
     return _Resolved(
         flow_id=cast(str, result.flow), flow=cfg.flows[cast(str, result.flow)], rule_id=result.rule
     )
@@ -265,7 +267,7 @@ def _buyer_check(
     if buyer_ok is False:
         candidates = candidate_flows(profile.flows, cfg.flows, reading.value("tipo") or "")
         text, buttons = flow_question(invoice_id, reading, candidates)
-        return _Step("ask", RULE_ASK, text, buttons)
+        return _Step("ask", RULE_ASK, text, buttons, choices=tuple(flow_id for flow_id, _ in candidates))
     if buyer_ok is None and _doubtful_buyer(reading, cfg.extraction.review_threshold):
         text, buttons = buyer_question(invoice_id, reading, resolved.flow)
         return _Step("ask_flow", RULE_BUYER, text, buttons, resolved.flow_id)
@@ -309,7 +311,14 @@ def _brand_check(
     razon_social = reading.value("razon_social") or ""
     if store is not None and len(store.brands) > 1 and comercio_for(store, serie, razon_social) is None:
         text, buttons = brand_question(invoice_id, store)
-        return _Step("ask_flow", RULE_BRAND, text, buttons, flow_id)
+        return _Step(
+            "ask_flow",
+            RULE_BRAND,
+            text,
+            buttons,
+            flow_id,
+            choices=tuple(brand.comercio for brand in store.brands),
+        )
     return None
 
 
@@ -328,6 +337,8 @@ async def _write(
     elif step.kind == "route":
         await _routed(conn, invoice, invoice_id, step.rule_id, step.text)
     else:
+        if step.choices:
+            await merge_flow_data(conn, invoice_id, {"choices": list(step.choices)})
         await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text, step.buttons)
 

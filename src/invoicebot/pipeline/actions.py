@@ -23,15 +23,14 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
+from invoicebot.pipeline.questions import CANCEL_ACTION, CONTINUE_ACTION, RULE_CAP
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state, take_photo_paths
 from invoicebot.store.invoices import get_state_rule, load_flow, set_state
 
-#: The button actions; the handlers that show a button import these, so ids always match (R-3.5).
-CONTINUE_ACTION = "continue"
-CANCEL_ACTION = "cancel"
+#: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
 
 CONFIRMING_STATE = "CONFIRMING"
@@ -40,7 +39,6 @@ FETCHING_STATE = "FETCHING_DOCS"
 CANCELLED_STATE = "CANCELLED"
 DONE_STATE = "DONE"
 
-RULE_CAP = "BR-D06"
 RULE_SENT = "BR-D08"
 
 PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"

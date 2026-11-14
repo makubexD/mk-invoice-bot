@@ -12,7 +12,6 @@ from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import Flow, Store
 from invoicebot.extract.fields import Reading
-from invoicebot.pipeline.actions import CANCEL_ACTION, CONTINUE_ACTION, RULE_CAP
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
@@ -23,14 +22,17 @@ from invoicebot.rules.messages_es import (
     buyer_desc,
 )
 
-#: The button actions routing asks with (R-3.5); part 12 applies them.
+#: The button actions routing asks with (R-3.5); the actions that answer them import these.
 PICK_ACTION = "pick"
 YES_ACTION = "yes"
 CHANGE_ACTION = "change"
 BRAND_ACTION = "brand"
+CONTINUE_ACTION = "continue"
+CANCEL_ACTION = "cancel"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
+RULE_CAP = "BR-D06"
 
 
 def candidate_flows(
