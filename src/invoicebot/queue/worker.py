@@ -22,6 +22,7 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import JOB_LEASE_S
 from invoicebot.queue.jobs import Job, claim, complete, fail
 from invoicebot.queue.retry import describe_error
+from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,12 @@ class Worker:
             await self._run_job(job)
 
     async def _run_job(self, job: Job) -> None:
-        """Run one handler outside a transaction and record the outcome."""
+        """Run one handler outside a transaction and record the outcome.
+
+        A handler whose guarded write lost to an earlier state change completes its job
+        instead of retrying: the handler's transaction rolled back and another writer,
+        such as ``/cancelar``, owns the invoice now (D95).
+        """
         handler = self._handlers.get(job.step)
         if handler is None:
             await self._record_failure(job, f"unknown step: {job.step}")
@@ -98,6 +104,16 @@ class Worker:
         except asyncio.CancelledError:
             # Keep the lease: the job is re-claimed once it expires (R-1.11).
             raise
+        except StateMoved as moved:
+            logger.info(
+                "invoice_moved_on",
+                extra={
+                    "job_id": job.id,
+                    "invoice_id": job.invoice_id,
+                    "expected": moved.expected,
+                    "actual": moved.actual,
+                },
+            )
         except Exception as exc:
             logger.warning("worker %s: job %d (%s) raised", self._worker_id, job.id, job.step, exc_info=True)
             await self._record_failure(job, describe_error(exc))

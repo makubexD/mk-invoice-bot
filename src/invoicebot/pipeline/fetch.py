@@ -238,7 +238,7 @@ async def _record_result(
                     size=fetched.size,
                 ),
             )
-        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE)
+        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE, expected=FETCHING_STATE)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
     elif result.reason is FetchReason.NOT_FOUND_YET:
         run_after = None if delay is None else await _run_after(conn, delay)
@@ -255,7 +255,9 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
-        await set_state(conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED)
+        await set_state(
+            conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
+        )
         await _notify(conn, inputs.head, RULE_EXHAUSTED, text)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import logging
 import time
 from typing import Any
 from uuid import uuid4
@@ -12,6 +13,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Worker
+from invoicebot.states import StateMoved
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -212,3 +214,35 @@ async def test_cancelling_the_worker_finishes_quickly(db_pool: Pool) -> None:
         assert time.monotonic() - started < 1.0
     finally:
         await _stop(task)
+
+
+async def test_state_moved_completes_the_job_without_a_failure(
+    db_pool: Pool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D95: a handler that lost to an earlier state change completes its job, not a retry."""
+    invoice_id = await _reset(db_pool)
+    job_id = await _enqueue(db_pool, invoice_id, "moved")
+    caplog.set_level(logging.INFO, logger="invoicebot.queue.worker")
+
+    async def moved(job: Job) -> None:
+        raise StateMoved(job.invoice_id, "FETCHING_DOCS", "CANCELLED")
+
+    worker = Worker(db_pool, {"moved": moved}, idle_timeout_s=120.0)
+    task = asyncio.create_task(worker.run())
+    try:
+        await _wait_for_count(db_pool, job_id, 0)
+    finally:
+        await _stop(task)
+
+    moved_records = [record for record in caplog.records if record.getMessage() == "invoice_moved_on"]
+    assert len(moved_records) == 1
+    record = moved_records[0]
+    assert record.job_id == job_id
+    assert record.invoice_id == invoice_id
+    assert record.expected == "FETCHING_DOCS"
+    assert record.actual == "CANCELLED"
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM jobs WHERE invoice_id = %s", (invoice_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    assert int(row[0]) == 0

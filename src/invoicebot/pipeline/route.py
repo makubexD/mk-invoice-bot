@@ -97,7 +97,9 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
         if rule_id in REFUSALS or flow is None:
             text = _refusal(rule_id, reading, flow)
             async with pool.connection() as conn, conn.transaction():
-                await set_state(conn, job.invoice_id, CANCELLED_STATE, rule_id=rule_id)
+                await set_state(
+                    conn, job.invoice_id, CANCELLED_STATE, rule_id=rule_id, expected=ROUTING_STATE
+                )
                 await _reply(conn, invoice, rule_id, text)
         else:
             # shortcut: the summary has no [Editar] button until S4.5.
@@ -155,14 +157,18 @@ async def _routed(
     text: str,
     cap_question: tuple[str, list[Button]] | None,
 ) -> None:
-    """Queue the fetch job, or BR-D06's question when the total is above the cap (R-7.13)."""
+    """Queue the fetch job, or BR-D06's question when the total is above the cap (R-7.13).
+
+    Both writes require the invoice to still be in ``ROUTING``, so one moved on by
+    ``/cancelar`` or an edit keeps its own state (D95).
+    """
     if cap_question is None:
-        await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id)
+        await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING_STATE)
         await enqueue(conn, invoice_id, FETCH_STEP)
         await _reply(conn, invoice, rule_id, text)
         return
     question, buttons = cap_question
-    await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=RULE_CAP)
+    await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=RULE_CAP, expected=ROUTING_STATE)
     await _reply(conn, invoice, RULE_CAP, f"{text}\n{question}", buttons)
 
 
