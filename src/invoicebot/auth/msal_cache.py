@@ -4,10 +4,10 @@ Each account's MSAL cache is one ``<data_dir>/tokens/<account>.msal.age`` file,
 encrypted to the recipient of the identity the caller passes in. MSAL only gets
 and refreshes tokens here; Graph calls are plain REST (D84).
 
-A missing cache, an account the cache does not hold, or a refused refresh raise
-:class:`AuthRequired`, which the pipeline turns into ``PENDING_AUTH`` (BR-D01).
-No token, refresh token or cache plaintext ever appears in a message or a log
-(R-9.9).
+A missing cache, an unreadable one (wrong identity or corrupt file), an account
+the cache does not hold, or a refused refresh raise :class:`AuthRequired`, which
+the pipeline turns into ``PENDING_AUTH`` (BR-D01). No token, refresh token or
+cache plaintext ever appears in a message or a log (R-9.9).
 """
 
 from __future__ import annotations
@@ -69,12 +69,15 @@ class TokenProvider:
         synchronous (D84).
 
         Raises:
-            AuthRequired: no cache, no matching account, or the refresh failed.
+            AuthRequired: no cache, an unreadable cache, no matching account, or
+                the refresh failed.
         """
         return await asyncio.to_thread(self._token)
 
     def login_device_code(self, show: Callable[[str], None]) -> None:
         """Sign the account in with the device-code flow and save the cache.
+
+        An unreadable existing cache is replaced rather than blocking the sign-in.
 
         Args:
             show: called once with the instruction message for the person
@@ -83,7 +86,12 @@ class TokenProvider:
         Raises:
             AuthRequired: the flow could not start or the sign-in failed.
         """
-        cache = self._load_cache()
+        try:
+            cache = self._load_cache()
+        except AuthRequired:
+            # A cache this identity cannot decrypt must not block a fresh sign-in:
+            # the new sign-in overwrites the file.
+            cache = msal.SerializableTokenCache()
         app = self._application(cache)
         flow = app.initiate_device_flow(scopes=self._scopes)
         if "user_code" not in flow:
@@ -120,9 +128,12 @@ class TokenProvider:
     def _load_cache(self) -> msal.SerializableTokenCache:
         cache = msal.SerializableTokenCache()
         if self._cache_path.exists():
-            ciphertext = self._cache_path.read_bytes()
-            plaintext = pyrage.decrypt(ciphertext, [self._identity])
-            cache.deserialize(plaintext.decode("utf-8"))
+            try:
+                ciphertext = self._cache_path.read_bytes()
+                plaintext = pyrage.decrypt(ciphertext, [self._identity])
+                cache.deserialize(plaintext.decode("utf-8"))
+            except (pyrage.DecryptError, ValueError) as err:
+                raise AuthRequired(self._account) from err
         return cache
 
     def _save_if_changed(self, cache: msal.SerializableTokenCache) -> None:
@@ -130,6 +141,7 @@ class TokenProvider:
             self._write(cache)
 
     def _write(self, cache: msal.SerializableTokenCache) -> None:
+        self._cache_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         ciphertext = pyrage.encrypt(
             cache.serialize().encode("utf-8"),
             [self._identity.to_public()],

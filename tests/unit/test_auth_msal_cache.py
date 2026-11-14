@@ -203,6 +203,57 @@ async def test_cache_file_is_encrypted_and_private(tmp_path: Path) -> None:
     assert SIGNED_IN_ACCESS in pyrage.decrypt(raw, [identity]).decode("utf-8")
 
 
+async def test_sign_in_creates_the_missing_cache_directory(tmp_path: Path) -> None:
+    """R-7.9, BR-D01: a fresh host has no tokens directory; the sign-in creates it privately."""
+    fake = FakeHttpClient(ACCOUNT)
+    identity = pyrage.x25519.Identity.generate()
+    token_dir = tmp_path / "tokens"
+    provider = TokenProvider(CLIENT_ID, ACCOUNT, SCOPES, token_dir / "x.age", identity, fake)
+
+    _login(provider)
+
+    assert (token_dir / "x.age").is_file()
+    assert token_dir.stat().st_mode & 0o777 == 0o700
+
+
+async def test_unreadable_cache_requires_sign_in(tmp_path: Path) -> None:
+    """BR-D01: garbage in the cache raises AuthRequired instead of a raw decrypt error."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, cache_path = _provider(tmp_path, fake)
+    cache_path.write_bytes(b"not an age file")
+
+    with pytest.raises(AuthRequired) as raised:
+        await provider.token()
+
+    assert raised.value.account == ACCOUNT
+
+
+async def test_cache_encrypted_to_another_identity_requires_sign_in(tmp_path: Path) -> None:
+    """BR-D01: a cache this identity cannot decrypt means the account must sign in again."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, cache_path = _provider(tmp_path, fake)
+    other_identity = pyrage.x25519.Identity.generate()
+    cache_path.write_bytes(pyrage.encrypt(b"{}", [other_identity.to_public()]))
+
+    with pytest.raises(AuthRequired) as raised:
+        await provider.token()
+
+    assert raised.value.account == ACCOUNT
+
+
+async def test_login_over_an_unreadable_cache_succeeds(tmp_path: Path) -> None:
+    """R-7.9, BR-D01: a fresh sign-in replaces an unreadable cache and leaves a usable one."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, identity, cache_path = _provider(tmp_path, fake)
+    cache_path.write_bytes(b"not an age file")
+
+    _login(provider)
+
+    saved = pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8")
+    assert SIGNED_IN_ACCESS in saved
+    assert await provider.token() == SIGNED_IN_ACCESS
+
+
 async def test_invalid_grant_requires_sign_in(tmp_path: Path) -> None:
     """BR-D01: a refused refresh token means the account must sign in again."""
     fake = FakeHttpClient(ACCOUNT, access_token_lifetime_s=100)
