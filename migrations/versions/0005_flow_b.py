@@ -35,19 +35,23 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the original checks and drop the flow data column."""
+    """Restore the original checks and drop the flow data column.
+
+    The narrow checks come back ``NOT VALID``: they hold for new rows, while existing ``eml``,
+    ``manifest`` and ``prepared`` rows survive, so a downgrade never deletes data.
+    """
     op.execute("ALTER TABLE files DROP CONSTRAINT files_kind_check")
     op.execute(
         """
         ALTER TABLE files ADD CONSTRAINT files_kind_check
-            CHECK (kind IN ('photo', 'pdf', 'xml', 'xlsx', 'captcha'))
+            CHECK (kind IN ('photo', 'pdf', 'xml', 'xlsx', 'captcha')) NOT VALID
         """
     )
     op.execute("ALTER TABLE batches DROP CONSTRAINT batches_state_check")
     op.execute(
         """
         ALTER TABLE batches ADD CONSTRAINT batches_state_check
-            CHECK (state IN ('open', 'sending', 'sent', 'failed'))
+            CHECK (state IN ('open', 'sending', 'sent', 'failed')) NOT VALID
         """
     )
     op.execute("ALTER TABLE invoices DROP COLUMN flow_data_json")
