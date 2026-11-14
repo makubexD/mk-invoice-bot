@@ -506,6 +506,26 @@ async def test_save_reading_writes_the_typed_columns(
     )
 
 
+async def test_save_reading_restarts_the_park_clock(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S08: save_reading stamps updated_at from the database clock, restarting the park clock."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - interval '25 hours' WHERE id = %s",
+            (invoice_id,),
+        )
+        await save_reading(conn, invoice_id, _reading())
+        cur = await conn.execute(
+            "SELECT updated_at >= now() - interval '1 minute' FROM invoices WHERE id = %s",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+
+    assert row == (True,)
+
+
 async def test_load_reading_is_none_before_a_reading_is_saved(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

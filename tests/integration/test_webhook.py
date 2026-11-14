@@ -27,6 +27,7 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.signature import sender_hash
 from invoicebot.config.models import Profile
+from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool, create_pool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -294,6 +295,21 @@ async def test_closed_pool_returns_503(db_pool: Pool) -> None:
     sender = _sender()
     closed_pool = create_pool(db_pool.conninfo)
     async with _client(_deps(closed_pool, sender)) as client:
+        response = await _post(client, _body(_photo_payload(sender.number)))
+
+    assert response.status_code == 503
+    assert response.content == b""
+
+
+async def test_state_moved_during_intake_returns_503(db_pool: Pool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """D95: a handler that lost a state race answers 503 so Meta redelivers to the new state."""
+    sender = _sender()
+
+    async def moved(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
+        raise StateMoved(1, "EXTRACT_FAILED", "CANCELLED")
+
+    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", moved)
+    async with _client(_deps(db_pool, sender)) as client:
         response = await _post(client, _body(_photo_payload(sender.number)))
 
     assert response.status_code == 503

@@ -526,7 +526,8 @@ async def save_reading(conn: AsyncConnection[Any], invoice_id: int, reading: Rea
     Amounts go through :meth:`Reading.amount`, so an amount that is not a finite number is
     stored as NULL and stays visible in ``fields_json``. A ``fecha_emision`` that is not an
     ISO date is likewise NULL in the typed column (D80): the doubtful value is carried by
-    the reading, not rejected here.
+    the reading, not rejected here. The database clock stamps ``updated_at``, so an edit
+    that answers BR-E01 again restarts the park clock (BR-S08).
     """
     await conn.execute(
         """
@@ -539,7 +540,8 @@ async def save_reading(conn: AsyncConnection[Any], invoice_id: int, reading: Rea
             igv = %s,
             total = %s,
             ruc_adq = %s,
-            fields_json = %s
+            fields_json = %s,
+            updated_at = now()
         WHERE id = %s
         """,
         (

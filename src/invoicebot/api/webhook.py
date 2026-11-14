@@ -3,7 +3,8 @@
 The body is untrusted: its size is capped while reading, the signature is
 verified over the raw bytes before any JSON parsing, and messages from senders
 outside the profile index are only ever logged through their hash. When
-Postgres is unreachable the route answers 503 so Meta retries the delivery.
+Postgres is unreachable, or the invoice's state moved under the message, the
+route answers 503 so Meta retries the delivery against the new state (D95).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.parse import parse_webhook
 from invoicebot.channels.whatsapp.signature import verify_handshake, verify_signature
 from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
@@ -83,8 +85,8 @@ def make_router(deps: WebhookDeps) -> APIRouter:
             logger.info("ignored sender %s", digest)
         try:
             await _persist(deps, parsed.messages)
-        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
-            logger.exception("webhook database error")
+        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed, StateMoved):
+            logger.exception("webhook database error or invoice moved")
             return Response(status_code=503)
         return JSONResponse({"status": "ok"})
 
