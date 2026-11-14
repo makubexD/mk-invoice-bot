@@ -15,6 +15,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.commands import COMMANDS, parse_command, resolve_target
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -39,6 +40,7 @@ from invoicebot.rules.messages_es import (
     STATUS_RULE_ONLY,
     state_desc,
 )
+from invoicebot.states import StateMoved
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
 from invoicebot.store.invoices import (
     InvoiceHead,
@@ -515,6 +517,25 @@ async def test_cancelar_on_a_batched_invoice_is_late(
     assert head.state == "BATCHED"
     assert jobs == []
     assert replies == [(expected, None)]
+
+
+async def test_cancelar_loses_to_a_move_after_resolve_target(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96: a cancel whose invoice moved to DELIVERING after resolve_target raises StateMoved."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-D06")
+    msg = _message(profile_id, f"/cancelar {invoice_id}")
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, "DELIVERING")
+
+    async with db_pool.connection() as conn:
+        with pytest.raises(StateMoved):
+            await cancel_invoice(conn, invoice_id, msg, expected="CONFIRMING")
+        head = await load_invoice_head(conn, invoice_id)
+
+    assert head is not None
+    assert head.state == "DELIVERING"
 
 
 async def test_reprocesar_on_failed_with_a_flow_refetches(

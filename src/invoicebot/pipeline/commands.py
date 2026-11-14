@@ -210,7 +210,7 @@ async def _cancelar(
         return
     invoice_id, head = target
     if head.state in CANCELLABLE:
-        await cancel_invoice(conn, invoice_id, msg)
+        await cancel_invoice(conn, invoice_id, msg, expected=head.state)
         return
     text = CANCEL_LATE.format(id=invoice_id, state_desc=state_desc(head.state))
     await _reply(conn, msg, None, text)

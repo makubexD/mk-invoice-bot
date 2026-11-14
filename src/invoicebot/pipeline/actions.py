@@ -54,7 +54,7 @@ from invoicebot.store.flow_b import (
     set_batch_state,
     take_photo_paths,
 )
-from invoicebot.store.invoices import get_state_rule, load_flow, set_state
+from invoicebot.store.invoices import get_state_rule, load_flow, load_invoice_head, set_state
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
@@ -182,24 +182,34 @@ async def _continue(
     return ()
 
 
-async def cancel_invoice(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> None:
-    """Cancel the invoice and tell its sender (R-3.4, BR-D06, D96).
+async def cancel_invoice(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, *, expected: str
+) -> None:
+    """Cancel the invoice and tell its sender (R-3.4, BR-D06, D95, D96).
 
-    Shared by the [Cancelar] button and ``/cancelar``, which checks the state itself.
-    CANCELLED is in ``NEEDS_RULE`` and the catalog has no sender-cancel rule, so this
-    keeps recording BR-D06's id, as it did when [Cancelar] only answered BR-D06.
+    Shared by the [Cancelar] button and ``/cancelar``, which both pass the state they
+    checked; an invoice that moved on raises :class:`StateMoved` and nothing is cancelled
+    (D95). CANCELLED is in ``NEEDS_RULE`` and the catalog has no sender-cancel rule, so
+    this keeps recording BR-D06's id, as it did when [Cancelar] only answered BR-D06.
     """
     # shortcut: spec 06 has no sender-cancel rule, so a cancel outside BR-D06 still records
     # BR-D06; it needs its own catalogued rule before reports read rule_id.
-    await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP)
+    await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP, expected=expected)
     await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
 
 
 async def _cancel(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
 ) -> tuple[Path, ...]:
-    """Cancel the invoice from any CANCELLABLE state (R-3.4, BR-D06, D96)."""
-    await cancel_invoice(conn, invoice_id, msg)
+    """Cancel the invoice from any CANCELLABLE state (R-3.4, BR-D06, D95, D96).
+
+    The state :func:`resolve_reply` checked is reloaded and passed as ``expected``, so a
+    press that lost a race to another transition changes nothing (D95).
+    """
+    head = await load_invoice_head(conn, invoice_id)
+    if head is None:
+        return ()
+    await cancel_invoice(conn, invoice_id, msg, expected=head.state)
     return ()
 
 

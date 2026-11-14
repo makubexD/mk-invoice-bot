@@ -30,7 +30,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
-from invoicebot.states import EXTRACTING
+from invoicebot.states import EXTRACTING, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import InvoiceHead, get_file_path, load_invoice_head, save_reading, set_state
 
@@ -102,7 +102,11 @@ def make_extract_handler(
             return
 
         async with pool.connection() as conn, conn.transaction():
-            await set_state(conn, job.invoice_id, "EXTRACTING")
+            try:
+                await set_state(conn, job.invoice_id, "EXTRACTING", expected=invoice.state)
+            except StateMoved:
+                # D95: a /cancelar between the read above and here wins; do not run the helper.
+                return
 
         try:
             result = await _run_helper(path, extraction_cfg, media, rules_path)
