@@ -38,7 +38,8 @@ def downgrade() -> None:
     """Restore the original checks and drop the flow data column.
 
     The narrow checks come back ``NOT VALID``: they hold for new rows, while existing ``eml``,
-    ``manifest`` and ``prepared`` rows survive, so a downgrade never deletes data.
+    ``manifest`` and ``prepared`` rows survive. Dropping ``flow_data_json`` does lose each
+    invoice's folder, sequence claim, comercio and overrides.
     """
     op.execute("ALTER TABLE files DROP CONSTRAINT files_kind_check")
     op.execute(
