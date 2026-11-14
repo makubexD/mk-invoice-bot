@@ -16,9 +16,22 @@ source_modules =
     invoicebot.routing
     invoicebot.net
     invoicebot.fetchers
+    invoicebot.sinks
+    invoicebot.auth
 forbidden_modules =
     invoicebot.api
     invoicebot.events
+
+[importlinter:contract:sinks-are-low]
+name = Sinks and auth never import the layers that use them (file-b)
+type = forbidden
+source_modules =
+    invoicebot.sinks
+    invoicebot.auth
+forbidden_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
 
 [importlinter:contract:fetchers-are-low]
 name = Fetchers never import the layers that use them

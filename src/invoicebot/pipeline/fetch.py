@@ -3,8 +3,8 @@
 :func:`make_fetch_handler` builds the handler of the ``fetch`` job step. The chain in
 :mod:`invoicebot.fetchers.chain` picks the fetcher from the recorded attempts; the
 handler runs it and, in one transaction, records the attempt and either stores the
-files, schedules the next try, or moves the invoice on. A chain with nothing left
-moves the invoice to ``MANUAL_REQUIRED`` with BR-F07's message.
+files with the deliver job, schedules the next try, or moves the invoice on. A chain
+with nothing left moves the invoice to ``MANUAL_REQUIRED`` with BR-F07's message.
 """
 
 from __future__ import annotations
@@ -29,6 +29,8 @@ from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
+from invoicebot.pipeline.steps import DELIVER_STEP
+from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
@@ -53,8 +55,6 @@ from invoicebot.store.invoices import (
 
 logger = logging.getLogger(__name__)
 
-#: The job step this handler runs.
-FETCH_STEP = "fetch"
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
 FETCHING_STATE = "FETCHING_DOCS"
 #: Where an invoice goes once its required documents are stored (R-5.1).
@@ -146,8 +146,9 @@ def make_fetch_handler(
         elif isinstance(decision, Exhausted):
             outcome = await _exhausted(inputs, reading)
         else:
-            # Done: the ok attempt and the DELIVERING commit happen together (R-5.1), so an
-            # invoice that still fetches has no ok attempt; the queue retries or parks this job.
+            # Done: the ok attempt, the DELIVERING commit and the deliver job happen together
+            # (R-5.1), so an invoice that still fetches has no ok attempt; the queue retries
+            # or parks this job.
             raise RuntimeError(f"invoice {job.invoice_id} has an ok attempt but is still fetching")
         logger.info(
             "step done",
@@ -222,7 +223,7 @@ async def _record_result(
     delay: timedelta | None,
     first_not_found: bool,
 ) -> None:
-    """Store an ``ok`` result's files, or schedule the next try, in the caller's transaction."""
+    """Store an ``ok`` result's files and enqueue deliver, or schedule the next try, in one transaction."""
     if result.ok:
         # shortcut: a fetched file's local_path stays under tmp/ until deliver moves it.
         for fetched in result.files:
@@ -238,6 +239,7 @@ async def _record_result(
                 ),
             )
         await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE)
+        await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
     elif result.reason is FetchReason.NOT_FOUND_YET:
         run_after = None if delay is None else await _run_after(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)

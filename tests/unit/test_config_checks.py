@@ -10,9 +10,10 @@ from types import ModuleType
 import pytest
 import yaml
 
-from invoicebot.config.checks import Problem, run_checks
+from invoicebot.config.checks import Problem, flow_problems, run_checks
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Portal, Store, StoreDirectory
+from invoicebot.config.models import ExcelTemplateSink, OneDriveFolderSink, Portal, Store, StoreDirectory
+from invoicebot.sinks.expr import field_names
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -338,3 +339,93 @@ def test_config_without_portal_folder_passes(tmp_path: Path) -> None:
     config_path = _config_dir(tmp_path)
 
     assert check_config.main([str(config_path)]) == 0
+
+
+def test_example_flow_templates_have_no_problems() -> None:
+    """BR-D02, R-7.1: the shipped flow B templates pass every flow check."""
+    cfg = load_config(EXAMPLE)
+
+    assert flow_problems(cfg, field_names=field_names) == []
+
+
+def test_flow_cell_with_unknown_name_is_reported() -> None:
+    """BR-D02: a cells expression with an unknown name is a problem carrying its path."""
+    cfg = load_config(EXAMPLE)
+    sink = cfg.flows["work_microsoft"].sinks[1]
+    assert isinstance(sink, ExcelTemplateSink)
+    sink.cells["C16"] = "{nope}"
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert [problem.code for problem in problems] == ["FLOW_TEMPLATE_UNKNOWN_NAME"]
+    assert problems[0].path == "flows.work_microsoft.sinks[1].cells.C16"
+    assert "nope" in problems[0].message
+    assert problems[0].blocking
+
+
+def test_flow_cell_with_forbidden_form_is_reported() -> None:
+    """BR-D02: a forbidden field form in a cell is a problem, not a crash."""
+    cfg = load_config(EXAMPLE)
+    sink = cfg.flows["work_microsoft"].sinks[1]
+    assert isinstance(sink, ExcelTemplateSink)
+    sink.cells["C16"] = "{x[0]}"
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert [problem.code for problem in problems] == ["FLOW_TEMPLATE_UNKNOWN_NAME"]
+    assert problems[0].path == "flows.work_microsoft.sinks[1].cells.C16"
+    assert "indexing" in problems[0].message
+
+
+@pytest.mark.parametrize(
+    "folder",
+    [
+        "{fecha:%Y}-{fecha:%m}-Support_{comercio}",
+        "{fecha:%m}-Support_{seq}_{comercio}",
+        "{fecha:%Y}-Support_{seq}_{comercio}",
+    ],
+)
+def test_folder_template_missing_part_is_reported(folder: str) -> None:
+    """R-7.1: the folder template must use seq and fecha with %Y and %m."""
+    cfg = load_config(EXAMPLE)
+    flow = cfg.flows["work_microsoft"]
+    sink = flow.sinks[0]
+    assert isinstance(sink, OneDriveFolderSink)
+    flow.sinks[0] = sink.model_copy(update={"folder": folder})
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert [problem.code for problem in problems] == ["FLOW_FOLDER_TEMPLATE"]
+    assert problems[0].path == "flows.work_microsoft.sinks[0].folder"
+    assert problems[0].blocking
+
+
+@pytest.mark.parametrize("template", ["{motivo}", "{descripcion}"])
+def test_description_default_may_not_use_override_names(template: str) -> None:
+    """BR-D02: defaults.descripcion may use comercio but not motivo or descripcion."""
+    cfg = load_config(EXAMPLE)
+    flow = cfg.flows["work_microsoft"]
+    sink = flow.sinks[1]
+    assert isinstance(sink, ExcelTemplateSink)
+    flow.sinks[1] = sink.model_copy(
+        update={"defaults": sink.defaults.model_copy(update={"descripcion": template})}
+    )
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert [problem.code for problem in problems] == ["FLOW_DESCRIPTION_TEMPLATE"]
+    assert problems[0].path == "flows.work_microsoft.sinks[1].defaults.descripcion"
+
+
+def test_mail_attach_without_excel_sink_is_reported() -> None:
+    """BR-D02: a mailer may attach excel_template only when the flow has that sink."""
+    cfg = load_config(EXAMPLE)
+    flow = cfg.flows["work_microsoft"]
+    flow.sinks = [sink for sink in flow.sinks if not isinstance(sink, ExcelTemplateSink)]
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert [(problem.code, problem.path) for problem in problems] == [
+        ("FLOW_MAIL_ATTACH", "flows.work_microsoft.sinks[1].attach")
+    ]
+    assert problems[0].blocking

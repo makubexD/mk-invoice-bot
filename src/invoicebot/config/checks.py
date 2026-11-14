@@ -6,10 +6,21 @@ are only reported, so ``main`` never freezes a deploy (R-11.6).
 
 from __future__ import annotations
 
+import string
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import combinations
 
-from invoicebot.config.models import Config, Portal, Store, StoreDirectory
+from invoicebot.config.models import (
+    Config,
+    ExcelTemplateSink,
+    MailerSink,
+    OneDriveFolderSink,
+    Portal,
+    Sink,
+    Store,
+    StoreDirectory,
+)
 from invoicebot.rules import RULES
 
 PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
@@ -17,6 +28,34 @@ MANUAL_PORTAL = "manual"
 _PYTHON_ADAPTER_PREFIX = "python:"
 _GENERIC_FORM_ADAPTER = "generic_form"
 _URL_TEMPLATE_MARKER = "{"
+
+#: The names a flow B template may read (BR-D02); ``profile`` stands for ``profile.attr``.
+_FLOW_TEMPLATE_NAMES = frozenset(
+    {
+        "fecha",
+        "seq",
+        "comercio",
+        "serie",
+        "numero",
+        "ruc_emisor",
+        "razon_social",
+        "base",
+        "igv",
+        "service_charge",
+        "total",
+        "motivo",
+        "descripcion",
+        "profile",
+    }
+)
+_DESCRIPTION_FORBIDDEN_NAMES = frozenset({"motivo", "descripcion"})
+_DESCRIPTION_TEMPLATE_NAMES = _FLOW_TEMPLATE_NAMES - _DESCRIPTION_FORBIDDEN_NAMES
+_FORMATTER = string.Formatter()
+
+_FLOW_TEMPLATE_CODE = "FLOW_TEMPLATE_UNKNOWN_NAME"
+_FLOW_DESCRIPTION_CODE = "FLOW_DESCRIPTION_TEMPLATE"
+_FLOW_FOLDER_CODE = "FLOW_FOLDER_TEMPLATE"
+_FLOW_ATTACH_CODE = "FLOW_MAIL_ATTACH"
 
 
 @dataclass(frozen=True)
@@ -45,6 +84,178 @@ def run_checks(cfg: Config, directory: StoreDirectory, *, changed_portals: froze
     problems.extend(_llm_fallback_problems(cfg))
     problems.extend(_routing_problems(cfg))
     return problems
+
+
+def flow_problems(cfg: Config, *, field_names: Callable[[str], frozenset[str]]) -> list[Problem]:
+    """Return every problem in a flow B sink template (BR-D02, R-7.1).
+
+    ``field_names`` is the safe template parser (``invoicebot.sinks.expr.field_names``),
+    passed in because ``config`` may not import the sinks. Each problem's path names the
+    flow, the sink index and the field, such as ``flows.work.sinks[0].folder``.
+    """
+    problems: list[Problem] = []
+    for flow_name, flow in cfg.flows.items():
+        for index, sink in enumerate(flow.sinks):
+            problems.extend(_sink_problems(flow_name, index, sink, field_names))
+        problems.extend(_mail_attach_problems(flow_name, flow.sinks))
+    return problems
+
+
+def _sink_problems(
+    flow_name: str, index: int, sink: Sink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    if isinstance(sink, OneDriveFolderSink):
+        return _folder_sink_problems(flow_name, index, sink, field_names)
+    if isinstance(sink, ExcelTemplateSink):
+        return _excel_sink_problems(flow_name, index, sink, field_names)
+    if isinstance(sink, MailerSink):
+        return _mailer_sink_problems(flow_name, index, sink, field_names)
+    return []
+
+
+def _folder_sink_problems(
+    flow_name: str, index: int, sink: OneDriveFolderSink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    """BR-D02, R-7.1: the folder, file names and folder layout of an OneDrive sink."""
+    problems: list[Problem] = []
+    folder_failure = _template_failure(sink.folder, _FLOW_TEMPLATE_NAMES, field_names)
+    if folder_failure is not None:
+        problems.append(_problem(flow_name, index, "folder", code=_FLOW_TEMPLATE_CODE, reason=folder_failure))
+    for field, template in (("files.pdf", sink.files.pdf), ("files.xml", sink.files.xml)):
+        failure = _template_failure(template, _FLOW_TEMPLATE_NAMES, field_names)
+        if failure is not None:
+            problems.append(_problem(flow_name, index, field, code=_FLOW_TEMPLATE_CODE, reason=failure))
+    # A malformed folder already has its name problem above; parsing it again is pointless.
+    if folder_failure is None:
+        folder_problem = _folder_layout_problem(flow_name, index, sink.folder)
+        if folder_problem is not None:
+            problems.append(folder_problem)
+    return problems
+
+
+def _folder_layout_problem(flow_name: str, index: int, template: str) -> Problem | None:
+    """R-7.1: the folder name carries the year and month and the claimed sequence."""
+    try:
+        parsed = list(_FORMATTER.parse(template))
+    except ValueError:
+        return None  # the name check already reported the malformed template
+    names = {name for _, name, _, _ in parsed if name is not None}
+    date_specs = [spec or "" for _, name, spec, _ in parsed if name == "fecha"]
+    has_year = any("%Y" in spec for spec in date_specs)
+    has_month = any("%m" in spec for spec in date_specs)
+    if "seq" in names and has_year and has_month:
+        return None
+    return _problem(
+        flow_name,
+        index,
+        "folder",
+        code=_FLOW_FOLDER_CODE,
+        reason="the folder template must use {seq} and {fecha} with %Y and %m (R-7.1)",
+    )
+
+
+def _excel_sink_problems(
+    flow_name: str, index: int, sink: ExcelTemplateSink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    return [
+        *_cell_problems(flow_name, index, sink, field_names),
+        *_default_problems(flow_name, index, sink, field_names),
+    ]
+
+
+def _cell_problems(
+    flow_name: str, index: int, sink: ExcelTemplateSink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    """BR-D02: every ``cells`` value only reads a known name."""
+    problems: list[Problem] = []
+    for cell, template in sink.cells.items():
+        failure = _template_failure(template, _FLOW_TEMPLATE_NAMES, field_names)
+        if failure is not None:
+            problems.append(
+                _problem(flow_name, index, f"cells.{cell}", code=_FLOW_TEMPLATE_CODE, reason=failure)
+            )
+    return problems
+
+
+def _default_problems(
+    flow_name: str, index: int, sink: ExcelTemplateSink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    """BR-D02: the defaults are safe, and ``descripcion`` cannot read the overrides."""
+    problems: list[Problem] = []
+    motivo_failure = _template_failure(sink.defaults.motivo, _FLOW_TEMPLATE_NAMES, field_names)
+    if motivo_failure is not None:
+        problems.append(
+            _problem(flow_name, index, "defaults.motivo", code=_FLOW_TEMPLATE_CODE, reason=motivo_failure)
+        )
+    descripcion_failure = _template_failure(
+        sink.defaults.descripcion, _DESCRIPTION_TEMPLATE_NAMES, field_names
+    )
+    if descripcion_failure is not None:
+        problems.append(
+            _problem(
+                flow_name,
+                index,
+                "defaults.descripcion",
+                code=_FLOW_DESCRIPTION_CODE,
+                reason=(
+                    f"{descripcion_failure}; defaults.descripcion may not use "
+                    "{motivo} or {descripcion} (BR-D02)"
+                ),
+            )
+        )
+    return problems
+
+
+def _mailer_sink_problems(
+    flow_name: str, index: int, sink: MailerSink, field_names: Callable[[str], frozenset[str]]
+) -> list[Problem]:
+    """BR-D02: the mail subject and body only read a known name."""
+    problems: list[Problem] = []
+    for field, template in (("subject", sink.subject), ("body", sink.body)):
+        failure = _template_failure(template, _FLOW_TEMPLATE_NAMES, field_names)
+        if failure is not None:
+            problems.append(_problem(flow_name, index, field, code=_FLOW_TEMPLATE_CODE, reason=failure))
+    return problems
+
+
+def _mail_attach_problems(flow_name: str, sinks: Sequence[Sink]) -> list[Problem]:
+    """BR-D02: a mailer may attach the Excel only when the flow builds one."""
+    if any(isinstance(sink, ExcelTemplateSink) for sink in sinks):
+        return []
+    return [
+        _problem(
+            flow_name,
+            index,
+            "attach",
+            code=_FLOW_ATTACH_CODE,
+            reason="attach names 'excel_template' but the flow has no excel_template sink (BR-D02)",
+        )
+        for index, sink in enumerate(sinks)
+        if isinstance(sink, MailerSink) and "excel_template" in sink.attach
+    ]
+
+
+def _template_failure(
+    template: str, allowed: frozenset[str], field_names: Callable[[str], frozenset[str]]
+) -> str | None:
+    """Return why ``template`` breaks BR-D02, or ``None`` when its names are safe."""
+    try:
+        names = field_names(template)
+    except ValueError as exc:
+        return f"template is not valid: {exc}"
+    unknown = names - allowed
+    if not unknown:
+        return None
+    return f"unknown name(s): {', '.join(sorted(unknown))} (BR-D02)"
+
+
+def _problem(flow_name: str, index: int, field: str, *, code: str, reason: str) -> Problem:
+    return Problem(
+        code=code,
+        path=f"flows.{flow_name}.sinks[{index}].{field}",
+        message=f"flow '{flow_name}' sink {index} {field}: {reason}",
+        blocking=True,
+    )
 
 
 def _portal_problems(key: str, portal: Portal, *, changed: bool) -> list[Problem]:

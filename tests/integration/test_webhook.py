@@ -66,10 +66,10 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
     """Build the webhook dependencies around one allowlisted sender."""
     profile = Profile(
         name="Webhook sender",
+        legal_name="Webhook Sender",
         whatsapp=sender.number,
         preferred_channel="whatsapp",
         flows=["personal_google"],
-        can_send_batch=True,
         admin=True,
     )
     return WebhookDeps(

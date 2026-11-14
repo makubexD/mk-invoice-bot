@@ -1,24 +1,28 @@
-"""Job handler that routes a read invoice and sends its summary (S4.2, R-3.1, R-3.4).
+"""Job handler that routes a read invoice and sends its summary (S4.2, R-3.1, R-3.4, R-7.13).
 
 :func:`make_route_handler` builds the handler of the ``route`` job step. A routed invoice
 stores its flow, gets one summary, queues its ``fetch`` job and waits in ``FETCHING_DOCS``;
-a refused one is cancelled with the rule's message. The state change, the fetch job and
-the outbox row commit together.
+one above its flow's reimbursement cap waits in ``CONFIRMING`` for [Continuar] / [Cancelar]
+with BR-D06's question instead (S11.13); a refused one is cancelled with the rule's message.
+The state change, the fetch job and the outbox row commit together.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Sequence
 from datetime import date
 from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import OutboundMessage
+from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
+from invoicebot.pipeline.actions import CANCEL_ACTION, CONTINUE_ACTION
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.queue import outbox
@@ -34,6 +38,8 @@ from invoicebot.routing.router import (
     route,
 )
 from invoicebot.rules.messages_es import (
+    BUTTON_CANCEL,
+    BUTTON_CONTINUE,
     MESSAGES,
     SUMMARY,
     SUMMARY_DATE_FORMAT,
@@ -54,6 +60,9 @@ logger = logging.getLogger(__name__)
 ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; its ``fetch`` job is queued with this state change.
 ROUTED_STATE = "FETCHING_DOCS"
+#: Where an invoice above the reimbursement cap waits for [Continuar] / [Cancelar] (R-7.13).
+CONFIRMING_STATE = "CONFIRMING"
+RULE_CAP = "BR-D06"
 DATE_FIELD = "fecha_emision"
 
 
@@ -91,13 +100,12 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
                 await set_state(conn, job.invoice_id, CANCELLED_STATE, rule_id=rule_id)
                 await _reply(conn, invoice, rule_id, text)
         else:
-            # shortcut: the summary has no [Editar] / [Cancelar] buttons until S4.5 and S4.9.
+            # shortcut: the summary has no [Editar] button until S4.5.
             text = _summary(reading, flow, rule_id, today, cfg.extraction)
+            cap_question = _cap_question(reading, flow, job.invoice_id)
             async with pool.connection() as conn, conn.transaction():
                 await set_flow(conn, job.invoice_id, cast(str, result.flow))
-                await set_state(conn, job.invoice_id, ROUTED_STATE, rule_id=rule_id)
-                await enqueue(conn, job.invoice_id, FETCH_STEP)
-                await _reply(conn, invoice, rule_id, text)
+                await _routed(conn, invoice, job.invoice_id, rule_id, text, cap_question)
         logger.info(
             "step done",
             extra={
@@ -120,7 +128,13 @@ async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
     return cast(date, row[0])
 
 
-async def _reply(conn: AsyncConnection[Any], invoice: InvoiceHead, rule_id: str, text: str) -> None:
+async def _reply(
+    conn: AsyncConnection[Any],
+    invoice: InvoiceHead,
+    rule_id: str,
+    text: str,
+    buttons: Sequence[Button] = (),
+) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
     message = OutboundMessage(
         channel=invoice.origin_channel,
@@ -128,8 +142,43 @@ async def _reply(conn: AsyncConnection[Any], invoice: InvoiceHead, rule_id: str,
         profile_id=invoice.profile_id,
         rule_id=rule_id,
         text=text,
+        buttons=list(buttons),
     )
     await outbox.add(conn, invoice.origin_channel, invoice.profile_id, message.model_dump(mode="json"))
+
+
+async def _routed(
+    conn: AsyncConnection[Any],
+    invoice: InvoiceHead,
+    invoice_id: int,
+    rule_id: str,
+    text: str,
+    cap_question: tuple[str, list[Button]] | None,
+) -> None:
+    """Queue the fetch job, or BR-D06's question when the total is above the cap (R-7.13)."""
+    if cap_question is None:
+        await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id)
+        await enqueue(conn, invoice_id, FETCH_STEP)
+        await _reply(conn, invoice, rule_id, text)
+        return
+    question, buttons = cap_question
+    await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=RULE_CAP)
+    await _reply(conn, invoice, RULE_CAP, f"{text}\n{question}", buttons)
+
+
+def _cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, list[Button]] | None:
+    """Return BR-D06's question and its two buttons when the total is above the cap (R-7.13)."""
+    if flow.reimbursement is None:
+        return None
+    total = reading.amount("total")
+    if total is None or total <= flow.reimbursement.cap:
+        return None
+    cap = f"{flow.reimbursement.cap:.2f}"
+    buttons = [
+        Button(id=button_id(invoice_id, CONTINUE_ACTION), title=BUTTON_CONTINUE),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+    return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
 
 
 def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:

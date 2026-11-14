@@ -9,7 +9,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 3   | `read` (done 2026-11-13)       | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                  | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                                                  |
 | 3b  | `ocr` (done 2026-11-13)        | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                  | M1b        | Tesseract with Spanish on the host; the private samples folder                                                     |
 | 4   | `fetch` (done 2026-11-13)      | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                 | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)                                       |
-| 5   | `file-b`                       | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                              | M3         | Entra app for the personal account; the Excel template on the host; a test inbox                                   |
+| 5   | `file-b` (done 2026-11-14)     | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                              | M3         | Entra app for the personal account; the Excel template on the host; a test inbox                                   |
 | 6   | `widen-b`                      | rest of E4 and E5; S7.2, S7.4, S7.5; E8 (MVP part); S10.3, S10.4, S10.7, S10.10; S11.9, S11.11, S11.12, S11.14, S11.15, S11.17; E15 | M4         | S0.6 (remaining store pages), S0.8, S0.10, S0.11; Q5 (inbox for the email fallback); the bot's Outlook.com mailbox |
 | 7   | `read-more`                    | S3.4, S3.8–S3.10; E6                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                                                      |
 | 8   | `flow-a`                       | E9, S10.6                                                                                                                           | M6         | S0.4, Google OAuth app in production status                                                                        |
@@ -78,15 +78,34 @@ Each item goes into the named phase's plan.
 - S10.8's brand choice by serie prefix (and its one-tap question) goes to `file-b`; its `SIGHUP` reload goes to `ops`.
 - The `BrowserPool` of spec 03 §8 is replaced by a browser helper process per fetch (D82).
 
+## Moved by the `file-b` plan (D84–D90)
+
+- BR-R09's one-tap brand question goes to `widen-b` with reply handling (D80): no store in `config/stores/` has two brands yet. `file-b` picks the brand by serie prefix, or the only brand.
+- The PKCE loopback login and the work-account attempt (S11.1, S0.8) go to `widen-b` with `inbox_rule`: the personal account allows device code.
+- The `_Sent` rename goes to `widen-b` with S11.12; `payments` and `payment_id` go there with S11.11.
+- `/pendientes` listing a batch `prepared` for 2 days (S11.4) goes with the commands of `widen-b`.
+- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E15, `widen-b`).
+- **M3 live run (deferred by the owner on 2026-11-14):** the code is merged, the demo is not. Run `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" once the Entra app, the Excel template on the host and a test inbox are ready, before `widen-b` starts.
+
+## Carried over from the `file-b` review
+
+Each item goes into the named phase's plan.
+
+- **`widen-b` (spec gap, needs the owner's text first):** BR-D03 says "admin alert", but spec 06 has no admin text for it, so a failed or crashed send only tells the sender. Add a `BR-D03_admin` text and send it through the same admin loop as BR-D01.
+- **`widen-b`:** check the host of Graph upload-session URLs (`sinks/onedrive.py`, `sinks/mailer_graph.py`) against an allow-list (`*.sharepoint.com`, `*.files.1drv.com`, `graph.microsoft.com`, `*.office.com`), so the PDF, XML and Excel bytes are never PUT elsewhere.
+- **`widen-b`:** cap the pages `Drive.list_names` follows through `@odata.nextLink` (e.g. 50) and raise `GraphError` past it.
+- **`widen-b` (with the work account, S11.1):** `auth-microsoft --account` becomes a choice of the configured accounts, and a sign-in resumes only that account's `PENDING_AUTH` invoices.
+- **`widen-b`:** a control character in a reading's text (`razon_social`, `serie`) makes lxml, the `.eml` builder or the drive path raise `ValueError`; map it to BR-D02 or strip it when the reading is stored.
+- **`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.
+- **Known, accepted (D89):** a transient Graph error during an automatic send leaves the batch `sending`, so the retry ends with BR-D03 instead of resending, even for a 429 that sent nothing.
+
 ## Known drift between code and specs
 
 The specs run ahead of the code in these places; each has a named story that closes it.
 
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
-- `config/example.yaml` still shows flow B with `on_command`, `/enviar` and `can_send_batch`, and has no `extraction.igv_rates`, `accepted_tipos`, `reimbursement_cap` or mail modes: `read` adds `igv_rates` and `supported_tipos`, `file-b` adds the rest (target shape in spec 03 §7).
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
-- The `files.kind` check has no `eml` or `manifest`: the flow-b migration adds them.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global. The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans

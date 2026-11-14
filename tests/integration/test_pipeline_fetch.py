@@ -18,6 +18,7 @@ from invoicebot.config.models import Brand, Config, Portal, Store, StoreDirector
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchedFile, Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
+from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import FETCH_WAITING
@@ -242,6 +243,14 @@ async def _fetch_jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[Any]:
     return [row[0] for row in await cur.fetchall()]
 
 
+async def _deliver_jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[Any]:
+    cur = await conn.execute(
+        "SELECT run_after FROM jobs WHERE invoice_id = %s AND step = %s ORDER BY id",
+        (invoice_id, DELIVER_STEP),
+    )
+    return [row[0] for row in await cur.fetchall()]
+
+
 async def _latest_fetch_job_id(conn: AsyncConnection[Any], invoice_id: int) -> int:
     cur = await conn.execute(
         "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s ORDER BY id DESC LIMIT 1",
@@ -279,7 +288,7 @@ async def _seed_attempts(
 async def test_ok_stores_both_files_and_moves_to_delivering(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-5.1, R-5.7: an ok fetch stores both files, records one attempt and adds no job."""
+    """R-5.1, R-5.7: an ok fetch stores both files, records one attempt and enqueues deliver."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     fetcher = FakeFetcher(FetchReason.OK)
@@ -291,6 +300,7 @@ async def test_ok_stores_both_files_and_moves_to_delivering(
         files = await _files(conn, invoice_id)
         attempts = await _attempts(conn, invoice_id)
         jobs = await _fetch_jobs(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
     assert invoice == ("DELIVERING", None, FLOW)
     assert [(kind, sha, size) for kind, _path, sha, size in files] == [
         ("pdf", hashlib.sha256(PDF_BYTES).hexdigest(), len(PDF_BYTES)),
@@ -300,6 +310,7 @@ async def test_ok_stores_both_files_and_moves_to_delivering(
     assert all(Path(path).is_relative_to(out_dir) for _kind, path, _sha, _size in files)
     assert attempts == [("portal_registry", PORTAL_KEY, True, "ok")]
     assert jobs == []
+    assert len(deliver_jobs) == 1
 
 
 async def test_timeout_result_leaves_no_fetch_folder(

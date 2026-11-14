@@ -46,6 +46,10 @@ BOT_TOKEN_RE = re.compile(r"bot\d+:[A-Za-z0-9_-]+")
 #: Loggers that must feed the root handler instead of writing on their own.
 PROPAGATING_LOGGERS = ("uvicorn", "uvicorn.error", "uvicorn.access", "httpx", "httpcore")
 
+#: HTTP client loggers kept at WARNING: their INFO request lines carry full URLs, such as a Graph
+#: upload session's pre-authenticated ``uploadUrl`` and drive paths built from invoice data (R-9.16).
+QUIET_LOGGERS = ("httpx", "httpcore")
+
 #: Attributes the logging machinery owns; anything else came from ``extra=``.
 _STANDARD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
 
@@ -165,7 +169,7 @@ def configure_logging(
         child = logging.getLogger(name)
         child.handlers.clear()
         child.propagate = True
-        child.setLevel(logging.NOTSET)
+        child.setLevel(logging.WARNING if name in QUIET_LOGGERS else logging.NOTSET)
 
 
 def _duration_ms(started: float) -> int:

@@ -6,7 +6,7 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
@@ -17,12 +17,15 @@ from invoicebot.extract.fields import Reading, reading_from_json, reading_to_jso
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
 
+#: The kinds an invoice's file may have: the channel attachments plus flow B's own files.
+type FileKind = AttachmentKind | Literal["eml", "manifest"]
+
 
 @dataclass(frozen=True)
 class FileRecord:
     """A file to attach to an invoice: where it came from and what it is (R-1.4)."""
 
-    kind: AttachmentKind
+    kind: FileKind
     local_path: str | None
     remote_ref: str | None
     sha256: str
@@ -61,6 +64,15 @@ async def get_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, s
     if row is None:
         return None
     return str(row[0]), str(row[1])
+
+
+async def get_state_rule(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None] | None:
+    """Return ``(state, rule_id)`` for invoice_id, or None when it does not exist."""
+    cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0]), None if row[1] is None else str(row[1])
 
 
 async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> InvoiceHead | None:
@@ -113,6 +125,26 @@ async def set_state(
     )
 
 
+async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
+    """Move every ``PENDING_AUTH`` invoice to ``DELIVERING`` and return their ids (BR-D01).
+
+    The caller adds each invoice's ``deliver`` job in the same transaction, so a
+    crash never leaves an invoice ``DELIVERING`` without its job.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE invoices
+        SET state = 'DELIVERING',
+            rule_id = NULL,
+            error = NULL,
+            updated_at = now()
+        WHERE state = 'PENDING_AUTH'
+        RETURNING id
+        """
+    )
+    return [int(row[0]) for row in await cur.fetchall()]
+
+
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     """Count the profile's jobs that are not parked at infinity (BR-S01)."""
     cur = await conn.execute(
@@ -129,6 +161,52 @@ async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     if row is None:
         raise RuntimeError("SELECT count(*) yielded no row")
     return int(row[0])
+
+
+async def find_override_target(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    reply_to: tuple[ChannelName, str] | None,
+) -> int | None:
+    """Return the invoice a chat override applies to, or None (D90).
+
+    The quoted message's invoice wins when it belongs to the same profile; otherwise the
+    profile's most recent invoice that is not ``CANCELLED``/``FAILED``/``DONE`` and whose
+    batch is not ``sent`` (a finished invoice is only reached by quoting it). A quote of a
+    message that is not stored (the bot's own summary) falls back the same way. Does not
+    commit.
+    """
+    if reply_to is not None:
+        channel, external_id = reply_to
+        cur = await conn.execute(
+            """
+            SELECT i.id
+            FROM messages AS m
+            JOIN invoices AS i ON i.id = m.invoice_id
+            WHERE m.channel = %s
+              AND m.external_id = %s
+              AND i.profile_id = %s
+            """,
+            (channel, external_id, profile_id),
+        )
+        row = await cur.fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = await conn.execute(
+        """
+        SELECT i.id
+        FROM invoices AS i
+        LEFT JOIN batches AS b ON b.id = i.batch_id
+        WHERE i.profile_id = %s
+          AND i.state NOT IN ('CANCELLED', 'FAILED', 'DONE')
+          AND (b.state IS NULL OR b.state <> 'sent')
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT 1
+        """,
+        (profile_id,),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
 
 
 async def add_file(conn: AsyncConnection[Any], invoice_id: int, record: FileRecord) -> int:
@@ -241,7 +319,7 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     return reading_from_json(row[0])
 
 
-async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: AttachmentKind) -> str | None:
+async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: FileKind) -> str | None:
     """Return the local path of the invoice's first file of ``kind``, or None."""
     cur = await conn.execute(
         """

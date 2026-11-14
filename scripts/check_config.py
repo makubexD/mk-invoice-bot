@@ -15,8 +15,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from invoicebot.config.checks import run_checks
+from invoicebot.config.checks import flow_problems, run_checks
 from invoicebot.config.loader import load_config, load_directory
+from invoicebot.sinks.expr import field_names
 
 DEFAULT_CONFIG_PATH = "config/example.yaml"
 
@@ -47,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     problems = run_checks(cfg, directory, changed_portals=_portal_keys(args.pr))
+    problems.extend(flow_problems(cfg, field_names=field_names))
     for problem in problems:
         print(f"{problem.code} {problem.path}: {problem.message}")
     return 1 if any(problem.blocking for problem in problems) else 0

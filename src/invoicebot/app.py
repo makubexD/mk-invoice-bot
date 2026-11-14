@@ -18,24 +18,29 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
+from invoicebot.auth.providers import build_token_provider, scopes_for
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, WhatsAppChannel
+from invoicebot.config.models import Config, OneDriveFolderSink, StoreDirectory, WhatsAppChannel
 from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.logging import configure_logging
+from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.queue.outbox import OutboxSender
-from invoicebot.queue.worker import Worker
+from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
+from invoicebot.sinks.mailer import DryRun, GraphSend, mail_modes
+from invoicebot.sinks.mailer_graph import GraphMailer
+from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
 
 logger = logging.getLogger(__name__)
@@ -49,6 +54,8 @@ WHATSAPP_ADAPTER = "whatsapp"
 WHATSAPP_SECRETS = frozenset(
     {"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token", "sender_hash_key"}
 )
+#: The Microsoft account flow B files through (R-7.1); config pins it to ``personal``.
+MICROSOFT_ACCOUNT = "personal"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
@@ -133,20 +140,21 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s
             )
         }
-        worker = Worker(
-            pool,
-            {
-                DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
-                EXTRACT_STEP: make_extract_handler(
-                    pool,
-                    cfg.extraction,
-                    cfg.limits.media,
-                    settings.parsing_rules_path,
-                ),
-                ROUTE_STEP: make_route_handler(pool, cfg, rules),
-                FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
-            },
-        )
+        handlers = {
+            DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
+            EXTRACT_STEP: make_extract_handler(
+                pool,
+                cfg.extraction,
+                cfg.limits.media,
+                settings.parsing_rules_path,
+            ),
+            ROUTE_STEP: make_route_handler(pool, cfg, rules),
+            FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
+        }
+        deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
+        if deliver_handler is not None:
+            handlers[DELIVER_STEP] = deliver_handler
+        worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
             pool,
@@ -180,6 +188,27 @@ def _load_secrets(settings: Settings) -> SecretStore:
 def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
     """Return the configured WhatsApp channel, if any."""
     return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
+
+
+def _deliver_handler(
+    settings: Settings,
+    cfg: Config,
+    directory: StoreDirectory,
+    http: httpx.AsyncClient,
+    pool: Pool,
+) -> Handler | None:
+    """Build flow B's deliver handler, or None when no flow files to OneDrive (R-7.1).
+
+    The provider only reads the age identity here; nothing signs in or calls Graph until
+    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9).
+    """
+    if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
+        return None
+    provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
+    drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
+    mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
+    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer))
+    return make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir)
 
 
 async def _send_forever(sender: OutboxSender) -> None:

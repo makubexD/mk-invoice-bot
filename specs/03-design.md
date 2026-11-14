@@ -114,7 +114,7 @@ channel_windows(channel, recipient /*profile id*/, last_inbound_at,
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
-`flow_data_json`, `payment_id`, the `payments` table, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `flow-b` phase; merged revisions are not edited.
+`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id` and the `payments` table arrive with S11.11 (`/pagado`, `widen-b`), their first caller. Merged revisions are not edited.
 
 - **Profiles** (people) live in config, not in a table: each links one WhatsApp number and one Telegram user id (R-1.9). `profile_id` is the config key.
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
@@ -288,7 +288,7 @@ work_microsoft:
       on_sent: { suffix: "_Sent" }
       on_paid: { suffix: "_PAID_{paid:%d_%m}___{payment_total}", move_to: "{fecha:%Y}" }
     - kind: excel_template
-      template: "/Reembolsos/_plantilla/Formato de reembolsos.xlsx"
+      template: "/data/templates/reembolsos.xlsx"   # a local file on the host, never in git (D86)
       template_sha256: "<pinned>"
       output: "Formato de reembolsos.xlsx"
       sheet: "Template"
@@ -303,6 +303,10 @@ work_microsoft:
       subject: "Support release {fecha:%d/%m/%Y}"
       body: "Hola,\nAdjunto los documentos solicitados para el reembolso."
       attach: [excel_template, pdf, xml]
+# top level, next to `flows:`
+env: development                         # production is required for mail.send_enabled: true (R-7.7, D89)
+mail: { send_enabled: false }
+microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 ```
 
 ## 8. Resource budget and efficiency tactics
@@ -358,8 +362,9 @@ mk-invoice-bot/
     sunat/{validez,sol}.py
     fetchers/{base,qr_url,portal_registry,email_inbox,sunat_sol,paid_api,manual}.py
     fetchers/portals/{generic_form,...}.py
-    sinks/{base,google_drive,google_sheets,onedrive,excel_template,mailer_gmail,mailer_graph}.py
-    auth/{google_oauth,msal_cache}.py
+    sinks/{base,google_drive,google_sheets,onedrive,onedrive_folder,excel_template,mailer,mailer_gmail,mailer_graph}.py
+                         # onedrive.py and mailer_graph.py are the Graph clients (D84)
+    auth/{google_oauth,msal_cache}.py   # msal_cache: one age-encrypted cache per account (D85)
     browser/pool.py
   scripts/{auth_google.py,auth_microsoft.py,import_padron.py,memprofile.py,check_config.py,restore_drill.sh}
   .github/workflows/{ci.yml,deploy.yml}   # gap-watch.yml is post-MVP (D44)

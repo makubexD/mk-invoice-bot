@@ -1,4 +1,4 @@
-"""Integration tests for the initial schema migration (specs/03-design.md section 3)."""
+"""Integration tests for the schema migrations (specs/03-design.md section 3)."""
 
 import asyncio
 import os
@@ -10,7 +10,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import AsyncConnection
-from psycopg.errors import UniqueViolation
+from psycopg.errors import CheckViolation, UniqueViolation
 from psycopg_pool import AsyncConnectionPool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -42,6 +42,14 @@ INSERT_MESSAGE = """
     INSERT INTO messages (channel, external_id, profile_id, kind, received_at, payload_json)
     VALUES (%s, %s, %s, %s, %s, %s)
 """
+
+INSERT_INVOICE = """
+    INSERT INTO invoices (profile_id, origin_channel, state)
+    VALUES (%s, %s, %s)
+    RETURNING id, flow_data_json
+"""
+
+INSERT_BATCH = "INSERT INTO batches (flow_id, state) VALUES (%s, %s)"
 
 
 def _run_alembic(url: str, revision: str, *, downgrade: bool = False) -> None:
@@ -132,3 +140,52 @@ async def test_messages_pk_is_unique_per_channel(
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == 2
+
+
+async def test_invoice_flow_data_json_defaults_to_empty_object(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.2: an invoice inserted without flow_data_json gets an empty JSON object."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(INSERT_INVOICE, ("owner", "whatsapp", "parsed"))
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[1] == {}
+
+
+async def test_batch_accepts_prepared_and_rejects_unknown_states(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8: a batch accepts prepared and still rejects a state outside the check."""
+    async with db_pool.connection() as conn:
+        await conn.execute(INSERT_BATCH, ("file-b", "prepared"))
+
+    with pytest.raises(CheckViolation):
+        async with db_pool.connection() as conn:
+            await conn.execute(INSERT_BATCH, ("file-b", "bogus"))
+
+
+async def test_file_accepts_eml_and_manifest_and_rejects_unknown_kinds(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.2: a file row accepts eml and manifest and still rejects a kind outside the check."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(INSERT_INVOICE, ("owner", "whatsapp", "parsed"))
+        row = await cur.fetchone()
+        assert row is not None
+        invoice_id = row[0]
+        await conn.execute(
+            "INSERT INTO files (invoice_id, kind, sha256, size) VALUES (%s, %s, %s, %s)",
+            (invoice_id, "eml", "synthetic-sha256", 1),
+        )
+        await conn.execute(
+            "INSERT INTO files (invoice_id, kind, sha256, size) VALUES (%s, %s, %s, %s)",
+            (invoice_id, "manifest", "synthetic-sha256", 1),
+        )
+
+    with pytest.raises(CheckViolation):
+        async with db_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO files (invoice_id, kind, sha256, size) VALUES (%s, %s, %s, %s)",
+                (invoice_id, "bogus", "synthetic-sha256", 1),
+            )

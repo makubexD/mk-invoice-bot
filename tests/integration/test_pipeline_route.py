@@ -12,6 +12,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, InboundMessage
+from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.extract.fields import Field, Flag, Reading
@@ -59,6 +60,7 @@ def _reading(
     buyer: str = WORK_RUC,
     tipo: str = FACTURA,
     tipo_flag: Flag | None = None,
+    total: str = "49.90",
 ) -> Reading:
     """Build a QR reading of a factura to ``buyer``."""
     return Reading(
@@ -68,7 +70,7 @@ def _reading(
             "serie": _field("F001"),
             "numero": _field("15160"),
             "igv": _field("7.61"),
-            "total": _field("49.90"),
+            "total": _field(total),
             "fecha_emision": _field(fecha.isoformat()),
             "tipo_doc_adq": _field("6"),
             "num_doc_adq": _field(buyer),
@@ -134,6 +136,21 @@ async def _texts(conn: AsyncConnection[Any], profile_id: str, rule_id: str | Non
         (profile_id, rule_id, rule_id),
     )
     return [str(text) for (text,) in await cur.fetchall()]
+
+
+async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None, Any]]:
+    """Return the outbox's ``(text, rule_id, buttons)`` rows for ``profile_id``, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text', payload_json->>'rule_id', payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    rows = await cur.fetchall()
+    return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
 
 
 async def _route_one(
@@ -318,3 +335,76 @@ async def test_second_run_changes_nothing(db_pool: AsyncConnectionPool[AsyncConn
     async with db_pool.connection() as conn:
         assert await _invoice(conn, invoice_id) == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
         assert len(await _texts(conn, profile_id)) == 1
+
+
+async def test_total_above_cap_waits_for_confirmation(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.13, BR-D06: a total above the cap waits in CONFIRMING with the question and two buttons."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool), total="63.50"))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+    assert row == ("CONFIRMING", "BR-D06", WORK_FLOW)
+    assert jobs == []
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-D06"
+    assert text.startswith("🧾 Factura F001-15160")
+    assert text.endswith(
+        "Esta factura es de S/ 63.50 y el tope es S/ 50.00: se reembolsarán S/ 50.00. ¿Continúo?"
+    )
+    assert buttons == [
+        {"id": button_id(invoice_id, "continue"), "title": "Continuar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
+
+
+async def test_total_at_cap_routes_without_a_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.13, BR-D06: a total at the cap routes normally, with no question and its fetch job."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool), total="50.00"))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert jobs == ["fetch"]
+    assert len(outbox) == 1
+    assert "¿Continúo?" not in outbox[0][0]
+    assert outbox[0][2] == []
+
+
+async def test_flow_without_reimbursement_is_not_asked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.13, BR-D06: a flow with no reimbursement asks nothing, even above the other flow's cap."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(
+        db_pool, profile_id, _reading(await _today(db_pool), buyer=OWNER_RUC, total="63.50")
+    )
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R01", OWNER_FLOW)
+    assert jobs == ["fetch"]
+    assert len(outbox) == 1
+    assert "¿Continúo?" not in outbox[0][0]
+    assert outbox[0][2] == []
