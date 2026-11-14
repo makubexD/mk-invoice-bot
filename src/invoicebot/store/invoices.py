@@ -66,6 +66,15 @@ async def get_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, s
     return str(row[0]), str(row[1])
 
 
+async def get_state_rule(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None] | None:
+    """Return ``(state, rule_id)`` for invoice_id, or None when it does not exist."""
+    cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0]), None if row[1] is None else str(row[1])
+
+
 async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> InvoiceHead | None:
     """Return the invoice's state, profile and channel, or None when it does not exist."""
     cur = await conn.execute(

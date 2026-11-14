@@ -309,6 +309,9 @@ BUTTON_SENT = "Ya lo envié"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
+#: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+CANCELLED_BY_USER = "🚫 Cancelado: no registraré el comprobante #{id}."
 
 
 def modes_desc(modes: Sequence[str]) -> str:

@@ -42,6 +42,7 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
+from invoicebot.pipeline.actions import SENT_ACTION
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
@@ -112,8 +113,6 @@ AUTH_PROVIDER_NAME = "Microsoft"
 AUTH_PROVIDER_SLUG = "microsoft"
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
-#: The button action that confirms the owner sent the draft (R-7.8, R-8.1).
-SENT_ACTION = "sent"
 
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"

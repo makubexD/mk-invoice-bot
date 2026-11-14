@@ -22,6 +22,7 @@ from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
+from invoicebot.pipeline.actions import CANCEL_ACTION, CONTINUE_ACTION
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.queue import outbox
@@ -62,8 +63,6 @@ ROUTED_STATE = "FETCHING_DOCS"
 #: Where an invoice above the reimbursement cap waits for [Continuar] / [Cancelar] (R-7.13).
 CONFIRMING_STATE = "CONFIRMING"
 RULE_CAP = "BR-D06"
-CONTINUE_ACTION = "continue"
-CANCEL_ACTION = "cancel"
 DATE_FIELD = "fecha_emision"
 
 

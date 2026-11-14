@@ -3,14 +3,17 @@
 This module owns the first pipeline step only (R-1.1, R-1.8, BR-S01). It makes
 no network calls and never commits: everything happens in the caller's
 transaction, so a later failure leaves no message, invoice, job or outbox row.
+The photo files a button press releases are deleted after that transaction (R-9.7).
 """
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.pipeline.actions import handle_press
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
@@ -48,20 +51,26 @@ async def handle_inbound(
     """Handle one inbound message inside the caller's transaction.
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
-    refreshes its channel window (R-1.10); a non-photo is only ``stored``. A
-    photo becomes an invoice with a ``download_media`` job and a BR-S09
-    acknowledgement, unless the sender already has ``max_queued_per_sender``
-    active jobs, in which case it is answered with BR-S01 and ``back_pressure``
-    (BR-S01).
+    refreshes its channel window (R-1.10); a button press runs its action and is
+    ``stored`` (R-3.5), a non-photo is only ``stored``. A photo becomes an
+    invoice with a ``download_media`` job and a BR-S09 acknowledgement, unless
+    the sender already has ``max_queued_per_sender`` active jobs, in which case
+    it is answered with BR-S01 and ``back_pressure`` (BR-S01).
     """
     async with conn.transaction():
         await _lock_profile(conn, msg.profile_id)
         if not await store_inbound(conn, msg):
             return IntakeResult(status="duplicate", invoice_id=None)
         await touch_window(conn, msg.channel, msg.profile_id, msg.received_at)
-        if not any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
+        if msg.button_id is not None:
+            pressed = await handle_press(conn, msg)
+        elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
+            return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
+        else:
             return IntakeResult(status="stored", invoice_id=None)
-        return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
+    for path in pressed.photo_paths:
+        await asyncio.to_thread(path.unlink, missing_ok=True)
+    return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
 
 
 async def _lock_profile(conn: AsyncConnection[Any], profile_id: str) -> None:
