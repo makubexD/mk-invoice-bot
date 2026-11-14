@@ -16,13 +16,19 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
     COMMAND_NEEDS_ID,
     HELP_AYUDA,
+    HELP_ESTADO,
     HELP_HEADER,
     MESSAGES,
+    STATUS,
+    STATUS_RULE,
+    STATUS_RULE_ONLY,
+    state_desc,
 )
-from invoicebot.store.invoices import InvoiceHead, load_invoice_head
+from invoicebot.store.invoices import InvoiceHead, get_state_rule, load_invoice_head
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
 RULE_NOT_FOUND = "BR-S07"
@@ -120,6 +126,38 @@ async def _ayuda(
     await _reply(conn, msg, None, help_text())
 
 
+async def _estado(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    admins: frozenset[str],
+) -> None:
+    """Answer with the invoice's state and, when it waits on a rule, that rule's last text.
+
+    A target the sender cannot see is refused by :func:`resolve_target` (R-10.1). The
+    second line names the rule and repeats its newest stored question, or just the rule
+    when the invoice has no stored text (S4.9, R-11.1).
+    """
+    target = await resolve_target(conn, msg, "estado", arg, admins)
+    if target is None:
+        return
+    invoice_id, _head = target
+    current = await get_state_rule(conn, invoice_id)
+    if current is None:
+        raise RuntimeError(f"invoice {invoice_id} does not exist")
+    state, rule_id = current
+    text = STATUS.format(id=invoice_id, state_desc=state_desc(state))
+    if rule_id is not None:
+        last = await outbox.last_text(conn, invoice_id, rule_id)
+        line = (
+            STATUS_RULE.format(rule_id=rule_id, text=last)
+            if last is not None
+            else STATUS_RULE_ONLY.format(rule_id=rule_id)
+        )
+        text = f"{text}\n{line}"
+    await _reply(conn, msg, None, text)
+
+
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -133,4 +171,5 @@ async def _reply(
 #: The commands a text may name; the help lists them in this order.
 COMMANDS: Mapping[str, Command] = {
     "ayuda": Command(_ayuda, HELP_AYUDA),
+    "estado": Command(_estado, HELP_ESTADO),
 }

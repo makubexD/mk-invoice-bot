@@ -15,12 +15,24 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.commands import COMMANDS, parse_command, resolve_target
 from invoicebot.pipeline.intake import handle_inbound
-from invoicebot.rules.messages_es import COMMAND_NEEDS_ID, HELP_AYUDA, HELP_HEADER, MESSAGES
-from invoicebot.store.invoices import InvoiceHead, create_invoice
+from invoicebot.queue import outbox
+from invoicebot.rules.messages_es import (
+    COMMAND_NEEDS_ID,
+    HELP_AYUDA,
+    HELP_HEADER,
+    MESSAGES,
+    STATUS,
+    STATUS_RULE,
+    STATUS_RULE_ONLY,
+    state_desc,
+)
+from invoicebot.store.invoices import InvoiceHead, create_invoice, set_state
 
 MAX_QUEUED = 10
 #: An id no test creates, so BR-S07's unknown-id answer is deterministic.
 UNKNOWN_INVOICE_ID = 999_999_999
+#: The stored question text a BR-R03 invoice's ``/estado`` repeats (S4.9).
+QUESTION_TEXT = "¿En qué flujo lo registro?"
 
 
 def _profile() -> str:
@@ -45,6 +57,37 @@ async def _invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: 
     """Create one RECEIVED invoice owned by profile_id and return its id."""
     async with pool.connection() as conn, conn.transaction():
         return await create_invoice(conn, profile_id, "whatsapp")
+
+
+async def _invoice_in(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    state: str,
+    rule_id: str | None = None,
+) -> int:
+    """Create an invoice in state, waiting on rule_id, and return its id."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_state(conn, invoice_id, state, rule_id=rule_id)
+    return invoice_id
+
+
+async def _question(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    profile_id: str,
+    rule_id: str,
+    text: str,
+) -> None:
+    """Store a question outbox row linked to invoice_id and naming rule_id."""
+    async with pool.connection() as conn, conn.transaction():
+        await outbox.add(
+            conn,
+            "whatsapp",
+            profile_id,
+            {"text": text, "rule_id": rule_id},
+            invoice_id=invoice_id,
+        )
 
 
 async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -215,3 +258,71 @@ async def test_parse_command_splits_name_and_argument() -> None:
     assert parse_command(" /AYUDA   12 ") == ("ayuda", "12")
     assert parse_command("hola") is None
     assert parse_command("/") is None
+
+
+async def test_estado_repeats_the_rule_and_its_last_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.1: /estado on a BR-R03 invoice shows its state and the stored question."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R03")
+    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    msg = _message(profile_id, f"/estado {invoice_id}")
+    expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
+    expected = f"{expected}\n{STATUS_RULE.format(rule_id='BR-R03', text=QUESTION_TEXT)}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies[-1] == (expected, None)
+
+
+async def test_estado_without_a_rule_shows_only_the_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.1: an invoice with no rule gets only the state line."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "FETCHING_DOCS")
+    msg = _message(profile_id, f"/estado {invoice_id}")
+    expected = STATUS.format(id=invoice_id, state_desc=state_desc("FETCHING_DOCS"))
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(expected, None)]
+
+
+async def test_estado_with_a_rule_but_no_stored_text_shows_the_reason(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.1: a rule with no stored text gets STATUS_RULE_ONLY instead of the question."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R04")
+    msg = _message(profile_id, f"/estado {invoice_id}")
+    expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
+    expected = f"{expected}\n{STATUS_RULE_ONLY.format(rule_id='BR-R04')}"
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(expected, None)]
+
+
+async def test_estado_on_another_profiles_invoice_answers_br_s07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S07: /estado on another profile's invoice is refused and changes nothing."""
+    owner_profile = _profile()
+    invoice_id = await _invoice_in(db_pool, owner_profile, "FETCHING_DOCS")
+    sender_profile = _profile()
+    msg = _message(sender_profile, f"/estado {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        replies = await _replies(conn, sender_profile)
+
+    assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]

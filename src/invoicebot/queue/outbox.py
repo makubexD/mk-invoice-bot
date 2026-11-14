@@ -86,6 +86,28 @@ async def add(
     return int(row[0])
 
 
+async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
+    """Return the newest stored text for invoice_id whose payload names rule_id.
+
+    ``/estado`` shows the invoice's last question, so an invoice with no stored
+    text for the rule (or none at all) answers None. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text'
+        FROM outbox
+        WHERE invoice_id = %(invoice_id)s AND payload_json->>'rule_id' = %(rule_id)s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"invoice_id": invoice_id, "rule_id": rule_id},
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
 class OutboxSender:
     """Deliver pending outbox rows through per-channel transports.
 
