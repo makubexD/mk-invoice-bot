@@ -89,6 +89,7 @@
 | D88 | **`seq` is claimed in the database.** The folder sink lists the month's folders (the root and `{YYYY}/`); the pipeline then claims `seq = max(listed, already claimed) + 1` in one short transaction under an advisory lock per flow and month, and stores it in `flow_data_json` before the folder exists. A retry reuses the stored `seq` and name. The folder is created with `conflictBehavior: fail`, and a 409 on the claimed name is accepted |
 | D89 | **No automatic resend.** An automatic mail mode commits the batch as `sending` before the Graph call and `sent` after it. A job that finds its batch `sending` never resends: the batch goes `failed` with BR-D03. When `mail.send_enabled` is false every mode is replaced by `dry_run` at startup (R-7.7), and `send_enabled: true` requires `env: production` |
 | D90 | **Overrides resolve like documents.** A `motivo=` / `descripcion=` text, or a photo caption, goes to the quoted message's invoice, else to the sender's most recent invoice whose batch is not `sent`. Outbound message ids are not stored yet, so quoting the bot's own summary falls back to the most recent invoice |
+| D91 | **Flow B runs on the personal Microsoft account only** (owner, 2026-11-14). The work tenant's IT gives no consent to a third-party app, so S0.8 is answered: no work-account login. `onedrive_work` and `graph_work` stay unbuilt; delivery is the personal OneDrive plus the D49 and D61 fallbacks (laptop mirror, `inbox_rule`, `laptop_outlook`). The PKCE loopback login and the `auth-microsoft --account` choice of accounts are dropped from `widen-b`, because they existed only for the work account. The Entra app is registered by the owner with the personal account (supported account type "Personal Microsoft accounts only", public client flows allowed) |
 
 ## Open (needed before or during Phase 0)
 Until they are answered, work proceeds with the default in the last column. Q5 still needs real input before S11.9 (the inbox fallback, now in flow B). Q2, Q3, Q4 and Q7 were answered on 2026-11-12 (D49, D50).
@@ -105,7 +106,7 @@ Until they are answered, work proceeds with the default in the last column. Q5 s
 ## Answered on 2026-11-12
 | # | Question | Answer |
 |---|---|---|
-| Q2 | Microsoft accounts: is your personal account outlook.com/hotmail (MSA)? Does your work tenant allow consenting to a third-party app? Should the bot write to your **personal** OneDrive and share that folder with your work account, or should the work account share a folder with your personal one? | D49 |
+| Q2 | Microsoft accounts: is your personal account outlook.com/hotmail (MSA)? Does your work tenant allow consenting to a third-party app? Should the bot write to your **personal** OneDrive and share that folder with your work account, or should the work account share a folder with your personal one? | D49; S0.8 answered by D91 (personal account only) |
 | Q3 | Email for flow B: which provider sends it (Outlook personal through Graph, or Gmail), and who receives it (to and cc)? | D49 |
 | Q4 | Can you share the **Excel template** (cells to fill, sheet name, .xlsx or .xlsm, formulas, and whether a batch means one file per invoice or one file with many)? | D50 |
 | Q7 | Required docs per flow: should flow B still deliver if only the PDF *or* only the XML is found? | D50 |
