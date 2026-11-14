@@ -161,7 +161,7 @@ def make_route_handler(
         raw_answers = flow_data.get("answers")
         answers: Mapping[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
         async with pool.connection() as conn, conn.transaction():
-            duplicate = await _claim(conn, job.invoice_id, reading)
+            duplicate = await _claim(conn, job.invoice_id, invoice.profile_id, reading)
             if duplicate is not None:
                 await _cancel_duplicate(conn, invoice, job.invoice_id, duplicate, cfg.owner.timezone)
                 rule_id = RULE_DUPLICATE
@@ -343,24 +343,27 @@ def _brand_check(
     return None
 
 
-async def _claim(conn: AsyncConnection[Any], invoice_id: int, reading: Reading) -> Duplicate | None:
-    """Claim the reading's natural key before the checks decide (BR-E04, D93).
+async def _claim(
+    conn: AsyncConnection[Any], invoice_id: int, profile_id: str, reading: Reading
+) -> Duplicate | None:
+    """Claim the reading's natural key before the checks decide (BR-E04, D93, R-10.1).
 
-    An incomplete key is not claimed: without all four parts it cannot identify an
-    invoice, so the checks run as before.
+    The key is scoped to the invoice's profile (D93), so the same invoice may be read by
+    two profiles. An incomplete key is not claimed: without all four parts it cannot
+    identify an invoice, so the checks run as before.
     """
-    key = _natural_key(reading)
+    key = _natural_key(profile_id, reading)
     if key is None:
         return None
     return await claim_natural_key(conn, invoice_id, key)
 
 
-def _natural_key(reading: Reading) -> str | None:
-    """Return ``ruc_emisor|tipo|serie|numero``, or None when a part is missing (D93)."""
+def _natural_key(profile_id: str, reading: Reading) -> str | None:
+    """Return ``profile_id|ruc_emisor|tipo|serie|numero``, or None if a part is missing (D93, R-10.1)."""
     parts = tuple(reading.value(name) for name in NATURAL_KEY_FIELDS)
     if any(not part for part in parts):
         return None
-    return "|".join(cast(tuple[str, ...], parts))
+    return "|".join((profile_id, *cast(tuple[str, ...], parts)))
 
 
 async def _cancel_duplicate(

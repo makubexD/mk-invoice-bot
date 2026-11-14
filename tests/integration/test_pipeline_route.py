@@ -822,6 +822,38 @@ async def test_second_invoice_with_a_done_key_is_cancelled(
     assert f"/estado {first}" in texts[0]
 
 
+async def test_same_reading_from_two_profiles_is_not_a_duplicate(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93, BR-E04, R-10.1: the natural key is per profile, so two profiles may hold it."""
+    first_profile = f"{FULL_PROFILE}-{uuid4().hex}"
+    second_profile = f"{FULL_PROFILE}-{uuid4().hex}"
+    first_cfg = _config(first_profile, FULL_PROFILE)
+    second_cfg = _config(second_profile, FULL_PROFILE)
+    reading = _reading(await _today(db_pool))
+    first = await _routing_invoice(db_pool, first_profile, reading)
+    await _run(db_pool, first_cfg, first)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, first, "DONE")
+
+    second = await _routing_invoice(db_pool, second_profile, reading)
+    await _run(db_pool, second_cfg, second)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, second)
+        first_duplicates = await _texts(conn, first_profile, "BR-E04")
+        second_duplicates = await _texts(conn, second_profile, "BR-E04")
+        first_key = await _stored_key(conn, first)
+        second_key = await _stored_key(conn, second)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert first_duplicates == []
+    assert second_duplicates == []
+    assert first_key is not None
+    assert first_key.startswith(f"{first_profile}|")
+    assert second_key is not None
+    assert second_key.startswith(f"{second_profile}|")
+
+
 async def test_failed_holder_gives_the_key_up(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -837,7 +869,7 @@ async def test_failed_holder_gives_the_key_up(
     second = await _routing_invoice(db_pool, profile_id, reading)
     await _run(db_pool, cfg, second)
 
-    key = f"{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
+    key = f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
     async with db_pool.connection() as conn:
         row = await _invoice(conn, second)
         first_key = await _stored_key(conn, first)
@@ -868,7 +900,7 @@ async def test_rerouted_invoice_is_not_its_own_duplicate(
         stored = await _stored_key(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
     assert duplicates == []
-    assert stored == f"{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
+    assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
 
 
 async def test_edited_numero_changes_the_stored_key(
@@ -888,4 +920,4 @@ async def test_edited_numero_changes_the_stored_key(
         row = await _invoice(conn, invoice_id)
         stored = await _stored_key(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert stored == f"{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
+    assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
