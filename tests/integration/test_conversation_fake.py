@@ -151,9 +151,20 @@ async def _start_routing(
 
 
 async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, invoice_id: int) -> None:
-    """Run the route handler on invoice_id as the queue would."""
+    """Run the route handler on invoice_id's newest route job, as the queue would (D95)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT max(id) FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, ROUTE_STEP)
+        )
+        row = await cur.fetchone()
+    job_id = 1 if row is None or row[0] is None else int(row[0])
     job = Job(
-        id=1, invoice_id=invoice_id, step=ROUTE_STEP, attempts=0, crashes=0, lease_until=datetime.now(UTC)
+        id=job_id,
+        invoice_id=invoice_id,
+        step=ROUTE_STEP,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
     )
     handler = make_route_handler(pool, cfg, StoreDirectory(stores={}, portals={}), compile_rules(cfg.routing))
     await handler(job)
