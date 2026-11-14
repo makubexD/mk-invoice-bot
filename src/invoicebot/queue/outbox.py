@@ -55,21 +55,30 @@ async def add(
     payload: dict[str, Any],
     *,
     template: str | None = None,
+    invoice_id: int | None = None,
 ) -> int:
     """Insert a pending outbox row in the caller's transaction and return its id.
 
-    The channel is validated before any SQL runs. The caller owns committing,
-    so a rollback enqueues nothing (R-1.8).
+    The channel is validated before any SQL runs. ``invoice_id`` links the row
+    to the invoice it talks about, so a parked invoice's question can be sent
+    again (R-3.7). The caller owns committing, so a rollback enqueues nothing
+    (R-1.8).
     """
     if channel not in VALID_CHANNELS:
         raise ValueError(f"unknown outbox channel: {channel!r}")
     cur = await conn.execute(
         """
-        INSERT INTO outbox (channel, "to", payload_json, template, state)
-        VALUES (%(channel)s, %(to)s, %(payload)s, %(template)s, 'pending')
+        INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
+        VALUES (%(channel)s, %(to)s, %(payload)s, %(template)s, 'pending', %(invoice_id)s)
         RETURNING id
         """,
-        {"channel": channel, "to": to, "payload": Json(payload), "template": template},
+        {
+            "channel": channel,
+            "to": to,
+            "payload": Json(payload),
+            "template": template,
+            "invoice_id": invoice_id,
+        },
     )
     row = await cur.fetchone()
     if row is None:
