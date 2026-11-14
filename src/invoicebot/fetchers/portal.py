@@ -1,16 +1,19 @@
 """The ``portal_registry`` fetcher: run the browser helper once per fetch (S10.2, D82).
 
 The fetcher finds the issuer's portal in the store directory and runs the browser helper
-in its own process for one fetch. The helper downloads the files; this module checks that
-every file it reports lies inside the output directory and under its kind's byte limit, then
-reads the XML and matches it against the invoice (R-5.6, BR-F06, BR-F09). A failed fetch
-removes the downloaded files.
+in its own process and its own temporary folder for one fetch (R-9.2). The helper downloads
+the files; this module checks that every file it reports lies inside the output directory,
+under its kind's byte limit and matches the bot's own SHA-256, then reads the XML and
+matches it against the invoice (R-5.6, BR-F06, BR-F09). A failed fetch removes the
+downloaded files.
 """
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
+import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -30,6 +33,8 @@ DEFAULT_HELPER_COMMAND = (sys.executable, "-P", "-m", "invoicebot.fetchers.brows
 PAGE_TIMEOUT_MS = 15_000
 #: The helper prints one small JSON object; anything larger is a bug the queue retries (R-9.2).
 MAX_HELPER_OUTPUT_BYTES = 64 * 1024
+#: The chunk size used to hash a downloaded file without reading it whole (R-5.6).
+HASH_CHUNK_BYTES = 64 * 1024
 
 
 class PortalFetcher:
@@ -71,7 +76,7 @@ class PortalFetcher:
         return portal
 
     async def _run(self, portal: Portal, invoice: FetchInvoice, out_dir: Path) -> HelperOutput | FetchResult:
-        """Run the browser helper and validate its one JSON line (S10.2, R-9.2)."""
+        """Run the browser helper in its own temp folder and validate its one JSON line (S10.2, R-9.2)."""
         request = HelperRequest(
             portal=portal,
             invoice=invoice,
@@ -80,13 +85,14 @@ class PortalFetcher:
             page_timeout_ms=PAGE_TIMEOUT_MS,
         )
         try:
-            stdout = await run_helper(
-                self._helper_command,
-                request.model_dump_json().encode(),
-                _helper_env(),
-                self._helper_timeout_s,
-                MAX_HELPER_OUTPUT_BYTES,
-            )
+            with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
+                stdout = await run_helper(
+                    self._helper_command,
+                    request.model_dump_json().encode(),
+                    _helper_env(Path(scratch)),
+                    self._helper_timeout_s,
+                    MAX_HELPER_OUTPUT_BYTES,
+                )
         except TimeoutError:
             return FetchResult(FetchReason.TIMEOUT, (), portal.key)
         except RuntimeError:
@@ -97,9 +103,13 @@ class PortalFetcher:
             return FetchResult(FetchReason.TECHNICAL, (), portal.key)
 
 
-def _helper_env() -> dict[str, str]:
-    """Return the helper's minimal environment: PATH and the variables Chromium needs."""
-    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin")}
+def _helper_env(tmp_dir: Path) -> dict[str, str]:
+    """Return the helper's minimal environment, with its temp files confined to ``tmp_dir``.
+
+    ``tmp_dir`` is the caller's scratch folder, removed after the run, so a killed helper
+    leaves no download artifacts or browser profile behind (R-9.2).
+    """
+    env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "TMPDIR": str(tmp_dir)}
     for name in ("HOME", "PLAYWRIGHT_BROWSERS_PATH"):
         value = os.environ.get(name)
         if value is not None:
@@ -116,14 +126,16 @@ def _result_from(
 ) -> FetchResult:
     """Check the helper's files and turn them into the fetch result (R-5.6)."""
     root = out_dir.resolve()
+    digests: dict[Path, str] = {}
     reason = output.reason
     if reason is FetchReason.OK:
-        reason = _validate_files(output.files, root, invoice, max_bytes)
+        reason = _validate_files(output.files, root, invoice, max_bytes, digests)
     if reason is not FetchReason.OK:
         _delete_inside(output.files, root)
         return FetchResult(reason, (), key)
     files = tuple(
-        FetchedFile(file.kind, file.path, file.path.stat().st_size, file.sha256) for file in output.files
+        FetchedFile(file.kind, file.path, file.path.stat().st_size, digests[file.path])
+        for file in output.files
     )
     return FetchResult(FetchReason.OK, files, key)
 
@@ -133,14 +145,27 @@ def _validate_files(
     root: Path,
     invoice: FetchInvoice,
     max_bytes: MediaMaxBytes,
+    digests: dict[Path, str],
 ) -> FetchReason:
-    """Return why the helper's files are unusable, or ``OK`` when they carry a matching XML."""
+    """Return why the helper's files are unusable, or ``OK`` when they carry a matching XML.
+
+    ``digests`` receives each file's bot-computed hash, so the caller builds the result
+    without reading the files a second time (R-5.6).
+    """
     if not all(_inside(file.path, root) for file in files):
         return FetchReason.TECHNICAL
     for file in files:
         reason = _too_large(file, max_bytes)
         if reason is not None:
             return reason
+    for file in files:
+        try:
+            digest = _sha256(file.path)
+        except OSError:
+            return FetchReason.TECHNICAL
+        if digest != file.sha256:
+            return FetchReason.TECHNICAL
+        digests[file.path] = digest
     xml = next((file for file in files if file.kind == "xml"), None)
     if xml is None:
         return FetchReason.MISSING_DOCS
@@ -160,6 +185,19 @@ def _too_large(file: HelperFile, max_bytes: MediaMaxBytes) -> FetchReason | None
     if size <= getattr(max_bytes, file.kind):
         return None
     return FetchReason.TECHNICAL if file.kind == "pdf" else FetchReason.XML_INVALID
+
+
+def _sha256(path: Path) -> str:
+    """Return the SHA-256 hex digest of the file at ``path``, read in 64 KiB chunks (R-5.6).
+
+    Raises:
+        OSError: when the file cannot be opened or read.
+    """
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(HASH_CHUNK_BYTES):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _xml_reason(xml: HelperFile, invoice: FetchInvoice) -> FetchReason | None:

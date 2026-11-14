@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +41,7 @@ SMALL_PDF_MAX_BYTES = MEDIA_MAX_BYTES.model_copy(update={"pdf": 8})
 HELPER_SCRIPT = '''\
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -100,6 +102,14 @@ def report(reason, files):
 
 if MODE == "sleep":
     time.sleep(10)
+elif MODE in ("tmp", "tmp_sleep"):
+    tmp_dir = Path(os.environ["TMPDIR"])
+    (tmp_dir / "artifact.bin").write_bytes(b"partial download")
+    Path(sys.argv[2]).write_text(str(tmp_dir))
+    if MODE == "tmp_sleep":
+        time.sleep(10)
+    else:
+        report("technical", [])
 elif MODE == "match":
     report("ok", [
         write("xml", "invoice.xml", xml_bytes()),
@@ -110,6 +120,10 @@ elif MODE == "pdf_only":
 elif MODE == "undersize":
     pdf = write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic")
     pdf["size"] = 1
+    report("ok", [write("xml", "invoice.xml", xml_bytes()), pdf])
+elif MODE == "bad_sha":
+    pdf = write("pdf", "invoice.pdf", b"%PDF-1.4 synthetic")
+    pdf["sha256"] = "0" * 64
     report("ok", [write("xml", "invoice.xml", xml_bytes()), pdf])
 elif MODE == "oversized":
     report("ok", [
@@ -185,6 +199,7 @@ def _fetcher(
     *,
     helper_timeout_s: float = HELPER_TIMEOUT_S,
     max_bytes: MediaMaxBytes = MEDIA_MAX_BYTES,
+    extra_args: tuple[str, ...] = (),
 ) -> PortalFetcher:
     """Return a fetcher whose helper is the fake script in its ``mode``."""
     script = tmp_path / "helper.py"
@@ -193,8 +208,13 @@ def _fetcher(
         _directory(),
         max_bytes,
         helper_timeout_s,
-        helper_command=(sys.executable, str(script), mode),
+        helper_command=(sys.executable, str(script), mode, *extra_args),
     )
+
+
+def _assert_missing(path: Path) -> None:
+    """Assert ``path`` no longer exists, outside the async test's event loop (ASYNC240)."""
+    assert not path.exists()
 
 
 async def test_fetch_matching_xml_and_pdf_is_ok(tmp_path: Path) -> None:
@@ -242,6 +262,17 @@ async def test_fetch_oversized_pdf_is_technical_and_removes_files(tmp_path: Path
     out_dir = tmp_path / OUT_DIR_NAME
 
     result = await _fetcher(tmp_path, "oversized", max_bytes=SMALL_PDF_MAX_BYTES).fetch(_invoice(), out_dir)
+
+    assert result.reason is FetchReason.TECHNICAL
+    assert result.files == ()
+    assert list(out_dir.iterdir()) == []
+
+
+async def test_fetch_file_with_a_wrong_sha256_is_technical_and_removes_files(tmp_path: Path) -> None:
+    """R-5.6: a helper hash that differs from the bot's own digest is technical and removed."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "bad_sha").fetch(_invoice(), out_dir)
 
     assert result.reason is FetchReason.TECHNICAL
     assert result.files == ()
@@ -313,6 +344,31 @@ async def test_fetch_helper_outliving_its_timeout_reports_timeout(tmp_path: Path
 
     assert result.reason is FetchReason.TIMEOUT
     assert result.files == ()
+
+
+async def test_fetch_helper_uses_its_own_tmp_dir_and_removes_it(tmp_path: Path) -> None:
+    """R-9.2: the helper's temp folder is its own, not the system root, and is gone afterwards."""
+    record = tmp_path / "helper_tmp.txt"
+
+    await _fetcher(tmp_path, "tmp", extra_args=(str(record),)).fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    helper_tmp = Path(record.read_text(encoding="utf-8"))
+    assert helper_tmp.name.startswith("invoicebot-browser-")
+    assert helper_tmp != Path(tempfile.gettempdir())
+    _assert_missing(helper_tmp)
+
+
+async def test_fetch_helper_tmp_dir_is_removed_when_it_times_out(tmp_path: Path) -> None:
+    """R-9.2: a helper killed for its timeout leaves no temp folder behind."""
+    record = tmp_path / "helper_tmp.txt"
+
+    result = await _fetcher(
+        tmp_path, "tmp_sleep", helper_timeout_s=SLEEP_TIMEOUT_S, extra_args=(str(record),)
+    ).fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TIMEOUT
+    helper_tmp = Path(record.read_text(encoding="utf-8"))
+    _assert_missing(helper_tmp)
 
 
 async def test_fetch_file_outside_out_dir_is_technical(tmp_path: Path) -> None:
