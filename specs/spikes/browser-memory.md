@@ -35,4 +35,5 @@ Date: 2026-11-13. Machine: the development host (Ubuntu, podman). Story: S0.9, R
 | Made-up número, 1 run | `not_found_yet`                    | —           | 5.5 s     |
 
 - The peak matches the spike's images-off number plus the CLI's own Python process, still under the 450 MB helper budget.
+- **Through the guard proxy (D82, same day):** 3 more `ok` runs and the made-up número's `not_found_yet` gave the same 315 MB peak in 5.0–5.8 s; the proxy costs no measurable memory. One earlier real-invoice run answered `not_found_yet` and the next ones `ok`, so a portal hiccup reads as "not found yet" and is retried on the D65 schedule.
 - The first runs found a bug: La Leña's PDF button fires its download twice, and the second one landed in the XML slot, so the XML was a copy of the PDF (`xml_invalid`). The helper now skips a download named for the other kind (`fetchers/browser/form.py`).

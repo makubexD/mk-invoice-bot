@@ -12,7 +12,7 @@ from datetime import timedelta
 from decimal import Decimal
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 class Owner(BaseModel):
@@ -510,6 +510,15 @@ def parse_delay(text: str) -> timedelta:
     return timedelta(minutes=int(amount) * _MINUTES[unit])
 
 
+def format_delay(delay: timedelta) -> str:
+    """Write ``delay`` back in ``parse_delay``'s form, in the largest whole unit."""
+    minutes = int(delay.total_seconds()) // 60
+    for unit in ("d", "h"):
+        if minutes % _MINUTES[unit] == 0:
+            return f"{minutes // _MINUTES[unit]}{unit}"
+    return f"{minutes}m"
+
+
 #: D65: a portal's default "not found yet" retry delays, in order.
 DEFAULT_RETRY_SCHEDULE: tuple[timedelta, ...] = (
     timedelta(hours=1),
@@ -548,6 +557,11 @@ class Portal(BaseModel):
     def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
         """D65: every retry delay is written as ``<number><m|h|d>``."""
         return tuple(parse_delay(entry) for entry in value)
+
+    @field_serializer("retry_schedule")
+    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
+        """D65: serialize back to ``1h``-style text, so a dumped portal validates again."""
+        return [format_delay(delay) for delay in value]
 
 
 class StoreDirectory(BaseModel):

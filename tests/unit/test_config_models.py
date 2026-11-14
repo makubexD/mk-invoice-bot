@@ -316,6 +316,16 @@ def test_portal_without_retry_schedule_gets_the_default(tmp_path: Path) -> None:
     )
 
 
+def test_portal_retry_schedule_survives_a_json_round_trip() -> None:
+    """D65: a portal dumped to JSON (the browser helper's request) validates back unchanged."""
+    portal = Portal(key="synthetic", adapter="generic_form", retry_schedule=["90m", "6h", "24h", "2d"])
+
+    restored = Portal.model_validate_json(portal.model_dump_json())
+
+    assert restored == portal
+    assert portal.model_dump()["retry_schedule"] == ["90m", "6h", "1d", "2d"]
+
+
 def test_parse_delay_minutes() -> None:
     """D65: a schedule entry such as 90m parses to a timedelta."""
     assert parse_delay("90m") == timedelta(minutes=90)
