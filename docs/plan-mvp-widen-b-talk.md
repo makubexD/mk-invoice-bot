@@ -94,14 +94,15 @@ Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/pipeline/intake.py`
 
 Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py tests/integration/test_intake.py tests/integration/test_pipeline_overrides.py`.
 
-## Step 8: Test that user text and log events have one home (S5.3) `[worker]`
+## Step 8: Test that user text has one home (S5.3) `[worker]`
 
-Files: `tests/unit/test_user_text.py`, plus any module the test catches (move its literal into `rules/messages_es.py`).
+Files: `tests/unit/test_user_text.py`.
 
-- Walk every `.py` under `src/invoicebot/` except `rules/messages_es.py` with `ast`. Fail on a call to `queue_message`, `OutboundMessage` or `Button` whose `text=` or `title=` argument is a string literal, or an f-string with a literal part that holds a letter. Fail on a `logger.<debug|info|warning|error|exception>(...)` whose first argument is a literal not matching `^[a-z][a-z0-9_]*$`, unless `tests/unit/test_logging.py` already checks this (then only the text rule).
+- Walk every `.py` under `src/invoicebot/` except `rules/messages_es.py` with `ast`. Fail on a call to `queue_message`, `OutboundMessage` or `Button` whose text is a string literal, or an f-string with a literal part that holds a letter. The text is the `text=` or `title=` keyword, or `queue_message`'s third positional argument (its signature is `queue_message(conn, to, text, ...)`).
+- No log-event rule: R-9.8 asks only for English logs, and 34 existing log calls use plain English messages (decided 2026-11-14).
 - Docstrings start with `R-9.8` / `R-11.1` (S5.3).
 
-Test cases: the real tree passes; a synthetic source string with `queue_message(conn, text="Hola")` fails; one with `text=MESSAGES["BR-S01"]` passes; `logger.info("Sent it")` fails; `logger.info("outbox_sent")` passes.
+Test cases: the real tree passes; a synthetic source string with `queue_message(conn, to, "Hola")` fails; one with `queue_message(conn, to, text="Hola")` fails; one with `text=MESSAGES["BR-S01"]` passes; `Button(id="x", title=f"Ver {n}")` fails; `Button(id="x", title=f"{n}")` passes.
 
 Test: `uv run pytest -q tests/unit/test_user_text.py`.
 
