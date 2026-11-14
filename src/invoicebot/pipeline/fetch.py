@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import shutil
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -171,8 +172,8 @@ async def _run(
     data_dir: Path,
 ) -> _Outcome:
     """Run one fetcher and record its result in one transaction (S7.1, R-5.7)."""
-    # One folder per job: a duplicate run's cleanup cannot remove the files another run stored.
-    out_dir = data_dir / TMP_DIRECTORY / str(inputs.job.invoice_id) / str(inputs.job.id)
+    # One folder per run: a duplicate run's cleanup cannot remove the files another run stored.
+    out_dir = data_dir / TMP_DIRECTORY / str(inputs.job.invoice_id) / f"{inputs.job.id}-{uuid.uuid4().hex}"
     out_dir.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
     started = time.perf_counter()
     try:
@@ -191,13 +192,27 @@ async def _run(
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
     async with inputs.pool.connection() as conn, conn.transaction():
         # Two runs of one job serialize on the job's row lock; the loser writes nothing (R-5.1).
-        if await is_superseded(conn, inputs.job):
+        if not await _is_current(conn, inputs.job):
+            # R-9.2: this run stored nothing, so its files must not stay.
+            shutil.rmtree(out_dir, ignore_errors=True)
             return outcome
         await record_attempt(
             conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
         )
         await _record_result(conn, inputs, result, delay, first_not_found)
     return outcome
+
+
+async def _is_current(conn: AsyncConnection[Any], job: Job) -> bool:
+    """Return True when ``job`` may write; the loser of two runs writes nothing (R-5.1).
+
+    ``is_superseded`` takes the job's row lock first, so two runs of one job
+    serialize before the invoice state is read.
+    """
+    if await is_superseded(conn, job):
+        return False
+    head = await load_invoice_head(conn, job.invoice_id)
+    return head is not None and head.state == FETCHING_STATE
 
 
 async def _record_result(
@@ -236,6 +251,8 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     """Move the invoice to MANUAL_REQUIRED with BR-F07's message (BR-F07)."""
     text = _manual_message(reading, inputs.flow.required_docs, inputs.attempts)
     async with inputs.pool.connection() as conn, conn.transaction():
+        if not await _is_current(conn, inputs.job):
+            return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
         await set_state(conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED)
         await _notify(conn, inputs.head, RULE_EXHAUSTED, text)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)

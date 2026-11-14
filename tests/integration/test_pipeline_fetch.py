@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Brand, Config, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.base import FetchedFile, Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
@@ -121,6 +121,37 @@ class FakeFetcher:
         return FetchResult(FetchReason.OK, files, PORTAL_KEY)
 
 
+class LeavingFetcher(FakeFetcher):
+    """An ok fetcher that moves the invoice out of FETCHING_DOCS before the handler commits."""
+
+    def __init__(
+        self,
+        pool: AsyncConnectionPool[AsyncConnection[Any]],
+        invoice_id: int,
+    ) -> None:
+        super().__init__(FetchReason.OK)
+        self._pool = pool
+        self._invoice_id = invoice_id
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        result = await super().fetch(invoice, out_dir)
+        async with self._pool.connection() as conn, conn.transaction():
+            await set_state(conn, self._invoice_id, "DELIVERING")
+        return result
+
+
+class RecordingFetcher:
+    """A fetcher that records the folder each run gives it, then fails."""
+
+    def __init__(self) -> None:
+        self.out_dirs: list[Path] = []
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        del invoice
+        self.out_dirs.append(out_dir)
+        raise RuntimeError("synthetic fetch failure")
+
+
 async def _fetching_invoice(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     profile_id: str,
@@ -151,7 +182,7 @@ def _job(invoice_id: int, job_id: int = 1) -> Job:
 
 def _handler(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
-    fetcher: FakeFetcher,
+    fetcher: Fetcher,
     data_dir: Path,
 ) -> Handler:
     """Build the fetch handler with the one-fetcher registry."""
@@ -166,7 +197,7 @@ def _handler(
 
 async def _run(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
-    fetcher: FakeFetcher,
+    fetcher: Fetcher,
     invoice_id: int,
     data_dir: Path,
     job_id: int = 1,
@@ -280,7 +311,8 @@ async def test_timeout_result_leaves_no_fetch_folder(
 
     await _run(db_pool, FakeFetcher(FetchReason.TIMEOUT), invoice_id, tmp_path)
 
-    assert not (tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)).exists()
+    out_root = tmp_path / "tmp" / str(invoice_id)
+    assert not out_root.exists() or not any(out_root.rglob("*"))
 
 
 async def test_ok_result_keeps_its_files(
@@ -292,7 +324,7 @@ async def test_ok_result_keeps_its_files(
 
     await _run(db_pool, FakeFetcher(FetchReason.OK), invoice_id, tmp_path)
 
-    out_dir = tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)
+    (out_dir,) = (tmp_path / "tmp" / str(invoice_id)).iterdir()
     assert sorted(path.name for path in out_dir.iterdir()) == ["invoice.pdf", "invoice.xml"]
 
 
@@ -324,7 +356,8 @@ async def test_ok_without_a_required_document_records_missing_docs_and_chains(
     assert files == []
     assert attempts == [("portal_registry", PORTAL_KEY, False, "missing_docs")]
     assert len(jobs) == 1  # the next fetch job runs at once, so the chain moves on
-    assert not (tmp_path / "tmp" / str(invoice_id) / str(_job(invoice_id).id)).exists()
+    out_root = tmp_path / "tmp" / str(invoice_id)
+    assert not out_root.exists() or not any(out_root.rglob("*"))
 
     await handler(_job(invoice_id, next_job_id))
 
@@ -430,6 +463,67 @@ async def test_running_the_same_fetch_job_twice_fetches_once(
     assert fetcher.calls == 1
     assert attempts == [("portal_registry", PORTAL_KEY, False, "not_found_yet")]
     assert len(jobs) == 2  # the original job and the one retry the first run scheduled
+
+
+async def test_second_run_of_the_same_ok_job_writes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: a second run of an ok job records no attempt and no file, and leaves DELIVERING."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.OK)
+    handler = _handler(db_pool, fetcher, tmp_path)
+    job = _job(invoice_id)
+
+    await handler(job)
+    await handler(job)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+    assert invoice == ("DELIVERING", None, FLOW)
+    assert attempts == [("portal_registry", PORTAL_KEY, True, "ok")]
+    assert [kind for kind, _path, _sha, _size in files] == ["pdf", "xml"]
+    assert fetcher.calls == 1
+
+
+async def test_run_that_leaves_fetching_after_its_fetch_removes_its_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.2: a run whose state changed during the fetch writes nothing and leaves no files."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = LeavingFetcher(db_pool, invoice_id)
+    handler = _handler(db_pool, fetcher, tmp_path)
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    out_root = tmp_path / "tmp" / str(invoice_id)
+    assert not out_root.exists() or not any(out_root.rglob("*"))
+    assert attempts == []
+    assert files == []
+
+
+async def test_two_runs_of_one_job_use_different_out_dirs(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.2: each run of a job gets its own folder, so one cannot remove the other's files."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = RecordingFetcher()
+    handler = _handler(db_pool, fetcher, tmp_path)
+    job = _job(invoice_id)
+
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="synthetic fetch failure"):
+            await handler(job)
+
+    assert len(fetcher.out_dirs) == 2
+    assert fetcher.out_dirs[0] != fetcher.out_dirs[1]
 
 
 async def test_not_found_yet_past_the_last_retry_ends_manual_required(
