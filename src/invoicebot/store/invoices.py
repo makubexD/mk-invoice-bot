@@ -148,6 +148,16 @@ async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> Invo
     )
 
 
+async def lock_invoice(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Lock invoice_id's row for the caller's transaction (D95).
+
+    A job that takes this lock before it writes serializes against an edit's update: an
+    edit that committed first leaves a newer job, so the older run sees it as superseded.
+    Does not commit.
+    """
+    await conn.execute("SELECT 1 FROM invoices WHERE id = %s FOR UPDATE", (invoice_id,))
+
+
 async def set_flow(conn: AsyncConnection[Any], invoice_id: int, flow: str) -> None:
     """Store the flow the invoice was routed to (R-3.1)."""
     await conn.execute("UPDATE invoices SET flow_id = %s WHERE id = %s", (flow, invoice_id))

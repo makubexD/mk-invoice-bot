@@ -21,7 +21,7 @@ from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.queue.jobs import Job
+from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.routing.router import CompiledRule
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
@@ -125,16 +125,28 @@ async def _routing_invoice(
     return invoice_id
 
 
+def _job(job_id: int, invoice_id: int) -> Job:
+    """Build the leased job row the route handler receives."""
+    return Job(
+        id=job_id,
+        invoice_id=invoice_id,
+        step=ROUTE_STEP,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
+    )
+
+
 async def _run(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     cfg: Config,
     invoice_id: int,
     directory: StoreDirectory | None = None,
+    job: Job | None = None,
 ) -> None:
-    job = Job(
-        id=1, invoice_id=invoice_id, step=ROUTE_STEP, attempts=0, crashes=0, lease_until=datetime.now(UTC)
+    await make_route_handler(pool, cfg, directory or StoreDirectory(stores={}, portals={}), RULES)(
+        job or _job(1, invoice_id)
     )
-    await make_route_handler(pool, cfg, directory or StoreDirectory(stores={}, portals={}), RULES)(job)
 
 
 def _store(ruc: str, *comercios: str) -> Store:
@@ -915,6 +927,36 @@ async def test_edited_numero_changes_the_stored_key(
     await _routing_invoice(db_pool, profile_id, edited, invoice_id=invoice_id)
 
     await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        stored = await _stored_key(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
+
+
+async def test_edit_during_routing_wins(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D95: a route job superseded by an edit's own job writes nothing; the edit's job routes."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+    async with db_pool.connection() as conn, conn.transaction():
+        first_id = await enqueue(conn, invoice_id, ROUTE_STEP)
+
+    edited = _reading(await _today(db_pool))
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, edited)
+        second_id = await enqueue(conn, invoice_id, ROUTE_STEP)
+
+    await _run(db_pool, cfg, invoice_id, job=_job(first_id, invoice_id))
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("ROUTING", None, None)
+        assert await _outbox(conn, profile_id) == []
+        assert await _stored_key(conn, invoice_id) is None
+
+    await _run(db_pool, cfg, invoice_id, job=_job(second_id, invoice_id))
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)

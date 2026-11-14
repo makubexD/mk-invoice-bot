@@ -40,7 +40,7 @@ from invoicebot.pipeline.questions import (
     flow_question,
     summary_buttons,
 )
-from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
     REFUSALS,
@@ -72,6 +72,7 @@ from invoicebot.store.invoices import (
     claim_natural_key,
     load_invoice_head,
     load_reading,
+    lock_invoice,
     set_flow,
     set_state,
 )
@@ -161,6 +162,10 @@ def make_route_handler(
         raw_answers = flow_data.get("answers")
         answers: Mapping[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
         async with pool.connection() as conn, conn.transaction():
+            # An edit that committed a newer route job leaves this run nothing to do (D95).
+            await lock_invoice(conn, job.invoice_id)
+            if await is_superseded(conn, job):
+                return
             duplicate = await _claim(conn, job.invoice_id, invoice.profile_id, reading)
             if duplicate is not None:
                 await _cancel_duplicate(conn, invoice, job.invoice_id, duplicate, cfg.owner.timezone)
