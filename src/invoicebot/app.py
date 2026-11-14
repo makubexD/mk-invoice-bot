@@ -148,7 +148,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
                 settings.parsing_rules_path,
             ),
-            ROUTE_STEP: make_route_handler(pool, cfg, rules),
+            ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
         }
         deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)

@@ -18,14 +18,14 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button
-from invoicebot.channels.whatsapp.payloads import button_id
-from invoicebot.config.models import Config, Extraction, Flow
+from invoicebot.config.models import Config, Extraction, Flow, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
-from invoicebot.pipeline.actions import CANCEL_ACTION, CONTINUE_ACTION
+from invoicebot.pipeline.actions import RULE_CAP
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.questions import cap_question
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
@@ -38,8 +38,6 @@ from invoicebot.routing.router import (
     route,
 )
 from invoicebot.rules.messages_es import (
-    BUTTON_CANCEL,
-    BUTTON_CONTINUE,
     MESSAGES,
     SUMMARY,
     SUMMARY_DATE_FORMAT,
@@ -62,11 +60,12 @@ ROUTING_STATE = "ROUTING"
 ROUTED_STATE = "FETCHING_DOCS"
 #: Where an invoice above the reimbursement cap waits for [Continuar] / [Cancelar] (R-7.13).
 CONFIRMING_STATE = "CONFIRMING"
-RULE_CAP = "BR-D06"
 DATE_FIELD = "fecha_emision"
 
 
-def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...]) -> Handler:
+def make_route_handler(
+    pool: Pool, cfg: Config, directory: StoreDirectory, rules: tuple[CompiledRule, ...]
+) -> Handler:
     """Build the handler that routes an invoice in ``ROUTING`` (S4.2).
 
     A matched flow is stored with its rule id, the summary goes to the sender and the
@@ -74,6 +73,8 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
     BR-R08 cancel it with their message. A missing reading or an unknown profile raises,
     so the queue retries.
     """
+    # BR-R09's brand question, added in part 2, reads the issuer's store from here.
+    _ = directory
 
     async def handle(job: Job) -> None:
         started = time.perf_counter()
@@ -104,10 +105,10 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
         else:
             # shortcut: the summary has no [Editar] button until S4.5.
             text = _summary(reading, flow, rule_id, today, cfg.extraction)
-            cap_question = _cap_question(reading, flow, job.invoice_id)
+            question = cap_question(reading, flow, job.invoice_id)
             async with pool.connection() as conn, conn.transaction():
                 await set_flow(conn, job.invoice_id, cast(str, result.flow))
-                await _routed(conn, invoice, job.invoice_id, rule_id, text, cap_question)
+                await _routed(conn, invoice, job.invoice_id, rule_id, text, question)
         logger.info(
             "step done",
             extra={
@@ -170,21 +171,6 @@ async def _routed(
     question, buttons = cap_question
     await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=RULE_CAP, expected=ROUTING_STATE)
     await _reply(conn, invoice, invoice_id, RULE_CAP, f"{text}\n{question}", buttons)
-
-
-def _cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, list[Button]] | None:
-    """Return BR-D06's question and its two buttons when the total is above the cap (R-7.13)."""
-    if flow.reimbursement is None:
-        return None
-    total = reading.amount("total")
-    if total is None or total <= flow.reimbursement.cap:
-        return None
-    cap = f"{flow.reimbursement.cap:.2f}"
-    buttons = [
-        Button(id=button_id(invoice_id, CONTINUE_ACTION), title=BUTTON_CONTINUE),
-        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
-    ]
-    return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
 
 
 def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:

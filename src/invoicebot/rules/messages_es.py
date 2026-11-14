@@ -312,6 +312,9 @@ BUTTON_SENT = "Ya lo envié"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
+#: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
+BUTTON_YES = "Sí"
+BUTTON_CHANGE = "Cambiar"
 #: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
 LIST_BUTTON = "Elegir"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).

@@ -14,7 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, StoreDirectory
 from invoicebot.extract.fields import Field, Flag, Reading
 from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
 from invoicebot.pipeline.extract import ROUTE_STEP
@@ -107,7 +107,7 @@ async def _run(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, inv
     job = Job(
         id=1, invoice_id=invoice_id, step=ROUTE_STEP, attempts=0, crashes=0, lease_until=datetime.now(UTC)
     )
-    await make_route_handler(pool, cfg, RULES)(job)
+    await make_route_handler(pool, cfg, StoreDirectory(stores={}, portals={}), RULES)(job)
 
 
 async def _invoice(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None, str | None]:

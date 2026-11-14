@@ -22,7 +22,7 @@ from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config as AppConfig
-from invoicebot.config.models import RoutingRule
+from invoicebot.config.models import RoutingRule, StoreDirectory
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import handle_inbound
@@ -236,7 +236,9 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             route_jobs = [int(row[0]) for row in await cur.fetchall()]
         rules = compile_rules(cfg.routing)
         for job_id in route_jobs:
-            await make_route_handler(db_pool, cfg, rules)(_job(job_id, invoice_id, ROUTE_STEP))
+            await make_route_handler(db_pool, cfg, StoreDirectory(stores={}, portals={}), rules)(
+                _job(job_id, invoice_id, ROUTE_STEP)
+            )
 
         fake = FakeChannel()
         await OutboxSender(db_pool, {"whatsapp": fake.transport()}).send_pending()
