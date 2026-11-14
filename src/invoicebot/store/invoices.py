@@ -14,7 +14,7 @@ from psycopg.types.json import Jsonb
 from invoicebot.channels.base import AttachmentKind, ChannelName
 from invoicebot.extract.fields import Reading, reading_from_json, reading_to_json
 from invoicebot.rules.catalog import RULES
-from invoicebot.states import NEEDS_RULE, StateMoved
+from invoicebot.states import CANCELLED, FAILED, NEEDS_RULE, StateMoved
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -41,6 +41,14 @@ class InvoiceHead:
     state: str
     profile_id: str
     origin_channel: ChannelName
+
+
+@dataclass(frozen=True)
+class Duplicate:
+    """The invoice still holding a natural key, and when it arrived (BR-E04, D93)."""
+
+    invoice_id: int
+    created_at: datetime
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -159,6 +167,41 @@ async def _read_state(conn: AsyncConnection[Any], invoice_id: int) -> str | None
     cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
     row = await cur.fetchone()
     return None if row is None else str(row[0])
+
+
+async def claim_natural_key(conn: AsyncConnection[Any], invoice_id: int, key: str) -> Duplicate | None:
+    """Claim ``key`` for invoice_id and return the invoice still holding it (BR-E04, D93).
+
+    A ``FAILED`` or ``CANCELLED`` holder gives the key up first. Any other holder wins
+    and is returned, leaving this invoice without a key. Otherwise this invoice takes
+    the key, replacing one it claimed before. A unique violation from a concurrent
+    claim propagates; the job retries and then finds the holder. Does not commit.
+    """
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET natural_key = NULL
+        WHERE natural_key = %s
+          AND id <> %s
+          AND state IN (%s, %s)
+        """,
+        (key, invoice_id, FAILED, CANCELLED),
+    )
+    cur = await conn.execute(
+        """
+        SELECT id, created_at
+        FROM invoices
+        WHERE natural_key = %s
+          AND id <> %s
+        LIMIT 1
+        """,
+        (key, invoice_id),
+    )
+    row = await cur.fetchone()
+    if row is not None:
+        return Duplicate(invoice_id=int(row[0]), created_at=cast(datetime, row[1]))
+    await conn.execute("UPDATE invoices SET natural_key = %s WHERE id = %s", (key, invoice_id))
+    return None
 
 
 async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:

@@ -16,11 +16,13 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import ChannelName
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
-from invoicebot.states import StateMoved
+from invoicebot.states import CANCELLED, FAILED, StateMoved
 from invoicebot.store.invoices import (
+    Duplicate,
     FileRecord,
     InvoiceHead,
     add_file,
+    claim_natural_key,
     count_active_jobs,
     create_invoice,
     get_file_path,
@@ -93,6 +95,19 @@ def _reading() -> Reading:
         },
         document_url=None,
     )
+
+
+def _natural_key(numero: str) -> str:
+    """Return the key routing claims for the synthetic invoice with ``numero`` (D93)."""
+    return f"{SYNTHETIC_RUC}|01|F001|{numero}"
+
+
+async def _stored_key(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
+    """Return the natural key stored on invoice_id, or None when it holds none."""
+    cur = await conn.execute("SELECT natural_key FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return None if row[0] is None else str(row[0])
 
 
 async def test_create_invoice_returns_id_and_state(
@@ -412,6 +427,106 @@ async def test_get_file_path_returns_the_first_path_of_a_kind(
     assert xml == "data/invoice.xml"
     assert absent_kind is None
     assert unknown_invoice is None
+
+
+async def test_claim_natural_key_stores_the_first_key(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: the first invoice to claim a free natural key gets it."""
+    key = _natural_key("15160")
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        duplicate = await claim_natural_key(conn, invoice_id, key)
+        stored = await _stored_key(conn, invoice_id)
+
+    assert duplicate is None
+    assert stored == key
+
+
+async def test_claim_natural_key_returns_the_done_holder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-E04: a DONE holder wins, carrying its id and created_at, and the second key stays unset."""
+    key = _natural_key("15161")
+
+    async with db_pool.connection() as conn:
+        first = await create_invoice(conn, "yo", CHANNEL)
+        assert await claim_natural_key(conn, first, key) is None
+        await set_state(conn, first, "DONE")
+        cur = await conn.execute("SELECT created_at FROM invoices WHERE id = %s", (first,))
+        row = await cur.fetchone()
+        assert row is not None
+        created_at = row[0]
+
+        second = await create_invoice(conn, "yo", CHANNEL)
+        duplicate = await claim_natural_key(conn, second, key)
+        second_key = await _stored_key(conn, second)
+
+    assert duplicate == Duplicate(invoice_id=first, created_at=created_at)
+    assert second_key is None
+
+
+@pytest.mark.parametrize(
+    ("holder_state", "rule_id", "numero"),
+    [(FAILED, "BR-E07", "15162"), (CANCELLED, "BR-E04", "15163")],
+)
+async def test_claim_natural_key_takes_over_from_a_terminal_holder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    holder_state: str,
+    rule_id: str,
+    numero: str,
+) -> None:
+    """D93: a FAILED or CANCELLED holder gives the key up and the second invoice takes it."""
+    key = _natural_key(numero)
+
+    async with db_pool.connection() as conn:
+        first = await create_invoice(conn, "yo", CHANNEL)
+        assert await claim_natural_key(conn, first, key) is None
+        await set_state(conn, first, holder_state, rule_id=rule_id)
+
+        second = await create_invoice(conn, "yo", CHANNEL)
+        duplicate = await claim_natural_key(conn, second, key)
+        first_key = await _stored_key(conn, first)
+        second_key = await _stored_key(conn, second)
+
+    assert duplicate is None
+    assert first_key is None
+    assert second_key == key
+
+
+async def test_claim_natural_key_again_by_its_holder_returns_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: re-routing the same invoice re-claims its own key without a duplicate."""
+    key = _natural_key("15164")
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        first = await claim_natural_key(conn, invoice_id, key)
+        second = await claim_natural_key(conn, invoice_id, key)
+        stored = await _stored_key(conn, invoice_id)
+
+    assert first is None
+    assert second is None
+    assert stored == key
+
+
+async def test_claim_natural_key_replaces_the_invoices_old_key(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D93: an edited numero makes the same invoice claim its new key and drop the old one."""
+    old_key = _natural_key("15165")
+    new_key = _natural_key("15166")
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        assert await claim_natural_key(conn, invoice_id, old_key) is None
+        duplicate = await claim_natural_key(conn, invoice_id, new_key)
+        stored = await _stored_key(conn, invoice_id)
+
+    assert duplicate is None
+    assert stored == new_key
 
 
 async def test_migration_0004_downgrades_to_0003_and_upgrades_again(
