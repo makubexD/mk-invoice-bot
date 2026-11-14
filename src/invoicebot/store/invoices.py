@@ -125,6 +125,26 @@ async def set_state(
     )
 
 
+async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
+    """Move every ``PENDING_AUTH`` invoice to ``DELIVERING`` and return their ids (BR-D01).
+
+    The caller adds each invoice's ``deliver`` job in the same transaction, so a
+    crash never leaves an invoice ``DELIVERING`` without its job.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE invoices
+        SET state = 'DELIVERING',
+            rule_id = NULL,
+            error = NULL,
+            updated_at = now()
+        WHERE state = 'PENDING_AUTH'
+        RETURNING id
+        """
+    )
+    return [int(row[0]) for row in await cur.fetchall()]
+
+
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     """Count the profile's jobs that are not parked at infinity (BR-S01)."""
     cur = await conn.execute(

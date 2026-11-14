@@ -1,9 +1,10 @@
-"""The ``invoicebot`` command line: today only ``portal-test`` (S10.5).
+"""The ``invoicebot`` command line: ``portal-test`` (S10.5) and ``auth-microsoft`` (R-7.9).
 
-The command reads one sample invoice from a YAML file and runs the named portal through
+``portal-test`` reads one sample invoice from a YAML file and runs the named portal through
 the browser helper into a temporary folder. It prints the reason, each file's kind and
 size, and whether the XML matches; it never prints an invoice field value or a file path
-(R-9.16).
+(R-9.16). ``auth-microsoft`` signs one account in with the device-code flow and then resumes
+the invoices that were parked in ``PENDING_AUTH`` (BR-D01).
 """
 
 from __future__ import annotations
@@ -12,34 +13,73 @@ import argparse
 import asyncio
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
+from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, StoreDirectory
+from invoicebot.config.models import Config, MailerSink, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
+from invoicebot.pipeline.deliver import DELIVER_STEP
+from invoicebot.queue.jobs import enqueue
+from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
+from invoicebot.store.db import create_pool
+from invoicebot.store.invoices import resume_pending_auth
 
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: The verdict line for each reason that says something about the XML itself.
 _XML_VERDICT = {FetchReason.OK: "yes", FetchReason.XML_MISMATCH: "no"}
+#: The scopes every account signs in with: token refresh and OneDrive writes (R-7.9).
+BASE_SCOPES = ("offline_access", "Files.ReadWrite")
+#: The scope the invoice email needs; only a Graph mailer from the account adds it (R-7.9).
+MAIL_SEND_SCOPE = "Mail.Send"
+#: The mail mode that sends through Graph (R-7.6).
+GRAPH_MODE = "graph"
+#: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
+TOKENS_DIRECTORY = "tokens"
+
+#: Builds the account's provider from settings, config, the account and its scopes (R-7.9).
+type TokenProviderFactory = Callable[[Settings, Config, str, Sequence[str]], TokenProvider]
+
+
+def _build_token_provider(
+    settings: Settings,
+    cfg: Config,
+    account: str,
+    scopes: Sequence[str],
+) -> TokenProvider:
+    """Build the real provider: client id from config, cache under ``data_dir/tokens`` (D85)."""
+    if settings.age_identity_path is None:
+        raise ValueError("AGE_IDENTITY_PATH must be set to sign in (R-7.9)")
+    return TokenProvider(
+        client_id=cfg.microsoft.client_id,
+        account=account,
+        scopes=scopes,
+        cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
+        identity=load_identity(settings.age_identity_path),
+    )
 
 
 def main(
     argv: Sequence[str] | None = None,
     *,
     helper_command: Sequence[str] = DEFAULT_HELPER_COMMAND,
+    token_provider_factory: TokenProviderFactory = _build_token_provider,
+    settings: Settings | None = None,
 ) -> int:
     """Parse ``argv`` and run the chosen command, returning its exit status (S10.5)."""
     parser = _parser()
     args = parser.parse_args(argv)
-    settings = Settings()
-    cfg = load_config(settings.config_path)
-    directory = load_directory(settings.config_path.parent)
+    resolved = settings if settings is not None else Settings()
+    cfg = load_config(resolved.config_path)
+    if args.command == "auth-microsoft":
+        return _auth_microsoft(parser, resolved, cfg, args.account, token_provider_factory)
+    directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
 
@@ -55,7 +95,69 @@ def _parser() -> argparse.ArgumentParser:
     portal_test = subparsers.add_parser("portal-test", help="run one portal fetch on a sample invoice")
     portal_test.add_argument("key", help="portal key, its file name under portals/")
     portal_test.add_argument("--sample", required=True, type=Path, help="YAML file with the invoice fields")
+    auth = subparsers.add_parser(
+        "auth-microsoft",
+        help="sign a Microsoft account in and resume the invoices waiting for it",
+    )
+    auth.add_argument("--account", required=True, help="account name, e.g. personal")
     return parser
+
+
+def _auth_microsoft(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    account: str,
+    provider_factory: TokenProviderFactory,
+) -> int:
+    """Sign the account in, then resume the invoices that waited for it (R-7.9, BR-D01).
+
+    A failed sign-in exits 1 and resumes nothing, so no invoice leaves ``PENDING_AUTH``
+    without a working token.
+    """
+    if settings.database_url is None:
+        parser.error("DATABASE_URL must be set to resume waiting invoices")
+    provider = provider_factory(settings, cfg, account, _scopes(cfg, account))
+    try:
+        provider.login_device_code(_show)
+    except AuthRequired as error:
+        sys.stderr.write(f"sign-in failed: {error}\n")
+        return 1
+    count = asyncio.run(_resume_pending_auth(settings.database_url))
+    sys.stdout.write(f"resumed {count} invoice(s)\n")
+    return 0
+
+
+def _scopes(cfg: Config, account: str) -> tuple[str, ...]:
+    """Return the scopes the account needs; add ``Mail.Send`` only for a Graph mailer (R-7.9)."""
+    scopes = list(BASE_SCOPES)
+    if any(
+        isinstance(sink, MailerSink) and sink.account == account and GRAPH_MODE in sink.modes
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+    ):
+        scopes.append(MAIL_SEND_SCOPE)
+    return tuple(scopes)
+
+
+def _show(message: str) -> None:
+    """Write the device-code instruction the provider built for the person (R-7.9)."""
+    sys.stdout.write(message + "\n")
+
+
+async def _resume_pending_auth(database_url: str) -> int:
+    """Move every waiting invoice to ``DELIVERING`` with a deliver job, in one transaction (BR-D01)."""
+    pool = create_pool(database_url)
+    await pool.open(wait=True)
+    invoice_ids: list[int] = []
+    try:
+        async with pool.connection() as conn, conn.transaction():
+            invoice_ids = await resume_pending_auth(conn)
+            for invoice_id in invoice_ids:
+                await enqueue(conn, invoice_id, DELIVER_STEP)
+    finally:
+        await pool.close()
+    return len(invoice_ids)
 
 
 def _portal_test(

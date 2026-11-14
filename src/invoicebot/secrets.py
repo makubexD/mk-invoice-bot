@@ -116,7 +116,7 @@ class SecretStore:
         The plaintext must be a YAML mapping of string keys to string values;
         anything else raises :class:`ValueError`. Keys are lower-cased.
         """
-        identity = _load_identity(Path(identity_path))
+        identity = load_identity(Path(identity_path))
         ciphertext = Path(path_age).read_bytes()
         plaintext = pyrage.decrypt(ciphertext, [identity])
         document = yaml.safe_load(plaintext.decode("utf-8"))
@@ -145,7 +145,7 @@ class SecretStore:
         return f"SecretStore(keys={len(self._values)})"
 
 
-def _load_identity(identity_path: Path) -> Any:
+def load_identity(identity_path: Path) -> Any:
     """Parse an age x25519 identity file, ignoring comments and blank lines."""
     text = identity_path.read_text(encoding="utf-8")
     for line in text.splitlines():
