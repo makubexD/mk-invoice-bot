@@ -20,12 +20,12 @@ from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.fetch import FETCH_STEP
+from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.replies import resolve_reply
-from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
-from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES, state_desc
+from invoicebot.rules.messages_es import CANCELLED_BY_USER, MESSAGES
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state, take_photo_paths
 from invoicebot.store.invoices import get_state_rule, load_flow, set_state
 
@@ -42,7 +42,6 @@ DONE_STATE = "DONE"
 
 RULE_CAP = "BR-D06"
 RULE_SENT = "BR-D08"
-RULE_STALE_BUTTON = "BR-S02"
 
 PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"
 SENT_BATCH_STATE = "sent"
@@ -99,7 +98,7 @@ async def _continue(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMes
 async def _cancel(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage) -> tuple[Path, ...]:
     """Cancel a BR-D06 invoice and tell its sender in one line (R-7.13)."""
     await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP)
-    await _reply(conn, msg, None, CANCELLED_BY_USER.format(id=invoice_id))
+    await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
     return ()
 
 
@@ -116,7 +115,7 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_SENT)
-    await _reply(conn, msg, RULE_SENT, MESSAGES[RULE_SENT])
+    await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
     return tuple(await take_photo_paths(conn, invoice_id))
 
 
@@ -134,25 +133,29 @@ async def send_stale(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id
     One home for BR-S02's text, shared with the override path (BR-S02).
     """
     state, _ = await _invoice_state(conn, invoice_id)
-    text = MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(state))
-    await _reply(conn, msg, RULE_STALE_BUTTON, text)
+    await queue_stale(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        invoice_id=invoice_id,
+        state=state,
+    )
 
 
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
+    invoice_id: int,
     rule_id: str | None,
     text: str,
 ) -> None:
     """Queue ``text`` for the press's sender in the caller's transaction."""
-    message = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        invoice_id=invoice_id,
         rule_id=rule_id,
         text=text,
     )
-    await outbox.add(conn, msg.channel, msg.profile_id, message.model_dump(mode="json"))
 
 
 #: The action each button runs; its keys match :data:`VALID_STATES`.

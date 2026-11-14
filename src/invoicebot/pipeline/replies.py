@@ -10,14 +10,10 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage, OutboundMessage
+from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import parse_button_id
-from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import MESSAGES, state_desc
+from invoicebot.pipeline.outgoing import Addressee, queue_stale
 from invoicebot.store.invoices import get_state
-
-#: Rule that tells the sender a button no longer applies (BR-S02).
-RULE_STALE_BUTTON = "BR-S02"
 
 
 async def resolve_reply(
@@ -42,7 +38,12 @@ async def resolve_reply(
     state = invoice[0]
     if state in states:
         return invoice_id, action
-    await _send_stale(conn, msg, invoice_id, state)
+    await queue_stale(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        invoice_id=invoice_id,
+        state=state,
+    )
     return None
 
 
@@ -61,20 +62,3 @@ def _parse_press(
     if states is None:
         return None
     return invoice_id, action, states
-
-
-async def _send_stale(
-    conn: AsyncConnection[Any],
-    msg: InboundMessage,
-    invoice_id: int,
-    state: str,
-) -> None:
-    """Queue BR-S02 to the sender of the stale button in the caller's transaction."""
-    reply = OutboundMessage(
-        channel=msg.channel,
-        recipient=msg.profile_id,
-        profile_id=msg.profile_id,
-        rule_id=RULE_STALE_BUTTON,
-        text=MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(state)),
-    )
-    await outbox.add(conn, msg.channel, msg.profile_id, reply.model_dump(mode="json"))

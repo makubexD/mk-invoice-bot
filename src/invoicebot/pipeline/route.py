@@ -17,7 +17,7 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import Config, Extraction, Flow
 from invoicebot.extract.fields import Reading
@@ -25,7 +25,7 @@ from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.pipeline.actions import CANCEL_ACTION, CONTINUE_ACTION
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
-from invoicebot.queue import outbox
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
@@ -100,7 +100,7 @@ def make_route_handler(pool: Pool, cfg: Config, rules: tuple[CompiledRule, ...])
                 await set_state(
                     conn, job.invoice_id, CANCELLED_STATE, rule_id=rule_id, expected=ROUTING_STATE
                 )
-                await _reply(conn, invoice, rule_id, text)
+                await _reply(conn, invoice, job.invoice_id, rule_id, text)
         else:
             # shortcut: the summary has no [Editar] button until S4.5.
             text = _summary(reading, flow, rule_id, today, cfg.extraction)
@@ -133,20 +133,20 @@ async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
 async def _reply(
     conn: AsyncConnection[Any],
     invoice: InvoiceHead,
+    invoice_id: int,
     rule_id: str,
     text: str,
     buttons: Sequence[Button] = (),
 ) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    message = OutboundMessage(
-        channel=invoice.origin_channel,
-        recipient=invoice.profile_id,
-        profile_id=invoice.profile_id,
+    await queue_message(
+        conn,
+        Addressee(invoice.origin_channel, invoice.profile_id),
+        invoice_id=invoice_id,
         rule_id=rule_id,
         text=text,
-        buttons=list(buttons),
+        buttons=buttons,
     )
-    await outbox.add(conn, invoice.origin_channel, invoice.profile_id, message.model_dump(mode="json"))
 
 
 async def _routed(
@@ -165,11 +165,11 @@ async def _routed(
     if cap_question is None:
         await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING_STATE)
         await enqueue(conn, invoice_id, FETCH_STEP)
-        await _reply(conn, invoice, rule_id, text)
+        await _reply(conn, invoice, invoice_id, rule_id, text)
         return
     question, buttons = cap_question
     await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=RULE_CAP, expected=ROUTING_STATE)
-    await _reply(conn, invoice, RULE_CAP, f"{text}\n{question}", buttons)
+    await _reply(conn, invoice, invoice_id, RULE_CAP, f"{text}\n{question}", buttons)
 
 
 def _cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, list[Button]] | None:
