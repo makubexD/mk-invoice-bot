@@ -14,6 +14,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import handle_press
+from invoicebot.pipeline.commands import handle_command, parse_command
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
@@ -50,16 +51,18 @@ async def handle_inbound(
     msg: InboundMessage,
     *,
     max_queued_per_sender: int,
+    admins: frozenset[str] = frozenset(),
 ) -> IntakeResult:
     """Handle one inbound message inside the caller's transaction.
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
     ``stored`` (R-3.5), a non-photo is ``stored`` and a text-only message may also
-    apply its edits (D97) and store its overrides (D70). A photo becomes an invoice,
-    with its caption's overrides, a ``download_media`` job and a BR-S09 acknowledgement,
-    unless the sender already has ``max_queued_per_sender`` active jobs, in which case it
-    is answered with BR-S01 and ``back_pressure`` (BR-S01).
+    run a command (R-10.1), apply its edits (D97) and store its overrides (D70). A photo
+    becomes an invoice, with its caption's overrides, a ``download_media`` job and a
+    BR-S09 acknowledgement, unless the sender already has ``max_queued_per_sender``
+    active jobs, in which case it is answered with BR-S01 and ``back_pressure`` (BR-S01).
+    ``admins`` holds the profile ids a command may reach another profile's invoice for.
     """
     async with conn.transaction():
         await _lock_profile(conn, msg.profile_id)
@@ -71,7 +74,7 @@ async def handle_inbound(
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
             return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
         else:
-            return await _store_with_overrides(conn, msg)
+            return await _store_with_overrides(conn, msg, admins)
     for path in pressed.photo_paths:
         await asyncio.to_thread(path.unlink, missing_ok=True)
     return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
@@ -109,15 +112,24 @@ async def _queue_or_back_pressure(
     return IntakeResult(status="queued", invoice_id=invoice_id)
 
 
-async def _store_with_overrides(conn: AsyncConnection[Any], msg: InboundMessage) -> IntakeResult:
-    """Store a non-photo text, applying its edits and overrides (D70, D90, D97).
+async def _store_with_overrides(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    admins: frozenset[str],
+) -> IntakeResult:
+    """Store a non-photo text, running its command or applying its edits and overrides.
 
-    A text may hold both: ``campo=valor`` edits when ``parse_edits`` finds fields or
-    errors, and ``motivo``/``descripcion`` overrides. Each is applied independently to
-    the invoice it targets, and the result names the invoice the edits first touched.
-    A non-photo attachment, or a text with neither, changes nothing.
+    A text starting with ``/`` is a command and is answered before anything else
+    (R-10.1). Otherwise it may hold both ``campo=valor`` edits when ``parse_edits`` finds
+    fields or errors, and ``motivo``/``descripcion`` overrides (D70, D90, D97). Each is
+    applied independently to the invoice it targets, and the result names the invoice the
+    edits first touched. A non-photo attachment, or a text with neither, changes nothing.
     """
     if msg.attachments:
+        return IntakeResult(status="stored", invoice_id=None)
+    command = parse_command(msg.text)
+    if command is not None:
+        await handle_command(conn, msg, command[0], command[1], admins=admins)
         return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)
     invoice_id = None

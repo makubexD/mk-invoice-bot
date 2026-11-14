@@ -119,4 +119,9 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
     """Handle each message in its own pooled connection and transaction."""
     for msg in messages:
         async with deps.pool.connection() as conn:
-            await handle_inbound(conn, msg, max_queued_per_sender=deps.max_queued_per_sender)
+            await handle_inbound(
+                conn,
+                msg,
+                max_queued_per_sender=deps.max_queued_per_sender,
+                admins=deps.admin_profiles,
+            )

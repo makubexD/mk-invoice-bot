@@ -340,6 +340,15 @@ EDIT_PROMPT = (
     "Envíame los cambios, uno por línea, así: campo=valor. Por ejemplo: total=45.50 o "
     "fecha=05/11/2026. Puedes cambiar ruc, serie, numero, fecha, total y cliente."
 )
+#: The first line of the command list (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_HEADER = "Envíame la foto de un comprobante y yo me encargo. También entiendo:"
+#: ``/ayuda``'s own line in the command list (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_AYUDA = "/ayuda: esta lista"
+#: The answer when a command that needs an invoice id is sent without one (R-10.1).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
 
 
 def modes_desc(modes: Sequence[str]) -> str:
