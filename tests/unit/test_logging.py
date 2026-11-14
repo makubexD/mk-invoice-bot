@@ -103,12 +103,23 @@ def test_telegram_token_in_httpx_record_is_redacted(log_stream: io.StringIO) -> 
     url = f"https://api.telegram.org/{token}/sendMessage"
     configure_logging(secret_values=[token], stream=log_stream)
 
-    logging.getLogger("httpx").info("HTTP Request: %s %s", "POST", url)
+    logging.getLogger("httpx").warning("HTTP Request: %s %s", "POST", url)
 
     output = log_stream.getvalue()
     assert token not in output
     assert "bot***" in output
     assert _records(log_stream)[-1]["logger"] == "httpx"
+
+
+def test_httpx_request_lines_are_not_logged(log_stream: io.StringIO) -> None:
+    """R-9.16: httpx and httpcore INFO lines, which carry full URLs, never reach the output."""
+    configure_logging(stream=log_stream)
+    url = "https://example.invalid/upload?tempauth=synthetic-capability"
+
+    logging.getLogger("httpx").info("HTTP Request: %s %s", "PUT", url)
+    logging.getLogger("httpcore").info("send_request_headers.started %s", url)
+
+    assert "tempauth" not in log_stream.getvalue()
 
 
 def test_secret_is_redacted_in_args_extra_and_exception(log_stream: io.StringIO) -> None:
