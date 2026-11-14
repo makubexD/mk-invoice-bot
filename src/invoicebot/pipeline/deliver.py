@@ -40,6 +40,7 @@ from invoicebot.config.models import (
     MailerSink,
     OneDriveFolderSink,
     Profile,
+    Store,
     StoreDirectory,
 )
 from invoicebot.extract.fields import Reading
@@ -292,7 +293,10 @@ def _sinks(flow: Flow) -> _Sinks | None:
 
 
 async def _prepare_values(context: _Context, invoice: _Invoice) -> _Values:
-    """Resolve the comercio and the step-6 names, saving the comercio in flow data (R-7.1, R-7.4)."""
+    """Resolve the comercio and the step-6 names, saving the comercio in flow data (R-7.1, R-7.4, BR-R09).
+
+    The sender's chosen brand wins over the serie when it is one of the store's (BR-R09).
+    """
     profile = context.cfg.profiles.get(invoice.head.profile_id)
     if profile is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has unknown profile")
@@ -312,10 +316,10 @@ async def _prepare_values(context: _Context, invoice: _Invoice) -> _Values:
             "shortcut: the issuer has no store; using the slug until the PORTAL_MISSING gap",
             extra={"step": DELIVER_STEP, "invoice_id": invoice.job.invoice_id},
         )
-    comercio = comercio_for(store, serie, razon_social)
+    overrides = _overrides(invoice.flow_data)
+    comercio = _comercio(store, invoice.flow_data, serie, razon_social)
     if comercio is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has no comercio")
-    overrides = _overrides(invoice.flow_data)
     async with context.pool.connection() as conn, conn.transaction():
         await merge_flow_data(conn, invoice.job.invoice_id, {"comercio": comercio})
     return _Values(
@@ -673,6 +677,16 @@ def _fecha(reading: Reading, xml: Reading | None) -> date | None:
     """Return the issue date from the reading, falling back to the XML (R-7.1)."""
     fecha = reading.fecha()
     return xml.fecha() if fecha is None and xml is not None else fecha
+
+
+def _comercio(store: Store | None, flow_data: Mapping[str, Any], serie: str, razon_social: str) -> str | None:
+    """Return the sender's chosen brand when it is the store's, else the serie's comercio (BR-R09)."""
+    raw_answers = flow_data.get("answers")
+    answers: Mapping[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
+    chosen = answers.get("comercio")
+    if isinstance(chosen, str) and store is not None and any(b.comercio == chosen for b in store.brands):
+        return chosen
+    return comercio_for(store, serie, razon_social)
 
 
 def _overrides(flow_data: Mapping[str, Any]) -> dict[str, str]:
