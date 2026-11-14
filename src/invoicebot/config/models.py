@@ -61,6 +61,7 @@ class WhatsAppChannel(BaseModel):
     phone_number_id: str
     graph_api_version: str
     templates: ChannelTemplates
+    template_language: str = Field(default="es_PE", pattern=r"^[a-z]{2}(_[A-Z]{2})?$")
 
 
 class TelegramChannel(BaseModel):

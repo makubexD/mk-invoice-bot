@@ -158,7 +158,15 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
             pool,
-            {WHATSAPP_ADAPTER: make_transport(client, pool, numbers=numbers, templates=channel.templates)},
+            {
+                WHATSAPP_ADAPTER: make_transport(
+                    client,
+                    pool,
+                    numbers=numbers,
+                    templates=channel.templates,
+                    language=channel.template_language,
+                )
+            },
         )
         async with _background({"worker": worker.run, "outbox": partial(_send_forever, sender)}):
             yield

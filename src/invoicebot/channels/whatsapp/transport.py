@@ -2,10 +2,11 @@
 
 Free-form messages are only allowed inside the customer service window. When the
 window is closed, or Meta answers that it has just closed, the same text goes
-through an approved template instead (BR-S04). A message with no configured
-template raises ``TemplateMissing``, so the outbox keeps the row and retries it
-with backoff. The window is read on its own pooled connection, never inside a
-transaction held across the HTTP call.
+through an approved template instead (BR-S04). A failure that no retry can fix
+(no number for the recipient, no configured template, a permanent Meta error
+code) raises ``PermanentSendError``, so the outbox kills the row at once. The
+window is read on its own pooled connection, never inside a transaction held
+across the HTTP call.
 """
 
 from __future__ import annotations
@@ -14,12 +15,16 @@ from collections.abc import Mapping
 from typing import Any
 
 from invoicebot.channels.base import OutboundMessage
-from invoicebot.channels.whatsapp.client import WhatsAppClient, WindowExpired
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError, WindowExpired
 from invoicebot.channels.whatsapp.payloads import buttons_payload, template_payload, text_payload
 from invoicebot.config.models import ChannelTemplates
-from invoicebot.queue.outbox import OutboxRow, Transport
+from invoicebot.queue.outbox import OutboxRow, PermanentSendError, Transport
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import window_open
+
+#: Meta error codes no retry can fix: invalid parameter, parameter value invalid,
+#: message undeliverable, unsupported message type.
+PERMANENT_META_CODES = frozenset({100, 131009, 131026, 131051})
 
 #: Rules whose out-of-window message has an approved template (R-1.10, BR-S04).
 TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
@@ -52,23 +57,39 @@ def make_transport(
     *,
     numbers: Mapping[str, str],
     templates: ChannelTemplates,
-    language: str = "es_PE",
+    language: str,
 ) -> Transport:
     """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4)."""
 
     async def transport(row: OutboxRow) -> None:
         msg = OutboundMessage.model_validate(row.payload)
-        to = numbers[row.to]
+        try:
+            to = numbers[row.to]
+        except KeyError as exc:
+            raise PermanentSendError(f"no WhatsApp number for {row.to}") from exc
         if await _recipient_window_open(pool, msg, row.to):
             try:
-                await client.send(_free_form_payload(to, msg))
+                await _send(client, _free_form_payload(to, msg))
                 return
             except WindowExpired:
                 pass
-        name = _template_name(templates, msg)
-        await client.send(template_payload(to, name, language, [_template_parameter(msg.text)]))
+        try:
+            name = _template_name(templates, msg)
+        except TemplateMissing as exc:
+            raise PermanentSendError(str(exc)) from exc
+        await _send(client, template_payload(to, name, language, [_template_parameter(msg.text)]))
 
     return transport
+
+
+async def _send(client: WhatsAppClient, payload: dict[str, Any]) -> None:
+    """Send one payload, making a Meta code that no retry can fix permanent (R-11.5)."""
+    try:
+        await client.send(payload)
+    except WhatsAppError as exc:
+        if exc.code in PERMANENT_META_CODES:
+            raise PermanentSendError(str(exc)) from exc
+        raise
 
 
 async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: str) -> bool:

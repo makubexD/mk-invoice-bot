@@ -11,7 +11,15 @@ import yaml
 from pydantic import ValidationError
 
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import CalendarField, Config, PickField, Portal, parse_delay
+from invoicebot.config.models import (
+    CalendarField,
+    ChannelTemplates,
+    Config,
+    PickField,
+    Portal,
+    WhatsAppChannel,
+    parse_delay,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -439,3 +447,33 @@ def test_portal_file_setting_key_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=r"example\.yaml"):
         load_directory(config_dir)
+
+
+def _whatsapp_channel(**overrides: Any) -> WhatsAppChannel:
+    """Build the WhatsApp channel config the example file carries."""
+    fields: dict[str, Any] = {
+        "kind": "whatsapp_cloud",
+        "phone_number_id": "123456789",
+        "graph_api_version": "v23.0",
+        "templates": ChannelTemplates(
+            completion="invoice_done",
+            manual_required="manual_required",
+            resume_notice="resume_notice",
+            pending_user_reminder="pending_user_reminder",
+            batch_preview="batch_preview",
+            admin_alert="admin_alert",
+        ),
+    }
+    fields.update(overrides)
+    return WhatsAppChannel(**fields)
+
+
+def test_whatsapp_template_language_rejects_a_dashed_locale() -> None:
+    """R-9.6: Meta writes the locale as es_PE, so a dashed tag fails validation."""
+    with pytest.raises(ValidationError, match="template_language"):
+        _whatsapp_channel(template_language="es-PE")
+
+
+def test_whatsapp_template_language_defaults_to_es_pe() -> None:
+    """R-9.6: a channel with no template_language sends templates in Spanish (Peru)."""
+    assert _whatsapp_channel().template_language == "es_PE"
