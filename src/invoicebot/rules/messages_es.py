@@ -312,6 +312,9 @@ BUTTON_CANCEL = "Cancelar"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 CANCELLED_BY_USER = "🚫 Cancelado: no registraré el comprobante #{id}."
+#: One-line confirmation after a chat motivo= / descripcion= override (R-7.4, D70).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+OVERRIDES_SAVED = "📝 Anotado en el comprobante #{id}."
 
 
 def modes_desc(modes: Sequence[str]) -> str:

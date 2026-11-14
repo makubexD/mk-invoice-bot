@@ -143,6 +143,52 @@ async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     return int(row[0])
 
 
+async def find_override_target(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    reply_to: tuple[ChannelName, str] | None,
+) -> int | None:
+    """Return the invoice a chat override applies to, or None (D90).
+
+    The quoted message's invoice wins when it belongs to the same profile; otherwise the
+    profile's most recent invoice that is not ``CANCELLED``/``FAILED``/``DONE`` and whose
+    batch is not ``sent`` (a finished invoice is only reached by quoting it). A quote of a
+    message that is not stored (the bot's own summary) falls back the same way. Does not
+    commit.
+    """
+    if reply_to is not None:
+        channel, external_id = reply_to
+        cur = await conn.execute(
+            """
+            SELECT i.id
+            FROM messages AS m
+            JOIN invoices AS i ON i.id = m.invoice_id
+            WHERE m.channel = %s
+              AND m.external_id = %s
+              AND i.profile_id = %s
+            """,
+            (channel, external_id, profile_id),
+        )
+        row = await cur.fetchone()
+        if row is not None:
+            return int(row[0])
+    cur = await conn.execute(
+        """
+        SELECT i.id
+        FROM invoices AS i
+        LEFT JOIN batches AS b ON b.id = i.batch_id
+        WHERE i.profile_id = %s
+          AND i.state NOT IN ('CANCELLED', 'FAILED', 'DONE')
+          AND (b.state IS NULL OR b.state <> 'sent')
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT 1
+        """,
+        (profile_id,),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
+
+
 async def add_file(conn: AsyncConnection[Any], invoice_id: int, record: FileRecord) -> int:
     """Store one file of an invoice and return its id (R-1.4)."""
     cur = await conn.execute(

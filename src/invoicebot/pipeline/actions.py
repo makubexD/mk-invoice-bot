@@ -89,7 +89,7 @@ async def _continue(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMes
     """
     _, rule_id = await _invoice_state(conn, invoice_id)
     if rule_id != RULE_CAP:
-        await _stale(conn, msg, invoice_id)
+        await send_stale(conn, msg, invoice_id)
         return ()
     await set_state(conn, invoice_id, FETCHING_STATE, rule_id=RULE_CAP)
     await enqueue(conn, invoice_id, FETCH_STEP)
@@ -111,7 +111,7 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage
     """
     flow_id = await load_flow(conn, invoice_id)
     if flow_id is None or await get_batch_state(conn, invoice_id) != PREPARED_BATCH_STATE:
-        await _stale(conn, msg, invoice_id)
+        await send_stale(conn, msg, invoice_id)
         return ()
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
@@ -128,8 +128,11 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     return state
 
 
-async def _stale(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id: int) -> None:
-    """Queue BR-S02 for a press the action refuses in the caller's transaction (BR-S02)."""
+async def send_stale(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id: int) -> None:
+    """Queue BR-S02 for a press or override the pipeline refuses in the caller's transaction.
+
+    One home for BR-S02's text, shared with the override path (BR-S02).
+    """
     state, _ = await _invoice_state(conn, invoice_id)
     text = MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(state))
     await _reply(conn, msg, RULE_STALE_BUTTON, text)
