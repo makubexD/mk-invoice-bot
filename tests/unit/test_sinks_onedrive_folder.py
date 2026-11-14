@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import date
 
 from invoicebot.config.models import OneDriveFolderSink, SinkFiles
@@ -89,6 +90,19 @@ async def test_empty_month_files_the_first_folder() -> None:
     assert drive.uploads[f"{result.path}/LaLena SAC.pdf"] == b"%PDF synthetic"
     manifest = json.loads(drive.uploads[f"{result.path}/.invoicebot.json"])
     assert manifest == {"invoice_id": INVOICE_ID, "version": 1}
+
+
+async def test_an_invoice_without_xml_files_no_xml() -> None:
+    """R-7.2: an invoice with no XML files its PDF and manifest, never an empty XML."""
+    drive = FakeDrive({ROOT: [], f"{ROOT}/2026": []})
+    ctx, _ = _ctx()
+
+    result = await file_folder(_sink(), drive, replace(ctx, xml=None))
+
+    assert set(drive.uploads) == {
+        f"{result.path}/LaLena SAC.pdf",
+        f"{result.path}/.invoicebot.json",
+    }
 
 
 async def test_existing_folders_in_root_and_year_claim_the_next_number() -> None:

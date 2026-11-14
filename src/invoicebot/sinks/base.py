@@ -18,13 +18,14 @@ class DeliveryContext:
     ``values`` holds the flow's step-6 names for the templates, ``saved`` the
     invoice's flow data so a retried delivery reuses what it already created, and
     ``claim_seq`` turns the largest sequence number listed on the drive into the
-    invoice's own, without ever renumbering an earlier folder.
+    invoice's own, without ever renumbering an earlier folder. ``xml`` is None
+    when the invoice has no XML, and then no XML file is filed.
     """
 
     invoice_id: int
     values: Mapping[str, object]
     pdf: bytes
-    xml: bytes
+    xml: bytes | None
     claim_seq: Callable[[int], Awaitable[int]]
     saved: Mapping[str, Any]
 

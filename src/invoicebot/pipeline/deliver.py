@@ -344,7 +344,7 @@ async def _prepare(context: _Context, invoice: _Invoice, sinks: _Sinks, prepared
             invoice_id=invoice.job.invoice_id,
             values=prepared.values,
             pdf=invoice.pdf,
-            xml=invoice.xml or b"",
+            xml=invoice.xml,
             claim_seq=claim,
             saved=invoice.flow_data,
         ),

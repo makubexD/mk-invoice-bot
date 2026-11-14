@@ -44,7 +44,8 @@ async def file_folder(sink: OneDriveFolderSink, drive: Drive, ctx: DeliveryConte
     path = f"{sink.root}/{folder}"
     await drive.create_folder(sink.root, folder)
     await drive.upload(f"{path}/{render(sink.files.pdf, ctx.values)}", ctx.pdf)
-    await drive.upload(f"{path}/{render(sink.files.xml, ctx.values)}", ctx.xml)
+    if ctx.xml is not None:
+        await drive.upload(f"{path}/{render(sink.files.xml, ctx.values)}", ctx.xml)
     await drive.upload(f"{path}/{sink.manifest}", _manifest(ctx.invoice_id))
     return FolderResult(folder=folder, path=path, seq=seq)
 
