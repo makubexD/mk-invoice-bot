@@ -45,7 +45,7 @@ from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, SENT_BUTTON_TITLE, modes_desc
+from invoicebot.rules.messages_es import BUTTON_SENT, MESSAGES, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
@@ -385,7 +385,7 @@ async def _assisted(context: _Context, delivery: _Delivery, mode: MailMode) -> N
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     data = await _read_bytes(eml)
     text = MESSAGES[RULE_BATCHED].format(folder=delivery.folder, modes_desc=modes_desc([DRY_RUN_MODE]))
-    button = Button(id=button_id(delivery.invoice_id, SENT_ACTION), title=SENT_BUTTON_TITLE)
+    button = Button(id=button_id(delivery.invoice_id, SENT_ACTION), title=BUTTON_SENT)
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
             return
