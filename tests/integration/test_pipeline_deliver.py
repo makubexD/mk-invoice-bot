@@ -166,6 +166,20 @@ class AuthRequiredDrive(FakeDrive):
         raise AuthRequired("personal")
 
 
+class CancellingGraphMode:
+    """An automatic mode that moves the invoice out of DELIVERING while it sends (R-7.5)."""
+
+    automatic = True
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+        self._pool = pool
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+        """Cancel the invoice during the send."""
+        async with self._pool.connection() as conn, conn.transaction():
+            await set_state(conn, invoice_id, "CANCELLED")
+
+
 def _field(value: str) -> Field:
     return Field(value=value, source="qr", confidence=1.0)
 
@@ -401,6 +415,26 @@ async def test_dry_run_batches_the_invoice_with_br_d07(
     assert buttons == [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}]
 
 
+async def test_an_assisted_draft_prepares_an_existing_failed_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-8.1, BR-D08: an assisted draft turns an existing failed batch back into prepared."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "sending")
+        await set_batch_state(conn, batch_id, "failed")
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "prepared"
+
+
 async def test_invoice_outside_delivering_is_left_untouched(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -487,6 +521,27 @@ async def test_graph_sends_once_and_closes_as_done(
     assert photo_path is None
 
 
+async def test_a_cancelled_invoice_still_marks_the_batch_sent(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.5, D89: a mail Graph accepted marks the batch sent even if the invoice left DELIVERING."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, CancellingGraphMode(db_pool), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("CANCELLED", None)
+    assert batch_state == "sent"
+    assert outbox == []
+
+
 async def test_rerunning_after_done_sends_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -532,7 +587,7 @@ async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
         batch_state = await get_batch_state(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
     assert mode.calls == []
-    assert invoice == ("DELIVERING", None)
+    assert invoice == ("BATCHED", "BR-D03")
     assert batch_state == "failed"
     assert outbox == [
         (

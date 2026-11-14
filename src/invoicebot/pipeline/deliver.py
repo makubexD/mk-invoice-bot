@@ -10,8 +10,10 @@ transaction, opens a ``prepared`` batch, records the draft file and moves the in
 photo. A batch a previous attempt left ``sending`` is not sent again: it is marked ``failed``
 and BR-D03 asks the owner to reprocess (D89). A sign-in failure leaves the invoice
 ``PENDING_AUTH`` with BR-D01, a bad Excel template leaves it ``MANUAL_REQUIRED`` with BR-D02,
-and a final Graph error fails the batch and leaves the invoice ``BATCHED`` with BR-D03; a
-transient Graph error propagates so the queue retries it.
+and a final Graph error fails the batch and leaves the invoice ``BATCHED`` with BR-D03. A
+transient Graph error during an automatic send propagates and leaves the batch ``sending``, so
+the retry treats it as a crashed send: the batch fails, BR-D03 reports it, and the mail is
+never resent (D89). Before the send (filing, Excel upload) a transient error is simply retried.
 """
 
 from __future__ import annotations
@@ -86,6 +88,8 @@ BATCHED_STATE = "BATCHED"
 RULE_BATCHED = "BR-D07"
 #: The batch state committed before the automatic mode sends, so a crash never resends (D89).
 SENDING_BATCH_STATE: Literal["sending"] = "sending"
+#: The batch state of a draft, the only one ``actions._sent`` accepts (R-8.1).
+PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"
 #: The batch state of a completed automatic send (R-7.5).
 SENT_BATCH_STATE = "sent"
 #: The batch state of a send that a previous attempt crashed during (D89).
@@ -347,7 +351,7 @@ async def _prepare(context: _Context, invoice: _Invoice, sinks: _Sinks, prepared
     )
     async with context.pool.connection() as conn, conn.transaction():
         await merge_flow_data(conn, invoice.job.invoice_id, {"folder": folder.folder, "seq": folder.seq})
-    excel = build_excel(sinks.excel, prepared.values, prepared.overrides)
+    excel = await asyncio.to_thread(build_excel, sinks.excel, prepared.values, prepared.overrides)
     await context.drive.upload(f"{folder.path}/{sinks.excel.output}", excel)
     mail = build_mail(
         sinks.mailer,
@@ -387,7 +391,8 @@ async def _assisted(context: _Context, delivery: _Delivery, mode: MailMode) -> N
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
             return
-        await open_batch(conn, delivery.invoice_id, delivery.flow_name, "prepared")
+        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, PREPARED_BATCH_STATE)
+        await set_batch_state(conn, batch_id, PREPARED_BATCH_STATE)
         await add_file(
             conn,
             delivery.invoice_id,
@@ -414,9 +419,10 @@ async def _automatic(
     The first transaction records the batch as ``sending`` before the external call; an
     existing batch may be ``failed`` or ``prepared``, so its state is always set again. A
     batch already ``sending`` means a previous attempt died mid-send, so it is never sent
-    again: the batch fails and BR-D03 asks the owner to reprocess it (D89). ``GraphTransient``
-    is a separate class, so it propagates for the queue to retry; only ``GraphError`` fails
-    the batch.
+    again: the batch fails and BR-D03 asks the owner to reprocess it (D89). A transient Graph
+    error during the send propagates and leaves the batch ``sending``, so the retry treats it
+    as a crashed send: the batch fails, BR-D03 reports it, and the mail is never resent (D89).
+    Before the send (filing, Excel upload) a transient error is simply retried.
     """
     async with context.pool.connection() as conn, conn.transaction():
         if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
@@ -438,9 +444,9 @@ async def _automatic(
         raise
 
     async with context.pool.connection() as conn, conn.transaction():
+        await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
-        await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
         await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=RULE_SENT)
         await _notify(conn, delivery.head, RULE_SENT, MESSAGES[RULE_SENT].format(folder=delivery.folder), [])
         photos = await take_photo_paths(conn, delivery.invoice_id)
@@ -451,8 +457,11 @@ async def _automatic(
 
 async def _crashed_send(conn: AsyncConnection[Any], delivery: _Delivery, prepared: _Values) -> None:
     """Fail the batch a previous attempt left ``sending`` and ask the owner to reprocess (D89)."""
+    if not await _still_delivering(conn, delivery.invoice_id):
+        return
     batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+    await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
     await _notify(conn, delivery.head, RULE_SEND_FAILED, _send_failed_text(prepared, delivery.invoice_id), [])
 
 
