@@ -50,7 +50,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-E01 | No QR, and OCR is missing required fields | `EXTRACT_FAILED` (waits for the user) | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` |
 | BR-E02 | The issuer RUC fails the check digit | Same as E01, with the field highlighted | `El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…` |
 | BR-E03 | The date is in the future or older than `max_invoice_age_days` | `CONFIRMING` | `La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa` |
-| BR-E04 | The natural key already exists and isn't failed or cancelled (D93) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}.` |
+| BR-E04 | The natural key already exists in the same profile and isn't failed or cancelled; another profile's invoice is never matched (D93, R-10.1) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}.` |
 | BR-E05 | Not a supported CPE (`tipo` ∉ config) | `CANCELLED` | `Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.` |
 | BR-E06 | OCR fails 2 or more times on photos from the same issuer | Raises gap `PARSER_MISS` | *(no extra message; E01 already asked the user)* |
 | BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported, or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) o el PDF del comprobante, de hasta {max_mb} MB.` |
