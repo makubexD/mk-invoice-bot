@@ -15,6 +15,7 @@ from invoicebot.config.models import (
     CalendarField,
     ChannelTemplates,
     Config,
+    EmailInbox,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -451,6 +452,44 @@ def test_retry_schedule_with_an_unknown_unit_fails() -> None:
     """D65: a retry delay only uses minutes, hours or days."""
     with pytest.raises(ValidationError, match="2w"):
         Portal.model_validate({"key": "example", "adapter": "generic_form", "retry_schedule": ["2w"]})
+
+
+def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
+    """D65: an email inbox retry schedule is typed and dumps back as canonical delay text."""
+    inbox = EmailInbox(provider="gmail", retry_schedule=["5m", "1h", "6h", "24h"])
+
+    assert inbox.retry_schedule == (
+        timedelta(minutes=5),
+        timedelta(hours=1),
+        timedelta(hours=6),
+        timedelta(hours=24),
+    )
+    assert inbox.model_dump()["retry_schedule"] == ["5m", "1h", "6h", "1d"]
+
+
+def test_email_inbox_retry_schedule_with_an_unknown_unit_fails() -> None:
+    """D65: an email inbox retry delay only uses minutes, hours or days."""
+    with pytest.raises(ValidationError, match="5 minutes"):
+        EmailInbox(provider="gmail", retry_schedule=["5 minutes"])
+
+
+def test_email_inbox_retry_schedule_may_be_empty() -> None:
+    """D65: an empty email inbox retry schedule is an empty tuple, as for a portal."""
+    inbox = EmailInbox(provider="gmail", retry_schedule=[])
+
+    assert inbox.retry_schedule == ()
+
+
+def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
+    """R-9.6: the shipped example config's email inbox validates with the typed schedule."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.retrieval.email_inbox.retry_schedule == (
+        timedelta(minutes=5),
+        timedelta(hours=1),
+        timedelta(hours=6),
+        timedelta(hours=24),
+    )
 
 
 def test_file_with_a_list_at_the_root_fails(tmp_path: Path) -> None:

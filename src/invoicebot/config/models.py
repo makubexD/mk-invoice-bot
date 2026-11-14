@@ -340,7 +340,18 @@ class EmailInbox(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Literal["gmail", "graph"]
-    retry_schedule: list[str]
+    retry_schedule: tuple[timedelta, ...]
+
+    @field_validator("retry_schedule", mode="before")
+    @classmethod
+    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
+        """D65: every retry delay is written as ``<number><m|h|d>``."""
+        return tuple(parse_delay(entry) for entry in value)
+
+    @field_serializer("retry_schedule")
+    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
+        """D65: serialize back to ``1h``-style text, so a dumped email inbox validates again."""
+        return [format_delay(delay) for delay in value]
 
 
 class PaidSolver(BaseModel):
