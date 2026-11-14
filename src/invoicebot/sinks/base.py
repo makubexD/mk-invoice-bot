@@ -6,8 +6,27 @@ another drive later, is a new module that implements these protocols.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
+
+
+@dataclass(frozen=True)
+class DeliveryContext:
+    """The invoice data and callbacks one delivery sink needs (R-7.1, R-7.2, D88).
+
+    ``values`` holds the flow's step-6 names for the templates, ``saved`` the
+    invoice's flow data so a retried delivery reuses what it already created, and
+    ``claim_seq`` turns the largest sequence number listed on the drive into the
+    invoice's own, without ever renumbering an earlier folder.
+    """
+
+    invoice_id: int
+    values: Mapping[str, object]
+    pdf: bytes
+    xml: bytes
+    claim_seq: Callable[[int], Awaitable[int]]
+    saved: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
