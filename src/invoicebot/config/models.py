@@ -7,13 +7,20 @@ silently ignored.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PlainSerializer,
+    field_validator,
+    model_validator,
+)
 
 
 class Owner(BaseModel):
@@ -340,18 +347,7 @@ class EmailInbox(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     provider: Literal["gmail", "graph"]
-    retry_schedule: tuple[timedelta, ...]
-
-    @field_validator("retry_schedule", mode="before")
-    @classmethod
-    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
-        """D65: every retry delay is written as ``<number><m|h|d>``."""
-        return tuple(parse_delay(entry) for entry in value)
-
-    @field_serializer("retry_schedule")
-    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
-        """D65: serialize back to ``1h``-style text, so a dumped email inbox validates again."""
-        return [format_delay(delay) for delay in value]
+    retry_schedule: tuple[Delay, ...]
 
 
 class PaidSolver(BaseModel):
@@ -643,6 +639,17 @@ def format_delay(delay: timedelta) -> str:
     return f"{minutes}m"
 
 
+def _delay(value: object) -> timedelta:
+    """Refuse a non-string entry so pydantic reports a ``ValidationError``, then parse it."""
+    if not isinstance(value, str):
+        raise ValueError(f"delay must be a string such as '1h', got {value!r}")
+    return parse_delay(value)
+
+
+#: D65: one retry delay, written as ``<number><m|h|d>`` and dumped back as that text.
+Delay = Annotated[timedelta, BeforeValidator(_delay), PlainSerializer(format_delay)]
+
+
 #: D65: a portal's default "not found yet" retry delays, in order.
 DEFAULT_RETRY_SCHEDULE: tuple[timedelta, ...] = (
     timedelta(hours=1),
@@ -673,19 +680,8 @@ class Portal(BaseModel):
     not_found: str | None = None
     tipo_labels: dict[str, str] = Field(default_factory=dict)
     allow_http: bool = False
-    retry_schedule: tuple[timedelta, ...] = DEFAULT_RETRY_SCHEDULE
+    retry_schedule: tuple[Delay, ...] = DEFAULT_RETRY_SCHEDULE
     notes: str = ""
-
-    @field_validator("retry_schedule", mode="before")
-    @classmethod
-    def _retry_schedule_entries_are_delays(cls, value: Sequence[str]) -> tuple[timedelta, ...]:
-        """D65: every retry delay is written as ``<number><m|h|d>``."""
-        return tuple(parse_delay(entry) for entry in value)
-
-    @field_serializer("retry_schedule")
-    def _retry_schedule_as_text(self, value: tuple[timedelta, ...]) -> list[str]:
-        """D65: serialize back to ``1h``-style text, so a dumped portal validates again."""
-        return [format_delay(delay) for delay in value]
 
 
 class StoreDirectory(BaseModel):
