@@ -36,8 +36,8 @@ def attempts(reason: FetchReason, count: int) -> list[Attempt]:
     [
         pytest.param([], Run(FETCHER), id="no-attempts"),
         pytest.param(attempts(FetchReason.OK, 1), Done(FETCHER), id="ok"),
-        pytest.param(attempts(FetchReason.NOT_FOUND_YET, 1), Wait(timedelta(hours=1), FETCHER), id="wait-1h"),
-        pytest.param(attempts(FetchReason.NOT_FOUND_YET, 2), Wait(timedelta(hours=6), FETCHER), id="wait-6h"),
+        pytest.param(attempts(FetchReason.NOT_FOUND_YET, 1), Wait(FETCHER), id="wait-after-first"),
+        pytest.param(attempts(FetchReason.NOT_FOUND_YET, 2), Wait(FETCHER), id="wait-after-second"),
         pytest.param(attempts(FetchReason.NOT_FOUND_YET, 3), Exhausted(), id="schedule-used-up"),
         pytest.param(attempts(FetchReason.TECHNICAL, 1), Exhausted(), id="technical-is-final"),
         pytest.param(attempts(FetchReason.XML_MISMATCH, 1), Exhausted(), id="xml-mismatch-is-final"),
@@ -74,6 +74,15 @@ def test_retry_delay_used_up_is_none() -> None:
     """D65: a used-up schedule has no delay."""
     history = attempts(FetchReason.NOT_FOUND_YET, 2)
     assert retry_delay(FETCHER, history, schedule_for(FETCHER)) is None
+
+
+@pytest.mark.parametrize("not_found_attempts", range(5))
+def test_decide_waits_exactly_when_retry_delay_has_a_delay(not_found_attempts: int) -> None:
+    """D65: ``decide`` waits after the next not-found-yet exactly when ``retry_delay`` queued a retry."""
+    history = attempts(FetchReason.NOT_FOUND_YET, not_found_attempts)
+    has_delay = retry_delay(FETCHER, history, schedule_for(FETCHER)) is not None
+    waits = decide(ORDER, REGISTERED, [*history, Attempt(FETCHER, FetchReason.NOT_FOUND_YET)], schedule_for)
+    assert (waits == Wait(FETCHER)) is has_delay
 
 
 def test_fetch_result_ok_only_for_ok_reason() -> None:

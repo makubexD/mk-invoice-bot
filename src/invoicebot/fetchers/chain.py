@@ -31,9 +31,8 @@ class Run:
 
 @dataclass(frozen=True)
 class Wait:
-    """Retry this fetcher after ``delay``; it is not due yet."""
+    """Run this fetcher again: its latest try was not found yet and its scheduled retry is now due (D65)."""
 
-    delay: timedelta
     fetcher: str
 
 
@@ -96,12 +95,14 @@ def _wait_or_none(
     history: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
 ) -> Wait | None:
-    """Wait after the latest ``not_found_yet``, or ``None`` if retries ran out."""
-    retries = sum(1 for attempt in history if attempt.reason is FetchReason.NOT_FOUND_YET)
-    schedule = schedule_for(fetcher)
-    if retries > len(schedule):
+    """Wait after the latest ``not_found_yet``, or ``None`` if ``retry_delay`` queued no retry (D65).
+
+    ``retry_delay`` is the one rule: it is asked about the history without the
+    run that produced the latest ``not_found_yet``.
+    """
+    if retry_delay(fetcher, history[:-1], schedule_for(fetcher)) is None:
         return None
-    return Wait(schedule[retries - 1], fetcher)
+    return Wait(fetcher)
 
 
 def retry_delay(
