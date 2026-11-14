@@ -57,8 +57,7 @@ def _parse_press(
     parsed = parse_button_id(msg.button_id)
     if parsed is None:
         return None
-    invoice_id, action = parsed
-    states = valid_states.get(action)
+    states = valid_states.get(parsed.action)
     if states is None:
         return None
-    return invoice_id, action, states
+    return parsed.invoice_id, parsed.action, states
