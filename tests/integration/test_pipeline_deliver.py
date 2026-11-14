@@ -574,7 +574,7 @@ async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
 ) -> None:
     """BR-D03, D89: a batch left sending is never resent; it fails and asks for a reprocess."""
     profile_id = f"deliver-{uuid4().hex}"
-    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="graph"), profile_id, [])
     invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
     async with db_pool.connection() as conn, conn.transaction():
         await open_batch(conn, invoice_id, FLOW, "sending")
@@ -596,6 +596,87 @@ async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
             [],
         )
     ]
+
+
+async def test_send_failure_alerts_every_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D03: a final send failure alerts the sender and each admin with a channel."""
+    profile_id = f"deliver-{uuid4().hex}"
+    admin_ids = [f"admin-a-{uuid4().hex}", f"admin-b-{uuid4().hex}"]
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="graph"), profile_id, admin_ids)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphError(400)), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    admin_text = MESSAGES["BR-D03_admin"].format(id=invoice_id, serie=SERIE, numero=NUMERO)
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        sender = await _outbox(conn, profile_id)
+        admins = [await _outbox(conn, admin_id) for admin_id in admin_ids]
+    assert invoice == ("BATCHED", "BR-D03")
+    assert batch_state == "failed"
+    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert admins == [[(admin_text, "BR-D03_admin", [])] for _ in admin_ids]
+
+
+async def test_crashed_send_alerts_every_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D03, D89: a batch left sending alerts the sender and each admin with a channel."""
+    profile_id = f"deliver-{uuid4().hex}"
+    admin_ids = [f"admin-a-{uuid4().hex}", f"admin-b-{uuid4().hex}"]
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="graph"), profile_id, admin_ids)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await open_batch(conn, invoice_id, FLOW, "sending")
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    admin_text = MESSAGES["BR-D03_admin"].format(id=invoice_id, serie=SERIE, numero=NUMERO)
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        sender = await _outbox(conn, profile_id)
+        admins = [await _outbox(conn, admin_id) for admin_id in admin_ids]
+    assert mode.calls == []
+    assert invoice == ("BATCHED", "BR-D03")
+    assert batch_state == "failed"
+    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert admins == [[(admin_text, "BR-D03_admin", [])] for _ in admin_ids]
+
+
+async def test_admin_without_channel_is_skipped_on_send_failure(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D03: an admin without preferred_channel gets no row; the sender and other admins do."""
+    profile_id = f"deliver-{uuid4().hex}"
+    reachable = f"admin-a-{uuid4().hex}"
+    unreachable = f"admin-b-{uuid4().hex}"
+    cfg = _config_with_admins(
+        _config(tmp_path, profile_id, mail_mode="graph"), profile_id, [reachable, unreachable]
+    )
+    profiles = dict(cfg.profiles)
+    profiles[unreachable] = profiles[unreachable].model_copy(update={"preferred_channel": None})
+    cfg = cfg.model_copy(update={"profiles": profiles})
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphError(400)), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    admin_text = MESSAGES["BR-D03_admin"].format(id=invoice_id, serie=SERIE, numero=NUMERO)
+    async with db_pool.connection() as conn:
+        sender = await _outbox(conn, profile_id)
+        skipped = await _outbox(conn, unreachable)
+        other_admin = await _outbox(conn, reachable)
+    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert skipped == []
+    assert other_admin == [(admin_text, "BR-D03_admin", [])]
 
 
 async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
@@ -642,7 +723,7 @@ async def test_graph_error_fails_the_batch_and_keeps_the_invoice_batched(
 ) -> None:
     """BR-D03, D89: a final send failure fails the batch and leaves the invoice BATCHED."""
     profile_id = f"deliver-{uuid4().hex}"
-    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="graph"), profile_id, [])
     invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
 
     await _handler(db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphError(400)), mode_name="graph")(
