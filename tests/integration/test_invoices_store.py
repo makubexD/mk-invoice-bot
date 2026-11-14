@@ -28,6 +28,7 @@ from invoicebot.store.invoices import (
     create_invoice,
     get_file_path,
     get_state,
+    get_waiting,
     has_file,
     load_flow,
     load_invoice_head,
@@ -37,6 +38,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
     touch_window,
+    unpark,
     window_open,
 )
 
@@ -311,6 +313,74 @@ async def test_park_stale_parks_only_old_waiting_invoices(
         ("CONFIRMING", None, None, "BR-R03"),
         ("FETCHING_DOCS", None, None, None),
     ]
+
+
+async def test_get_waiting_returns_the_parked_columns_or_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94: get_waiting returns the stored waiting state and rule; an unknown id is None."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, "PENDING_USER", rule_id="BR-S08")
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET waiting_state = 'EXTRACT_FAILED', waiting_rule_id = 'BR-E01'
+            WHERE id = %s
+            """,
+            (invoice_id,),
+        )
+        waiting = await get_waiting(conn, invoice_id)
+        missing = await get_waiting(conn, UNKNOWN_INVOICE_ID)
+
+    assert waiting == ("EXTRACT_FAILED", "BR-E01")
+    assert missing is None
+
+
+async def test_unpark_restores_the_waiting_state_and_rule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94: unpark restores a parked invoice's state and rule and clears the waiting columns."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, "PENDING_USER", rule_id="BR-S08")
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET waiting_state = 'CONFIRMING', waiting_rule_id = 'BR-R03'
+            WHERE id = %s
+            """,
+            (invoice_id,),
+        )
+        unparked = await unpark(conn, invoice_id)
+        cur = await conn.execute(
+            "SELECT state, rule_id, waiting_state, waiting_rule_id FROM invoices WHERE id = %s",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+
+    assert unparked is True
+    assert row == ("CONFIRMING", "BR-R03", None, None)
+
+
+@pytest.mark.parametrize(
+    ("state", "rule_id"),
+    [("CONFIRMING", "BR-R03"), ("PENDING_USER", "BR-S08")],
+)
+async def test_unpark_is_false_when_it_cannot_resume_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    state: str,
+    rule_id: str,
+) -> None:
+    """D94: unpark leaves an invoice that is not parked, or has no waiting state, as it was."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, invoice_id, state, rule_id=rule_id)
+        unparked = await unpark(conn, invoice_id)
+        stored = await get_state(conn, invoice_id)
+
+    assert unparked is False
+    assert stored == (state, "yo")
 
 
 async def test_add_file_stores_sha256_and_size(

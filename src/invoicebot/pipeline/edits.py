@@ -6,7 +6,8 @@ each value is normalised here so the caller stores a canonical reading field. A 
 the field's rule rejects becomes an :class:`EditError` that names the business rule
 when there is one; the caller answers with the first error and changes nothing.
 :func:`apply_edits` stores the accepted fields on the invoice the message targets and
-re-routes it, so the route handler validates the new values and sends the summary again.
+re-routes it, so the route handler validates the new values and sends the summary again;
+a ``PENDING_USER`` invoice is unparked first (D94).
 """
 
 from __future__ import annotations
@@ -29,9 +30,9 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import MAX_OVERRIDE_CHARS, OVERRIDE_KEYS, edit_target
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
-from invoicebot.states import EDITABLE, EXTRACT_FAILED, ROUTING
+from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
 from invoicebot.store.flow_b import merge_flow_data
-from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state
+from invoicebot.store.invoices import get_state_rule, load_reading, save_reading, set_state, unpark
 
 #: The most edit lines one message may carry; later lines each get an error.
 MAX_EDIT_LINES = 10
@@ -108,11 +109,12 @@ async def apply_edits(
 
     The target is the message's edit target (the quoted invoice, else the profile's newest
     open one). No target changes nothing and returns None. A rejected line gets the first
-    error's text and changes nothing. A state outside ``EDITABLE`` gets ``EDIT_LATE``. From
-    ``EXTRACT_FAILED`` a reading still missing a required field gets BR-E01 and stays; any
-    other accepted edit stores its fields with source ``user``, clears the stored answers
-    (so routing asks again) and moves to ``ROUTING`` with a ``route`` job, all in the
-    caller's transaction.
+    error's text and changes nothing. A ``PENDING_USER`` invoice is unparked first, so the
+    edit applies to the state it was waiting in (D94). A state outside ``EDITABLE`` gets
+    ``EDIT_LATE``. From ``EXTRACT_FAILED`` a reading still missing a required field gets
+    BR-E01 and stays; any other accepted edit stores its fields with source ``user``,
+    clears the stored answers (so routing asks again) and moves to ``ROUTING`` with a
+    ``route`` job, all in the caller's transaction.
     """
     invoice_id = await edit_target(conn, msg)
     if invoice_id is None:
@@ -124,6 +126,12 @@ async def apply_edits(
     if edits.errors:
         await _reply_error(conn, msg, invoice_id, edits.errors[0])
         return invoice_id
+    if state == PENDING_USER:
+        await unpark(conn, invoice_id)
+        current = await get_state_rule(conn, invoice_id)
+        if current is None:
+            raise RuntimeError(f"invoice {invoice_id} does not exist")
+        state, _ = current
     if state not in EDITABLE:
         await _reply(
             conn,

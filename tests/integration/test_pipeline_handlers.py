@@ -384,7 +384,7 @@ async def test_confirm_button_in_confirming_resolves_to_the_invoice(
     )
 
     async with db_pool.connection() as conn:
-        resolved = await resolve_reply(conn, msg, VALID_STATES)
+        resolved = await resolve_reply(conn, msg, VALID_STATES, {})
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
 
     assert resolved == ButtonPress(invoice_id, "confirm", None)
@@ -404,7 +404,7 @@ async def test_confirm_button_with_choice_resolves_to_the_choice(
     )
 
     async with db_pool.connection() as conn:
-        resolved = await resolve_reply(conn, msg, VALID_STATES)
+        resolved = await resolve_reply(conn, msg, VALID_STATES, {})
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
 
     assert resolved == ButtonPress(invoice_id, "confirm", 2)
@@ -424,7 +424,7 @@ async def test_confirm_button_in_done_sends_br_s02_and_keeps_the_state(
     )
 
     async with db_pool.connection() as conn:
-        resolved = await resolve_reply(conn, msg, VALID_STATES)
+        resolved = await resolve_reply(conn, msg, VALID_STATES, {})
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
         state, rule_id = await _invoice_row(conn, invoice_id)
 
@@ -457,9 +457,9 @@ async def test_malformed_foreign_and_unknown_buttons_resolve_to_none(
     )
 
     async with db_pool.connection() as conn:
-        foreign = await resolve_reply(conn, sender_msg, VALID_STATES)
-        malformed = await resolve_reply(conn, malformed_msg, VALID_STATES)
-        unknown = await resolve_reply(conn, unknown_msg, VALID_STATES)
+        foreign = await resolve_reply(conn, sender_msg, VALID_STATES, {})
+        malformed = await resolve_reply(conn, malformed_msg, VALID_STATES, {})
+        unknown = await resolve_reply(conn, unknown_msg, VALID_STATES, {})
         sender_outbox = await _outbox_rows(conn, sender_profile, "BR-S02")
         own_outbox = await _outbox_rows(conn, own_profile, "BR-S02")
 

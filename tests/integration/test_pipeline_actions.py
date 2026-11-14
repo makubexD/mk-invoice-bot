@@ -25,6 +25,7 @@ MAX_QUEUED = 10
 FLOW = "work_microsoft"
 CONFIRMING = "CONFIRMING"
 ROUTING = "ROUTING"
+PENDING_USER = "PENDING_USER"
 FETCHING_DOCS = "FETCHING_DOCS"
 DELIVERING = "DELIVERING"
 BATCHED = "BATCHED"
@@ -78,6 +79,21 @@ async def _confirming_invoice(
     return invoice_id
 
 
+async def _park(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    waiting_state: str,
+    waiting_rule_id: str,
+) -> None:
+    """Move the invoice to PENDING_USER, storing the state and rule it waited in (D94)."""
+    async with pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, PENDING_USER, rule_id="BR-S08")
+        await conn.execute(
+            "UPDATE invoices SET waiting_state = %s, waiting_rule_id = %s WHERE id = %s",
+            (waiting_state, waiting_rule_id, invoice_id),
+        )
+
+
 async def _invoice_in(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, state: str) -> int:
     """Create an invoice in state, which needs no rule id."""
     async with pool.connection() as conn, conn.transaction():
@@ -125,6 +141,17 @@ async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str
     row = await cur.fetchone()
     assert row is not None
     return str(row[0]), None if row[1] is None else str(row[1])
+
+
+async def _waiting_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str | None, str | None]:
+    """Return the invoice's ``(waiting_state, waiting_rule_id)``."""
+    cur = await conn.execute(
+        "SELECT waiting_state, waiting_rule_id FROM invoices WHERE id = %s",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0], row[1]
 
 
 async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
@@ -213,6 +240,58 @@ async def test_pick_on_a_buyer_question_is_stale(
     assert "answers" not in flow_data
     assert jobs == []
     assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(CONFIRMING)))]
+
+
+async def test_pick_on_a_parked_br_r03_invoice_resumes_and_reroutes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94: a [pick] on an invoice parked from BR-R03 unparks it and routes with answers.flow."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=1)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert flow_data["answers"]["flow"] == FLOW_CHOICES[1]
+    assert invoice == (ROUTING, RULE_ASK)
+    assert waiting == (None, None)
+    assert jobs == ["route"]
+    assert texts == []
+
+
+async def test_yes_on_a_parked_br_r03_invoice_is_stale_and_stays_parked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: a [Sí] on an invoice parked from BR-R03 answers BR-S02 and leaves it parked."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "yes", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (PENDING_USER, "BR-S08")
+    assert waiting == (CONFIRMING, RULE_ASK)
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(PENDING_USER)))
+    ]
 
 
 @pytest.mark.parametrize(("action", "buyer_ok"), [("yes", True), ("change", False)])

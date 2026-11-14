@@ -129,6 +129,32 @@ async def _invoice_in(
     return invoice_id
 
 
+async def _park(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    waiting_state: str,
+    waiting_rule_id: str,
+) -> None:
+    """Move the invoice to PENDING_USER, storing the state and rule it waited in (D94)."""
+    async with pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, "PENDING_USER", rule_id="BR-S08")
+        await conn.execute(
+            "UPDATE invoices SET waiting_state = %s, waiting_rule_id = %s WHERE id = %s",
+            (waiting_state, waiting_rule_id, invoice_id),
+        )
+
+
+async def _waiting_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str | None, str | None]:
+    """Return the invoice's ``(waiting_state, waiting_rule_id)``."""
+    cur = await conn.execute(
+        "SELECT waiting_state, waiting_rule_id FROM invoices WHERE id = %s",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0], row[1]
+
+
 def _config(profile_id: str) -> Config:
     """Return the example config with ``profile_id`` as the full profile and both buyer rules."""
     cfg = load_config(EXAMPLE)
@@ -477,6 +503,32 @@ async def test_complete_edit_reroutes_an_extract_failed_invoice(
     assert jobs == ["route"]
     assert row == (20000000001, "01", "F001", "4321", date(2025, 2, 1), Decimal("45.50"))
     assert source == (OWNER_RUC, "user")
+
+
+async def test_complete_edit_resumes_a_parked_extract_failed_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94: a complete edit on a PENDING_USER invoice unparks EXTRACT_FAILED and routes it."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
+    await _park(db_pool, invoice_id, "EXTRACT_FAILED", "BR-E01")
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        text=f"ruc={OWNER_RUC}\nserie=F001\nnumero=4321\nfecha=01/02/2025\ntotal=45.50",
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        state_rule = await _state_rule(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        ruc = await _field(conn, invoice_id, "ruc_emisor")
+
+    assert state_rule == ("ROUTING", None)
+    assert waiting == (None, None)
+    assert jobs == ["route"]
+    assert ruc == (OWNER_RUC, "user")
 
 
 async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(

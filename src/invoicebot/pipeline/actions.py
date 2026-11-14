@@ -9,7 +9,9 @@ A routing question's answer is stored in the invoice's flow data under ``answers
 action puts the invoice back in ``ROUTING`` and enqueues the route step, which validates
 the answer again on its next run (D92). [Continuar] answers BR-D06's cap question,
 [Cancelar] cancels the invoice from any cancellable state (R-3.4), and [Ya lo envié]
-closes a prepared batch as sent (R-7.8, BR-D08).
+closes a prepared batch as sent (R-7.8, BR-D08). A press that answers the question a
+``PENDING_USER`` invoice was parked on resumes the waiting state before its action runs:
+:data:`ASKED_RULES` names the rule each action answers for ``resolve_reply`` to check (D94).
 
 Everything here happens in the caller's transaction. The photo files [Ya lo envié]
 releases are returned, not deleted: the caller removes them after committing (R-9.7).
@@ -80,6 +82,15 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     SENT_ACTION: frozenset({BATCHED_STATE}),
 }
 
+#: The rule each question action answers; a parked invoice resumes only for its own (D94).
+ASKED_RULES: Mapping[str, str] = {
+    PICK_ACTION: RULE_ASK,
+    YES_ACTION: RULE_BUYER,
+    CHANGE_ACTION: RULE_BUYER,
+    BRAND_ACTION: RULE_BRAND,
+    CONTINUE_ACTION: RULE_CAP,
+}
+
 #: An action applied to its invoice in the caller's transaction; it returns the photo
 #: files whose rows it cleared, for the caller to delete after commit (R-9.7).
 type Action = Callable[[AsyncConnection[Any], int, InboundMessage, int | None], Awaitable[tuple[Path, ...]]]
@@ -100,7 +111,7 @@ async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> Press
     already been answered with BR-S02 by :func:`resolve_reply`. The returned photo paths
     are the files whose rows the action cleared: the caller deletes them after committing.
     """
-    resolved = await resolve_reply(conn, msg, VALID_STATES)
+    resolved = await resolve_reply(conn, msg, VALID_STATES, ASKED_RULES)
     if resolved is None:
         return PressResult(invoice_id=None)
     photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved.choice)

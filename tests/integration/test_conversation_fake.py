@@ -143,7 +143,7 @@ async def test_a_stale_button_sends_br_s02(
 
     msg = _message(profile_id, button_id=f"{invoice_id}:confirm")
     async with db_pool.connection() as conn:
-        resolved = await resolve_reply(conn, msg, VALID_STATES)
+        resolved = await resolve_reply(conn, msg, VALID_STATES, {})
 
     assert resolved is None
     sender = _sender(db_pool, fake)

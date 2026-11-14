@@ -104,6 +104,18 @@ async def get_state_rule(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     return str(row[0]), None if row[1] is None else str(row[1])
 
 
+async def get_waiting(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str | None, str | None] | None:
+    """Return ``(waiting_state, waiting_rule_id)`` for invoice_id, or None when it does not exist."""
+    cur = await conn.execute(
+        "SELECT waiting_state, waiting_rule_id FROM invoices WHERE id = %s",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return (None if row[0] is None else str(row[0])), (None if row[1] is None else str(row[1]))
+
+
 async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> InvoiceHead | None:
     """Return the invoice's state, profile and channel, or None when it does not exist."""
     cur = await conn.execute(
@@ -273,6 +285,29 @@ async def park_stale(conn: AsyncConnection[Any], timeout_h: int) -> list[Invoice
         )
         for row in await cur.fetchall()
     ]
+
+
+async def unpark(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Restore a parked invoice's waiting state and rule, returning whether it did (D94).
+
+    Only a ``PENDING_USER`` row that stored its ``waiting_state`` is resumed; the waiting
+    columns are cleared and the database clock stamps ``updated_at``. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE invoices
+        SET state = waiting_state,
+            rule_id = waiting_rule_id,
+            waiting_state = NULL,
+            waiting_rule_id = NULL,
+            updated_at = now()
+        WHERE id = %s
+          AND state = %s
+          AND waiting_state IS NOT NULL
+        """,
+        (invoice_id, PENDING_USER),
+    )
+    return cur.rowcount == 1
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
