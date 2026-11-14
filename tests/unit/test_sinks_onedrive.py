@@ -12,6 +12,7 @@ import pytest
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
+    MAX_LIST_PAGES,
     NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
     GraphDrive,
@@ -125,6 +126,62 @@ async def test_list_names_does_not_follow_a_next_link_to_another_host() -> None:
 
     assert names == ["2026-11-Support_1_A"]
     assert len(requests) == 1
+
+
+def _page(number: int, *, has_next: bool) -> dict[str, object]:
+    """Return one children page with a graph.microsoft.com next link when asked."""
+    body: dict[str, object] = {"value": [{"name": f"name-{number}"}]}
+    if has_next:
+        body["@odata.nextLink"] = f"{GRAPH_BASE_URL}/me/drive/root:/folder:/children?$skiptoken={number + 1}"
+    return body
+
+
+async def test_list_names_of_three_pages_returns_every_name_in_order() -> None:
+    """R-7.1: a three-page listing collects every name in order and stops at the last page."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = len(requests)
+        return httpx.Response(200, json=_page(page, has_next=page < 3))
+
+    async with _make_drive(handler) as drive:
+        names = await drive.list_names("/folder")
+
+    assert names == ["name-1", "name-2", "name-3"]
+    assert len(requests) == 3
+
+
+async def test_list_names_accepts_exactly_fifty_pages() -> None:
+    """R-7.1: fifty pages whose last has no next link is a complete listing, not a cap error."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        page = len(requests)
+        return httpx.Response(200, json=_page(page, has_next=page < MAX_LIST_PAGES))
+
+    async with _make_drive(handler) as drive:
+        names = await drive.list_names("/folder")
+
+    assert names == [f"name-{page}" for page in range(1, MAX_LIST_PAGES + 1)]
+    assert len(requests) == MAX_LIST_PAGES
+
+
+async def test_list_names_raises_when_the_fiftieth_page_has_a_next_link() -> None:
+    """R-7.1: the page past the cap is never requested; the listing fails with GraphError."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json=_page(len(requests), has_next=True))
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphError) as raised:
+            await drive.list_names("/folder")
+
+    assert raised.value.status == NOT_SENT_STATUS
+    assert len(requests) == MAX_LIST_PAGES
 
 
 async def test_create_folder_sends_conflict_behavior_fail_and_accepts_409() -> None:

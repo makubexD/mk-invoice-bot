@@ -29,6 +29,9 @@ UPLOAD_CHUNK_BYTES = 10 * 320 * 1024
 #: The status of an error raised before any follow-up request was sent.
 NOT_SENT_STATUS = 0
 
+#: The most folder-listing pages one call follows before it gives up.
+MAX_LIST_PAGES = 50
+
 #: The hosts an upload session may point at, exactly (D84).
 UPLOAD_HOSTS = ("graph.microsoft.com",)
 
@@ -226,11 +229,16 @@ class GraphDrive:
         self._account = account
 
     async def list_names(self, path: str) -> list[str]:
-        """Return the names directly under ``path``; a missing folder lists ``[]`` (R-7.1)."""
+        """Return the names directly under ``path``; a missing folder lists ``[]`` (R-7.1).
+
+        Follows at most :data:`MAX_LIST_PAGES` pages; when the last permitted
+        page still carries an ``@odata.nextLink`` the listing stops with
+        ``GraphError(NOT_SENT_STATUS)`` and never requests another page.
+        """
         url = f"{GRAPH_BASE_URL}{_children_url(path)}?$select=name&$top=200"
         token = await self._tokens.token()
         names: list[str] = []
-        while True:
+        for _ in range(MAX_LIST_PAGES):
             response = await self._client.get(url, headers=auth_headers(token), timeout=self._timeout_s)
             if response.status_code == 404:
                 return []
@@ -241,6 +249,7 @@ class GraphDrive:
             if next_url is None:
                 return names
             url = next_url
+        raise GraphError(NOT_SENT_STATUS)
 
     async def create_folder(self, parent: str, name: str) -> None:
         """Create ``name`` under ``parent``; an existing folder is accepted (R-7.1, D88).
