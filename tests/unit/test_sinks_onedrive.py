@@ -358,7 +358,7 @@ async def test_upload_accepts_a_microsoft_upload_host(upload_url: str) -> None:
         "https://tenant-my.sharepoint.com/u",
         "https://evil.office.com/u",
         "https://up.1drv.com.evil.example/u",
-        "https://evil／up.1drv.com/u",
+        "https://evil\uff0fup.1drv.com/u",
     ],
 )
 async def test_upload_refuses_a_session_url_outside_microsoft_before_chunking(upload_url: str) -> None:
@@ -388,6 +388,21 @@ async def test_invalid_path_raises_before_any_request() -> None:
     async with _make_drive(handler) as drive:
         with pytest.raises(ValueError, match="invalid drive path segment"):
             await drive.list_names("/folder/../other")
+
+    assert requests == []
+
+
+async def test_unsafe_character_in_a_path_raises_before_any_request() -> None:
+    """R-12.8: a path segment with a bidi override is rejected before the drive is contacted."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"value": []})
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="invalid drive path segment"):
+            await drive.list_names("/folder/\u202eevil")
 
     assert requests == []
 

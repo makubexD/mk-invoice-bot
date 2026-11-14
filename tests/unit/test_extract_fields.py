@@ -78,15 +78,16 @@ def test_field_without_flag_loads_with_none() -> None:
         pytest.param("Razón\tSocial", "Razón Social", id="tab"),
         pytest.param("\x1b[31mX", "[31mX", id="escape"),
         pytest.param("Pollería Ñandú", "Pollería Ñandú", id="no-control-character"),
+        pytest.param("Razón\u202eSocial", "Razón Social", id="bidi-override"),
     ],
 )
 def test_field_replaces_control_characters_with_spaces(value: str, cleaned: str) -> None:
-    """BR-D02: a field value carries a space where a control character was, and no edges."""
+    """R-12.8: a field value carries a space where a control character was, and no edges."""
     assert Field(value=value, source="ocr", confidence=1.0).value == cleaned
 
 
 def test_reading_from_json_cleans_a_control_character() -> None:
-    """BR-D02: a loaded field value carries a space where a control character was."""
+    """R-12.8: a loaded field value carries a space where a control character was."""
     payload = {
         "fields": {"razon_social": {"value": "ACME\x07 SAC", "source": "ocr", "confidence": 1.0}},
         "document_url": None,

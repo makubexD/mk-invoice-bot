@@ -7,12 +7,13 @@ is what one reader produced for an invoice, plus the URL when the QR carried one
 from __future__ import annotations
 
 import math
-import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, cast, get_args
+
+from invoicebot.text import replace_unsafe_chars
 
 Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
 Flag = Literal["inferred", "conflict"]
@@ -24,9 +25,6 @@ AMOUNT_FIELDS = frozenset({"total", "base", "igv", "service_charge", "icbper", "
 
 #: Confidence of a value a reader took directly from the document (R-2.6).
 FULL_CONFIDENCE = 1.0
-
-#: The Unicode category of a control character, which a field value must never carry (BR-D02).
-_CONTROL_CATEGORY = "Cc"
 
 #: The shapes the JSON form of a reading has; both are closed (R-2.6).
 _READING_KEYS = frozenset({"fields", "document_url"})
@@ -43,8 +41,8 @@ class Field:
     ``flag`` is ``"inferred"`` when a reader derived the value instead of reading it, and
     ``"conflict"`` when readers disagree; ``None`` means the reader found it as printed.
 
-    ``value`` never carries a control character (BR-D02): lxml, the ``.eml`` builder and the
-    drive path reject them, so each is replaced with a space and the result is stripped.
+    ``value`` never carries an unsafe character (R-12.8): lxml, the ``.eml`` builder and
+    the drive path reject them, so each is replaced with a space and the result is stripped.
     """
 
     value: str
@@ -53,11 +51,8 @@ class Field:
     flag: Flag | None = None
 
     def __post_init__(self) -> None:
-        """Replace every control character with a space and strip the edges (BR-D02)."""
-        cleaned = "".join(
-            " " if unicodedata.category(char) == _CONTROL_CATEGORY else char for char in self.value
-        )
-        object.__setattr__(self, "value", cleaned.strip())
+        """Replace every unsafe character with a space and strip the edges (R-12.8)."""
+        object.__setattr__(self, "value", replace_unsafe_chars(self.value))
 
 
 @dataclass(frozen=True)

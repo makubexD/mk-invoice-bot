@@ -8,7 +8,6 @@ one. Errors carry the HTTP status only, never a URL, a path or a body (R-9.16).
 
 from __future__ import annotations
 
-import unicodedata
 import urllib.parse
 from pathlib import PurePosixPath
 
@@ -16,6 +15,7 @@ import httpx
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.base import TokenSource
+from invoicebot.text import has_unsafe_char
 
 #: The Graph v1.0 endpoint; the only host this client talks to (D84).
 GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
@@ -89,7 +89,7 @@ def _validate_segment(segment: str) -> None:
         not segment
         or segment in {".", ".."}
         or any(char in segment for char in _FORBIDDEN_SEGMENT_CHARS)
-        or any(unicodedata.category(char) == "Cc" for char in segment)
+        or has_unsafe_char(segment)
     ):
         raise ValueError("invalid drive path segment")
 
