@@ -10,7 +10,7 @@ from types import ModuleType
 import pytest
 import yaml
 
-from invoicebot.config.checks import Problem, flow_problems, run_checks
+from invoicebot.config.checks import Problem, flow_problems, label_problems, run_checks
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import ExcelTemplateSink, OneDriveFolderSink, Portal, Store, StoreDirectory
 from invoicebot.sinks.expr import field_names
@@ -346,6 +346,44 @@ def test_example_flow_templates_have_no_problems() -> None:
     cfg = load_config(EXAMPLE)
 
     assert flow_problems(cfg, field_names=field_names) == []
+
+
+def test_flow_label_at_the_cap_is_accepted() -> None:
+    """BR-R03: a flow label that fits a WhatsApp button title is accepted."""
+    cfg = load_config(EXAMPLE)
+    cfg.flows["work_microsoft"].label = "x" * 20
+
+    assert label_problems(cfg, StoreDirectory(stores={}, portals={}), max_chars=20) == []
+
+
+def test_flow_label_over_the_cap_is_reported() -> None:
+    """BR-R03: a flow label longer than a button title is blocking and names the flow."""
+    cfg = load_config(EXAMPLE)
+    cfg.flows["work_microsoft"].label = "x" * 21
+
+    problems = label_problems(cfg, StoreDirectory(stores={}, portals={}), max_chars=20)
+
+    assert _codes(problems) == ["FLOW_LABEL_LENGTH"]
+    assert problems[0].path == "flows.work_microsoft.label"
+    assert "work_microsoft" in problems[0].message
+    assert "21" in problems[0].message
+    assert "20" in problems[0].message
+    assert problems[0].blocking
+
+
+def test_store_comercio_over_the_cap_is_reported() -> None:
+    """BR-R03: a comercio longer than a button title is blocking and names the store file."""
+    cfg = load_config(EXAMPLE)
+    directory = _directory(stores={"20000000001": _store(brands=[{"comercio": "x" * 21}])})
+
+    problems = label_problems(cfg, directory, max_chars=20)
+
+    assert _codes(problems) == ["STORE_COMERCIO_LENGTH"]
+    assert problems[0].path == "stores/20000000001.yaml:brands[0].comercio"
+    assert "stores/20000000001.yaml" in problems[0].message
+    assert "21" in problems[0].message
+    assert "20" in problems[0].message
+    assert problems[0].blocking
 
 
 def test_flow_cell_with_unknown_name_is_reported() -> None:

@@ -56,6 +56,8 @@ _FLOW_TEMPLATE_CODE = "FLOW_TEMPLATE_UNKNOWN_NAME"
 _FLOW_DESCRIPTION_CODE = "FLOW_DESCRIPTION_TEMPLATE"
 _FLOW_FOLDER_CODE = "FLOW_FOLDER_TEMPLATE"
 _FLOW_ATTACH_CODE = "FLOW_MAIL_ATTACH"
+_FLOW_LABEL_CODE = "FLOW_LABEL_LENGTH"
+_STORE_COMERCIO_CODE = "STORE_COMERCIO_LENGTH"
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,54 @@ def flow_problems(cfg: Config, *, field_names: Callable[[str], frozenset[str]]) 
             problems.extend(_sink_problems(flow_name, index, sink, field_names))
         problems.extend(_mail_attach_problems(flow_name, flow.sinks))
     return problems
+
+
+def label_problems(cfg: Config, directory: StoreDirectory, *, max_chars: int) -> list[Problem]:
+    """Return every flow label or store comercio that cannot be a button title (BR-R03, BR-R09).
+
+    Flow labels and store comercios become WhatsApp button titles, so each is 1 to
+    ``max_chars`` characters. The cap is passed in because ``config`` may not import
+    the channels. Each problem points at its flow or store field, such as
+    ``flows.work.label`` or ``stores/<ruc>.yaml:brands[0].comercio``.
+    """
+    problems: list[Problem] = []
+    for flow_name, flow in cfg.flows.items():
+        problem = _label_problem(
+            flow.label,
+            path=f"flows.{flow_name}.label",
+            code=_FLOW_LABEL_CODE,
+            subject=f"flow '{flow_name}' label",
+            max_chars=max_chars,
+        )
+        if problem is not None:
+            problems.append(problem)
+    for ruc, store in directory.stores.items():
+        for index, brand in enumerate(store.brands):
+            problem = _label_problem(
+                brand.comercio,
+                path=f"stores/{ruc}.yaml:brands[{index}].comercio",
+                code=_STORE_COMERCIO_CODE,
+                subject=f"stores/{ruc}.yaml comercio '{brand.comercio}'",
+                max_chars=max_chars,
+            )
+            if problem is not None:
+                problems.append(problem)
+    return problems
+
+
+def _label_problem(value: str, *, path: str, code: str, subject: str, max_chars: int) -> Problem | None:
+    """BR-R03, BR-R09: a button title is 1 to ``max_chars`` characters."""
+    if 1 <= len(value) <= max_chars:
+        return None
+    return Problem(
+        code=code,
+        path=path,
+        message=(
+            f"{subject} is {len(value)} characters; it becomes a WhatsApp button title, "
+            f"which must be 1-{max_chars} (BR-R03, BR-R09)"
+        ),
+        blocking=True,
+    )
 
 
 def _sink_problems(
