@@ -24,6 +24,8 @@ SITE_LOCAL_NETWORK = ipaddress.ip_network("fec0::/10")
 _IPV4_MASK = 0xFFFFFFFF
 #: Schemes that may reach the network at all; everything else is blocked outright.
 NETWORK_SCHEMES = frozenset({"http", "https"})
+#: Longest a host may take to resolve before the guard treats it as unresolvable (R-5.10).
+DNS_TIMEOUT_S = 5.0
 
 
 class GuardReason(StrEnum):
@@ -49,14 +51,18 @@ class Resolver(Protocol):
 
 
 class SystemResolver:
-    """Resolve hosts through the operating system's resolver (R-5.10)."""
+    """Resolve hosts through the operating system's resolver, within a deadline (R-5.10)."""
+
+    def __init__(self, timeout_s: float = DNS_TIMEOUT_S) -> None:
+        self._timeout_s = timeout_s
 
     async def resolve(self, host: str) -> list[str]:
-        """Return the host's unique address strings in answer order; none if it fails."""
+        """Return the host's unique address strings in answer order; none if it fails or times out."""
         loop = asyncio.get_running_loop()
         try:
-            answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except socket.gaierror:
+            async with asyncio.timeout(self._timeout_s):
+                answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except (TimeoutError, socket.gaierror):
             return []
         addresses: list[str] = []
         for answer in answers:

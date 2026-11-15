@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
 from collections.abc import Iterable
 
 import pytest
 
-from invoicebot.net.guard import GuardReason, Resolver, check_addresses, check_url, resolve_and_check
+from invoicebot.net.guard import (
+    GuardReason,
+    Resolver,
+    SystemResolver,
+    check_addresses,
+    check_url,
+    resolve_and_check,
+)
 
 PUBLIC_ADDRESS = "93.184.216.34"
 HTTP_HOSTS = frozenset({"portal.example"})
@@ -95,6 +104,21 @@ async def test_resolve_and_check_returns_the_first_public_address() -> None:
         PUBLIC_ADDRESS,
         None,
     )
+
+
+async def test_system_resolver_returns_nothing_when_dns_outlasts_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-5.10: a resolution that outlives the deadline yields no addresses."""
+    loop = asyncio.get_running_loop()
+
+    async def slow_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+        await asyncio.sleep(1)
+        # A late answer with an address: only the deadline can make resolve return [].
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", 0))]
+
+    monkeypatch.setattr(loop, "getaddrinfo", slow_getaddrinfo)
+    assert await SystemResolver(timeout_s=0.01).resolve("portal.example") == []
 
 
 def _refuse_all(addresses: Iterable[str]) -> GuardReason:

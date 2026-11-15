@@ -148,7 +148,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
     async with (
         httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http,
         httpx.AsyncClient(
-            transport=GuardedTransport(httpx.AsyncHTTPTransport(), SystemResolver()),
+            transport=GuardedTransport(
+                # A pinned request reaches httpcore by IP, so a pooled connection would carry an
+                # earlier host's TLS check to another host on the same IP (R-5.10).
+                httpx.AsyncHTTPTransport(limits=httpx.Limits(max_keepalive_connections=0)),
+                SystemResolver(),
+            ),
             follow_redirects=False,
             timeout=REQUEST_TIMEOUT_SECONDS,
         ) as guarded_http,
