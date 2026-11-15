@@ -279,6 +279,14 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
 FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar más tarde."
 #: One BR-F07 bullet for a fetcher whose last reason has no BR-F text of its own.
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
+#: BR-F07 bullet: the store has no known portal to fetch from (S7.4).
+FETCH_NO_PORTAL_LINE = "• Portal del comercio: no lo conozco"
+#: BR-F07 bullet: the store's portal is configured but not implemented yet (S7.4).
+FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
+#: BR-F07 bullet: the fetcher failed for a technical reason or a timeout (S7.4).
+FETCH_TECHNICAL_LINE = "• {fetcher}: falló por un error técnico"
+#: BR-F07 bullet: the mailbox needs a new sign-in, which the owner was already told (S7.4).
+FETCH_AUTH_LINE = "• Correo: el buzón necesita reconectarse; ya avisé al administrador"
 #: es-PE names of the fetchers, used in BR-F07's bullets.
 FETCHER_DESC: dict[str, str] = {
     "qr_url": "Enlace del QR",

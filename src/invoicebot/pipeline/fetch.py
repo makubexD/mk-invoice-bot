@@ -22,24 +22,18 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 
 from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
-from invoicebot.config.checks import MANUAL_PORTAL
-from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, Portal, StoreDirectory
+from invoicebot.config.models import DEFAULT_RETRY_SCHEDULE, Config, Flow, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
+from invoicebot.pipeline.manual_message import RULE_EXHAUSTED, manual_message, portal_for
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import (
-    FETCH_NOT_FOUND_LINE,
-    FETCH_WAITING,
-    MESSAGES,
-    docs_desc,
-    fetcher_desc,
-)
+from invoicebot.rules.messages_es import FETCH_WAITING
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.invoices import (
@@ -60,17 +54,8 @@ FETCHING_STATE = "FETCHING_DOCS"
 DELIVERING_STATE = "DELIVERING"
 #: Where an invoice goes when no fetcher can get its documents (BR-F07).
 MANUAL_STATE = "MANUAL_REQUIRED"
-#: BR-F07: the rule that reports an invoice nobody could fetch.
-RULE_EXHAUSTED = "BR-F07"
 #: The fetcher whose retry schedule comes from the store's portal (D65).
 PORTAL_FETCHER = "portal_registry"
-
-#: The BR-F message of a fetcher's chain-final reason (spec 06 §1, BR-F07).
-_REASON_RULES: dict[FetchReason, str] = {
-    FetchReason.XML_MISMATCH: "BR-F06",
-    FetchReason.GUARD_BLOCKED: "BR-F08",
-    FetchReason.XML_INVALID: "BR-F09",
-}
 
 
 @dataclass(frozen=True)
@@ -83,6 +68,7 @@ class _Inputs:
     flow: Flow
     invoice: FetchInvoice
     attempts: Sequence[Attempt]
+    directory: StoreDirectory
 
 
 @dataclass(frozen=True)
@@ -135,6 +121,7 @@ def make_fetch_handler(
             flow=flow,
             invoice=_fetch_invoice(reading, job.invoice_id),
             attempts=_attempts(rows),
+            directory=directory,
         )
         schedule_for = _schedule_for(inputs.invoice.ruc_emisor, directory)
         decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for)
@@ -252,7 +239,7 @@ async def _record_result(
 
 async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     """Move the invoice to MANUAL_REQUIRED with BR-F07's message (BR-F07)."""
-    text = _manual_message(reading, inputs.flow.required_docs, inputs.attempts)
+    text = manual_message(reading, inputs.flow, inputs.attempts, inputs.directory)
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
@@ -328,36 +315,6 @@ def _with_required_docs(result: FetchResult, required_docs: Sequence[str]) -> Fe
     return FetchResult(FetchReason.MISSING_DOCS, (), result.portal_key)
 
 
-def _manual_message(reading: Reading, required_docs: Sequence[str], attempts: Sequence[Attempt]) -> str:
-    """Return BR-F07's message for an invoice no fetcher could complete (BR-F07)."""
-    return MESSAGES[RULE_EXHAUSTED].format(
-        serie=reading.value("serie") or "",
-        numero=reading.value("numero") or "",
-        fetcher_lines=_fetcher_lines(attempts),
-        manual_docs_desc=docs_desc(required_docs),
-        # shortcut: gaps land in S7.4 (widen-b); until then the line is always empty.
-        gap_line="",
-    )
-
-
-def _fetcher_lines(attempts: Sequence[Attempt]) -> str:
-    """Return one BR-F07 bullet per fetcher in attempt order, with its last reason (BR-F07).
-
-    shortcut: the full list of S7.4 (widen-b) adds the other fetchers' failure texts;
-    here a fetcher with no BR-F text of its own reads as "not found".
-    """
-    last: dict[str, FetchReason] = {attempt.fetcher: attempt.reason for attempt in attempts}
-    return "\n".join(_reason_line(fetcher, reason) for fetcher, reason in last.items())
-
-
-def _reason_line(fetcher: str, reason: FetchReason) -> str:
-    """Return the BR-F07 bullet for one fetcher's final reason (BR-F07)."""
-    rule_id = _REASON_RULES.get(reason)
-    if rule_id is None:
-        return FETCH_NOT_FOUND_LINE.format(fetcher=fetcher_desc(fetcher))
-    return MESSAGES[rule_id].format(fetcher=fetcher_desc(fetcher))
-
-
 def _schedule_for(ruc_emisor: str, directory: StoreDirectory) -> Callable[[str], Sequence[timedelta]]:
     """Return each fetcher's retry schedule as parsed delays (D65)."""
 
@@ -371,13 +328,5 @@ def _schedule_entries(fetcher: str, ruc_emisor: str, directory: StoreDirectory) 
     """Return the delays of a fetcher: its portal's schedule or the D65 default (D65)."""
     if fetcher != PORTAL_FETCHER:
         return DEFAULT_RETRY_SCHEDULE
-    portal = _portal_for(ruc_emisor, directory)
+    portal = portal_for(ruc_emisor, directory)
     return DEFAULT_RETRY_SCHEDULE if portal is None else portal.retry_schedule
-
-
-def _portal_for(ruc_emisor: str, directory: StoreDirectory) -> Portal | None:
-    """Return the issuer's configured portal, or None when it has none (R-5.8)."""
-    store = directory.stores.get(ruc_emisor)
-    if store is None or store.portal in (None, MANUAL_PORTAL):
-        return None
-    return directory.portals.get(store.portal)
