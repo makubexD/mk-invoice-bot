@@ -30,6 +30,8 @@ from invoicebot.store.invoices import create_invoice, save_reading, set_state
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+#: The owner timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 # Both values come from tests/synthetic_rucs.txt; the unknown buyer fails its check digit.
 OWNER_RUC = "20000000001"
 WORK_RUC = "51900000000"
@@ -261,7 +263,7 @@ async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[Asy
         received_at=datetime.now(UTC),
     )
     async with db_pool.connection() as conn:
-        intake = await handle_inbound(conn, msg, max_queued_per_sender=5)
+        intake = await handle_inbound(conn, msg, max_queued_per_sender=5, timezone=TIMEZONE)
     assert intake.invoice_id is not None
     await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)), intake.invoice_id)
 

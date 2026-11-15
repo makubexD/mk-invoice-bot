@@ -109,6 +109,8 @@ _CANVAS_PX = 800
 _QR_SCALE = 6
 _QR_OFFSET_PX = 100
 _MAX_QUEUED = 10
+#: The owner timezone, for the dates a command prints (S11.4).
+_TIMEZONE = "America/Lima"
 #: Font and layout that make Tesseract read the printed invoice text (D81, R-9.16).
 _FONT = cv2.FONT_HERSHEY_SIMPLEX
 _FONT_SCALE = 1.0
@@ -218,7 +220,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
         )
         async with db_pool.connection() as conn:
             await conn.execute("DELETE FROM outbox")
-            intake = await handle_inbound(conn, msg, max_queued_per_sender=_MAX_QUEUED)
+            intake = await handle_inbound(conn, msg, max_queued_per_sender=_MAX_QUEUED, timezone=_TIMEZONE)
         assert intake.invoice_id is not None
         invoice_id = intake.invoice_id
         photo = _write_photo(tmp_path / f"{invoice_id}.png", payload if with_qr else None, printed_lines)

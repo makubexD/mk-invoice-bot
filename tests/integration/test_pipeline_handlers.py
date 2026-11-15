@@ -42,6 +42,8 @@ MEDIA_URL = "https://mmg.whatsapp.net/v/t62/media"
 GRAPH_HOST = "graph.facebook.com"
 PNG_MIME = "image/png"
 MAX_QUEUED = 10
+#: The owner timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 MEGABYTE = 1024 * 1024
 VALID_STATES: dict[str, frozenset[str]] = {"confirm": frozenset({"CONFIRMING"})}
 
@@ -138,7 +140,7 @@ async def _queue_photo(
     """Store a photo through intake and return the invoice it created."""
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo(media_ref)])
     async with pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
     assert result.invoice_id is not None
     return result.invoice_id
 
