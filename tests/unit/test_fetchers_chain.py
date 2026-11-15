@@ -89,3 +89,27 @@ def test_fetch_result_ok_only_for_ok_reason() -> None:
     """R-5.1: a fetch result is ok only when its reason is ok."""
     assert FetchResult(FetchReason.OK, (), None).ok is True
     assert FetchResult(FetchReason.NOT_FOUND_YET, (), None).ok is False
+
+
+def test_auth_required_waits_on_the_first_schedule_entry() -> None:
+    """D65, D100: an auth-required attempt waits for the first scheduled retry."""
+    history = attempts(FetchReason.AUTH_REQUIRED, 1)
+    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert retry_delay(FETCHER, [], schedule_for(FETCHER)) == timedelta(hours=1)
+
+
+def test_auth_required_then_not_found_yet_waits_on_the_second_schedule_entry() -> None:
+    """D65, D100: auth-required and not-found-yet attempts share the schedule in order."""
+    history = [Attempt(FETCHER, FetchReason.AUTH_REQUIRED), Attempt(FETCHER, FetchReason.NOT_FOUND_YET)]
+    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert retry_delay(FETCHER, history[:-1], schedule_for(FETCHER)) == timedelta(hours=6)
+
+
+def test_wait_reasons_exhaust_the_schedule_and_move_on() -> None:
+    """D65, D100: once wait-reason attempts fill the schedule the chain moves to the next fetcher."""
+    history = [
+        Attempt(FETCHER, FetchReason.AUTH_REQUIRED),
+        Attempt(FETCHER, FetchReason.NOT_FOUND_YET),
+        Attempt(FETCHER, FetchReason.AUTH_REQUIRED),
+    ]
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Run("email_inbox")
