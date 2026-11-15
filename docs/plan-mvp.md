@@ -124,6 +124,14 @@ Each item goes into the named phase's plan.
 - **`ops`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
 - **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
 
+## Carried over from the `widen-b-fetch` review
+
+Each item goes into the named phase's plan.
+
+- **`widen-b-deliver`:** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
+- **`widen-b-deliver`:** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
+- **`widen-b-deliver`:** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
+
 ## Known drift between code and specs
 
 The specs run ahead of the code in these places; each has a named story that closes it.

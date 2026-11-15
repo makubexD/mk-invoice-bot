@@ -118,6 +118,11 @@ MESSAGES: dict[str, str] = {
         "💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. "
         "Saldrá cuando la enciendas."
     ),
+    "BR-D14": (
+        "Tienes varios comprobantes esperando archivos: {invoices}. "
+        "Vuelve a enviar el archivo respondiendo a la foto del comprobante."
+    ),
+    "BR-D15": "El archivo que enviaste no es un PDF válido; no lo guardé.",
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?",
