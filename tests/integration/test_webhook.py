@@ -40,6 +40,8 @@ HANDSHAKE = "synthetic-verify-token"
 CHALLENGE = "1158201444"
 EPOCH = "1700000000"
 MAX_QUEUED = 10
+#: The owner's timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 
 
 @dataclass(frozen=True)
@@ -83,6 +85,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
+        timezone=TIMEZONE,
     )
 
 
