@@ -20,7 +20,12 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
-from invoicebot.auth.providers import build_token_provider, scopes_for
+from invoicebot.auth.providers import (
+    build_token_provider,
+    delivery_accounts,
+    microsoft_accounts,
+    scopes_for,
+)
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import Config, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
@@ -86,9 +91,14 @@ def _auth_microsoft(
 ) -> int:
     """Sign the account in, then resume the invoices that waited for it (R-7.9, BR-D01).
 
-    A failed sign-in exits 1 and resumes nothing, so no invoice leaves ``PENDING_AUTH``
-    without a working token.
+    An account no flow uses exits 2 before signing in. Only a sign-in that delivers files
+    or mail resumes the waiting invoices; a failed sign-in exits 1 and resumes nothing, so
+    no invoice leaves ``PENDING_AUTH`` without a working token.
     """
+    accounts = microsoft_accounts(cfg)
+    if account not in accounts:
+        configured = ", ".join(sorted(accounts)) or "none"
+        parser.error(f"account {account!r} is not configured; configured accounts: {configured}")
     if settings.database_url is None:
         parser.error("DATABASE_URL must be set to resume waiting invoices")
     provider = provider_factory(settings, cfg, account, scopes_for(cfg, account))
@@ -97,6 +107,9 @@ def _auth_microsoft(
     except AuthRequired as error:
         sys.stderr.write(f"sign-in failed: {error}\n")
         return 1
+    if account not in delivery_accounts(cfg):
+        sys.stdout.write("resumed 0 invoice(s)\n")
+        return 0
     count = asyncio.run(_resume_pending_auth(settings.database_url))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0

@@ -12,6 +12,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.auth.providers import scopes_for
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
@@ -56,11 +57,11 @@ def _settings(pool: AsyncConnectionPool[AsyncConnection[Any]], data_dir: Path, c
     return Settings(config_path=config, database_url=pool.conninfo, data_dir=data_dir)
 
 
-async def _run_cli(settings: Settings, provider: _StubProvider) -> int:
+async def _run_cli(settings: Settings, provider: _StubProvider, account: str = ACCOUNT) -> int:
     """Run the command off the event loop, as the console entry point does."""
     return await asyncio.to_thread(
         main,
-        ["auth-microsoft", "--account", ACCOUNT],
+        ["auth-microsoft", "--account", account],
         settings=settings,
         token_provider_factory=_factory(provider),
     )
@@ -186,3 +187,56 @@ async def test_auth_microsoft_mail_scope_follows_the_graph_mailer(
     assert provider.account == ACCOUNT
     assert provider.scopes[: len(BASE_SCOPES)] == BASE_SCOPES
     assert ("Mail.Send" in provider.scopes) is expected
+
+
+async def test_scopes_for_personal_cover_files_and_mail_send() -> None:
+    """R-6.5, R-7.9, D98: the example's delivery account gets files and mail send, no mail read."""
+    cfg = load_config(EXAMPLE_CONFIG)
+
+    assert scopes_for(cfg, ACCOUNT) == ("offline_access", "Files.ReadWrite", "Mail.Send")
+
+
+async def test_scopes_for_bot_reads_the_inbox_only() -> None:
+    """R-6.5, R-7.9, D98: the inbox-only account gets Mail.Read and no delivery scope."""
+    cfg = load_config(EXAMPLE_CONFIG)
+
+    assert scopes_for(cfg, "bot") == ("offline_access", "Mail.Read")
+
+
+async def test_auth_microsoft_unknown_account_exits_two_and_resumes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R-6.5, R-7.9, D98: an account no flow uses exits 2 and leaves PENDING_AUTH alone."""
+    invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
+
+    with pytest.raises(SystemExit) as exit_info:
+        await _run_cli(_settings(db_pool, tmp_path / "data", EXAMPLE_CONFIG), _StubProvider(), "nobody")
+
+    assert exit_info.value.code == 2
+    assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
+    assert await _job_steps(db_pool, invoice_id) == []
+    error = capsys.readouterr().err
+    assert "nobody" in error
+    assert ACCOUNT in error
+    assert "bot" in error
+
+
+async def test_auth_microsoft_bot_signs_in_without_resuming(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R-6.5, R-7.9, D98: signing the inbox account in resumes no PENDING_AUTH invoice."""
+    invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
+    provider = _StubProvider()
+
+    code = await _run_cli(_settings(db_pool, tmp_path / "data", EXAMPLE_CONFIG), provider, "bot")
+
+    assert code == 0
+    assert provider.account == "bot"
+    assert provider.scopes == ("offline_access", "Mail.Read")
+    assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
+    assert await _job_steps(db_pool, invoice_id) == []
+    assert "resumed 0 invoice(s)" in capsys.readouterr().out
