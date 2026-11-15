@@ -29,6 +29,7 @@ from invoicebot.config.models import Config, Flow, MediaLimits
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
+from invoicebot.pipeline.intake import UPLOAD_KINDS
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
@@ -117,7 +118,7 @@ def make_attach_handler(
             head = await load_invoice_head(conn, job.invoice_id)
             if head is None or head.state != MANUAL_STATE:
                 return
-            uploads = await list_unattached_uploads(conn, job.invoice_id)
+            uploads = await list_unattached_uploads(conn, job.invoice_id, UPLOAD_KINDS)
             if not uploads:
                 return
             reading = await load_reading(conn, job.invoice_id)

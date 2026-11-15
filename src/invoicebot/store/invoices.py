@@ -4,6 +4,7 @@ Every function takes the caller's connection and never commits: the caller
 owns the transaction (R-1.1, R-1.4, R-1.10).
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -627,12 +628,32 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     return reading_from_json(row[0])
 
 
-async def list_unattached_uploads(conn: AsyncConnection[Any], invoice_id: int) -> list[Attachment]:
-    """Return the invoice's linked pdf/xml uploads that no file row points at, oldest first.
+async def record_upload_rejection(
+    conn: AsyncConnection[Any], invoice_id: int, media_ref: str, rule_id: str
+) -> None:
+    """Record that invoice_id's upload at media_ref was rejected under rule_id (D103).
+
+    A redelivered job records the same rejection again without raising: the first row
+    stands, so the reply is not repeated. Does not commit.
+    """
+    await conn.execute(
+        """
+        INSERT INTO upload_rejections (invoice_id, media_ref, rule_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (invoice_id, media_ref) DO NOTHING
+        """,
+        (invoice_id, media_ref, rule_id),
+    )
+
+
+async def list_unattached_uploads(
+    conn: AsyncConnection[Any], invoice_id: int, kinds: Sequence[str]
+) -> list[Attachment]:
+    """Return the invoice's linked uploads of ``kinds`` with no file or rejection row, oldest first.
 
     The attachments travel in the stored message payload; a kept upload records its media
-    ref as ``files.remote_ref``, so a redelivered job finds nothing left (R-1.5, D101).
-    Does not commit.
+    ref as ``files.remote_ref`` and a rejected one gets an ``upload_rejections`` row, so a
+    redelivered job finds nothing left to do (R-1.5, D101, D103). Does not commit.
     """
     cur = await conn.execute(
         """
@@ -644,16 +665,22 @@ async def list_unattached_uploads(conn: AsyncConnection[Any], invoice_id: int) -
         CROSS JOIN LATERAL jsonb_array_elements(m.payload_json->'attachments')
              WITH ORDINALITY AS a(attachment, position)
         WHERE m.invoice_id = %s
-          AND attachment->>'kind' IN ('pdf', 'xml')
+          AND attachment->>'kind' = ANY(%s)
           AND NOT EXISTS (
               SELECT 1
               FROM files AS f
               WHERE f.invoice_id = m.invoice_id
                 AND f.remote_ref = attachment->>'media_ref'
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM upload_rejections AS r
+              WHERE r.invoice_id = m.invoice_id
+                AND r.media_ref = attachment->>'media_ref'
+          )
         ORDER BY m.received_at, m.external_id, a.position
         """,
-        (invoice_id,),
+        (invoice_id, list(kinds)),
     )
     return [
         Attachment(

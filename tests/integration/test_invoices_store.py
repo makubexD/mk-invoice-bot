@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,7 @@ from alembic.config import Config
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import ChannelName
+from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
 from invoicebot.states import BATCHED, CANCELLED, FAILED, StateMoved
@@ -33,10 +33,12 @@ from invoicebot.store.invoices import (
     get_waiting,
     has_file,
     list_pending,
+    list_unattached_uploads,
     load_flow,
     load_invoice_head,
     load_reading,
     park_stale,
+    record_upload_rejection,
     save_reading,
     set_flow,
     set_state,
@@ -44,6 +46,7 @@ from invoicebot.store.invoices import (
     unpark,
     window_open,
 )
+from invoicebot.store.messages import link_message_to_invoice, store_inbound
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -115,6 +118,26 @@ async def _stored_key(conn: AsyncConnection[Any], invoice_id: int) -> str | None
     row = await cur.fetchone()
     assert row is not None
     return None if row[0] is None else str(row[0])
+
+
+async def _store_upload(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    kind: AttachmentKind,
+    media_ref: str,
+    received_at: datetime,
+) -> None:
+    """Store one inbound upload and link it to invoice_id, as intake does (R-1.5)."""
+    msg = InboundMessage(
+        channel=CHANNEL,
+        external_id=f"ext-{uuid4().hex}",
+        profile_id="yo",
+        sender_role="owner",
+        attachments=[Attachment(kind=kind, media_ref=media_ref, mime="application/octet-stream", size=1)],
+        received_at=received_at,
+    )
+    assert await store_inbound(conn, msg)
+    await link_message_to_invoice(conn, msg.channel, msg.external_id, invoice_id)
 
 
 async def test_create_invoice_returns_id_and_state(
@@ -701,6 +724,42 @@ async def test_list_pending_dates_a_prepared_batch_in_the_owner_timezone(
 
     assert total == 1
     assert [row.batch_prepared_at for row in rows] == [expected]
+
+
+async def test_record_upload_rejection_hides_only_its_upload(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D103: a recorded rejection hides its upload from list_unattached_uploads; the others stay."""
+    first = datetime(2026, 11, 14, 10, 0, tzinfo=UTC)
+    second = datetime(2026, 11, 14, 10, 1, tzinfo=UTC)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await _store_upload(conn, invoice_id, "pdf", "media-pdf", first)
+        await _store_upload(conn, invoice_id, "xml", "media-xml", second)
+        before = await list_unattached_uploads(conn, invoice_id, ("pdf", "xml"))
+        await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
+        after = await list_unattached_uploads(conn, invoice_id, ("pdf", "xml"))
+
+    assert [upload.media_ref for upload in before] == ["media-pdf", "media-xml"]
+    assert [upload.media_ref for upload in after] == ["media-xml"]
+
+
+async def test_record_upload_rejection_twice_keeps_one_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D103: recording the same rejection twice raises nothing and leaves exactly one row."""
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
+        await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
+        cur = await conn.execute(
+            "SELECT rule_id, count(*) FROM upload_rejections WHERE invoice_id = %s GROUP BY rule_id",
+            (invoice_id,),
+        )
+        rows = await cur.fetchall()
+
+    assert rows == [("BR-D15", 1)]
 
 
 async def test_migration_0004_downgrades_to_0003_and_upgrades_again(
