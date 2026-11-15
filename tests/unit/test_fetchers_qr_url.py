@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -60,7 +61,7 @@ XML_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 """
 DOCTYPE = '<!DOCTYPE Invoice [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
 
-Handler = Callable[[httpx.Request], httpx.Response]
+Handler = Callable[[httpx.Request], httpx.Response | Awaitable[httpx.Response]]
 
 
 def _portal(key: str, url: str | None) -> Portal:
@@ -98,9 +99,10 @@ async def _make_fetcher(
     *,
     hosts: frozenset[str] = HOSTS,
     max_bytes: MediaMaxBytes = MEDIA_MAX_BYTES,
+    timeout_s: float = 5.0,
 ) -> AsyncIterator[QrUrlFetcher]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        yield QrUrlFetcher(http, hosts, max_bytes)
+        yield QrUrlFetcher(http, hosts, max_bytes, timeout_s)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +314,19 @@ async def test_fetch_timeout_is_timeout(tmp_path: Path) -> None:
         raise httpx.ReadTimeout("synthetic timeout")
 
     async with _make_fetcher(handler) as fetcher:
+        result = await fetcher.fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.TIMEOUT
+
+
+async def test_fetch_past_the_deadline_is_timeout(tmp_path: Path) -> None:
+    """R-5.1: a download that outlives the overall deadline is reported as a timeout."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        return httpx.Response(200, content=PDF)
+
+    async with _make_fetcher(handler, timeout_s=0.01) as fetcher:
         result = await fetcher.fetch(_invoice(), tmp_path)
 
     assert result.reason is FetchReason.TIMEOUT

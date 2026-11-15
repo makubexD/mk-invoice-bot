@@ -279,7 +279,12 @@ def _fetcher_builders(
 ) -> dict[str, _FetcherBuilder]:
     """Return a builder per fetcher this build runs; adding a fetcher adds an entry (S7.1)."""
     portal = PortalFetcher(directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
-    qr_url = QrUrlFetcher(guarded_http, allowed_hosts(directory), cfg.limits.media.max_bytes)
+    qr_url = QrUrlFetcher(
+        guarded_http,
+        allowed_hosts(directory),
+        cfg.limits.media.max_bytes,
+        cfg.retrieval.portal_timeout_s,
+    )
     return {
         PORTAL_FETCHER: lambda _name, _flow: portal,
         QR_URL_FETCHER: lambda _name, _flow: qr_url,

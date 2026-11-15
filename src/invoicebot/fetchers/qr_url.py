@@ -8,6 +8,7 @@ and writes the invoice's files by kind.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -39,6 +40,9 @@ MAX_REDIRECTS = 3
 _HTML_PREFIXES = (b"<!doctype html", b"<html")
 
 _DocumentKind = Literal["pdf", "xml", "html"]
+
+#: The result of a download that ran into its read or overall deadline (R-5.1).
+_TIMEOUT_RESULT = FetchResult(FetchReason.TIMEOUT, (), None)
 
 
 def allowed_hosts(directory: StoreDirectory) -> frozenset[str]:
@@ -91,22 +95,31 @@ class _BodyTooLarge(Exception):
 class QrUrlFetcher:
     """Fetch an invoice's files from the URL its QR code carried (R-5.2, R-5.6)."""
 
-    def __init__(self, http: httpx.AsyncClient, hosts: frozenset[str], max_bytes: MediaMaxBytes) -> None:
+    def __init__(
+        self,
+        http: httpx.AsyncClient,
+        hosts: frozenset[str],
+        max_bytes: MediaMaxBytes,
+        timeout_s: float,
+    ) -> None:
+        """Keep the client, the allowed hosts, the body caps and the fetch deadline (R-5.1)."""
         self._http = http
         self._hosts = hosts
         self._max_bytes = max_bytes
+        self._timeout_s = timeout_s
 
     async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
-        """Fetch ``invoice``'s document from its QR URL and report why (R-5.2, R-5.6)."""
+        """Fetch ``invoice``'s document from its QR URL and report why (R-5.1, R-5.2, R-5.6)."""
         url = invoice.document_url
         if url is None:
             return FetchResult(FetchReason.NO_URL, (), None)
         try:
-            reply = await self._follow(url)
+            async with asyncio.timeout(self._timeout_s):
+                reply = await self._follow(url)
         except (GuardBlocked, _TooManyRedirects):
             return FetchResult(FetchReason.GUARD_BLOCKED, (), None)
-        except httpx.TimeoutException:
-            return FetchResult(FetchReason.TIMEOUT, (), None)
+        except (TimeoutError, httpx.TimeoutException):
+            return _TIMEOUT_RESULT
         except (httpx.HTTPError, _BodyTooLarge):
             return FetchResult(FetchReason.TECHNICAL, (), None)
         if reply.status != httpx.codes.OK:
