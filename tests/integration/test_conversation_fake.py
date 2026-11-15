@@ -439,6 +439,11 @@ async def test_parked_question_is_listed_and_resumed_from_pendientes(
             "UPDATE invoices SET updated_at = now() - interval '25 hours' WHERE id = %s",
             (invoice_id,),
         )
+        # The question went out as long ago, so /pendientes may re-send it (S4.8, D94).
+        await conn.execute(
+            "UPDATE outbox SET created_at = now() - interval '25 hours' WHERE invoice_id = %s",
+            (invoice_id,),
+        )
 
     assert await park_stale_questions(db_pool, 24) >= 1
     await sender.send_pending()
