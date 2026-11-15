@@ -14,7 +14,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import handle_press
-from invoicebot.pipeline.commands import handle_command, parse_command
+from invoicebot.pipeline.commands import CommandContext, handle_command, parse_command
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
@@ -51,6 +51,7 @@ async def handle_inbound(
     msg: InboundMessage,
     *,
     max_queued_per_sender: int,
+    timezone: str,
     admins: frozenset[str] = frozenset(),
 ) -> IntakeResult:
     """Handle one inbound message inside the caller's transaction.
@@ -62,7 +63,8 @@ async def handle_inbound(
     becomes an invoice, with its caption's overrides, a ``download_media`` job and a
     BR-S09 acknowledgement, unless the sender already has ``max_queued_per_sender``
     active jobs, in which case it is answered with BR-S01 and ``back_pressure`` (BR-S01).
-    ``admins`` holds the profile ids a command may reach another profile's invoice for.
+    ``admins`` holds the profile ids a command may reach another profile's invoice for,
+    and ``timezone`` is the owner's zone for the dates a command prints (S11.4).
     """
     async with conn.transaction():
         await _lock_profile(conn, msg.profile_id)
@@ -74,7 +76,7 @@ async def handle_inbound(
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
             return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
         else:
-            return await _store_with_overrides(conn, msg, admins)
+            return await _store_with_overrides(conn, msg, admins, timezone)
     for path in pressed.photo_paths:
         await asyncio.to_thread(path.unlink, missing_ok=True)
     return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
@@ -116,6 +118,7 @@ async def _store_with_overrides(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     admins: frozenset[str],
+    timezone: str,
 ) -> IntakeResult:
     """Store a non-photo text, running its command or applying its edits and overrides.
 
@@ -129,7 +132,8 @@ async def _store_with_overrides(
         return IntakeResult(status="stored", invoice_id=None)
     command = parse_command(msg.text)
     if command is not None:
-        await handle_command(conn, msg, command[0], command[1], admins=admins)
+        context = CommandContext(admins=admins, timezone=timezone)
+        await handle_command(conn, msg, command[0], command[1], context=context)
         return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)
     invoice_id = None

@@ -186,6 +186,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
         admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
+        timezone=cfg.owner.timezone,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),

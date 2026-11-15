@@ -43,6 +43,8 @@ class WebhookDeps:
     index: ProfileIndex
     owner_profile: str
     admin_profiles: frozenset[str]
+    #: The owner's timezone, for the dates commands print (S11.4).
+    timezone: str
     app_secret: str
     verify_token: str
     sender_hash_key: str
@@ -140,5 +142,6 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
                 conn,
                 msg,
                 max_queued_per_sender=deps.max_queued_per_sender,
+                timezone=deps.timezone,
                 admins=deps.admin_profiles,
             )
