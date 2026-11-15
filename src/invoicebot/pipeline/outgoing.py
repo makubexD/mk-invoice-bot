@@ -8,18 +8,22 @@ stale press, and this module is the one they can share without a cycle.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import logging
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ChannelName, OutboundMessage
+from invoicebot.config.models import Profile
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import MESSAGES, state_desc
 
 #: Rule that tells the sender a button or override no longer applies (BR-S02).
 RULE_STALE_BUTTON = "BR-S02"
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -75,3 +79,31 @@ async def queue_stale(
         rule_id=RULE_STALE_BUTTON,
         text=MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(state)),
     )
+
+
+async def queue_admin_alert(
+    conn: AsyncConnection[Any],
+    profiles: Mapping[str, Profile],
+    rule_id: str,
+    text: str,
+) -> None:
+    """Queue one rule's admin alert for every admin profile on its preferred channel."""
+    for profile_id, profile in profiles.items():
+        if profile.admin:
+            await _notify_admin(conn, profile_id, profile, rule_id, text)
+
+
+async def _notify_admin(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    profile: Profile,
+    rule_id: str,
+    text: str,
+) -> None:
+    """Queue a rule's admin text for one admin profile on its preferred channel, if it has one."""
+    channel = profile.preferred_channel
+    if channel is None:
+        # One unreachable admin must not undo the state change or the other alerts.
+        logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
+        return
+    await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id)
