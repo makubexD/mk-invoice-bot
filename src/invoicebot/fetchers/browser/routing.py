@@ -8,8 +8,6 @@ not done here: the helper's guard proxy checks every hop and pins the address it
 
 from __future__ import annotations
 
-import asyncio
-import socket
 from urllib.parse import urlsplit
 
 from playwright.async_api import Route
@@ -63,24 +61,6 @@ class RouteGuard:
             await route.abort(BLOCKED_BY_CLIENT)
             return
         await route.continue_()
-
-
-class SystemResolver:
-    """Resolve hosts through the operating system's resolver (R-5.10)."""
-
-    async def resolve(self, host: str) -> list[str]:
-        """Return the host's unique address strings in answer order; none if it fails."""
-        loop = asyncio.get_running_loop()
-        try:
-            answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except socket.gaierror:
-            return []
-        addresses: list[str] = []
-        for answer in answers:
-            address = answer[4][0]
-            if isinstance(address, str) and address not in addresses:
-                addresses.append(address)
-        return addresses
 
 
 def _is_analytics_host(host: str) -> bool:
