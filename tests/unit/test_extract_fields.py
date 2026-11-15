@@ -38,6 +38,28 @@ def _payload_with_field(**overrides: object) -> dict[str, Any]:
     return {"fields": {"total": field}, "document_url": None}
 
 
+def test_reading_with_empty_serie_reports_it_missing() -> None:
+    """R-2.13, R-12.8: an empty field counts as absent, so a required field is missing."""
+    reading = Reading(
+        fields={"serie": Field(value="", source="ocr", confidence=1.0)},
+        document_url=None,
+    )
+
+    assert "serie" in reading.missing_required()
+    assert reading.value("serie") is None
+
+
+def test_reading_with_serie_value_does_not_report_it_missing() -> None:
+    """R-2.13, R-12.8: a required field with text is present, not missing."""
+    reading = Reading(
+        fields={"serie": Field(value="F001", source="ocr", confidence=1.0)},
+        document_url=None,
+    )
+
+    assert "serie" not in reading.missing_required()
+    assert reading.value("serie") == "F001"
+
+
 def test_reading_round_trips_through_json() -> None:
     """R-2.6: a reading survives reading_to_json and reading_from_json unchanged."""
     reading = _reading()
