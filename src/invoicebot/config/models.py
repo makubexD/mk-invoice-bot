@@ -376,6 +376,9 @@ class PaidApi(BaseModel):
 #: The worker's job lease; a portal fetch must end before it (R-5.1).
 JOB_LEASE_S = 300
 
+#: The margin a portal fetch keeps below the lease, so its result is recorded in time (R-5.1).
+JOB_LEASE_MARGIN_S = 30
+
 
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -388,11 +391,11 @@ class Retrieval(BaseModel):
 
     @model_validator(mode="after")
     def _portal_fetch_fits_in_job_lease(self) -> Self:
-        """R-5.1: a portal fetch must end before the job lease expires."""
-        if self.portal_timeout_s >= JOB_LEASE_S:
+        """R-5.1: a portal fetch must end at least the margin before the job lease expires."""
+        if self.portal_timeout_s + JOB_LEASE_MARGIN_S > JOB_LEASE_S:
             raise ValueError(
-                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) must be less than "
-                f"the job lease ({JOB_LEASE_S}s)"
+                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) plus the margin "
+                f"({JOB_LEASE_MARGIN_S}s) must not exceed the job lease ({JOB_LEASE_S}s)"
             )
         return self
 

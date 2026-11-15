@@ -252,9 +252,9 @@ def test_zero_portal_timeout_fails(tmp_path: Path) -> None:
     assert "retrieval.portal_timeout_s" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("timeout_s", [120, 299.5])
+@pytest.mark.parametrize("timeout_s", [120, 270])
 def test_portal_timeout_under_job_lease_is_valid(tmp_path: Path, timeout_s: float) -> None:
-    """R-5.1: a portal fetch shorter than the job lease loads."""
+    """R-5.1: a portal fetch ending at least the margin before the lease loads."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["retrieval"]["portal_timeout_s"] = timeout_s
     path = _write_yaml(tmp_path / "example.yaml", document)
@@ -262,9 +262,9 @@ def test_portal_timeout_under_job_lease_is_valid(tmp_path: Path, timeout_s: floa
     assert load_config(path).retrieval.portal_timeout_s == timeout_s
 
 
-@pytest.mark.parametrize("timeout_s", [300, 900])
+@pytest.mark.parametrize("timeout_s", [271, 300, 900])
 def test_portal_timeout_at_or_over_job_lease_fails(tmp_path: Path, timeout_s: float) -> None:
-    """R-5.1: a portal fetch may not outlive the job lease, so it fails to load."""
+    """R-5.1: a fetch must end at least the 30s margin before the 300s lease, so it fails."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["retrieval"]["portal_timeout_s"] = timeout_s
     path = _write_yaml(tmp_path / "example.yaml", document)
@@ -273,6 +273,7 @@ def test_portal_timeout_at_or_over_job_lease_fails(tmp_path: Path, timeout_s: fl
         load_config(path)
 
     assert "300" in str(excinfo.value)
+    assert "margin (30s)" in str(excinfo.value)
     assert str(timeout_s) in str(excinfo.value)
 
 
