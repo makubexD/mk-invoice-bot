@@ -22,6 +22,7 @@ from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL
+from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
 
@@ -531,6 +532,30 @@ async def test_run_that_leaves_fetching_after_its_fetch_removes_its_folder(
     handler = _handler(db_pool, fetcher, tmp_path)
 
     await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    out_root = tmp_path / "tmp" / str(invoice_id)
+    assert not out_root.exists() or not any(out_root.rglob("*"))
+    assert attempts == []
+    assert files == []
+
+
+async def test_commit_that_raises_after_the_fetch_removes_its_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-9.2: a fetch whose commit raises (here StateMoved) rolls back and leaves no files."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    handler = _handler(db_pool, FakeFetcher(FetchReason.OK), tmp_path)
+
+    async def moved(conn: AsyncConnection[Any], invoice_id: int, state: str, **kwargs: Any) -> None:
+        raise StateMoved(invoice_id, kwargs.get("expected"), "DELIVERING")
+
+    monkeypatch.setattr("invoicebot.pipeline.fetch.set_state", moved)
+    with pytest.raises(StateMoved):
+        await handler(_job(invoice_id))
 
     async with db_pool.connection() as conn:
         attempts = await _attempts(conn, invoice_id)
