@@ -278,6 +278,86 @@ async def test_pick_on_a_parked_br_r03_invoice_resumes_and_reroutes(
     assert texts == []
 
 
+async def test_pick_out_of_range_on_a_parked_br_r03_invoice_stays_parked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: an out-of-range [pick] on an invoice parked from BR-R03 leaves it parked."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=7)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (PENDING_USER, "BR-S08")
+    assert waiting == (CONFIRMING, RULE_ASK)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(PENDING_USER)))
+    ]
+
+
+async def test_pick_from_another_menu_on_a_parked_br_r03_invoice_stays_parked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: a [pick] from another menu on a parked BR-R03 invoice leaves it parked."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=0, menu=5)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (PENDING_USER, "BR-S08")
+    assert waiting == (CONFIRMING, RULE_ASK)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(PENDING_USER)))
+    ]
+
+
+async def test_pick_in_range_on_a_parked_br_r03_invoice_resumes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: an in-range [pick] on a parked BR-R03 invoice resumes it and stores the flow."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=0)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert flow_data["answers"]["flow"] == FLOW_CHOICES[0]
+    assert invoice == (ROUTING, RULE_ASK)
+    assert waiting == (None, None)
+    assert jobs == ["route"]
+
+
 async def test_yes_on_a_parked_br_r03_invoice_is_stale_and_stays_parked(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

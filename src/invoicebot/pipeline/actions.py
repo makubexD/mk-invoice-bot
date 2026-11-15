@@ -42,7 +42,7 @@ from invoicebot.pipeline.questions import (
     RULE_CAP,
     YES_ACTION,
 )
-from invoicebot.pipeline.replies import resolve_reply
+from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES
@@ -139,7 +139,7 @@ async def _pick(
     """
     if not await _still_asks(conn, invoice_id, msg, RULE_ASK):
         return ()
-    picked = await _choice_at(conn, invoice_id, press.choice, press.menu)
+    picked = await choice_at(conn, invoice_id, press.choice, press.menu)
     if picked is None:
         await send_stale(conn, msg, invoice_id)
         return ()
@@ -177,7 +177,7 @@ async def _brand(
     """
     if not await _still_asks(conn, invoice_id, msg, RULE_BRAND):
         return ()
-    comercio = await _choice_at(conn, invoice_id, press.choice, press.menu)
+    comercio = await choice_at(conn, invoice_id, press.choice, press.menu)
     if comercio is None:
         await send_stale(conn, msg, invoice_id)
         return ()
@@ -264,24 +264,6 @@ async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundM
         return True
     await send_stale(conn, msg, invoice_id)
     return False
-
-
-async def _choice_at(
-    conn: AsyncConnection[Any], invoice_id: int, choice: int | None, menu: int | None
-) -> Any | None:
-    """Return ``choices[choice]`` from the invoice's flow data, or None when it is stale (BR-S02).
-
-    A missing or out-of-range choice is stale, and so is a choice from another menu: the
-    stored ``menu`` must be an int equal to the press's, so an older menu is a stale button.
-    """
-    flow_data = await load_flow_data(conn, invoice_id)
-    choices = flow_data.get("choices")
-    stored_menu = flow_data.get("menu")
-    if isinstance(stored_menu, bool) or not isinstance(stored_menu, int) or menu != stored_menu:
-        return None
-    if choice is None or not isinstance(choices, list) or not 0 <= choice < len(choices):
-        return None
-    return choices[choice]
 
 
 async def _record_answer(
