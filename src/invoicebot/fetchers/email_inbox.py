@@ -19,7 +19,7 @@ import httpx
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
-from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult, is_pdf
 from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
 from invoicebot.fetchers.portal import invoice_reading, sha256_hex
 from invoicebot.sinks.onedrive import GraphError, GraphTransient
@@ -156,14 +156,17 @@ class EmailInboxFetcher:
         """Return the PDF that belongs with the matching XML, or ``None`` (R-5.6)."""
         pdfs = [attachment for attachment in match.attachments if _matches(attachment, ".pdf", pattern)]
         if not pdfs:
-            only = [attachment for attachment in match.attachments if _is_pdf(attachment)]
+            only = [attachment for attachment in match.attachments if _name_is_pdf(attachment)]
             if len(only) != 1:
                 return None
             pdfs = only
         attachment = pdfs[0]
         if attachment.size > self._max_bytes.pdf:
             return None
-        return await _download(self._mailbox, match.message.id, attachment, self._max_bytes.pdf)
+        data = await _download(self._mailbox, match.message.id, attachment, self._max_bytes.pdf)
+        if data is None or not is_pdf(data):
+            return None
+        return data
 
 
 def _name_pattern(invoice: FetchInvoice) -> re.Pattern[str]:
@@ -183,7 +186,7 @@ def _matches(attachment: MailAttachment, extension: str, pattern: re.Pattern[str
     return attachment.name.lower().endswith(extension) and pattern.search(attachment.name.upper()) is not None
 
 
-def _is_pdf(attachment: MailAttachment) -> bool:
+def _name_is_pdf(attachment: MailAttachment) -> bool:
     """Return whether the attachment is a PDF by its name's extension, case-insensitively."""
     return attachment.name.lower().endswith(".pdf")
 

@@ -15,6 +15,18 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
+#: A UTF-8 BOM may precede the first byte of a document.
+UTF8_BOM = b"\xef\xbb\xbf"
+#: ASCII whitespace that may precede the first byte of a document.
+ASCII_WHITESPACE = b" \t\n\r\f\v"
+
+_PDF_MAGIC = b"%PDF-"
+
+
+def is_pdf(data: bytes) -> bool:
+    """Return whether ``data`` starts with a PDF header, after an optional BOM and whitespace (R-5.6)."""
+    return data.removeprefix(UTF8_BOM).lstrip(ASCII_WHITESPACE).startswith(_PDF_MAGIC)
+
 
 class FetchReason(StrEnum):
     """Why one fetch ended; only ``OK`` carries files (S7.1)."""

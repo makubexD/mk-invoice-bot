@@ -256,6 +256,26 @@ async def test_fetch_with_only_the_xml_is_ok(tmp_path: Path) -> None:
     assert file.kind == "xml"
 
 
+async def test_fetch_drops_a_pdf_attachment_that_is_not_a_pdf(tmp_path: Path) -> None:
+    """R-5.6: an HTML body named like a PDF is dropped, leaving only the matching XML."""
+    xml = _xml()
+    html = b"<!DOCTYPE html><html><body>not a pdf</body></html>"
+    message = _message("M1", datetime(2026, 11, 13, 10, 0, tzinfo=UTC))
+    xml_attachment = _attachment("A1", "F001-123.xml", len(xml))
+    pdf_attachment = _attachment("A2", "F001-123.pdf", len(html))
+    mailbox = FakeMailbox(
+        [message],
+        {"M1": [xml_attachment, pdf_attachment]},
+        {"A1": xml, "A2": html},
+    )
+
+    result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.OK
+    (file,) = result.files
+    assert file.kind == "xml"
+
+
 async def test_fetch_skips_a_rejected_xml_and_tries_the_next_message(tmp_path: Path) -> None:
     """R-5.2, R-5.6, S11.9: a rejected XML is skipped and a later matching one is used."""
     rejected = _xml(doctype=True)

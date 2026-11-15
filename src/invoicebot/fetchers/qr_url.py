@@ -16,7 +16,15 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from invoicebot.config.models import MediaMaxBytes, StoreDirectory
-from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.base import (
+    ASCII_WHITESPACE,
+    UTF8_BOM,
+    FetchedFile,
+    FetchInvoice,
+    FetchReason,
+    FetchResult,
+    is_pdf,
+)
 from invoicebot.fetchers.portal import sha256_hex, xml_reason
 from invoicebot.net.guard import GuardReason
 from invoicebot.net.http import GuardBlocked
@@ -27,10 +35,6 @@ SUNAT_DOMAIN = "sunat.gob.pe"
 QR_URL_FETCHER = "qr_url"
 #: Redirect hops followed before the URL counts as a loop and is refused (R-5.10).
 MAX_REDIRECTS = 3
-#: A UTF-8 BOM may precede the first markup byte.
-_UTF8_BOM = b"\xef\xbb\xbf"
-#: ASCII whitespace that may precede the first markup byte.
-_ASCII_WHITESPACE = b" \t\n\r\f\v"
 #: The first bytes that make a ``<`` document an HTML page rather than an XML (R-5.4).
 _HTML_PREFIXES = (b"<!doctype html", b"<html")
 
@@ -151,9 +155,9 @@ def _is_redirect(status: int) -> bool:
 
 def _classify(data: bytes) -> _DocumentKind | None:
     """Return what the body is, judged by its first bytes (R-5.6)."""
-    body = data.removeprefix(_UTF8_BOM).lstrip(_ASCII_WHITESPACE)
-    if body.startswith(b"%PDF-"):
+    if is_pdf(data):
         return "pdf"
+    body = data.removeprefix(UTF8_BOM).lstrip(ASCII_WHITESPACE)
     if body.startswith(b"<"):
         # HTML pages are a not-found answer (R-5.4).
         if body[:64].lower().startswith(_HTML_PREFIXES):
