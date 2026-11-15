@@ -219,8 +219,8 @@ def make_deliver_handler(
                 await _automatic(context, delivery, prepared, mode)
             else:
                 await _assisted(context, delivery, mode)
-        except AuthRequired:
-            await _pending_auth(context, invoice)
+        except AuthRequired as required:
+            await _pending_auth(context, invoice, required.account)
             return
         except TemplateInvalid:
             await _template_invalid(context, invoice)
@@ -536,10 +536,10 @@ def _send_failed_admin_text(prepared: _Values, invoice_id: int) -> str:
     )
 
 
-async def _pending_auth(context: _Context, invoice: _Invoice) -> None:
+async def _pending_auth(context: _Context, invoice: _Invoice, account: str) -> None:
     """Park the invoice until the account signs in and alert its sender and admins (BR-D01)."""
     text = MESSAGES[RULE_AUTH].format(provider=AUTH_PROVIDER_NAME)
-    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG)
+    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG, account=account)
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return

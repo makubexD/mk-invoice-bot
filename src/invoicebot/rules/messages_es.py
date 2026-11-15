@@ -88,7 +88,9 @@ MESSAGES: dict[str, str] = {
     "BR-D01": (
         "Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar."
     ),
-    "BR-D01_admin": "🔑 Reautoriza {provider}: ejecuta scripts/auth_{provider}.py",
+    "BR-D01_admin": (
+        "🔑 Reautoriza {provider} ({account}): ejecuta scripts/auth_{provider}.py --account {account}"
+    ),
     "BR-D02": (
         "No pude llenar la plantilla de Excel (configuración incompleta). "
         "Ya avisé para corregirlo; reintento automáticamente."
