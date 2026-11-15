@@ -24,8 +24,6 @@ from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
 from invoicebot.fetchers.portal import invoice_reading, sha256_hex
 from invoicebot.sinks.onedrive import GraphError, GraphTransient
 
-#: The name this fetcher uses in a flow's ``fetchers`` list (R-5.2).
-EMAIL_INBOX_FETCHER = "email_inbox"
 #: The newest messages Graph is asked for; the invoice's own mail is near the top (S11.9).
 SEARCH_TOP = 25
 #: XML attachments downloaded per fetch before the fetcher gives up (S11.9).

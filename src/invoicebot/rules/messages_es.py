@@ -294,6 +294,10 @@ FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
 FETCH_TECHNICAL_LINE = "• {fetcher}: falló por un error técnico"
 #: BR-F07 bullet: the mailbox needs a new sign-in, which the owner was already told (S7.4).
 FETCH_AUTH_LINE = "• Correo: el buzón necesita reconectarse; ya avisé al administrador"
+#: BR-F11's ``{comercio}`` when the store directory does not know the issuer (BR-F07).
+STORE_FALLBACK = "el comercio"
+#: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
+STORE_FALLBACK_OF = "del comercio"
 #: es-PE names of the fetchers, used in BR-F07's bullets.
 FETCHER_DESC: dict[str, str] = {
     "qr_url": "Enlace del QR",

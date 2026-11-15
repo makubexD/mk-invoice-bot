@@ -23,6 +23,8 @@ from invoicebot.rules.messages_es import (
     FETCH_PORTAL_TODO_LINE,
     FETCH_TECHNICAL_LINE,
     MESSAGES,
+    STORE_FALLBACK,
+    STORE_FALLBACK_OF,
     docs_desc,
     fetcher_desc,
 )
@@ -111,13 +113,13 @@ def _fetcher_line(fetcher: str, reason: FetchReason) -> str:
 
 def _comercio(store: Store | None) -> str:
     """Return BR-F11's ``{comercio}``: the store's first brand, or a generic name (BR-F07)."""
-    return "el comercio" if store is None else store.brands[0].comercio
+    return STORE_FALLBACK if store is None else store.brands[0].comercio
 
 
 def _portal_desc(store: Store | None, portal: Portal | None) -> str:
     """Return ``{portal}``: the portal URL's host, else its key, else a generic name (BR-F07)."""
     if store is None or store.portal is None or store.portal == MANUAL_PORTAL:
-        return "del comercio"
+        return STORE_FALLBACK_OF
     if portal is None or portal.url is None:
         return store.portal
     return urlsplit(portal.url).hostname or store.portal
