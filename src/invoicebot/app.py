@@ -47,6 +47,8 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
@@ -174,6 +176,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 _fetch_registries(settings, cfg, directory, guarded_http, http),
                 settings.data_dir,
             ),
+            ATTACH_STEP: make_attach_handler(pool, cfg, client, settings.data_dir, cfg.limits.media),
         }
         deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
         if deliver_handler is not None:
