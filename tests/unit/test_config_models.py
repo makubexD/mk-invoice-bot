@@ -16,7 +16,7 @@ from invoicebot.config.models import (
     CalendarField,
     ChannelTemplates,
     Config,
-    EmailInbox,
+    FlowInbox,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -458,7 +458,7 @@ def test_retry_schedule_with_an_unknown_unit_fails() -> None:
 
 def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
     """D65: an email inbox retry schedule is typed and dumps back as canonical delay text."""
-    inbox = EmailInbox(provider="gmail", retry_schedule=["5m", "1h", "6h", "24h"])
+    inbox = FlowInbox(provider="gmail", account="invoices_a", retry_schedule=["5m", "1h", "6h", "24h"])
 
     assert inbox.retry_schedule == (
         timedelta(minutes=5),
@@ -472,12 +472,12 @@ def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
 def test_email_inbox_retry_schedule_with_an_unknown_unit_fails() -> None:
     """D65: an email inbox retry delay only uses minutes, hours or days."""
     with pytest.raises(ValidationError, match="5 minutes"):
-        EmailInbox(provider="gmail", retry_schedule=["5 minutes"])
+        FlowInbox(provider="gmail", account="invoices_a", retry_schedule=["5 minutes"])
 
 
 def test_email_inbox_retry_schedule_may_be_empty() -> None:
     """D65: an empty email inbox retry schedule is an empty tuple, as for a portal."""
-    inbox = EmailInbox(provider="gmail", retry_schedule=[])
+    inbox = FlowInbox(provider="gmail", account="invoices_a", retry_schedule=[])
 
     assert inbox.retry_schedule == ()
 
@@ -486,7 +486,8 @@ def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
     """R-9.6: the shipped example config's email inbox validates with the typed schedule."""
     cfg = load_config(EXAMPLE)
 
-    assert cfg.retrieval.email_inbox.retry_schedule == (
+    assert cfg.flows["personal_google"].email_inbox is not None
+    assert cfg.flows["personal_google"].email_inbox.retry_schedule == (
         timedelta(minutes=5),
         timedelta(hours=1),
         timedelta(hours=6),
@@ -494,9 +495,59 @@ def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
     )
 
 
+def test_example_config_has_per_flow_inbox_settings() -> None:
+    """D98, R-5.2: the example config loads with the inbox settings under each flow.
+
+    ``config/config.yaml`` is the owner's untracked copy, so CI can load only the example.
+    """
+    cfg = load_config(EXAMPLE)
+
+    personal = cfg.flows["personal_google"].email_inbox
+    work = cfg.flows["work_microsoft"].email_inbox
+    assert personal is not None
+    assert (personal.provider, personal.account) == ("gmail", "invoices_a")
+    assert work is not None
+    assert (work.provider, work.account) == ("graph", "bot")
+
+
+def test_flow_listing_email_inbox_without_settings_fails_naming_the_flow(tmp_path: Path) -> None:
+    """D98, R-5.2: listing the email_inbox fetcher without settings fails naming the flow."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["email_inbox"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "personal_google" in str(excinfo.value)
+    assert "email_inbox" in str(excinfo.value)
+
+
+def test_retrieval_refuses_email_inbox_settings(tmp_path: Path) -> None:
+    """D98, R-5.2: inbox settings belong to the flow, so retrieval refuses them."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["email_inbox"] = {
+        "provider": "gmail",
+        "account": "invoices_a",
+        "retry_schedule": ["5m"],
+    }
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"retrieval\.email_inbox"):
+        load_config(path)
+
+
+def test_email_inbox_account_with_an_invalid_name_fails() -> None:
+    """D98, R-5.2: an inbox account is lowercase letters, digits and underscores only."""
+    with pytest.raises(ValidationError, match="account"):
+        FlowInbox(provider="gmail", account="Bad-Name", retry_schedule=["5m"])
+
+
 _RETRY_SCHEDULE_MODELS = [
     pytest.param(
-        lambda schedule: EmailInbox.model_validate({"provider": "gmail", "retry_schedule": schedule}),
+        lambda schedule: FlowInbox.model_validate(
+            {"provider": "gmail", "account": "invoices_a", "retry_schedule": schedule}
+        ),
         id="email-inbox",
     ),
     pytest.param(
@@ -510,7 +561,7 @@ _RETRY_SCHEDULE_MODELS = [
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_parses_and_dumps_the_same_delay_text(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a retry schedule parses to timedeltas and dumps back as the same text (D65)."""
     instance = model(["5m", "1h"])
@@ -521,7 +572,7 @@ def test_retry_schedule_parses_and_dumps_the_same_delay_text(
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_with_a_non_string_entry_fails(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a non-string delay is a ValidationError, not a TypeError (D65)."""
     with pytest.raises(ValidationError, match="must be a string"):
@@ -530,7 +581,7 @@ def test_retry_schedule_with_a_non_string_entry_fails(
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_with_an_unknown_unit_is_a_validation_error(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a delay outside ``<number><m|h|d>`` fails naming the text (D65)."""
     with pytest.raises(ValidationError, match="5x"):

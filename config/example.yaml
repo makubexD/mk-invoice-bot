@@ -99,6 +99,10 @@ flows:
     label: "Mi empresa (Google)"
     accepted_tipos: ["01", "03"]
     fetchers: [qr_url, portal_registry, sunat_sol, email_inbox, manual]   # a fetcher's final failure passes to the next
+    email_inbox:
+      provider: gmail                   # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
+      account: invoices_a               # the mailbox the fetcher searches (D98)
+      retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [xml]                # pdf is nice-to-have
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
     sinks:
@@ -130,6 +134,10 @@ flows:
     label: "Trabajo (Microsoft)"
     accepted_tipos: ["01"]              # facturas only (BR-R08)
     fetchers: [qr_url, portal_registry, email_inbox, manual]   # no sunat_sol: no access to work RUC
+    email_inbox:
+      provider: graph                   # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
+      account: bot                      # the mailbox the fetcher searches (D98)
+      retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [xml, pdf]
     deliver_without_docs: false
     reimbursement: { cap: 50.00 }       # BR-D06, R-7.13
@@ -168,9 +176,6 @@ flows:
 
 retrieval:
   portal_timeout_s: 120                 # one portal fetch, browser helper included; OCR has its own timeout
-  email_inbox:
-    provider: gmail                     # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
-    retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
   captcha:
     local_ocr_attempts: 2
     ask_user_timeout_s: 300

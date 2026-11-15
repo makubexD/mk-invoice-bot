@@ -332,6 +332,20 @@ class Reimbursement(BaseModel):
     cap: Decimal = Field(gt=0)
 
 
+class FlowInbox(BaseModel):
+    """One flow's invoice mailbox: which provider, which account, how to retry (D98)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: Literal["gmail", "graph"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
+    retry_schedule: tuple[Delay, ...]
+
+
+#: The fetcher name that requires ``Flow.email_inbox`` settings (D98, R-5.2).
+EMAIL_INBOX_FETCHER = "email_inbox"
+
+
 class Flow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -341,14 +355,15 @@ class Flow(BaseModel):
     required_docs: list[str]
     deliver_without_docs: bool
     reimbursement: Reimbursement | None = None
+    email_inbox: FlowInbox | None = None
     sinks: list[Sink]
 
-
-class EmailInbox(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider: Literal["gmail", "graph"]
-    retry_schedule: tuple[Delay, ...]
+    @model_validator(mode="after")
+    def _email_inbox_fetcher_needs_settings(self) -> Self:
+        """D98, R-5.2: a flow that lists the email_inbox fetcher configures that inbox."""
+        if EMAIL_INBOX_FETCHER in self.fetchers and self.email_inbox is None:
+            raise ValueError(f"flow fetchers lists '{EMAIL_INBOX_FETCHER}' without flow.email_inbox settings")
+        return self
 
 
 class PaidSolver(BaseModel):
@@ -385,7 +400,6 @@ class Retrieval(BaseModel):
 
     # Sized for a portal fetch, not for OCR; extraction.helper_timeout_s covers the OCR helper.
     portal_timeout_s: float = Field(gt=0)
-    email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi
 
