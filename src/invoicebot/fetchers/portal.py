@@ -64,13 +64,18 @@ class PortalFetcher:
         return _result_from(output, out_dir, invoice, self._max_bytes, portal.key)
 
     def _portal_for(self, ruc: str) -> Portal | FetchResult:
-        """Return the store's active portal, or the reason there is none (R-5.8)."""
+        """Return the store's usable portal, or why the fetch cannot run (R-5.8, S10.10, D99)."""
         store = self._directory.stores.get(ruc)
-        if store is None or store.portal in (None, MANUAL_PORTAL):
+        if store is None or store.portal is None:
             return FetchResult(FetchReason.NO_PORTAL, (), None)
+        if store.portal == MANUAL_PORTAL:
+            return FetchResult(FetchReason.NO_WEBSITE, (), None)
         portal = self._directory.portals.get(store.portal)
         if portal is None:
             return FetchResult(FetchReason.NO_PORTAL, (), None)
+        if portal.captcha != "none":
+            # shortcut: image captchas wait for S10.3/S10.4 (D99); reported unsolvable until then.
+            return FetchResult(FetchReason.CAPTCHA_UNSOLVABLE, (), portal.key)
         if portal.status != "active":
             return FetchResult(FetchReason.PORTAL_INACTIVE, (), portal.key)
         return portal

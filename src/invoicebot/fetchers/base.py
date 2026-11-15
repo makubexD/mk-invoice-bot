@@ -21,6 +21,16 @@ class FetchReason(StrEnum):
 
     OK = "ok"
     NOT_FOUND_YET = "not_found_yet"
+    #: The source answered and holds no document; final (R-5.4).
+    NOT_FOUND = "not_found"
+    #: The source gave no document URL to request (R-5.4).
+    NO_URL = "no_url"
+    #: The store has no website to fetch from; its portal is manual (S10.10, R-5.4).
+    NO_WEBSITE = "no_website"
+    #: The portal shows a captcha the bot cannot solve (D99, R-5.4).
+    CAPTCHA_UNSOLVABLE = "captcha_unsolvable"
+    #: The source needs credentials the bot does not have (R-5.4).
+    AUTH_REQUIRED = "auth_required"
     NO_PORTAL = "no_portal"
     PORTAL_INACTIVE = "portal_inactive"
     TECHNICAL = "technical"

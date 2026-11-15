@@ -17,6 +17,8 @@ from invoicebot.fetchers.portal import PortalFetcher
 SYNTHETIC_RUC = "20000000001"
 MANUAL_RUC = "20000000002"
 TODO_RUC = "20000000003"
+RECAPTCHA_RUC = "20000000004"
+IMAGE_CAPTCHA_RUC = "20000000005"
 UNKNOWN_RUC = "51900000000"
 SERIE = "F001"
 NUMERO = "123"
@@ -165,18 +167,34 @@ def _store(ruc: str, portal: str | None) -> Store:
 
 
 def _directory() -> StoreDirectory:
-    """Return the synthetic store directory: one active portal, one todo portal."""
+    """Return the synthetic store directory with one portal per fetch outcome."""
     return StoreDirectory(
         stores={
             SYNTHETIC_RUC: _store(SYNTHETIC_RUC, "synthetic"),
             MANUAL_RUC: _store(MANUAL_RUC, "manual"),
             TODO_RUC: _store(TODO_RUC, "todo"),
+            RECAPTCHA_RUC: _store(RECAPTCHA_RUC, "recaptcha"),
+            IMAGE_CAPTCHA_RUC: _store(IMAGE_CAPTCHA_RUC, "image_captcha"),
         },
         portals={
             "synthetic": Portal(
                 key="synthetic", adapter="generic_form", url="https://synthetic.example/", status="active"
             ),
             "todo": Portal(key="todo", adapter="generic_form", url="https://todo.example/", status="todo"),
+            "recaptcha": Portal(
+                key="recaptcha",
+                adapter="generic_form",
+                url="https://recaptcha.example/",
+                status="todo",
+                captcha="recaptcha",
+            ),
+            "image_captcha": Portal(
+                key="image_captcha",
+                adapter="generic_form",
+                url="https://image-captcha.example/",
+                status="active",
+                captcha="image",
+            ),
         },
     )
 
@@ -319,12 +337,42 @@ async def test_fetch_for_a_ruc_without_a_store_has_no_portal(tmp_path: Path) -> 
     assert result.portal_key is None
 
 
-async def test_fetch_for_a_manual_store_has_no_portal(tmp_path: Path) -> None:
-    """R-5.8: a store whose portal is manual has no portal."""
+async def test_fetch_for_a_manual_store_has_no_website(tmp_path: Path) -> None:
+    """R-5.8: a store whose portal is manual is no_website."""
     result = await _fetcher(tmp_path, "match").fetch(_invoice(MANUAL_RUC), tmp_path / OUT_DIR_NAME)
 
-    assert result.reason is FetchReason.NO_PORTAL
+    assert result.reason is FetchReason.NO_WEBSITE
     assert result.portal_key is None
+
+
+async def test_fetch_for_a_manual_store_never_runs_the_helper(tmp_path: Path) -> None:
+    """S10.10, R-5.4: a manual store reports no_website and its helper never runs."""
+    record = tmp_path / "helper_tmp.txt"
+
+    result = await _fetcher(tmp_path, "tmp", extra_args=(str(record),)).fetch(
+        _invoice(MANUAL_RUC), tmp_path / OUT_DIR_NAME
+    )
+
+    assert result.reason is FetchReason.NO_WEBSITE
+    assert not record.exists()
+
+
+async def test_fetch_for_a_recaptcha_portal_is_captcha_unsolvable(tmp_path: Path) -> None:
+    """D99, R-5.4: a captcha portal is captcha_unsolvable with its key, before its todo status."""
+    result = await _fetcher(tmp_path, "match").fetch(_invoice(RECAPTCHA_RUC), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.CAPTCHA_UNSOLVABLE
+    assert result.portal_key == "recaptcha"
+    assert result.files == ()
+
+
+async def test_fetch_for_an_image_captcha_portal_is_captcha_unsolvable(tmp_path: Path) -> None:
+    """D99, R-5.4: an image captcha is unsolvable until S10.3/S10.4, even on an active portal."""
+    result = await _fetcher(tmp_path, "match").fetch(_invoice(IMAGE_CAPTCHA_RUC), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.CAPTCHA_UNSOLVABLE
+    assert result.portal_key == "image_captcha"
+    assert result.files == ()
 
 
 async def test_fetch_for_a_todo_portal_is_inactive(tmp_path: Path) -> None:
