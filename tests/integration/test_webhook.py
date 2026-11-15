@@ -28,6 +28,7 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.signature import sender_hash
 from invoicebot.config.models import Profile
+from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool, create_pool
 
@@ -139,17 +140,20 @@ def _payload(*messages: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _photo_message(sender_number: str, *, message_id: str | None = None) -> dict[str, Any]:
+    """Return one photo message from sender_number."""
+    return {
+        "from": sender_number,
+        "id": message_id or f"wamid.{uuid4().hex}",
+        "timestamp": EPOCH,
+        "type": "image",
+        "image": {"id": f"media-{uuid4().hex}", "mime_type": "image/jpeg", "caption": "boleta"},
+    }
+
+
 def _photo_payload(sender_number: str, *, message_id: str | None = None) -> dict[str, Any]:
     """Return a webhook carrying one photo from sender_number."""
-    return _payload(
-        {
-            "from": sender_number,
-            "id": message_id or f"wamid.{uuid4().hex}",
-            "timestamp": EPOCH,
-            "type": "image",
-            "image": {"id": f"media-{uuid4().hex}", "mime_type": "image/jpeg", "caption": "boleta"},
-        }
-    )
+    return _payload(_photo_message(sender_number, message_id=message_id))
 
 
 def _statuses_payload() -> dict[str, Any]:
@@ -337,6 +341,40 @@ async def test_message_refused_by_database_returns_200(
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
     assert "webhook message refused by the database" in caplog.text
+
+
+async def test_one_refused_message_does_not_drop_the_rest_of_the_batch(
+    db_pool: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-1.8: a message Postgres refuses is skipped and the rest of the batch is stored."""
+    sender = _sender()
+    first_id = f"wamid.{uuid4().hex}"
+    middle_id = f"wamid.{uuid4().hex}"
+    third_id = f"wamid.{uuid4().hex}"
+    body = _body(
+        _payload(
+            _photo_message(sender.number, message_id=first_id),
+            _photo_message(sender.number, message_id=middle_id),
+            _photo_message(sender.number, message_id=third_id),
+        )
+    )
+
+    async def refused(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
+        if msg.external_id == middle_id:
+            raise psycopg.errors.DataError("bad")
+        await handle_inbound(conn, msg, **kwargs)
+
+    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", refused)
+    with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
+        async with _client(_deps(db_pool, sender)) as client:
+            response = await _post(client, body)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert await _counts(db_pool, sender.profile_id) == (2, 2, 2, 2)
+    assert "webhook message refused by the database" in caplog.text
+    assert "bad" not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 async def test_database_operational_error_returns_503(db_pool: Pool, monkeypatch: pytest.MonkeyPatch) -> None:

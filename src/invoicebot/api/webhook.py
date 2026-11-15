@@ -5,8 +5,8 @@ verified over the raw bytes before any JSON parsing, and messages from senders
 outside the profile index are only ever logged through their hash. When
 Postgres is unreachable, or the invoice's state moved under the message, the
 route answers 503 so Meta retries the delivery against the new state (D95). A
-message the database refuses outright is acknowledged with 200, because no
-redelivery can ever store it (R-1.8).
+message the database refuses outright is skipped and the delivery acknowledged
+with 200, because no redelivery can ever store it (R-1.8).
 """
 
 from __future__ import annotations
@@ -93,17 +93,13 @@ def make_router(deps: WebhookDeps) -> APIRouter:
 
 
 async def _intake(deps: WebhookDeps, messages: list[InboundMessage]) -> Response:
-    """Store the messages, mapping a state race or a database error to a response."""
+    """Store the messages, mapping a state race or a transient database error to a response."""
     try:
         await _persist(deps, messages)
     except StateMoved as moved:
         # An expected race (D95): the redelivery applies to the new state.
         logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
         return Response(status_code=503)
-    except psycopg.errors.DataError:
-        # Postgres will never accept it, so Meta must stop redelivering (R-1.8).
-        logger.exception("webhook message refused by the database")
-        return JSONResponse({"status": "ok"})
     except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
         logger.exception("webhook database error")
         return Response(status_code=503)
@@ -135,13 +131,24 @@ def _parse_json(body: bytes) -> dict[str, Any] | None:
 
 
 async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
-    """Handle each message in its own pooled connection and transaction."""
+    """Handle each message in its own pooled connection and transaction.
+
+    A message the database refuses outright is logged and skipped, so the rest
+    of the delivery is still stored (R-1.8). The log names the error type and
+    SQLSTATE only: psycopg's message can echo the refused value.
+    """
     for msg in messages:
-        async with deps.pool.connection() as conn:
-            await handle_inbound(
-                conn,
-                msg,
-                max_queued_per_sender=deps.max_queued_per_sender,
-                timezone=deps.timezone,
-                admins=deps.admin_profiles,
+        try:
+            async with deps.pool.connection() as conn:
+                await handle_inbound(
+                    conn,
+                    msg,
+                    max_queued_per_sender=deps.max_queued_per_sender,
+                    timezone=deps.timezone,
+                    admins=deps.admin_profiles,
+                )
+        except psycopg.errors.DataError as exc:
+            logger.error(
+                "webhook message refused by the database",
+                extra={"error_type": type(exc).__name__, "sqlstate": exc.sqlstate},
             )
