@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 import yaml
 
 from invoicebot.extract.ocr import OcrText, OcrWord
-from invoicebot.extract.ocr_parse import OcrReading, parse_ocr
+from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,7 +48,6 @@ def test_load_rules_config_file_returns_compiled_rules(rules: ParsingRules) -> N
     """S3.6: the checked-in rules load and every pattern is compiled ignoring case."""
     assert rules.ruc
     assert rules.amount_patterns["total"]
-    assert rules.printed_url.flags & re.IGNORECASE
 
 
 def test_load_rules_pattern_without_named_group_raises(tmp_path: Path) -> None:
@@ -194,26 +192,6 @@ def test_parse_ocr_reads_charges_when_printed(rules: ParsingRules) -> None:
 
     assert fields["service_charge"] == "5.00"
     assert fields["icbper"] == "0.50"
-
-
-def test_parse_ocr_printed_url_reduced_to_scheme_host_path(rules: ParsingRules) -> None:
-    """R-2.10: a printed URL keeps only its scheme, host and path, de-duplicated."""
-    text = _ocr(
-        f"RUC {SYNTHETIC_RUC}",
-        "Consulte su documento en https://x.example/p?q=1",
-        "Otra vez en https://x.example/p?q=1.",
-    )
-
-    result: OcrReading = parse_ocr(text, rules)
-
-    assert result.printed_urls == ("https://x.example/p",)
-
-
-def test_parse_ocr_malformed_printed_url_is_dropped(rules: ParsingRules) -> None:
-    """R-2.10: printed text like ``http://[x`` yields no URL and does not raise."""
-    result = parse_ocr(_ocr(f"RUC {SYNTHETIC_RUC}", "Consulte http://[x"), rules)
-
-    assert result.printed_urls == ()
 
 
 def test_parse_ocr_low_confidence_words_lower_field_confidence(rules: ParsingRules) -> None:

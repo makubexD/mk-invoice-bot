@@ -67,7 +67,6 @@ class ParsingRules(BaseModel):
     amount_gap: KeywordPattern
     amount_value: ValuePattern
     amounts: dict[str, tuple[KeywordPattern, ...]]
-    printed_url: ValuePattern
 
     _amount_patterns: dict[str, tuple[re.Pattern[str], ...]] = PrivateAttr()
 

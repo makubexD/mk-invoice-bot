@@ -22,4 +22,3 @@ amounts:   # field -> keywords; the first keyword (in list order) with a match w
   service_charge: ['RECARGO']
   icbper: ['ICBPER']
   discounts: ['DESCUENTOS?']
-printed_url: '(?P<value>https?://[^\s<>"]+)'

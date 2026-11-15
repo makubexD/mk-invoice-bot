@@ -3,8 +3,7 @@
 The rules live in ``config/parsing_rules.yaml`` and are loaded and compiled once by
 :mod:`invoicebot.extract.parsing_rules`. Each field is read from the first matching rule, its
 confidence is the mean confidence of the OCR words its match covers, and ``source`` is ``"ocr"``.
-Printed URLs ride beside the reading because :class:`Reading` has no slot for them. The OCR text
-and the printed URLs are never logged (R-9.16).
+The OCR text is never logged (R-9.16).
 """
 
 from __future__ import annotations
@@ -13,7 +12,6 @@ import itertools
 import re
 from collections.abc import Iterator
 from dataclasses import dataclass
-from urllib.parse import urlsplit, urlunsplit
 
 from invoicebot.extract.fields import Field, Flag, Reading
 from invoicebot.extract.ocr import OcrText
@@ -36,8 +34,6 @@ AMOUNT_SEPARATORS = frozenset(".,")
 AMOUNT_DECIMALS = 2
 AMOUNT_SEPARATOR_OFFSET = AMOUNT_DECIMALS + 1
 AMOUNT_SEPARATORS_PATTERN = re.compile(r"[.,]")
-URL_TRAILING_CHARS = ".,;)"
-MAX_PRINTED_URLS = 3
 NO_CONFIDENCE = 0.0
 #: Most OCR text characters parsed, so a huge read cannot exhaust the helper (R-9.2).
 MAX_OCR_TEXT_CHARS = 64 * 1024
@@ -47,10 +43,9 @@ MAX_MATCHES_PER_RULE = 50
 
 @dataclass(frozen=True)
 class OcrReading:
-    """What the OCR reader produced: the reading and the URLs printed on the document."""
+    """What the OCR reader produced: the reading."""
 
     reading: Reading
-    printed_urls: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -63,7 +58,7 @@ class _WordSpan:
 
 
 def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:
-    """Return the fields and printed URLs read from ``text`` with ``rules`` (S3.6, R-2.3)."""
+    """Return the fields read from ``text`` with ``rules`` (S3.6, R-2.3)."""
     searched, spans = _build_text(text)
     searched = searched[:MAX_OCR_TEXT_CHARS]
     fields: dict[str, Field] = {}
@@ -81,7 +76,7 @@ def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:
         fields["fecha_emision"] = fecha
     fields.update(_read_amounts(searched, spans, rules))
     reading = Reading(fields=fields, document_url=None)
-    return OcrReading(reading=reading, printed_urls=_read_printed_urls(searched, rules))
+    return OcrReading(reading=reading)
 
 
 def _matches(pattern: re.Pattern[str], searched: str) -> Iterator[re.Match[str]]:
@@ -268,26 +263,3 @@ def _normalise_amount(text: str) -> str:
         whole = AMOUNT_SEPARATORS_PATTERN.sub("", compact[:-AMOUNT_SEPARATOR_OFFSET])
         return f"{whole}{AMOUNT_SEPARATOR}{compact[-AMOUNT_DECIMALS:]}"
     return compact
-
-
-def _read_printed_urls(searched: str, rules: ParsingRules) -> tuple[str, ...]:
-    """Return the distinct printed URLs reduced to scheme, host and path, capped at three (R-2.10)."""
-    urls: list[str] = []
-    for match in _matches(rules.printed_url, searched):
-        url = _reduce_url(match.group("value"))
-        if url is None or url in urls:
-            continue
-        urls.append(url)
-        if len(urls) == MAX_PRINTED_URLS:
-            break
-    return tuple(urls)
-
-
-def _reduce_url(value: str) -> str | None:
-    """Return ``value`` without its query, fragment or trailing punctuation, or ``None`` if malformed."""
-    try:
-        parts = urlsplit(value)
-    except ValueError:
-        return None
-    path = parts.path.rstrip(URL_TRAILING_CHARS)
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
