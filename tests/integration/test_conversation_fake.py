@@ -339,7 +339,7 @@ async def test_dni_buyer_picks_a_flow_and_gets_the_summary(
     assert fake.rule_ids() == ["BR-S09", "BR-R03"]
     assert "¿En qué flujo lo registro?" in fake.texts()[-1]
 
-    pressed = _message(profile_id, button_id=button_id(invoice_id, "pick", 1))
+    pressed = _message(profile_id, button_id=fake.sent[-1].buttons[1].id)
     async with db_pool.connection() as conn:
         await handle_inbound(conn, pressed, max_queued_per_sender=MAX_QUEUED)
     await _run_route(db_pool, cfg, invoice_id)
@@ -452,7 +452,7 @@ async def test_parked_question_is_listed_and_resumed_from_pendientes(
     assert fake.rule_ids()[-1] == "BR-R03"
     assert "¿En qué flujo lo registro?" in fake.texts()[-1]
 
-    pressed = _message(profile_id, button_id=button_id(invoice_id, "pick", 1))
+    pressed = _message(profile_id, button_id=fake.sent[-1].buttons[1].id)
     async with db_pool.connection() as conn:
         await handle_inbound(conn, pressed, max_queued_per_sender=MAX_QUEUED)
         assert await _state_rule(conn, invoice_id) == ("ROUTING", "BR-R03")

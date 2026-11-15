@@ -387,7 +387,7 @@ async def test_confirm_button_in_confirming_resolves_to_the_invoice(
         resolved = await resolve_reply(conn, msg, VALID_STATES, {})
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
 
-    assert resolved == ButtonPress(invoice_id, "confirm", None)
+    assert resolved == ButtonPress(invoice_id, "confirm", None, None)
     assert outbox_rows == []
 
 
@@ -400,14 +400,14 @@ async def test_confirm_button_with_choice_resolves_to_the_choice(
     msg = _message(
         profile_id,
         external_id=_external_id(),
-        button_id=f"{invoice_id}:confirm:2",
+        button_id=f"{invoice_id}:confirm:2:0",
     )
 
     async with db_pool.connection() as conn:
         resolved = await resolve_reply(conn, msg, VALID_STATES, {})
         outbox_rows = await _outbox_rows(conn, profile_id, "BR-S02")
 
-    assert resolved == ButtonPress(invoice_id, "confirm", 2)
+    assert resolved == ButtonPress(invoice_id, "confirm", 2, 0)
     assert outbox_rows == []
 
 

@@ -524,11 +524,12 @@ async def test_dni_buyer_asks_which_flow(
     assert rule_id == "BR-R03"
     assert "del DNI 40382716" in text
     assert buttons == [
-        {"id": button_id(invoice_id, "pick", 0), "title": "Mi empresa (Google)"},
-        {"id": button_id(invoice_id, "pick", 1), "title": "Trabajo (Microsoft)"},
+        {"id": button_id(invoice_id, "pick", 0, 0), "title": "Mi empresa (Google)"},
+        {"id": button_id(invoice_id, "pick", 1, 0), "title": "Trabajo (Microsoft)"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
     assert flow_data["choices"] == [OWNER_FLOW, WORK_FLOW]
+    assert flow_data["menu"] == 0
 
 
 async def test_answered_flow_is_routed_to_summary(
@@ -700,11 +701,12 @@ async def test_two_brand_store_with_unknown_serie_asks_brand(
     assert rule_id == "BR-R09"
     assert "Comercio Sintético" in text
     assert buttons == [
-        {"id": button_id(invoice_id, "brand", 0), "title": "Local Uno"},
-        {"id": button_id(invoice_id, "brand", 1), "title": "Local Dos"},
+        {"id": button_id(invoice_id, "brand", 0, 0), "title": "Local Uno"},
+        {"id": button_id(invoice_id, "brand", 1, 0), "title": "Local Dos"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
     assert flow_data["choices"] == ["Local Uno", "Local Dos"]
+    assert flow_data["menu"] == 0
 
 
 async def test_answered_comercio_skips_the_brand_question(
@@ -777,7 +779,7 @@ async def test_stale_answered_flow_is_dropped_and_reasked(
     _text, rule_id, buttons = outbox[0]
     assert rule_id == "BR-R03"
     assert buttons == [
-        {"id": button_id(invoice_id, "pick", 0), "title": "Mi empresa (Google)"},
+        {"id": button_id(invoice_id, "pick", 0, 0), "title": "Mi empresa (Google)"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
 
