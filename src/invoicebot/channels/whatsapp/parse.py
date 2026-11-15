@@ -15,6 +15,7 @@ from typing import Any
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage, SenderRole
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.signature import sender_hash
+from invoicebot.text import replace_unsafe_chars
 
 _MAX_EPOCH_SECONDS = 253402300799  # 9999-12-31T23:59:59Z
 
@@ -104,7 +105,7 @@ def _parse_message(
         external_id=external_id,
         profile_id=profile_id,
         sender_role=_sender_role(profile_id, owner_profile, admin_profiles),
-        text=content.text,
+        text=replace_unsafe_chars(content.text),
         attachments=content.attachments,
         reply_to_external_id=_reply_to(raw),
         button_id=content.button_id,
