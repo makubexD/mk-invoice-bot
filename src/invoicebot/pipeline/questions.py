@@ -1,7 +1,7 @@
 """The questions routing asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06).
 
 Each builder is pure: it returns the es-PE text from the catalog and the buttons that
-carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>]"`` (R-3.5).
+carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R-3.5).
 """
 
 from __future__ import annotations
@@ -49,12 +49,15 @@ def candidate_flows(
 
 
 def flow_question(
-    invoice_id: int, reading: Reading, candidates: Sequence[tuple[str, Flow]]
+    invoice_id: int, reading: Reading, candidates: Sequence[tuple[str, Flow]], menu: int
 ) -> tuple[str, list[Button]]:
-    """Return BR-R03's question, one [pick] button per candidate flow, then [Cancelar]."""
+    """Return BR-R03's question, one [pick] button per candidate flow, then [Cancelar].
+
+    Menu number ``menu`` tells a press on this question apart from one on an older ask (R-3.5).
+    """
     buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
     buttons = [
-        Button(id=button_id(invoice_id, PICK_ACTION, choice), title=flow.label)
+        Button(id=button_id(invoice_id, PICK_ACTION, choice, menu), title=flow.label)
         for choice, (_flow_id, flow) in enumerate(candidates)
     ]
     buttons.append(Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL))
@@ -72,10 +75,13 @@ def buyer_question(invoice_id: int, reading: Reading, flow: Flow) -> tuple[str, 
     return text, buttons
 
 
-def brand_question(invoice_id: int, store: Store) -> tuple[str, list[Button]]:
-    """Return BR-R09's question for the issuer's store, one [brand] button per comercio, then [Cancelar]."""
+def brand_question(invoice_id: int, store: Store, menu: int) -> tuple[str, list[Button]]:
+    """Return BR-R09's question for the issuer's store, one [brand] button per comercio, then [Cancelar].
+
+    Menu number ``menu`` tells a press on this question apart from one on an older ask (R-3.5).
+    """
     buttons = [
-        Button(id=button_id(invoice_id, BRAND_ACTION, choice), title=brand.comercio)
+        Button(id=button_id(invoice_id, BRAND_ACTION, choice, menu), title=brand.comercio)
         for choice, brand in enumerate(store.brands)
     ]
     buttons.append(Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL))

@@ -52,9 +52,9 @@ def _store() -> Store:
 
 def test_flow_question_offers_one_pick_button_per_candidate_then_cancel() -> None:
     """BR-R03: two candidate flows give two pick buttons and a last cancel button."""
-    text, buttons = flow_question(42, _reading(), _candidates())
+    text, buttons = flow_question(42, _reading(), _candidates(), 4)
 
-    assert [button.id for button in buttons] == ["42:pick:0", "42:pick:1", "42:cancel"]
+    assert [button.id for button in buttons] == ["42:pick:0:4", "42:pick:1:4", "42:cancel"]
     assert [button.title for button in buttons] == ["Trabajo", "Personal", "Cancelar"]
     assert "del DNI 20000000002" in text
 
@@ -75,11 +75,27 @@ def test_brand_question_offers_one_brand_button_per_comercio_then_cancel() -> No
     """BR-R09: a two-brand store gets two brand buttons and a last cancel button."""
     store = _store()
 
-    text, buttons = brand_question(9, store)
+    text, buttons = brand_question(9, store, 4)
 
-    assert [button.id for button in buttons] == ["9:brand:0", "9:brand:1", "9:cancel"]
+    assert [button.id for button in buttons] == ["9:brand:0:4", "9:brand:1:4", "9:cancel"]
     assert [button.title for button in buttons] == ["Local Uno", "Local Dos", "Cancelar"]
     assert "Comercio Sintético" in text
+
+
+def test_question_choice_button_ids_carry_the_menu_and_cancel_does_not() -> None:
+    """R-3.5: every choice button id carries the menu, and the cancel id carries none."""
+    menu = 7
+    questions = (
+        flow_question(42, _reading(), _candidates(), menu),
+        brand_question(9, _store(), menu),
+    )
+
+    for _text, buttons in questions:
+        assert buttons[:-1], "a question with choices offers at least one"
+        for button in buttons[:-1]:
+            assert button.id.endswith(f":{menu}")
+        assert buttons[-1].id.endswith(":cancel")
+        assert f":{menu}" not in buttons[-1].id
 
 
 def test_candidate_flows_keeps_config_order() -> None:
