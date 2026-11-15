@@ -1,7 +1,7 @@
 """The ``email_inbox`` fetcher: find an invoice's files in the flow's mailbox (S11.9, R-5.2).
 
-The mailbox is searched by serie; only recent messages with a matching serie-numero
-attachment are looked at. Each XML download is capped and tried in turn, and the first
+The mailbox is searched by serie-numero; only recent messages with a matching
+serie-numero attachment are looked at. Each XML download is capped and tried in turn, and the first
 one that matches the invoice wins. The PDF beside that XML is taken too. The fetcher
 never raises for an expected outcome: a missing mail or a sign-in need is a reason code.
 """
@@ -82,7 +82,7 @@ class EmailInboxFetcher:
 
     async def _fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
         """Search, match and write the files, letting the mailbox's errors escape."""
-        messages = await self._mailbox.search(invoice.serie, SEARCH_TOP)
+        messages = await self._mailbox.search(f"{invoice.serie}-{invoice.numero}", SEARCH_TOP)
         pattern = _name_pattern(invoice)
         match, reason = await self._find_xml(_newest_first(messages, invoice.fecha), invoice, pattern)
         if match is None:
