@@ -4,7 +4,9 @@ The body is untrusted: its size is capped while reading, the signature is
 verified over the raw bytes before any JSON parsing, and messages from senders
 outside the profile index are only ever logged through their hash. When
 Postgres is unreachable, or the invoice's state moved under the message, the
-route answers 503 so Meta retries the delivery against the new state (D95).
+route answers 503 so Meta retries the delivery against the new state (D95). A
+message the database refuses outright is acknowledged with 200, because no
+redelivery can ever store it (R-1.8).
 """
 
 from __future__ import annotations
@@ -83,18 +85,27 @@ def make_router(deps: WebhookDeps) -> APIRouter:
         )
         for digest in dict.fromkeys(parsed.unknown_senders):
             logger.info("ignored sender %s", digest)
-        try:
-            await _persist(deps, parsed.messages)
-        except StateMoved as moved:
-            # An expected race (D95): the redelivery applies to the new state.
-            logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
-            return Response(status_code=503)
-        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
-            logger.exception("webhook database error")
-            return Response(status_code=503)
-        return JSONResponse({"status": "ok"})
+        return await _intake(deps, parsed.messages)
 
     return router
+
+
+async def _intake(deps: WebhookDeps, messages: list[InboundMessage]) -> Response:
+    """Store the messages, mapping a state race or a database error to a response."""
+    try:
+        await _persist(deps, messages)
+    except StateMoved as moved:
+        # An expected race (D95): the redelivery applies to the new state.
+        logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
+        return Response(status_code=503)
+    except psycopg.errors.DataError:
+        # Postgres will never accept it, so Meta must stop redelivering (R-1.8).
+        logger.exception("webhook message refused by the database")
+        return JSONResponse({"status": "ok"})
+    except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
+        logger.exception("webhook database error")
+        return Response(status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 async def _read_body(request: Request) -> bytes | None:

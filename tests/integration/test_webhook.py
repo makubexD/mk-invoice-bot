@@ -19,6 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
+import psycopg
 import pytest
 from fastapi import FastAPI
 from psycopg import AsyncConnection
@@ -316,7 +317,39 @@ async def test_state_moved_during_intake_returns_503(db_pool: Pool, monkeypatch:
     assert response.content == b""
 
 
-async def test_statuses_payload_is_acknowledged_without_storing(db_pool: Pool) -> None:
+async def test_message_refused_by_database_returns_200(
+    db_pool: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-1.8: a message Postgres will never accept is acknowledged so Meta stops redelivering."""
+    sender = _sender()
+
+    async def refused(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
+        raise psycopg.errors.DataError("bad")
+
+    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", refused)
+    with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
+        async with _client(_deps(db_pool, sender)) as client:
+            response = await _post(client, _body(_photo_payload(sender.number)))
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert "webhook message refused by the database" in caplog.text
+
+
+async def test_database_operational_error_returns_503(db_pool: Pool, monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-1.8: a transient database failure still asks Meta to redeliver."""
+    sender = _sender()
+
+    async def down(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
+        raise psycopg.errors.OperationalError("down")
+
+    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", down)
+    async with _client(_deps(db_pool, sender)) as client:
+        response = await _post(client, _body(_photo_payload(sender.number)))
+
+    assert response.status_code == 503
+    assert response.content == b""
+
     """R-1.9: a signed status-only payload returns 200 and stores nothing."""
     sender = _sender()
     async with _client(_deps(db_pool, sender)) as client:
