@@ -941,6 +941,90 @@ async def test_upload_quoting_an_older_invoice_wins_over_the_newest(
     assert newer_jobs == []
 
 
+async def test_ambiguous_upload_asks_which_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102: an unquoted upload with two open invoices lists both and links neither."""
+    profile_id = _profile()
+    older_reading = _reading(await _today(db_pool))
+    older = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", older_reading, rule_id="BR-F07")
+    newer_reading = _reading(await _today(db_pool))
+    newer = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", newer_reading, rule_id="BR-F07")
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+
+    expected = MESSAGES["BR-D14"].format(
+        invoices=(
+            f"#{newer} {newer_reading.value('serie')}-{newer_reading.value('numero')}, "
+            f"#{older} {older_reading.value('serie')}-{older_reading.value('numero')}"
+        )
+    )
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert replies == [(expected, "BR-D14")]
+    assert older_jobs == []
+    assert newer_jobs == []
+
+
+async def test_ambiguous_upload_quoting_one_invoice_links_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: quoting one of several open invoices links that invoice, not BR-D14."""
+    profile_id = _profile()
+    older = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    newer = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    source = _message(profile_id, external_id=_external_id(), text="aquí van sus archivos")
+    async with db_pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, source) is True
+        await link_message_to_invoice(conn, source.channel, source.external_id, older)
+
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        attachments=[_upload("pdf")],
+        reply_to_external_id=source.external_id,
+    )
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+
+    assert result.invoice_id == older
+    assert replies == []
+    assert older_jobs == [ATTACH_STEP]
+    assert newer_jobs == []
+
+
+async def test_single_open_invoice_still_links_without_a_quote(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5, D102: with one open invoice an unquoted upload still links to it and asks nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.invoice_id == invoice_id
+    assert replies == []
+    assert jobs == [ATTACH_STEP]
+
+
 async def test_another_profiles_invoice_is_never_matched(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

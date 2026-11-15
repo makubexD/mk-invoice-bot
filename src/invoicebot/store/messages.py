@@ -6,6 +6,7 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
 from invoicebot.channels.base import ChannelName, InboundMessage
+from invoicebot.extract.fields import reading_from_json
 
 # The states in which R-1.5 accepts a document for an invoice.
 # shortcut: D101 — CONFIRMING joins when read-more lands.
@@ -50,11 +51,12 @@ async def link_message_to_invoice(
 async def find_open_invoice_for_attachment(
     conn: AsyncConnection[Any], profile_id: str, reply_to: tuple[ChannelName, str] | None
 ) -> int | None:
-    """Find the invoice a document from profile_id belongs to (R-1.5).
+    """Find the invoice a document from profile_id belongs to (R-1.5, D102).
 
     The quoted invoice wins when it is still open and belongs to the same
-    profile; otherwise the profile's most recent open invoice does, on any
-    channel. A quoted invoice of another profile never matches.
+    profile, on any channel. Without a resolved quote, the profile's open
+    invoice matches only when it is the only one: with several open invoices
+    nothing is guessed and ``None`` is returned so the sender can be asked.
     """
     if reply_to is not None:
         channel, external_id = reply_to
@@ -73,15 +75,36 @@ async def find_open_invoice_for_attachment(
         row = await cur.fetchone()
         if row is not None:
             return int(row[0])
+    invoices = await list_open_invoices(conn, profile_id)
+    return invoices[0][0] if len(invoices) == 1 else None
+
+
+async def list_open_invoices(
+    conn: AsyncConnection[Any], profile_id: str
+) -> list[tuple[int, str | None, str | None]]:
+    """Return the profile's open invoices as ``(id, serie, numero)``, newest first (D102).
+
+    ``serie`` and ``numero`` come from each invoice's stored reading and are
+    ``None`` when the invoice has no reading or the reading lacks that field.
+    The caller owns the transaction; this function never commits.
+    """
     cur = await conn.execute(
         """
-        SELECT id
+        SELECT id, fields_json
         FROM invoices
         WHERE profile_id = %s AND state = ANY(%s)
         ORDER BY created_at DESC, id DESC
-        LIMIT 1
         """,
         (profile_id, list(OPEN_STATES)),
     )
-    row = await cur.fetchone()
-    return None if row is None else int(row[0])
+    invoices: list[tuple[int, str | None, str | None]] = []
+    for invoice_id, fields_json in await cur.fetchall():
+        reading = None if fields_json is None else reading_from_json(fields_json)
+        invoices.append(
+            (
+                int(invoice_id),
+                None if reading is None else reading.value("serie"),
+                None if reading is None else reading.value("numero"),
+            )
+        )
+    return invoices

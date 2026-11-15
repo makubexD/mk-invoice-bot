@@ -26,6 +26,7 @@ from invoicebot.store.invoices import count_active_jobs, create_invoice, touch_w
 from invoicebot.store.messages import (
     find_open_invoice_for_attachment,
     link_message_to_invoice,
+    list_open_invoices,
     store_inbound,
 )
 
@@ -33,6 +34,8 @@ from invoicebot.store.messages import (
 RULE_BACK_PRESSURE = "BR-S01"
 #: Rule that acknowledges a queued invoice (BR-S09).
 RULE_ACK = "BR-S09"
+#: Rule that asks which open invoice an ambiguous upload belongs to (BR-D14).
+RULE_AMBIGUOUS_UPLOAD = "BR-D14"
 #: Job step that downloads a photo before extraction (R-1.4).
 DOWNLOAD_STEP = "download_media"
 #: Advisory-lock namespace that serialises one profile's intake (R-1.6, PT-2).
@@ -155,21 +158,41 @@ async def _store_with_overrides(
 
 
 async def _link_upload(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
-    """Link a pdf/xml upload to the stuck invoice it belongs to (R-1.5, S7.5).
+    """Link a pdf/xml upload to the stuck invoice it belongs to (R-1.5, S7.5, D102).
 
-    The invoice is the one the message quotes, else the profile's newest open
-    one. The link and the ``attach_upload`` job join the caller's transaction;
-    no invoice (or another attachment kind) links nothing.
+    The invoice is the one the message quotes, else the profile's only open
+    one. With several open invoices and no resolved quote nothing is linked:
+    BR-D14 lists them and asks the sender to reply to the right photo. The
+    link, the reply and the ``attach_upload`` job join the caller's
+    transaction; no invoice (or another attachment kind) links nothing.
     """
     if not any(attachment.kind in UPLOAD_KINDS for attachment in msg.attachments):
         return None
     reply_to = None if msg.reply_to_external_id is None else (msg.channel, msg.reply_to_external_id)
     invoice_id = await find_open_invoice_for_attachment(conn, msg.profile_id, reply_to)
     if invoice_id is None:
+        await _ask_which_invoice(conn, msg)
         return None
     await link_message_to_invoice(conn, msg.channel, msg.external_id, invoice_id)
     await enqueue(conn, invoice_id, ATTACH_STEP)
     return invoice_id
+
+
+async def _ask_which_invoice(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
+    """Queue BR-D14 when the sender has more than one open invoice to choose from (D102)."""
+    open_invoices = await list_open_invoices(conn, msg.profile_id)
+    if len(open_invoices) <= 1:
+        return
+    invoices = ", ".join(_invoice_label(*invoice) for invoice in open_invoices)
+    text = MESSAGES[RULE_AMBIGUOUS_UPLOAD].format(invoices=invoices)
+    await _add_outbox(conn, msg, RULE_AMBIGUOUS_UPLOAD, text)
+
+
+def _invoice_label(invoice_id: int, serie: str | None, numero: str | None) -> str:
+    """Return ``#{id} {serie}-{numero}``, or ``#{id}`` when either field is missing (BR-D14)."""
+    if serie is None or numero is None:
+        return f"#{invoice_id}"
+    return f"#{invoice_id} {serie}-{numero}"
 
 
 async def _add_outbox(
