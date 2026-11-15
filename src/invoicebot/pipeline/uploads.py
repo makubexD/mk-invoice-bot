@@ -2,12 +2,12 @@
 
 :func:`make_attach_handler` builds the handler of the ``attach_upload`` job step. It acts
 on a ``MANUAL_REQUIRED`` invoice only (D101): each linked PDF or XML the flow lets a sender
-upload is downloaded, an XML is checked like a fetched one (R-5.6), and the kept files are
-stored with their media ref in one transaction. A rejected upload is answered once and its
-media ref recorded, so a later job neither fetches nor answers it again (D103). When every
-required document is present the invoice moves to ``DELIVERING`` with its deliver job;
-otherwise BR-D09 says what is still missing. A run that stores nothing records its
-rejections and leaves the invoice in ``MANUAL_REQUIRED``.
+upload is downloaded, a PDF must carry a PDF header (BR-D15), an XML is checked like a
+fetched one (R-5.6), and the kept files are stored with their media ref in one transaction. A
+rejected upload is answered once and its media ref recorded, so a later job neither fetches
+nor answers it again (D103). When every required document is present the invoice moves to
+``DELIVERING`` with its deliver job; otherwise BR-D09 says what is still missing. A run that
+stores nothing records its rejections and leaves the invoice in ``MANUAL_REQUIRED``.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from invoicebot.channels.whatsapp.media import DownloadedMedia, MediaChecksumMis
 from invoicebot.config.models import Config, Flow, MediaLimits
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
+from invoicebot.fetchers.base import is_pdf
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.intake import UPLOAD_KINDS
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -64,6 +65,8 @@ logger = logging.getLogger(__name__)
 RULE_XML_INVALID = "BR-F09"
 #: BR-F06's reply when an uploaded XML is not this invoice's.
 RULE_XML_MISMATCH = "BR-F06"
+#: BR-D15's reply when an uploaded PDF does not start with a PDF header.
+RULE_PDF_INVALID = "BR-D15"
 #: BR-D09's reply while a required document is still missing.
 RULE_MISSING_DOCS = "BR-D09"
 
@@ -162,7 +165,7 @@ async def _collect(
     out_dir: Path,
     limits: MediaLimits,
 ) -> _Outcome:
-    """Download each allowed upload and keep the ones that pass the XML checks (R-1.5, R-5.6)."""
+    """Download each allowed upload and keep the ones that pass its checks (R-1.5, R-5.6, BR-D15)."""
     kept: list[FileRecord] = []
     stored_kinds: list[str] = []
     replies: list[_Rejection] = []
@@ -176,7 +179,7 @@ async def _collect(
         media = await _download(client, upload, out_dir, limits, inputs.job.invoice_id)
         if media is None:
             continue
-        rejection = await _xml_rejection(media, upload, inputs)
+        rejection = await _rejection(media, upload, inputs)
         if rejection is not None:
             _discard(media)
             replies.append(rejection)
@@ -216,6 +219,23 @@ async def _download(
             extra={"invoice_id": invoice_id, "type": type(exc).__name__},
         )
         return None
+
+
+async def _rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:
+    """Return the reply for an upload that is not kept, or None (BR-F06, BR-F09, BR-D15)."""
+    if upload.kind == "xml":
+        return await _xml_rejection(media, upload, inputs)
+    if upload.kind == "pdf":
+        return await _pdf_rejection(media, upload)
+    return None
+
+
+async def _pdf_rejection(media: DownloadedMedia, upload: Attachment) -> _Rejection | None:
+    """Return the reply for a PDF without a PDF header, or None (BR-D15)."""
+    data = await asyncio.to_thread(media.path.read_bytes)
+    if is_pdf(data):
+        return None
+    return _Rejection(upload.media_ref, RULE_PDF_INVALID, MESSAGES["BR-D15"])
 
 
 async def _xml_rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:

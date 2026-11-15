@@ -28,7 +28,7 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.jobs import Job
-from invoicebot.rules.messages_es import UPLOAD_XML_INVALID, UPLOAD_XML_MISMATCH
+from invoicebot.rules.messages_es import MESSAGES, UPLOAD_XML_INVALID, UPLOAD_XML_MISMATCH
 from invoicebot.store.invoices import (
     FileKind,
     FileRecord,
@@ -403,6 +403,32 @@ async def test_xml_with_a_doctype_replies_br_f09(
     assert state == "MANUAL_REQUIRED"
     assert files == []
     assert outbox == [(UPLOAD_XML_INVALID, "BR-F09")]
+
+
+async def test_html_uploaded_as_a_pdf_replies_br_d15_and_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D103, BR-D15: an HTML body uploaded as a pdf is removed and answered once, none stored."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    html_bytes = b"<!doctype html><html><body>synthetic</body></html>"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, html_bytes, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {media_ref: (MIME["pdf"], html_bytes)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == [(MESSAGES["BR-D15"], "BR-D15")]
 
 
 async def test_xlsx_attachment_is_ignored(
