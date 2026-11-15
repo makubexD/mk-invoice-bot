@@ -658,3 +658,30 @@ def test_config_with_invalid_profile_id_fails(tmp_path: Path, profile_id: str) -
     """D93: a profile id outside the natural-key pattern fails at load."""
     with pytest.raises(ValidationError, match="profiles"):
         load_config(_config_with_profile(tmp_path, profile_id))
+
+
+def test_example_config_declares_each_flows_manual_uploads() -> None:
+    """R-1.5: each flow declares the file kinds a sender may upload, in preference order."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.flows["personal_google"].manual_uploads == ["xml", "pdf"]
+    assert cfg.flows["work_microsoft"].manual_uploads == ["pdf", "xml"]
+
+
+def test_flow_with_an_unsupported_manual_upload_fails(tmp_path: Path) -> None:
+    """R-1.5: a sender may upload only a PDF or an XML, so a spreadsheet is refused at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["manual_uploads"] = ["xlsx"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="manual_uploads"):
+        load_config(path)
+
+
+def test_flow_without_manual_uploads_defaults_to_empty(tmp_path: Path) -> None:
+    """R-1.5: a flow that names no manual uploads accepts none by default."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["manual_uploads"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).flows["personal_google"].manual_uploads == []

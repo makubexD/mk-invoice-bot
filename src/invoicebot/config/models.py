@@ -353,6 +353,8 @@ class Flow(BaseModel):
     accepted_tipos: list[str]
     fetchers: list[str]
     required_docs: list[str]
+    #: R-1.5, D66: the file kinds a sender may upload by hand, in preference order.
+    manual_uploads: list[Literal["pdf", "xml"]] = Field(default_factory=list)
     deliver_without_docs: bool
     reimbursement: Reimbursement | None = None
     email_inbox: FlowInbox | None = None

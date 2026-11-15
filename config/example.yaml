@@ -104,6 +104,7 @@ flows:
       account: invoices_a               # the mailbox the fetcher searches (D98)
       retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [xml]                # pdf is nice-to-have
+    manual_uploads: [xml, pdf]          # what a sender may upload by hand, in preference order (R-1.5, D66)
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
     sinks:
       - kind: google_drive
@@ -139,6 +140,7 @@ flows:
       account: bot                      # the mailbox the fetcher searches (D98)
       retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [xml, pdf]
+    manual_uploads: [pdf, xml]          # what a sender may upload by hand, in preference order (R-1.5, D66)
     deliver_without_docs: false
     reimbursement: { cap: 50.00 }       # BR-D06, R-7.13
     sinks:
