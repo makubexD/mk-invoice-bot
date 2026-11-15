@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    StringConstraints,
     field_validator,
     model_validator,
 )
@@ -494,6 +495,10 @@ class Limits(BaseModel):
     per_domain_min_interval_s: int
 
 
+#: D93: a profile id is the natural key, so it cannot carry the ``|`` the key encodes.
+PROFILE_ID_PATTERN = r"^[a-z0-9_-]+$"
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -502,7 +507,7 @@ class Config(BaseModel):
     env: Literal["development", "production"]
     mail: Mail
     microsoft: Microsoft
-    profiles: dict[str, Profile]
+    profiles: dict[Annotated[str, StringConstraints(pattern=PROFILE_ID_PATTERN)], Profile]
     channels: list[Channel]
     sunat: Sunat
     extraction: Extraction

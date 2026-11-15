@@ -584,3 +584,25 @@ def test_whatsapp_template_language_rejects_a_dashed_locale() -> None:
 def test_whatsapp_template_language_defaults_to_es_pe() -> None:
     """R-9.6: a channel with no template_language sends templates in Spanish (Peru)."""
     assert _whatsapp_channel().template_language == "es_PE"
+
+
+def _config_with_profile(tmp_path: Path, profile_id: str) -> Path:
+    """Write the example config with its profiles replaced by one keyed by ``profile_id``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["profiles"] = {profile_id: document["profiles"]["yo"]}
+    return _write_yaml(tmp_path / "example.yaml", document)
+
+
+@pytest.mark.parametrize("profile_id", ["owner", "maku_2"])
+def test_config_with_valid_profile_id_loads(tmp_path: Path, profile_id: str) -> None:
+    """D93: a profile id of lowercase letters, digits, ``_`` or ``-`` is the natural key."""
+    cfg = load_config(_config_with_profile(tmp_path, profile_id))
+
+    assert list(cfg.profiles) == [profile_id]
+
+
+@pytest.mark.parametrize("profile_id", ["a|b", "Ana", ""])
+def test_config_with_invalid_profile_id_fails(tmp_path: Path, profile_id: str) -> None:
+    """D93: a profile id outside the natural-key pattern fails at load."""
+    with pytest.raises(ValidationError, match="profiles"):
+        load_config(_config_with_profile(tmp_path, profile_id))
