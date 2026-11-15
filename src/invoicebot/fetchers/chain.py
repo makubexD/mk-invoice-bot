@@ -1,7 +1,7 @@
 """The fetcher chain decision: which fetcher runs next, and when (D65).
 
 Pure: there is no clock and no I/O. ``decide`` reads the attempt history and
-says whether to run a fetcher, wait after a ``not_found_yet``, stop, or move on;
+says whether to run a fetcher, wait after a wait reason, stop, or move on;
 the queue's ``run_after`` holds the actual time.
 """
 
@@ -12,6 +12,9 @@ from dataclasses import dataclass
 from datetime import timedelta
 
 from invoicebot.fetchers.base import FetchReason
+
+#: Reasons after which a fetcher waits for its next scheduled retry instead of ending (D65, D100).
+WAIT_REASONS = frozenset({FetchReason.NOT_FOUND_YET, FetchReason.AUTH_REQUIRED})
 
 
 @dataclass(frozen=True)
@@ -31,7 +34,7 @@ class Run:
 
 @dataclass(frozen=True)
 class Wait:
-    """Run this fetcher again: its latest try was not found yet and its scheduled retry is now due (D65)."""
+    """Run this fetcher again: its latest try was a wait reason and its retry is due (D65, D100)."""
 
     fetcher: str
 
@@ -61,7 +64,7 @@ def decide(
 
     Walks ``order`` keeping only registered fetchers. A fetcher with no attempt
     runs; one whose latest attempt is ``ok`` is done; one whose latest attempt
-    is ``not_found_yet`` waits on its schedule until it is used up; any other
+    is in ``WAIT_REASONS`` waits on its schedule until it is used up; any other
     reason is final and the next fetcher gets its turn.
     """
     for fetcher in order:
@@ -85,7 +88,7 @@ def _decide_one(
     latest = history[-1].reason
     if latest is FetchReason.OK:
         return Done(fetcher)
-    if latest is FetchReason.NOT_FOUND_YET:
+    if latest in WAIT_REASONS:
         return _wait_or_none(fetcher, history, schedule_for)
     return None
 
@@ -95,10 +98,10 @@ def _wait_or_none(
     history: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
 ) -> Wait | None:
-    """Wait after the latest ``not_found_yet``, or ``None`` if ``retry_delay`` queued no retry (D65).
+    """Wait after the latest wait reason, or ``None`` if ``retry_delay`` queued no retry (D65, D100).
 
     ``retry_delay`` is the one rule: it is asked about the history without the
-    run that produced the latest ``not_found_yet``.
+    run that produced the latest wait reason.
     """
     if retry_delay(fetcher, history[:-1], schedule_for(fetcher)) is None:
         return None
@@ -110,14 +113,10 @@ def retry_delay(
     attempts: Sequence[Attempt],
     schedule: Sequence[timedelta],
 ) -> timedelta | None:
-    """Return the wait after this ``not_found_yet``, or ``None`` when retries are used up (D65).
+    """Return the wait after this wait reason, or ``None`` when retries are used up (D65, D100).
 
-    ``n`` counts this fetcher's ``not_found_yet`` attempts so far, so the first one
-    waits ``schedule[0]``.
+    ``n`` counts this fetcher's attempts whose reason is in ``WAIT_REASONS`` so far,
+    so the first one waits ``schedule[0]``.
     """
-    retries = sum(
-        1
-        for attempt in attempts
-        if attempt.fetcher == fetcher and attempt.reason is FetchReason.NOT_FOUND_YET
-    )
+    retries = sum(1 for attempt in attempts if attempt.fetcher == fetcher and attempt.reason in WAIT_REASONS)
     return schedule[retries] if retries < len(schedule) else None

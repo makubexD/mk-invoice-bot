@@ -273,6 +273,29 @@ def test_document_with_unsupported_mime_has_no_attachment(index: ProfileIndex) -
     assert message.text == ""
 
 
+def test_text_nul_is_replaced_with_a_space(index: ProfileIndex) -> None:
+    """R-12.8: a NUL in the text body becomes a space so the text can be stored."""
+    message = _only(_parse(_payload(_message(text={"body": "ho\x00la"})), index))
+
+    assert message.text == "ho la"
+
+
+def test_image_caption_drops_bidi_override(index: ProfileIndex) -> None:
+    """R-12.8: a bidi override in an image caption becomes a space."""
+    image = {"id": "MEDIA1", "mime_type": "image/jpeg", "caption": "hola\u202emundo"}
+    message = _only(_parse(_payload(_message(message_type="image", image=image)), index))
+
+    assert message.text == "hola mundo"
+    assert "\u202e" not in message.text
+
+
+def test_plain_text_is_unchanged(index: ProfileIndex) -> None:
+    """R-12.8: text without unsafe characters is kept as sent."""
+    message = _only(_parse(_payload(_message(text={"body": "hola"})), index))
+
+    assert message.text == "hola"
+
+
 def test_malformed_messages_are_skipped(index: ProfileIndex) -> None:
     """R-1.9: a non-numeric timestamp and a non-dict message are skipped without raising."""
     payload = _payload(

@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button
+from invoicebot.channels.whatsapp.payloads import MENU_MAX
 from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
@@ -117,6 +118,8 @@ class _Step:
     flow_id: str | None = None
     #: What a question's buttons offer, in button order, stored for its answer (BR-R03, BR-R09).
     choices: tuple[str, ...] = ()
+    #: The menu number the question's choice buttons carry, stored with ``choices`` (R-3.5).
+    menu: int | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +134,7 @@ class _Decision:
     answers: Mapping[str, Any]
     directory: StoreDirectory
     today: date
+    menu: int
 
 
 def make_route_handler(
@@ -161,6 +165,7 @@ def make_route_handler(
             raise RuntimeError(f"invoice {job.invoice_id} has an unknown profile")
         raw_answers = flow_data.get("answers")
         answers: Mapping[str, Any] = raw_answers if isinstance(raw_answers, dict) else {}
+        menu = _next_menu(flow_data)
         async with pool.connection() as conn, conn.transaction():
             # An edit that committed a newer route job leaves this run nothing to do (D95).
             await lock_invoice(conn, job.invoice_id)
@@ -181,6 +186,7 @@ def make_route_handler(
                         answers=answers,
                         directory=directory,
                         today=today,
+                        menu=menu,
                     )
                 )
                 await _write(conn, invoice, job.invoice_id, step)
@@ -200,24 +206,10 @@ def make_route_handler(
 
 def _decide(decision: _Decision) -> _Step:
     """Run D92's ordered checks and return the write they decide (S4.3, S4.4, BR-R09)."""
-    resolved = _resolve_flow(
-        decision.reading,
-        decision.profile,
-        decision.cfg,
-        decision.rules,
-        decision.answers,
-        decision.invoice_id,
-    )
+    resolved = _resolve_flow(decision)
     if isinstance(resolved, _Step):
         return resolved
-    buyer = _buyer_check(
-        decision.reading,
-        resolved,
-        decision.profile,
-        decision.cfg,
-        decision.answers,
-        decision.invoice_id,
-    )
+    buyer = _buyer_check(decision, resolved)
     if buyer is not None:
         return buyer
     summary = _summary(
@@ -229,59 +221,57 @@ def _decide(decision: _Decision) -> _Step:
     cap = _cap_check(decision.reading, resolved, decision.answers, decision.invoice_id, summary)
     if cap is not None:
         return cap
-    brand = _brand_check(
-        decision.reading,
-        decision.answers,
-        decision.directory,
-        decision.invoice_id,
-        resolved.flow_id,
-    )
+    brand = _brand_check(decision, resolved.flow_id)
     if brand is not None:
         return brand
     return _Step("route", resolved.rule_id, summary, flow_id=resolved.flow_id)
 
 
-def _resolve_flow(
-    reading: Reading,
-    profile: Profile,
-    cfg: Config,
-    rules: tuple[CompiledRule, ...],
-    answers: Mapping[str, Any],
-    invoice_id: int,
-) -> _Resolved | _Step:
+def _resolve_flow(decision: _Decision) -> _Resolved | _Step:
     """Run D92's first check: the stored answer or the router (BR-R03, BR-R07, refusals).
 
     A stored ``answers.flow`` that is no longer a candidate is dropped, so the router runs
     again and the question is re-asked.
     """
-    answer = answers.get("flow")
+    reading = decision.reading
+    answer = decision.answers.get("flow")
     if isinstance(answer, str):
-        for flow_id, flow in candidate_flows(profile.flows, cfg.flows, reading.value("tipo") or ""):
+        for flow_id, flow in candidate_flows(
+            decision.profile.flows, decision.cfg.flows, reading.value("tipo") or ""
+        ):
             if flow_id == answer:
                 return _Resolved(flow_id=flow_id, flow=flow, rule_id=RULE_ASK)
-    result = route(reading, profile.flows, rules, cfg.flows, cfg.routing.unmatched)
+    result = route(
+        reading,
+        decision.profile.flows,
+        decision.rules,
+        decision.cfg.flows,
+        decision.cfg.routing.unmatched,
+    )
     if result.rule in REFUSALS:
-        refused_flow = None if result.flow is None else cfg.flows[result.flow]
+        refused_flow = None if result.flow is None else decision.cfg.flows[result.flow]
         return _Step("cancel", result.rule, _refusal(result.rule, reading, refused_flow))
     if result.rule == RULE_ASK:
-        candidates = candidate_flows(profile.flows, cfg.flows, reading.value("tipo") or "")
+        candidates = candidate_flows(decision.profile.flows, decision.cfg.flows, reading.value("tipo") or "")
         if not candidates:
             return _Step("cancel", RULE_UNMATCHED, _refusal(RULE_UNMATCHED, reading, None))
-        text, buttons = flow_question(invoice_id, reading, candidates)
-        return _Step("ask", RULE_ASK, text, buttons, choices=tuple(flow_id for flow_id, _ in candidates))
+        text, buttons = flow_question(decision.invoice_id, reading, candidates, decision.menu)
+        return _Step(
+            "ask",
+            RULE_ASK,
+            text,
+            buttons,
+            choices=tuple(flow_id for flow_id, _ in candidates),
+            menu=decision.menu,
+        )
     return _Resolved(
-        flow_id=cast(str, result.flow), flow=cfg.flows[cast(str, result.flow)], rule_id=result.rule
+        flow_id=cast(str, result.flow),
+        flow=decision.cfg.flows[cast(str, result.flow)],
+        rule_id=result.rule,
     )
 
 
-def _buyer_check(
-    reading: Reading,
-    resolved: _Resolved,
-    profile: Profile,
-    cfg: Config,
-    answers: Mapping[str, Any],
-    invoice_id: int,
-) -> _Step | None:
+def _buyer_check(decision: _Decision, resolved: _Resolved) -> _Step | None:
     """Run D92's second check: BR-R04 for a doubtful buyer, BR-R03 when it was refused (S4.4).
 
     A flow the sender picked in the BR-R03 menu needs no buyer check: they chose it knowing
@@ -289,13 +279,22 @@ def _buyer_check(
     """
     if resolved.rule_id == RULE_ASK:
         return None
-    buyer_ok = answers.get("buyer_ok")
+    buyer_ok = decision.answers.get("buyer_ok")
     if buyer_ok is False:
-        candidates = candidate_flows(profile.flows, cfg.flows, reading.value("tipo") or "")
-        text, buttons = flow_question(invoice_id, reading, candidates)
-        return _Step("ask", RULE_ASK, text, buttons, choices=tuple(flow_id for flow_id, _ in candidates))
-    if buyer_ok is None and _doubtful_buyer(reading, cfg.extraction.review_threshold):
-        text, buttons = buyer_question(invoice_id, reading, resolved.flow)
+        candidates = candidate_flows(
+            decision.profile.flows, decision.cfg.flows, decision.reading.value("tipo") or ""
+        )
+        text, buttons = flow_question(decision.invoice_id, decision.reading, candidates, decision.menu)
+        return _Step(
+            "ask",
+            RULE_ASK,
+            text,
+            buttons,
+            choices=tuple(flow_id for flow_id, _ in candidates),
+            menu=decision.menu,
+        )
+    if buyer_ok is None and _doubtful_buyer(decision.reading, decision.cfg.extraction.review_threshold):
+        text, buttons = buyer_question(decision.invoice_id, decision.reading, resolved.flow)
         return _Step("ask_flow", RULE_BUYER, text, buttons, resolved.flow_id)
     return None
 
@@ -317,26 +316,21 @@ def _cap_check(
     return _Step("ask_flow", RULE_CAP, f"{summary}\n{text}", buttons, resolved.flow_id)
 
 
-def _brand_check(
-    reading: Reading,
-    answers: Mapping[str, Any],
-    directory: StoreDirectory,
-    invoice_id: int,
-    flow_id: str,
-) -> _Step | None:
+def _brand_check(decision: _Decision, flow_id: str) -> _Step | None:
     """Run D92's fourth check: BR-R09 for a multi-brand store with no serie match (BR-R09).
 
     The issuer's store is the one delivery looks up. A stored ``answers.comercio`` that is
     not one of its brands is dropped, so the question is asked again.
     """
-    store = directory.stores.get(reading.value("ruc_emisor") or "")
-    comercio = answers.get("comercio")
+    reading = decision.reading
+    store = decision.directory.stores.get(reading.value("ruc_emisor") or "")
+    comercio = decision.answers.get("comercio")
     if isinstance(comercio, str) and store is not None and any(b.comercio == comercio for b in store.brands):
         return None
     serie = reading.value("serie") or ""
     razon_social = reading.value("razon_social") or ""
     if store is not None and len(store.brands) > 1 and comercio_for(store, serie, razon_social) is None:
-        text, buttons = brand_question(invoice_id, store)
+        text, buttons = brand_question(decision.invoice_id, store, decision.menu)
         return _Step(
             "ask_flow",
             RULE_BRAND,
@@ -344,6 +338,7 @@ def _brand_check(
             buttons,
             flow_id,
             choices=tuple(brand.comercio for brand in store.brands),
+            menu=decision.menu,
         )
     return None
 
@@ -403,9 +398,22 @@ async def _write(
         await _routed(conn, invoice, invoice_id, step.rule_id, step.text)
     else:
         if step.choices:
-            await merge_flow_data(conn, invoice_id, {"choices": list(step.choices)})
+            await merge_flow_data(conn, invoice_id, {"choices": list(step.choices), "menu": step.menu})
         await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text, step.buttons)
+
+
+def _next_menu(flow_data: Mapping[str, Any]) -> int:
+    """Return the menu number of the question about to be asked (R-3.5).
+
+    It is the stored menu plus one, so a press on an older menu is recognisably stale; an
+    invoice that has not asked yet, or whose stored menu is not an int, starts at 0. It
+    wraps after ``MENU_MAX`` so the button id stays valid.
+    """
+    menu = flow_data.get("menu")
+    if isinstance(menu, bool) or not isinstance(menu, int):
+        return 0
+    return (menu + 1) % (MENU_MAX + 1)
 
 
 async def _today(conn: AsyncConnection[Any], timezone: str) -> date:

@@ -73,6 +73,8 @@ RULES: dict[str, Rule] = {
     "BR-D11": Rule("BR-D11", None, "BR-D11"),
     "BR-D12": Rule("BR-D12", None, "BR-D12"),
     "BR-D13": Rule("BR-D13", "DONE", "BR-D13"),
+    "BR-D14": Rule("BR-D14", None, "BR-D14"),
+    "BR-D15": Rule("BR-D15", None, "BR-D15"),
     "BR-P01": Rule("BR-P01", None, "BR-P01"),
     "BR-P02": Rule("BR-P02", None, "BR-P02"),
     "BR-P03": Rule("BR-P03", None, "BR-P03"),

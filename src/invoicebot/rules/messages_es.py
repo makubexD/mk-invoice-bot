@@ -88,7 +88,9 @@ MESSAGES: dict[str, str] = {
     "BR-D01": (
         "Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar."
     ),
-    "BR-D01_admin": "🔑 Reautoriza {provider}: ejecuta scripts/auth_{provider}.py",
+    "BR-D01_admin": (
+        "🔑 Reautoriza {provider} ({account}): ejecuta scripts/auth_{provider}.py --account {account}"
+    ),
     "BR-D02": (
         "No pude llenar la plantilla de Excel (configuración incompleta). "
         "Ya avisé para corregirlo; reintento automáticamente."
@@ -116,6 +118,11 @@ MESSAGES: dict[str, str] = {
         "💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. "
         "Saldrá cuando la enciendas."
     ),
+    "BR-D14": (
+        "Tienes varios comprobantes esperando archivos: {invoices}. "
+        "Vuelve a enviar el archivo respondiendo a la foto del comprobante."
+    ),
+    "BR-D15": "El archivo que enviaste no es un PDF válido; no lo guardé.",
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?",
@@ -275,8 +282,22 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
 
 #: Status line while a portal has not published the invoice yet (D65).
 FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar más tarde."
+#: Status line while the invoice's mailbox has not received it yet (D100).
+FETCH_WAITING_MAIL = "⏳ Comprobante #{id}: esperando correo del comercio. Lo vuelvo a buscar más tarde."
 #: One BR-F07 bullet for a fetcher whose last reason has no BR-F text of its own.
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
+#: BR-F07 bullet: the store has no known portal to fetch from (S7.4).
+FETCH_NO_PORTAL_LINE = "• Portal del comercio: no lo conozco"
+#: BR-F07 bullet: the store's portal is configured but not implemented yet (S7.4).
+FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
+#: BR-F07 bullet: the fetcher failed for a technical reason or a timeout (S7.4).
+FETCH_TECHNICAL_LINE = "• {fetcher}: falló por un error técnico"
+#: BR-F07 bullet: the mailbox needs a new sign-in, which the owner was already told (S7.4).
+FETCH_AUTH_LINE = "• Correo: el buzón necesita reconectarse; ya avisé al administrador"
+#: BR-F11's ``{comercio}`` when the store directory does not know the issuer (BR-F07).
+STORE_FALLBACK = "el comercio"
+#: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
+STORE_FALLBACK_OF = "del comercio"
 #: es-PE names of the fetchers, used in BR-F07's bullets.
 FETCHER_DESC: dict[str, str] = {
     "qr_url": "Enlace del QR",
@@ -286,6 +307,10 @@ FETCHER_DESC: dict[str, str] = {
 }
 #: es-PE names of the required document kinds, used in BR-F07's ``{manual_docs_desc}``.
 DOC_DESC: dict[str, str] = {"pdf": "el PDF", "xml": "el XML"}
+#: Reply to an uploaded XML that is unsafe or invalid (BR-F09, D101).
+UPLOAD_XML_INVALID = "El XML que enviaste no es válido; no lo guardé."
+#: Reply to an uploaded XML that is not the invoice it was sent for (BR-F06, D101).
+UPLOAD_XML_MISMATCH = "El XML que enviaste no corresponde a {serie}-{numero}; no lo guardé."
 
 
 def fetcher_desc(name: str) -> str:

@@ -9,7 +9,7 @@ import asyncio
 import logging
 import os
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from functools import partial
 
@@ -18,15 +18,28 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
-from invoicebot.auth.providers import build_token_provider, scopes_for
+from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, scopes_for
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, OneDriveFolderSink, StoreDirectory, WhatsAppChannel
+from invoicebot.config.models import (
+    EMAIL_INBOX_FETCHER,
+    Config,
+    Flow,
+    OneDriveFolderSink,
+    StoreDirectory,
+    WhatsAppChannel,
+)
 from invoicebot.extract.parsing_rules import load_rules
+from invoicebot.fetchers.base import Fetcher
+from invoicebot.fetchers.email_inbox import EmailInboxFetcher
+from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
+from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
 from invoicebot.logging import configure_logging
+from invoicebot.net.guard import SystemResolver
+from invoicebot.net.http import GuardedTransport
 from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
@@ -34,6 +47,8 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
@@ -49,6 +64,8 @@ logger = logging.getLogger(__name__)
 DbPing = Callable[[], Awaitable[bool]]
 Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 TaskFactory = Callable[[], Awaitable[None]]
+#: Builds one flow's instance of a fetcher, or ``None`` when the flow cannot use it (S7.1).
+_FetcherBuilder = Callable[[str, Flow], Fetcher | None]
 
 #: Secrets the WhatsApp channel declares (R-9.10).
 WHATSAPP_ADAPTER = "whatsapp"
@@ -128,7 +145,20 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing) or ["channel config"])
         yield
         return
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http:
+    async with (
+        httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http,
+        httpx.AsyncClient(
+            transport=GuardedTransport(
+                # A pinned request reaches httpcore by IP, so a pooled connection would carry an
+                # earlier host's TLS check to another host on the same IP (R-5.10). HTTP/2 must
+                # stay off for the same reason: one h2 connection multiplexes hosts on an IP.
+                httpx.AsyncHTTPTransport(limits=httpx.Limits(max_keepalive_connections=0)),
+                SystemResolver(),
+            ),
+            follow_redirects=False,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        ) as guarded_http,
+    ):
         client = WhatsAppClient(
             http,
             phone_number_id=channel.phone_number_id,
@@ -136,11 +166,6 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             token=secrets.get("whatsapp_token"),
         )
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
-        registry = {
-            PORTAL_FETCHER: PortalFetcher(
-                directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s
-            )
-        }
         handlers = {
             DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
             EXTRACT_STEP: make_extract_handler(
@@ -150,7 +175,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 settings.parsing_rules_path,
             ),
             ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
-            FETCH_STEP: make_fetch_handler(pool, cfg, directory, registry, settings.data_dir),
+            FETCH_STEP: make_fetch_handler(
+                pool,
+                cfg,
+                directory,
+                _fetch_registries(settings, cfg, directory, guarded_http, http),
+                settings.data_dir,
+            ),
+            ATTACH_STEP: make_attach_handler(pool, cfg, client, settings.data_dir, cfg.limits.media),
         }
         deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
         if deliver_handler is not None:
@@ -186,6 +218,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
         admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
+        timezone=cfg.owner.timezone,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
@@ -224,6 +257,76 @@ def _deliver_handler(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer))
     return make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir)
+
+
+def _fetch_registries(
+    settings: Settings,
+    cfg: Config,
+    directory: StoreDirectory,
+    guarded_http: httpx.AsyncClient,
+    graph_http: httpx.AsyncClient,
+) -> dict[str, dict[str, Fetcher]]:
+    """Return each flow's fetcher registry, sharing one instance where it can (S7.1, D98)."""
+    builders = _fetcher_builders(settings, cfg, directory, guarded_http, graph_http)
+    return {name: _flow_registry(name, flow, builders) for name, flow in cfg.flows.items()}
+
+
+def _fetcher_builders(
+    settings: Settings,
+    cfg: Config,
+    directory: StoreDirectory,
+    guarded_http: httpx.AsyncClient,
+    graph_http: httpx.AsyncClient,
+) -> dict[str, _FetcherBuilder]:
+    """Return a builder per fetcher this build runs; adding a fetcher adds an entry (S7.1)."""
+    portal = PortalFetcher(directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
+    qr_url = QrUrlFetcher(
+        guarded_http,
+        allowed_hosts(directory),
+        cfg.limits.media.max_bytes,
+        cfg.retrieval.portal_timeout_s,
+    )
+    return {
+        PORTAL_FETCHER: lambda _name, _flow: portal,
+        QR_URL_FETCHER: lambda _name, _flow: qr_url,
+        EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, graph_http),
+    }
+
+
+def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:
+    """Return the fetchers ``flow`` lists that this build can run, in config order (S7.1, D98)."""
+    registry: dict[str, Fetcher] = {}
+    for fetcher_name in flow.fetchers:
+        builder = builders.get(fetcher_name)
+        if builder is None:
+            continue
+        fetcher = builder(name, flow)
+        if fetcher is not None:
+            registry[fetcher_name] = fetcher
+    return registry
+
+
+def _email_inbox_fetcher(
+    name: str,
+    flow: Flow,
+    settings: Settings,
+    cfg: Config,
+    http: httpx.AsyncClient,
+) -> Fetcher | None:
+    """Return the flow's Graph mailbox fetcher, or ``None`` with a warning when it cannot run (D98)."""
+    inbox = flow.email_inbox
+    if inbox is None:
+        reason = "the flow has no email_inbox settings"
+    elif inbox.provider != GRAPH_MODE:
+        reason = f"provider {inbox.provider} is not supported"
+    elif settings.age_identity_path is None:
+        reason = "AGE_IDENTITY_PATH is not set"
+    else:
+        provider = build_token_provider(settings, cfg, inbox.account, scopes_for(cfg, inbox.account))
+        mailbox = GraphMailbox(http, provider, inbox.account, cfg.microsoft.timeout_s)
+        return EmailInboxFetcher(mailbox, cfg.limits.media.max_bytes)
+    logger.warning("email_inbox fetcher disabled", extra={"flow": name, "reason": reason})
+    return None
 
 
 async def _send_forever(sender: OutboxSender) -> None:

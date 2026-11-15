@@ -6,7 +6,8 @@ build-backend = "hatchling.build"
 name = "mk-invoice-bot"
 version = "0.1.0"
 description = "Invoice processing bot"
-requires-python = ">=3.12"
+# The address guard relies on the ipaddress.is_private fixes in 3.12.4 (CVE-2024-4032).
+requires-python = ">=3.12.4"
 dependencies = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.32",

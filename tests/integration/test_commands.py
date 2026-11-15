@@ -5,10 +5,11 @@ real Postgres; every test uses its own profile, so no outbox row leaks between t
 """
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, cast
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from psycopg import AsyncConnection
@@ -51,6 +52,8 @@ from invoicebot.store.invoices import (
 )
 
 MAX_QUEUED = 10
+#: The owner's timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 #: An id no test creates, so BR-S07's unknown-id answer is deterministic.
 UNKNOWN_INVOICE_ID = 999_999_999
 #: The stored question text a BR-R03 invoice's ``/estado`` repeats (S4.9).
@@ -137,6 +140,24 @@ async def _question(
             invoice_id=invoice_id,
             rule_id=rule_id,
             buttons=buttons,
+        )
+
+
+async def _backdate_questions(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    *,
+    minutes: int = 11,
+) -> None:
+    """Move the invoice's outbox rows back in time so /pendientes may re-send a question (S4.8, D94)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            UPDATE outbox
+            SET created_at = created_at - make_interval(mins => %s)
+            WHERE invoice_id = %s
+            """,
+            (minutes, invoice_id),
         )
 
 
@@ -266,7 +287,7 @@ async def test_ayuda_replies_with_the_command_list(
     msg = _message(profile_id, "/ayuda")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -282,7 +303,7 @@ async def test_uppercase_command_is_the_same_command(
     msg = _message(profile_id, "/AYUDA")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert replies == [(_help(), None)]
@@ -296,7 +317,7 @@ async def test_unknown_command_answers_with_the_help(
     msg = _message(profile_id, "/foo")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -420,7 +441,7 @@ async def test_estado_repeats_the_rule_and_its_last_question(
     expected = f"{expected}\n{STATUS_RULE.format(rule_id='BR-R03', text=QUESTION_TEXT)}"
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -437,7 +458,7 @@ async def test_estado_without_a_rule_shows_only_the_state(
     expected = STATUS.format(id=invoice_id, state_desc=state_desc("FETCHING_DOCS"))
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert replies == [(expected, None)]
@@ -454,7 +475,7 @@ async def test_estado_with_a_rule_but_no_stored_text_shows_the_reason(
     expected = f"{expected}\n{STATUS_RULE_ONLY.format(rule_id='BR-R04')}"
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert replies == [(expected, None)]
@@ -470,7 +491,7 @@ async def test_estado_on_another_profiles_invoice_answers_br_s07(
     msg = _message(sender_profile, f"/estado {invoice_id}")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, sender_profile)
 
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
@@ -485,7 +506,7 @@ async def test_cancelar_cancels_a_confirming_invoice(
     msg = _message(profile_id, f"/cancelar {invoice_id}")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -507,7 +528,7 @@ async def test_cancelar_on_a_batched_invoice_is_late(
     expected = CANCEL_LATE.format(id=invoice_id, state_desc=state_desc("BATCHED"))
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -547,7 +568,7 @@ async def test_reprocesar_on_failed_with_a_flow_refetches(
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -568,7 +589,7 @@ async def test_reprocesar_on_manual_required_refetches(
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -589,7 +610,7 @@ async def test_reprocesar_on_a_failed_batch_redelivers(
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -613,7 +634,7 @@ async def test_reprocesar_on_done_is_not_allowed(
     expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("DONE"))
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -635,7 +656,7 @@ async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
     expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("FAILED"))
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -659,7 +680,7 @@ async def test_cancel_and_reprocess_on_another_profiles_invoice_answer_br_s07(
     msg = _message(sender_profile, f"/{command} {invoice_id}")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, sender_profile)
@@ -679,7 +700,7 @@ async def test_pendientes_with_nothing_waiting_answers_pending_none(
     msg = _message(profile_id, "/pendientes")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -698,6 +719,7 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
         Button(id=f"{invoice_id}:cancel", title=BUTTON_CANCEL),
     ]
     await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT, buttons)
+    await _backdate_questions(db_pool, invoice_id)
     msg = _message(profile_id, "/pendientes")
     line = PENDING_LINE.format(
         id=invoice_id,
@@ -708,7 +730,7 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     expected = f"{PENDING_HEADER}\n{line}"
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
         payloads = await _invoice_payloads(conn, invoice_id)
 
@@ -723,6 +745,39 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     assert requeued["text"] == original["text"]
 
 
+async def test_pendientes_requeues_a_question_at_most_every_ten_minutes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.8, D94: /pendientes re-sends a parked question once, but not again within 10 minutes."""
+    profile_id = _profile()
+    invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
+    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
+        first = await _invoice_payloads(conn, invoice_id)
+        await handle_inbound(
+            conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
+        second = await _invoice_payloads(conn, invoice_id)
+
+    assert [payload.get("rule_id") for payload in first] == ["BR-R03", "BR-R03"]
+    assert second == first
+
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
+        third = await _invoice_payloads(conn, invoice_id)
+
+    assert [payload.get("rule_id") for payload in third] == ["BR-R03", "BR-R03", "BR-R03"]
+
+
 async def test_pendientes_lists_a_prepared_batch_older_than_the_reminder(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -734,14 +789,42 @@ async def test_pendientes_lists_a_prepared_batch_older_than_the_reminder(
     msg = _message(profile_id, "/pendientes")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
-        prepared_at = await _updated_at(conn, invoice_id)
+        prepared_at = (await _updated_at(conn, invoice_id)).astimezone(ZoneInfo(TIMEZONE)).date()
 
     line = PENDING_BATCH_LINE.format(
         id=invoice_id,
         issuer="Ferretería El Sol",
         prepared_at=prepared_at,
+    )
+    assert result.status == "stored"
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_lists_a_prepared_batch_in_the_owner_timezone(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S11.4: a batch prepared at 03:30 UTC lists the previous day in America/Lima."""
+    profile_id = _profile()
+    invoice_id = await _prepared_invoice(
+        db_pool, profile_id, days=3, razon_social="Ferretería El Sol", total=Decimal("45.50")
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE invoices SET updated_at = %s WHERE id = %s",
+            (datetime(2024, 11, 14, 3, 30, tzinfo=UTC), invoice_id),
+        )
+    msg = _message(profile_id, "/pendientes")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+
+    line = PENDING_BATCH_LINE.format(
+        id=invoice_id,
+        issuer="Ferretería El Sol",
+        prepared_at=date(2024, 11, 13),
     )
     assert result.status == "stored"
     assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
@@ -758,7 +841,7 @@ async def test_pendientes_skips_a_prepared_batch_inside_the_reminder(
     msg = _message(profile_id, "/pendientes")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -775,7 +858,7 @@ async def test_pendientes_skips_another_profiles_invoices(
     msg = _message(profile_id, "/pendientes")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
@@ -801,7 +884,7 @@ async def test_pendientes_caps_the_list_and_counts_the_rest(
     expected = "\n".join([PENDING_HEADER, *lines, PENDING_MORE.format(count=5)])
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"

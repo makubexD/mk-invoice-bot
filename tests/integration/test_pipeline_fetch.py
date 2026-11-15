@@ -21,7 +21,8 @@ from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import FETCH_WAITING
+from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL
+from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
 
@@ -111,10 +112,11 @@ class FakeFetcher:
         self.reason = reason
         self.kinds = kinds
         self.calls = 0
+        self.invoices: list[FetchInvoice] = []
 
     async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
         self.calls += 1
-        del invoice
+        self.invoices.append(invoice)
         if self.reason is not FetchReason.OK:
             _written(out_dir, "pdf", PDF_BYTES)
             return FetchResult(self.reason, (), PORTAL_KEY)
@@ -210,7 +212,7 @@ def _handler(
         pool,
         _config(),
         _directory(),
-        {"portal_registry": fetcher},
+        {FLOW: {"portal_registry": fetcher}},
         data_dir,
     )
 
@@ -370,7 +372,7 @@ async def test_ok_without_a_required_document_records_missing_docs_and_chains(
         db_pool,
         _config(("portal_registry", "manual")),
         _directory(),
-        {"portal_registry": first, "manual": second},
+        {FLOW: {"portal_registry": first, "manual": second}},
         tmp_path,
     )
 
@@ -430,7 +432,9 @@ async def test_not_found_yet_with_an_empty_retry_schedule_schedules_at_once_and_
     directory = _directory()
     portal = directory.portals[PORTAL_KEY].model_copy(update={"retry_schedule": ()})
     directory = directory.model_copy(update={"portals": {PORTAL_KEY: portal}})
-    handler = make_fetch_handler(db_pool, _config(), directory, {"portal_registry": fetcher}, tmp_path)
+    handler = make_fetch_handler(
+        db_pool, _config(), directory, {FLOW: {"portal_registry": fetcher}}, tmp_path
+    )
 
     await handler(_job(invoice_id))
 
@@ -528,6 +532,30 @@ async def test_run_that_leaves_fetching_after_its_fetch_removes_its_folder(
     handler = _handler(db_pool, fetcher, tmp_path)
 
     await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    out_root = tmp_path / "tmp" / str(invoice_id)
+    assert not out_root.exists() or not any(out_root.rglob("*"))
+    assert attempts == []
+    assert files == []
+
+
+async def test_commit_that_raises_after_the_fetch_removes_its_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-9.2: a fetch whose commit raises (here StateMoved) rolls back and leaves no files."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    handler = _handler(db_pool, FakeFetcher(FetchReason.OK), tmp_path)
+
+    async def moved(conn: AsyncConnection[Any], invoice_id: int, state: str, **kwargs: Any) -> None:
+        raise StateMoved(invoice_id, kwargs.get("expected"), "DELIVERING")
+
+    monkeypatch.setattr("invoicebot.pipeline.fetch.set_state", moved)
+    with pytest.raises(StateMoved):
+        await handler(_job(invoice_id))
 
     async with db_pool.connection() as conn:
         attempts = await _attempts(conn, invoice_id)
@@ -652,3 +680,134 @@ async def test_invoice_outside_fetching_docs_is_left_alone(
     assert attempts == []
     assert jobs == []
     assert outbox == []
+
+
+async def test_flow_registry_missing_a_listed_fetcher_skips_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """S7.1, S11.9, D100: a fetcher the flow lists but its registry lacks is skipped."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("email_inbox", "portal_registry")),
+        _directory(),
+        {FLOW: {"portal_registry": fetcher}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        attempts = await _attempts(conn, invoice_id)
+    assert fetcher.calls == 1
+    assert attempts == [("portal_registry", PORTAL_KEY, False, "not_found_yet")]
+
+
+async def test_inbox_second_not_found_yet_retries_in_1h(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """S7.1, S11.9, D100: the inbox's second wait uses its flow schedule's 1 h delay."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = make_fetch_handler(
+        db_pool, _config(("email_inbox",)), _directory(), {FLOW: {"email_inbox": fetcher}}, tmp_path
+    )
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+
+    await handler(_job(invoice_id, retry_job_id))
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT max(run_after) - now() FROM jobs WHERE invoice_id = %s AND step = %s",
+            (invoice_id, FETCH_STEP),
+        )
+        row = await cur.fetchone()
+    assert fetcher.calls == 2
+    assert row is not None
+    assert MINUTES_55 <= row[0].total_seconds() / 60 <= MINUTES_65
+
+
+async def test_inbox_first_wait_says_waiting_for_mail_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """S7.1, S11.9, D100: each fetcher's first wait sends its own text, once."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    portal = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    inbox = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    directory = _directory()
+    portal_cfg = directory.portals[PORTAL_KEY].model_copy(update={"retry_schedule": ["1h"]})
+    directory = directory.model_copy(update={"portals": {PORTAL_KEY: portal_cfg}})
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("portal_registry", "email_inbox")),
+        directory,
+        {FLOW: {"portal_registry": portal, "email_inbox": inbox}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        second_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    # The portal's one retry is spent; its second wait has no delay and says nothing.
+    await handler(_job(invoice_id, second_job_id))
+    async with db_pool.connection() as conn:
+        third_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, third_job_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    texts = [text for text, _rule_id in outbox]
+    assert texts.count(FETCH_WAITING.format(id=invoice_id)) == 1
+    assert texts.count(FETCH_WAITING_MAIL.format(id=invoice_id)) == 1
+
+
+async def test_inbox_auth_required_alerts_admins_once_and_retries(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """S7.1, S11.9, D100: an inbox auth_required alerts each admin once and schedules the next try."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.AUTH_REQUIRED)
+    cfg = _config(("email_inbox",))
+    handler = make_fetch_handler(db_pool, cfg, _directory(), {FLOW: {"email_inbox": fetcher}}, tmp_path)
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, retry_job_id))
+
+    async with db_pool.connection() as conn:
+        alerts = {
+            admin_id: [text for text, rule_id in await _outbox(conn, admin_id) if rule_id == "BR-D01_admin"]
+            for admin_id, profile in cfg.profiles.items()
+            if profile.admin
+        }
+        cur = await conn.execute(
+            "SELECT max(run_after) - now() FROM jobs WHERE invoice_id = %s AND step = %s",
+            (invoice_id, FETCH_STEP),
+        )
+        row = await cur.fetchone()
+    assert {admin_id: len(texts) for admin_id, texts in alerts.items()} == {"yo": 1}
+    assert "--account bot" in alerts["yo"][0]
+    assert row is not None
+    assert row[0].total_seconds() > 0
+
+
+async def test_reading_document_url_reaches_the_fetcher(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """S7.1, S11.9, D100: the reading's document_url reaches the fetcher's FetchInvoice."""
+    profile_id = f"fetch-{uuid4().hex}"
+    reading = Reading(fields=_reading().fields, document_url="https://example.test/comprobante")
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=reading)
+    fetcher = FakeFetcher(FetchReason.OK)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path)
+
+    assert fetcher.invoices[0].document_url == "https://example.test/comprobante"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -74,10 +75,20 @@ PREPARED_REMIND_DAYS = 2
 MAX_PENDING_LINES = 20
 #: How many parked questions ``/pendientes`` sends again in one answer (S4.8).
 PENDING_REQUEUES = 3
+#: The least time between two sends of the same parked question (S4.8, D94).
+PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 
-#: A command applied in the caller's transaction: its connection, sender, argument and
-#: the admin profile ids (R-10.1).
-type Handler = Callable[[AsyncConnection[Any], InboundMessage, str, frozenset[str]], Awaitable[None]]
+
+@dataclass(frozen=True)
+class CommandContext:
+    """What a command needs beyond its message: the admin profile ids and the owner timezone."""
+
+    admins: frozenset[str]
+    timezone: str
+
+
+#: A command applied in the caller's transaction: its connection, sender, argument and context.
+type Handler = Callable[[AsyncConnection[Any], InboundMessage, str, CommandContext], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -109,14 +120,14 @@ async def handle_command(
     name: str,
     arg: str,
     *,
-    admins: frozenset[str],
+    context: CommandContext,
 ) -> None:
     """Run the named command in the caller's transaction; an unknown name answers the help."""
     command = COMMANDS.get(name)
     if command is None:
         await _reply(conn, msg, None, help_text())
         return
-    await command.handler(conn, msg, arg, admins)
+    await command.handler(conn, msg, arg, context)
 
 
 async def resolve_target(
@@ -160,7 +171,7 @@ async def _ayuda(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     _arg: str,
-    _admins: frozenset[str],
+    _context: CommandContext,
 ) -> None:
     """Answer with every command and what it does (R-10.1)."""
     await _reply(conn, msg, None, help_text())
@@ -170,7 +181,7 @@ async def _estado(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     arg: str,
-    admins: frozenset[str],
+    context: CommandContext,
 ) -> None:
     """Answer with the invoice's state and, when it waits on a rule, that rule's last text.
 
@@ -178,7 +189,7 @@ async def _estado(
     second line names the rule and repeats its newest stored question, or just the rule
     when the invoice has no stored text (S4.9, R-11.1).
     """
-    target = await resolve_target(conn, msg, "estado", arg, admins)
+    target = await resolve_target(conn, msg, "estado", arg, context.admins)
     if target is None:
         return
     invoice_id, _head = target
@@ -202,10 +213,10 @@ async def _cancelar(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     arg: str,
-    admins: frozenset[str],
+    context: CommandContext,
 ) -> None:
     """Cancel the named invoice when its state is CANCELLABLE, or explain why not (S4.9, D96)."""
-    target = await resolve_target(conn, msg, "cancelar", arg, admins)
+    target = await resolve_target(conn, msg, "cancelar", arg, context.admins)
     if target is None:
         return
     invoice_id, head = target
@@ -220,10 +231,10 @@ async def _reprocesar(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     arg: str,
-    admins: frozenset[str],
+    context: CommandContext,
 ) -> None:
     """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96)."""
-    target = await resolve_target(conn, msg, "reprocesar", arg, admins)
+    target = await resolve_target(conn, msg, "reprocesar", arg, context.admins)
     if target is None:
         return
     invoice_id, head = target
@@ -265,13 +276,14 @@ async def _pendientes(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     _arg: str,
-    _admins: frozenset[str],
+    context: CommandContext,
 ) -> None:
     """List what waits on the sender and send their parked questions again (S4.8, S4.9, S11.4).
 
     Only the sender's own invoices are listed; a parked row shows the state it was
     waiting in (D94). The first :data:`PENDING_REQUEUES` parked invoices get their
-    question sent again with the same buttons, so a lapsed question comes back.
+    question sent again with the same buttons, so a lapsed question comes back, but
+    one sent within :data:`PENDING_REQUEUE_INTERVAL` is not repeated (S4.8).
     """
     rows, total = await list_pending(
         conn,
@@ -279,6 +291,7 @@ async def _pendientes(
         limit=MAX_PENDING_LINES,
         remind_days=PREPARED_REMIND_DAYS,
         prepared_batch_state=PREPARED_BATCH_STATE,
+        timezone=context.timezone,
     )
     if not rows:
         await _reply(conn, msg, None, PENDING_NONE)
@@ -294,8 +307,6 @@ def _pending_line(row: PendingRow) -> str:
     """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
     issuer = row.razon_social or PENDING_NO_ISSUER
     if row.state == BATCHED:
-        # shortcut: prepared_at is the database session's date, not the owner's timezone,
-        # so late evenings in Lima show the next day; commands get no timezone yet.
         return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
     total = "—" if row.total is None else f"{row.total:.2f}"
     state = row.waiting_state if row.state == PENDING_USER and row.waiting_state else row.state
@@ -315,7 +326,7 @@ async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) ->
             return
         if row.state != PENDING_USER or row.waiting_rule_id is None:
             continue
-        await outbox.requeue_last(conn, row.id, row.waiting_rule_id)
+        await outbox.requeue_last(conn, row.id, row.waiting_rule_id, PENDING_REQUEUE_INTERVAL)
         requeued += 1
 
 

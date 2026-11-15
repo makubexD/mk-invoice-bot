@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    StringConstraints,
     field_validator,
     model_validator,
 )
@@ -331,6 +332,20 @@ class Reimbursement(BaseModel):
     cap: Decimal = Field(gt=0)
 
 
+class FlowInbox(BaseModel):
+    """One flow's invoice mailbox: which provider, which account, how to retry (D98)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    provider: Literal["gmail", "graph"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
+    retry_schedule: tuple[Delay, ...]
+
+
+#: The fetcher name that requires ``Flow.email_inbox`` settings (D98, R-5.2).
+EMAIL_INBOX_FETCHER = "email_inbox"
+
+
 class Flow(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -338,16 +353,19 @@ class Flow(BaseModel):
     accepted_tipos: list[str]
     fetchers: list[str]
     required_docs: list[str]
+    #: R-1.5, D66: the file kinds a sender may upload by hand, in preference order.
+    manual_uploads: list[Literal["pdf", "xml"]] = Field(default_factory=list)
     deliver_without_docs: bool
     reimbursement: Reimbursement | None = None
+    email_inbox: FlowInbox | None = None
     sinks: list[Sink]
 
-
-class EmailInbox(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    provider: Literal["gmail", "graph"]
-    retry_schedule: tuple[Delay, ...]
+    @model_validator(mode="after")
+    def _email_inbox_fetcher_needs_settings(self) -> Self:
+        """D98, R-5.2: a flow that lists the email_inbox fetcher configures that inbox."""
+        if EMAIL_INBOX_FETCHER in self.fetchers and self.email_inbox is None:
+            raise ValueError(f"flow fetchers lists '{EMAIL_INBOX_FETCHER}' without flow.email_inbox settings")
+        return self
 
 
 class PaidSolver(BaseModel):
@@ -375,23 +393,25 @@ class PaidApi(BaseModel):
 #: The worker's job lease; a portal fetch must end before it (R-5.1).
 JOB_LEASE_S = 300
 
+#: The margin a portal fetch keeps below the lease, so its result is recorded in time (R-5.1).
+JOB_LEASE_MARGIN_S = 30
+
 
 class Retrieval(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # Sized for a portal fetch, not for OCR; extraction.helper_timeout_s covers the OCR helper.
     portal_timeout_s: float = Field(gt=0)
-    email_inbox: EmailInbox
     captcha: Captcha
     paid_api: PaidApi
 
     @model_validator(mode="after")
     def _portal_fetch_fits_in_job_lease(self) -> Self:
-        """R-5.1: a portal fetch must end before the job lease expires."""
-        if self.portal_timeout_s >= JOB_LEASE_S:
+        """R-5.1: a portal fetch must end at least the margin before the job lease expires."""
+        if self.portal_timeout_s + JOB_LEASE_MARGIN_S > JOB_LEASE_S:
             raise ValueError(
-                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) must be less than "
-                f"the job lease ({JOB_LEASE_S}s)"
+                f"retrieval.portal_timeout_s ({self.portal_timeout_s}) plus the margin "
+                f"({JOB_LEASE_MARGIN_S}s) must not exceed the job lease ({JOB_LEASE_S}s)"
             )
         return self
 
@@ -494,6 +514,10 @@ class Limits(BaseModel):
     per_domain_min_interval_s: int
 
 
+#: D93: a profile id is the natural key, so it cannot carry the ``|`` the key encodes.
+PROFILE_ID_PATTERN = r"^[a-z0-9_-]+$"
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -502,7 +526,7 @@ class Config(BaseModel):
     env: Literal["development", "production"]
     mail: Mail
     microsoft: Microsoft
-    profiles: dict[str, Profile]
+    profiles: dict[Annotated[str, StringConstraints(pattern=PROFILE_ID_PATTERN)], Profile]
     channels: list[Channel]
     sunat: Sunat
     extraction: Extraction

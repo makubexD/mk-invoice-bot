@@ -14,6 +14,7 @@ database clock.
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, cast
 
 from psycopg import AsyncConnection
@@ -108,25 +109,39 @@ async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -
     return str(row[0])
 
 
-async def requeue_last(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> bool:
+async def requeue_last(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    rule_id: str,
+    min_interval: timedelta,
+) -> bool:
     """Queue the invoice's newest message for rule_id again, returning whether it did.
 
     ``/pendientes`` sends a parked question again with the same channel, recipient and
     payload, buttons included, as a new pending row in the caller's transaction
     (S4.8, D94). An invoice with no stored message for the rule queues nothing, so a
-    missing question is never invented. Does not commit.
+    missing question is never invented; one sent within ``min_interval`` is not sent
+    again, measured on the database clock. Does not commit.
     """
     cur = await conn.execute(
         """
         INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
         SELECT channel, "to", payload_json, template, 'pending', invoice_id
-        FROM outbox
-        WHERE invoice_id = %(invoice_id)s
-          AND payload_json->>'rule_id' = %(rule_id)s
-        ORDER BY id DESC
-        LIMIT 1
+        FROM (
+            SELECT channel, "to", payload_json, template, invoice_id, created_at
+            FROM outbox
+            WHERE invoice_id = %(invoice_id)s
+              AND payload_json->>'rule_id' = %(rule_id)s
+            ORDER BY id DESC
+            LIMIT 1
+        ) AS newest
+        WHERE newest.created_at <= now() - %(min_interval)s
         """,
-        {"invoice_id": invoice_id, "rule_id": rule_id},
+        {
+            "invoice_id": invoice_id,
+            "rule_id": rule_id,
+            "min_interval": min_interval,
+        },
     )
     return cur.rowcount == 1
 

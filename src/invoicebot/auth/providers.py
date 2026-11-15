@@ -10,16 +10,22 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from invoicebot.auth.msal_cache import TokenProvider
-from invoicebot.config.models import Config, MailerSink
+from invoicebot.config.models import Config, MailerSink, OneDriveFolderSink
 from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
 
-#: The scopes every account signs in with: token refresh and OneDrive writes (R-7.9).
-BASE_SCOPES = ("offline_access", "Files.ReadWrite")
+#: The scopes every account signs in with: token refresh only (R-7.9).
+BASE_SCOPES = ("offline_access",)
+#: Reading and writing the invoice files in the account's OneDrive (R-7.9).
+FILES_SCOPE = "Files.ReadWrite"
+#: Reading the invoice mailbox a flow's ``email_inbox`` fetcher searches (R-6.5, D98).
+MAIL_READ_SCOPE = "Mail.Read"
 #: The scope the invoice email needs; only a Graph mailer from the account adds it (R-7.9).
 MAIL_SEND_SCOPE = "Mail.Send"
-#: The mail mode that sends through Graph (R-7.6).
+#: The mailer mode and inbox provider that talk to Graph (R-7.6, R-6.5).
 GRAPH_MODE = "graph"
+#: OneDrive storage targets name their account with this prefix (R-7.1, D98).
+ONEDRIVE_TARGET_PREFIX = "onedrive_"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
 
@@ -46,13 +52,57 @@ def build_token_provider(
     )
 
 
-def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
-    """Return the scopes the account needs; add ``Mail.Send`` only for a Graph mailer (R-7.9)."""
-    scopes = list(BASE_SCOPES)
-    if any(
-        isinstance(sink, MailerSink) and sink.account == account and GRAPH_MODE in sink.modes
+def _files_accounts(cfg: Config) -> set[str]:
+    """Return the accounts an OneDrive target names across every flow (R-7.1, D98)."""
+    return {
+        target.removeprefix(ONEDRIVE_TARGET_PREFIX)
         for flow in cfg.flows.values()
         for sink in flow.sinks
-    ):
+        if isinstance(sink, OneDriveFolderSink)
+        for target in sink.targets
+    }
+
+
+def _mailer_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a Graph mailer sends from across every flow (R-7.6)."""
+    return {
+        sink.account
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+        if isinstance(sink, MailerSink) and GRAPH_MODE in sink.modes
+    }
+
+
+def _inbox_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a Graph ``email_inbox`` fetcher searches (R-6.5, D98)."""
+    return {
+        flow.email_inbox.account
+        for flow in cfg.flows.values()
+        if flow.email_inbox is not None and flow.email_inbox.provider == GRAPH_MODE
+    }
+
+
+def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
+    """Return the scopes ``account`` needs for the configured flows (R-6.5, R-7.9, D98)."""
+    scopes = list(BASE_SCOPES)
+    if account in _files_accounts(cfg):
+        scopes.append(FILES_SCOPE)
+    if account in _mailer_accounts(cfg):
         scopes.append(MAIL_SEND_SCOPE)
+    if account in _inbox_accounts(cfg):
+        scopes.append(MAIL_READ_SCOPE)
     return tuple(scopes)
+
+
+def microsoft_accounts(cfg: Config) -> frozenset[str]:
+    """Return every account a flow uses, each with a scope beyond ``offline_access`` (R-6.5, R-7.9, D98)."""
+    candidates = _files_accounts(cfg) | _mailer_accounts(cfg) | _inbox_accounts(cfg)
+    return frozenset(account for account in candidates if len(scopes_for(cfg, account)) > len(BASE_SCOPES))
+
+
+def delivery_accounts(cfg: Config) -> frozenset[str]:
+    """Return the used accounts whose sign-in delivers files or mail (R-6.5, R-7.9, D98)."""
+    delivery = {FILES_SCOPE, MAIL_SEND_SCOPE}
+    return frozenset(
+        account for account in microsoft_accounts(cfg) if delivery.intersection(scopes_for(cfg, account))
+    )

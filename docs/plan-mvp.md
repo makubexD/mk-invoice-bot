@@ -2,23 +2,23 @@
 
 Source of truth: `specs/` (constitution, requirements, design, backlog in `specs/04-tasks.md`). Each phase becomes its own step plan, `docs/plan-mvp-<phase>.md`, written when the previous phase finishes. A phase is done when its milestone demo in spec 04 passes.
 
-| #   | Phase (plan file)                  | Backlog                                                                                                                 | Milestone  | Needs from the owner first                                                       |
-| --- | ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
-| 1   | `foundation` (done 2026-11-11)     | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                            | part of M1 | Nothing                                                                          |
-| 2   | `whatsapp` (done 2026-11-11)       | E2 (incl. S2.7–S2.9 window and templates)                                                                               | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
-| 3   | `read` (done 2026-11-13)           | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                      | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
-| 3b  | `ocr` (done 2026-11-13)            | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                      | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
-| 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                     | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
-| 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                  | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
-| 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                   | part of M4 | Nothing                                                                          |
-| 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                           | part of M4 | Nothing                                                                          |
-| 6c  | `widen-b-fetch`                    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.3, S10.4, S10.7, S10.10, S11.9; portal config checks | part of M4 | S0.6 (remaining store pages); Q5                                                 |
-| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                             | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
-| 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                    | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
-| 8   | `flow-a`                           | E9, S10.6                                                                                                               | M6         | S0.4, Google OAuth app in production status                                      |
-| 9   | `ops`                              | E12, then S12.7 (repo private), then S16.2                                                                              | M7         | VPS chosen (D42)                                                                 |
-| –   | v1.1 `contract`                    | E13, E14                                                                                                                | M8         | —                                                                                |
-| –   | optional `llm-fallback`            | E3b                                                                                                                     | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
+| #   | Phase (plan file)                  | Backlog                                                                                                                                                         | Milestone  | Needs from the owner first                                                       |
+| --- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
+| 1   | `foundation` (done 2026-11-11)     | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                                                                    | part of M1 | Nothing                                                                          |
+| 2   | `whatsapp` (done 2026-11-11)       | E2 (incl. S2.7–S2.9 window and templates)                                                                                                                       | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
+| 3   | `read` (done 2026-11-13)           | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                                              | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
+| 3b  | `ocr` (done 2026-11-13)            | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                                              | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
+| 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                                             | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
+| 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                                                          | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
+| 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                                                           | part of M4 | Nothing                                                                          |
+| 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                                                                   | part of M4 | Nothing                                                                          |
+| 6c  | `widen-b-fetch` (done 2026-11-14)  | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
+| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                                                                     | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
+| 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                                                            | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
+| 8   | `flow-a`                           | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
+| 9   | `ops`                              | E12, then S12.7 (repo private), then S16.2                                                                                                                      | M7         | VPS chosen (D42)                                                                 |
+| –   | v1.1 `contract`                    | E13, E14                                                                                                                                                        | M8         | —                                                                                |
+| –   | optional `llm-fallback`            | E3b                                                                                                                                                             | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
 
 **Why this order (D64):** the first three phases are a thin slice of the work flow for one real store, so the riskiest pieces (the store's site, the Excel, the mail) are proven before anything is widened. PDF input, the padrón and the synthetic generator wait for `read-more`, because a readable QR plus the downloaded XML already give every field the work flow needs. OCR moved forward to phase 3b (D81), because the QR decodes on only half of real photos.
 
@@ -41,12 +41,12 @@ Rules for every phase plan: steps of one concern in at most about 3 files, each 
 
 Each item goes into the `widen-b-fetch` plan unless named otherwise.
 
-- A press on an older menu indexes the newest `choices`: store a menu id in the button.
-- `/pendientes` re-sends parked questions without a rate limit.
-- A resumed press whose action rejects its choice leaves the invoice unparked.
-- `/pendientes` shows the prepared date in UTC (`shortcut:` in `commands.py`).
-- A NUL in an inbound text fails the JSONB insert, so the webhook answers 503 and Meta redelivers it for days. Strip or reject control characters in `parse_webhook`, and answer 200 for a message that can never succeed.
-- Profile ids have no pattern; the per-profile natural key (D93) assumes they never contain `|`. Give them one (`^[a-z0-9_-]+$`) in the config model.
+- (widen-b-fetch) A press on an older menu indexes the newest `choices`: store a menu id in the button.
+- (widen-b-fetch) `/pendientes` re-sends parked questions without a rate limit.
+- (widen-b-fetch) A resumed press whose action rejects its choice leaves the invoice unparked.
+- (widen-b-fetch) `/pendientes` shows the prepared date in UTC (`shortcut:` in `commands.py`).
+- (widen-b-fetch) A NUL in an inbound text fails the JSONB insert, so the webhook answers 503 and Meta redelivers it for days. Strip or reject control characters in `parse_webhook`, and answer 200 for a message that can never succeed.
+- (widen-b-fetch) Profile ids have no pattern; the per-profile natural key (D93) assumes they never contain `|`. Give them one (`^[a-z0-9_-]+$`) in the config model.
 
 ## Carried over from the `read` review
 
@@ -55,7 +55,7 @@ Each item goes into the named phase's plan.
 - **Next (owner, 2026-11-13): D81, OCR as the primary reader.** The QR spike reads 50 % of real WhatsApp photos (`specs/spikes/qr.md`), far below S3.3's 95 %. The owner chose OCR on every photo, with the QR only confirming or filling fields. D81 is recorded in spec 05, and phase 3b `ocr` (`docs/plan-mvp-ocr.md`) runs before `fetch`. It changes R-2.1, R-2.3, R-2.6, spec 03 §5 and the R-9.2 budget, and pulls S0.3, S3.5, S3.6 and S3.7 forward from `read-more`.
 - **`ocr` (step 10):** the QR payload repairs the spike found (date with time, label before the RUC, word buyer type; the decimal comma is already read), and the XML fix for a `schemaLocation` namespace with a relative Windows path (2 of 10 real XMLs fail as `malformed`).
 - **`ocr` (step 4):** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
-- **`widen-b` (with S7.2 `qr_url`, moved from `fetch`):** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
+- **`widen-b` (with S7.2 `qr_url`, moved from `fetch`; widen-b-fetch):** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
 - **`ops` (moved from `fetch`, a host setting):** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared. The browser helper (D82) needs network, so it gets its own user with internet-only egress instead.
 - **`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.
 
@@ -67,7 +67,7 @@ Each item goes into the named phase's plan.
 - **`fetch` step 18:** set `RLIMIT_FSIZE=0` for Tesseract and document it; cap the OCR text size and the matches per parsing rule.
 - **`fetch` step 17:** catch OpenCV errors in the helper and report the photo as unreadable instead of exiting non-zero (today the queue retries them).
 - **`fetch` step 17:** the helper's `variant` and `decoder` strings are logged unchecked. Move the QR variant and decoder names to a module without cv2 and make the result fields `Literal`s of them (R-9.16).
-- **`widen-b-fetch`:** drop `printed_urls` until a step reads them, or put them to use.
+- **`widen-b-fetch` (widen-b-fetch, D101):** drop `printed_urls` until a step reads them, or put them to use.
 - **`fetch` step 12 (moved from `read-more`: a fetched XML is the first caller):** `parse_invoice_xml` relies on the hardened parser plus the docinfo check, not on its byte scan for `<!doctype` (a UTF-16 document without a BOM passes the scan). Before a caller lands, refuse input that does not start with `<` after an optional UTF-8 BOM and whitespace.
 - **`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.
 - **`read-more`:** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
@@ -118,11 +118,23 @@ Each item goes into the named phase's plan.
 Each item goes into the named phase's plan.
 
 - **M3 live run:** the upload-session allow-list (`UPLOAD_HOSTS`, `UPLOAD_HOST_SUFFIXES` in `sinks/onedrive.py`) comes from Microsoft's docs (`*.up.1drv.com`, `api.onedrive.com`, `outlook.office.com`). Record a real personal-account `uploadUrl` for a drive upload and a mail attachment, and pin the list to it.
-- **`widen-b-fetch`:** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
+- **`widen-b-fetch` (widen-b-fetch):** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
 - **`widen-b-fetch` (with the next portal):** `portal_timeout_s` only has to stay below the 300 s lease (`JOB_LEASE_S`); leave a margin for the helper start and the handler's database work (e.g. 30 s).
 - **`widen-b-talk` (widen-b-talk):** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
 - **`ops`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
 - **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
+
+## Carried over from the `widen-b-fetch` review
+
+Each item goes into the named phase's plan.
+
+- **`widen-b-deliver`:** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
+- **`widen-b-deliver`:** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
+- **`widen-b-deliver`:** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
+- **`widen-b-deliver` (from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
+- **`widen-b-deliver`:** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
+- **`ops`:** `SystemResolver`'s deadline abandons the `getaddrinfo` thread without stopping it, so a hung resolver fills the default executor that `asyncio.to_thread` shares. Give DNS its own small executor. Reachable today only through allowlisted hosts.
+- **`ops`:** pin the Docker base image by digest and set `UV_PYTHON_DOWNLOADS=never`; cap the BR-D14 list (e.g. 10 items and "…"); add a webhook test where a real NUL byte makes Postgres refuse the middle message.
 
 ## Known drift between code and specs
 
@@ -132,7 +144,7 @@ The specs run ahead of the code in these places; each has a named story that clo
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
 - `confirm_mode: always`, the `VALIDATING` state and asking in `CONFIRMING` for BR-E03 or a `source=llm` field (spec 03 §4) are not built; routing goes straight to `FETCHING_DOCS`. `read-more` builds them with BR-E03.
-- S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global. The flow config rework in `file-b` replaces them with per-flow settings (D53).
+- S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans
 

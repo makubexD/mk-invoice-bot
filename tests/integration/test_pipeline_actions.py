@@ -22,6 +22,8 @@ from invoicebot.store.invoices import FileRecord, add_file, create_invoice, get_
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 MAX_QUEUED = 10
+#: The owner timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 FLOW = "work_microsoft"
 CONFIRMING = "CONFIRMING"
 ROUTING = "ROUTING"
@@ -44,14 +46,22 @@ def _profile() -> str:
     return f"press-{uuid4().hex}"
 
 
-def _press(invoice_id: int, action: str, profile_id: str, choice: int | None = None) -> InboundMessage:
-    """Build a canonical button press for the invoice."""
+def _press(
+    invoice_id: int,
+    action: str,
+    profile_id: str,
+    choice: int | None = None,
+    menu: int | None = None,
+) -> InboundMessage:
+    """Build a canonical button press for the invoice, on menu 0 unless another is given."""
+    if choice is not None and menu is None:
+        menu = 0
     return InboundMessage(
         channel="whatsapp",
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
-        button_id=button_id(invoice_id, action, choice),
+        button_id=button_id(invoice_id, action, choice, menu),
         received_at=datetime.now(UTC),
     )
 
@@ -62,15 +72,17 @@ async def _confirming_invoice(
     rule_id: str,
     *,
     choices: tuple[str, ...] | None = None,
+    menu: int = 0,
     answers: dict[str, Any] | None = None,
 ) -> int:
-    """Create a CONFIRMING invoice waiting on rule_id, with the offered choices."""
+    """Create a CONFIRMING invoice waiting on rule_id, with the offered choices and menu."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await set_flow(conn, invoice_id, FLOW)
         flow_data: dict[str, Any] = {}
         if choices is not None:
             flow_data["choices"] = list(choices)
+            flow_data["menu"] = menu
         if answers is not None:
             flow_data["answers"] = answers
         if flow_data:
@@ -183,7 +195,7 @@ async def test_continue_stores_the_cap_answer_and_reroutes(
     msg = _press(invoice_id, "continue", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -206,7 +218,7 @@ async def test_pick_stores_the_chosen_flow_and_reroutes(
     msg = _press(invoice_id, "pick", profile_id, choice=1)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -229,7 +241,7 @@ async def test_pick_on_a_buyer_question_is_stale(
     msg = _press(invoice_id, "pick", profile_id, choice=0)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -252,7 +264,7 @@ async def test_pick_on_a_parked_br_r03_invoice_resumes_and_reroutes(
     msg = _press(invoice_id, "pick", profile_id, choice=1)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         waiting = await _waiting_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
@@ -268,6 +280,86 @@ async def test_pick_on_a_parked_br_r03_invoice_resumes_and_reroutes(
     assert texts == []
 
 
+async def test_pick_out_of_range_on_a_parked_br_r03_invoice_stays_parked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: an out-of-range [pick] on an invoice parked from BR-R03 leaves it parked."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=7)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (PENDING_USER, "BR-S08")
+    assert waiting == (CONFIRMING, RULE_ASK)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(PENDING_USER)))
+    ]
+
+
+async def test_pick_from_another_menu_on_a_parked_br_r03_invoice_stays_parked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: a [pick] from another menu on a parked BR-R03 invoice leaves it parked."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=0, menu=5)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (PENDING_USER, "BR-S08")
+    assert waiting == (CONFIRMING, RULE_ASK)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(PENDING_USER)))
+    ]
+
+
+async def test_pick_in_range_on_a_parked_br_r03_invoice_resumes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D94, BR-S02: an in-range [pick] on a parked BR-R03 invoice resumes it and stores the flow."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_ASK, choices=FLOW_CHOICES)
+    await _park(db_pool, invoice_id, CONFIRMING, RULE_ASK)
+    msg = _press(invoice_id, "pick", profile_id, choice=0)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert flow_data["answers"]["flow"] == FLOW_CHOICES[0]
+    assert invoice == (ROUTING, RULE_ASK)
+    assert waiting == (None, None)
+    assert jobs == ["route"]
+
+
 async def test_yes_on_a_parked_br_r03_invoice_is_stale_and_stays_parked(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -278,7 +370,7 @@ async def test_yes_on_a_parked_br_r03_invoice_is_stale_and_stays_parked(
     msg = _press(invoice_id, "yes", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         waiting = await _waiting_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -306,7 +398,7 @@ async def test_yes_and_change_store_the_buyer_answer(
     msg = _press(invoice_id, action, profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -326,7 +418,73 @@ async def test_brand_with_an_out_of_range_choice_is_stale(
     msg = _press(invoice_id, "brand", profile_id, choice=5)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert invoice == (CONFIRMING, RULE_BRAND)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(CONFIRMING)))]
+
+
+async def test_brand_from_an_older_menu_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-S02: [brand] on menu 0 when menu 1 was asked answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BRAND, choices=FLOW_CHOICES, menu=1)
+    msg = _press(invoice_id, "brand", profile_id, choice=0, menu=0)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert invoice == (CONFIRMING, RULE_BRAND)
+    assert "answers" not in flow_data
+    assert jobs == []
+    assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(CONFIRMING)))]
+
+
+async def test_brand_from_the_current_menu_is_taken(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-S02: [brand] on the menu just asked stores its choice and re-routes."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BRAND, choices=FLOW_CHOICES, menu=1)
+    msg = _press(invoice_id, "brand", profile_id, choice=0, menu=1)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert flow_data["answers"]["comercio"] == FLOW_CHOICES[0]
+    assert invoice == (ROUTING, RULE_BRAND)
+    assert jobs == ["route"]
+    assert texts == []
+
+
+async def test_pick_from_an_older_menu_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5, BR-S02: [pick] on menu 0 of the BR-R09 invoice answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BRAND, choices=FLOW_CHOICES, menu=1)
+    msg = _press(invoice_id, "pick", profile_id, choice=0, menu=0)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -346,15 +504,20 @@ async def test_an_answer_keeps_the_answers_stored_before_it(
     profile_id = _profile()
     invoice_id = await _confirming_invoice(db_pool, profile_id, RULE_BUYER)
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(invoice_id, "yes", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(invoice_id, "yes", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
 
     async with db_pool.connection() as conn, conn.transaction():
-        await merge_flow_data(conn, invoice_id, {"choices": list(FLOW_CHOICES)})
+        await merge_flow_data(conn, invoice_id, {"choices": list(FLOW_CHOICES), "menu": 0})
         await set_state(conn, invoice_id, CONFIRMING, rule_id=RULE_ASK)
 
     async with db_pool.connection() as conn:
         await handle_inbound(
-            conn, _press(invoice_id, "pick", profile_id, choice=0), max_queued_per_sender=MAX_QUEUED
+            conn,
+            _press(invoice_id, "pick", profile_id, choice=0),
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
         )
         flow_data = await load_flow_data(conn, invoice_id)
 
@@ -370,7 +533,7 @@ async def test_cancel_cancels_the_invoice_and_replies(
     msg = _press(invoice_id, "cancel", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
@@ -391,7 +554,7 @@ async def test_cancel_in_fetching_docs_cancels_the_invoice(
     msg = _press(invoice_id, "cancel", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
@@ -412,7 +575,7 @@ async def test_edit_in_fetching_docs_sends_the_edit_prompt(
     msg = _press(invoice_id, "edit", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
@@ -433,7 +596,7 @@ async def test_edit_in_done_is_stale(
     msg = _press(invoice_id, "edit", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
@@ -454,7 +617,7 @@ async def test_cancel_in_delivering_is_stale(
     msg = _press(invoice_id, "cancel", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
@@ -476,7 +639,7 @@ async def test_sent_closes_a_prepared_batch_and_deletes_the_photo(
     msg = _press(invoice_id, "sent", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         photo_path = await get_file_path(conn, invoice_id, "photo")
@@ -499,11 +662,13 @@ async def test_a_second_sent_press_is_stale_and_changes_nothing(
     profile_id = _profile()
     invoice_id, _ = await _batched_invoice(db_pool, profile_id, tmp_path)
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(invoice_id, "sent", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(invoice_id, "sent", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, _press(invoice_id, "sent", profile_id), max_queued_per_sender=MAX_QUEUED
+            conn, _press(invoice_id, "sent", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
         )
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
@@ -530,7 +695,7 @@ async def test_a_press_from_another_profile_changes_nothing(
     msg = _press(invoice_id, "continue", other)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         owner_texts = await _texts(conn, owner)
@@ -554,8 +719,8 @@ async def test_a_redelivered_press_acts_once(
     msg = _press(invoice_id, "sent", profile_id)
 
     async with db_pool.connection() as conn:
-        first = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
-        second = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        first = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        second = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         texts = await _texts(conn, profile_id)

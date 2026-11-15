@@ -27,6 +27,7 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.whatsapp.payloads import ButtonPress
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
@@ -41,7 +42,7 @@ from invoicebot.pipeline.questions import (
     RULE_CAP,
     YES_ACTION,
 )
-from invoicebot.pipeline.replies import resolve_reply
+from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES
@@ -98,9 +99,10 @@ ASKED_RULES: Mapping[str, str] = {
     CONTINUE_ACTION: RULE_CAP,
 }
 
-#: An action applied to its invoice in the caller's transaction; it returns the photo
-#: files whose rows it cleared, for the caller to delete after commit (R-9.7).
-type Action = Callable[[AsyncConnection[Any], int, InboundMessage, int | None], Awaitable[tuple[Path, ...]]]
+#: An action applied to its invoice in the caller's transaction; the resolved press carries
+#: the choice and its menu. It returns the photo files whose rows it cleared, for the
+#: caller to delete after commit (R-9.7).
+type Action = Callable[[AsyncConnection[Any], int, InboundMessage, ButtonPress], Awaitable[tuple[Path, ...]]]
 
 
 @dataclass(frozen=True)
@@ -123,20 +125,21 @@ async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> Press
         return PressResult(invoice_id=None)
     # Any press ends a pending [Editar] on its invoice; [Editar] itself pins it again (D90).
     await clear_editing(conn, resolved.invoice_id)
-    photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved.choice)
+    photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved)
     return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 
 
 async def _pick(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, press: ButtonPress
 ) -> tuple[Path, ...]:
     """Store the flow the sender picked from BR-R03's menu and re-run routing (BR-R03).
 
-    A missing menu or an out-of-range choice is a stale button: BR-S02, no change.
+    A missing menu, a choice from an older menu or an out-of-range choice is a stale
+    button: BR-S02, no change.
     """
     if not await _still_asks(conn, invoice_id, msg, RULE_ASK):
         return ()
-    picked = await _choice_at(conn, invoice_id, choice)
+    picked = await choice_at(conn, invoice_id, press.choice, press.menu)
     if picked is None:
         await send_stale(conn, msg, invoice_id)
         return ()
@@ -145,7 +148,7 @@ async def _pick(
 
 
 async def _yes(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Record that the buyer is right, so routing skips BR-R04 (BR-R04)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
@@ -155,7 +158,7 @@ async def _yes(
 
 
 async def _change(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Record that the buyer is wrong, so routing asks BR-R03 again (BR-R04)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
@@ -165,15 +168,16 @@ async def _change(
 
 
 async def _brand(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, press: ButtonPress
 ) -> tuple[Path, ...]:
     """Store the comercio the sender picked from BR-R09's menu and re-run routing (BR-R09).
 
-    A missing menu or an out-of-range choice is a stale button: BR-S02, no change.
+    A missing menu, a choice from an older menu or an out-of-range choice is a stale
+    button: BR-S02, no change.
     """
     if not await _still_asks(conn, invoice_id, msg, RULE_BRAND):
         return ()
-    comercio = await _choice_at(conn, invoice_id, choice)
+    comercio = await choice_at(conn, invoice_id, press.choice, press.menu)
     if comercio is None:
         await send_stale(conn, msg, invoice_id)
         return ()
@@ -182,7 +186,7 @@ async def _brand(
 
 
 async def _continue(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Record that the sender accepted BR-D06's cap and re-run routing (BR-D06)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_CAP):
@@ -208,7 +212,7 @@ async def cancel_invoice(
 
 
 async def _cancel(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Cancel the invoice from any CANCELLABLE state (R-3.4, BR-D06, D95, D96).
 
@@ -223,7 +227,7 @@ async def _cancel(
 
 
 async def _edit(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90)."""
     await mark_editing(conn, msg.profile_id, invoice_id)
@@ -232,7 +236,7 @@ async def _edit(
 
 
 async def _sent(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _choice: int | None
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
     """Close the invoice's prepared batch as sent and clear its photos (R-7.8, BR-D08).
 
@@ -260,14 +264,6 @@ async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundM
         return True
     await send_stale(conn, msg, invoice_id)
     return False
-
-
-async def _choice_at(conn: AsyncConnection[Any], invoice_id: int, choice: int | None) -> Any | None:
-    """Return ``choices[choice]`` from the invoice's flow data, or None when it is absent (BR-S02)."""
-    choices = (await load_flow_data(conn, invoice_id)).get("choices")
-    if choice is None or not isinstance(choices, list) or not 0 <= choice < len(choices):
-        return None
-    return choices[choice]
 
 
 async def _record_answer(

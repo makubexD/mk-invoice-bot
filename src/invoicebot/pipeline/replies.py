@@ -16,6 +16,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import ButtonPress, parse_button_id
 from invoicebot.pipeline.outgoing import Addressee, queue_stale
 from invoicebot.states import PENDING_USER
+from invoicebot.store.flow_b import load_flow_data
 from invoicebot.store.invoices import get_state, get_waiting, lock_invoice, unpark
 
 
@@ -32,7 +33,9 @@ async def resolve_reply(
     invoice's current state resolves at once. A press on a ``PENDING_USER`` invoice
     resumes it first when the stored ``waiting_state`` accepts the action and the
     stored ``waiting_rule_id`` is ``asked_rules``' rule for it, so the action then runs
-    against the restored state (D94). Any other press sends BR-S02 and resolves to
+    against the restored state (D94). A press that carries a choice the invoice no longer
+    offers, because it came from another menu or an out-of-range option, does not resume
+    the parked invoice either (D94, BR-S02). Any other press sends BR-S02 and resolves to
     None, changing nothing else (R-3.5, BR-S02). The invoice row stays locked for the
     caller's transaction, so the state checked here is the state the action sees (D95).
     """
@@ -50,7 +53,9 @@ async def resolve_reply(
     state = invoice[0]
     if state in states:
         return button_press
-    if await _resumes_parked(conn, invoice_id, state, button_press.action, states, asked_rules):
+    if await _choice_still_offered(conn, invoice_id, button_press) and await _resumes_parked(
+        conn, invoice_id, state, button_press.action, states, asked_rules
+    ):
         return button_press
     await queue_stale(
         conn,
@@ -80,6 +85,35 @@ async def _resumes_parked(
     if waiting_state not in valid_states or asked_rule is None or waiting_rule_id != asked_rule:
         return False
     return await unpark(conn, invoice_id)
+
+
+async def _choice_still_offered(conn: AsyncConnection[Any], invoice_id: int, press: ButtonPress) -> bool:
+    """Say whether press's choice still matches the menu the invoice stored (D94, BR-S02).
+
+    A press without a choice is always fine; one whose choice is missing, out of range or
+    from another menu is stale and must not resume a parked invoice.
+    """
+    if press.choice is None:
+        return True
+    return await choice_at(conn, invoice_id, press.choice, press.menu) is not None
+
+
+async def choice_at(
+    conn: AsyncConnection[Any], invoice_id: int, choice: int | None, menu: int | None
+) -> Any | None:
+    """Return ``choices[choice]`` from the invoice's flow data, or None when it is stale (BR-S02).
+
+    A missing or out-of-range choice is stale, and so is a choice from another menu: the
+    stored ``menu`` must be an int equal to the press's, so an older menu is a stale button.
+    """
+    flow_data = await load_flow_data(conn, invoice_id)
+    choices = flow_data.get("choices")
+    stored_menu = flow_data.get("menu")
+    if isinstance(stored_menu, bool) or not isinstance(stored_menu, int) or menu != stored_menu:
+        return None
+    if choice is None or not isinstance(choices, list) or not 0 <= choice < len(choices):
+        return None
+    return choices[choice]
 
 
 def _parse_press(

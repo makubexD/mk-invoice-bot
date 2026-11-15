@@ -63,13 +63,13 @@ class Reading:
     document_url: str | None
 
     def missing_required(self) -> tuple[str, ...]:
-        """Return the required field names (R-2.13) this reading does not carry, in order."""
-        return tuple(name for name in REQUIRED if name not in self.fields)
+        """Return the required field names (R-2.13) this reading lacks or leaves empty, in order."""
+        return tuple(name for name in REQUIRED if self.value(name) is None)
 
     def value(self, name: str) -> str | None:
-        """Return the text of field ``name``, or ``None`` when it is absent."""
+        """Return the text of field ``name``, or ``None`` when it is absent or its text is empty."""
         field = self.fields.get(name)
-        return None if field is None else field.value
+        return None if field is None or field.value == "" else field.value
 
     def amount(self, name: str) -> Decimal | None:
         """Return field ``name`` as a finite decimal, or ``None`` when absent or not finite (R-2.6)."""

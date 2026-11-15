@@ -27,8 +27,8 @@ from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.fetchers.browser.proxy import GuardProxy
-from invoicebot.fetchers.browser.routing import RouteGuard, SystemResolver
-from invoicebot.net.guard import GuardReason
+from invoicebot.fetchers.browser.routing import RouteGuard
+from invoicebot.net.guard import GuardReason, SystemResolver
 
 logger = logging.getLogger(__name__)
 

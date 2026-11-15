@@ -93,6 +93,7 @@ jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_er
 batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason /*enum code*/, ms, at) -- R-5.7
+upload_rejections(invoice_id, media_ref, rule_id, created_at, PRIMARY KEY(invoice_id, media_ref)) -- D103
 outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo or subscriber*/,
        payload_json, template NULL, state /*pending|sent|dead*/, attempts, created_at,
        run_after, last_error NULL, sent_at NULL)                        -- outbox pattern; run_after drives retry backoff
@@ -253,9 +254,11 @@ status: active                          # active | todo | broken
   - The selectors live in a file so they're easy to fix when SUNAT changes the UI.
   - **To validate manually in Phase 0 (S0.4, still a blocker):** that this menu actually offers the XML for received invoices. SIRE Compras returns rows, not XML, so it can't replace this fetcher.
 - **`email_inbox`:**
+  - Each flow names its mailbox (D98): `flows.<name>.email_inbox: {provider, account, retry_schedule}`. Flow B reads the bot's Outlook.com mailbox (`account: bot`, `Mail.Read`) through Graph: `$search` on the serie, the 25 newest messages with attachments received since the invoice date minus one day, an attachment name matching `{serie}-0*{numero}`, at most 5 XMLs downloaded; a sign-in needed waits on the retry schedule (D100).
   - Gmail query `has:attachment (filename:xml OR filename:pdf) "{serie}-{numero}" newer_than:30d`. Graph `$search` equivalent on Outlook. A dedicated invoice mailbox is preferred (R-6.5).
   - Parse the XML with the hardened parser (R-2.12) and match it against the invoice (R-5.6).
   - Retry schedule: +5 min, +1 h, +6 h, +24 h, because issuers send asynchronously. Each retry is a scheduled job, so nothing waits in the worker; meanwhile the invoice stays in `FETCHING_DOCS` with "esperando correo". After the last retry fails, the chain moves to the **next fetcher** (with the default order, `manual`).
+- **`qr_url` (D101):** follows `document_url` only when it is `https` and its host is `sunat.gob.pe` (or a subdomain) or the host of a file in `config/portals/`, through the request guard, re-checking each redirect (at most 3); keeps the answer only when it is a PDF or an XML.
 - **XML handling (R-2.12, D57):** every XML, whatever its source, is parsed with the hardened parser (§2) and accepted only if it matches the invoice (R-5.6). Signature checks and BR-F10 are post-MVP.
 - **Not found yet (D65):** a portal's "no such invoice" (its file's `not_found` selector) is a scheduled retry (`retry_schedule` in the portal file, default 1 h, 6 h, 24 h, 72 h), not a failure; a technical error is a failure (BR-F03 counts it).
 - **Chain position (D82):** read from the invoice's `fetch_attempts`, not stored: an `ok` attempt ends the chain, a final failure moves to the next fetcher, and `not_found_yet` attempts up to the length of `retry_schedule` mean wait. A fetcher not built yet is skipped.

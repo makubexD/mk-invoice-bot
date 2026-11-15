@@ -15,7 +15,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, ChannelName, InboundMessage
+from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, RoutingRule, StoreDirectory
@@ -23,15 +23,19 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
+from invoicebot.store.messages import link_message_to_invoice, store_inbound
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 MAX_QUEUED = 10
+#: The owner's timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 LEASE_S = 60
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 # From tests/synthetic_rucs.txt; 20000000002 fails its check digit.
@@ -71,6 +75,7 @@ def _message(
     channel: ChannelName = "whatsapp",
     text: str = "",
     attachments: list[Attachment] | None = None,
+    reply_to_external_id: str | None = None,
 ) -> InboundMessage:
     """Build a canonical inbound message for profile_id."""
     return InboundMessage(
@@ -80,8 +85,15 @@ def _message(
         sender_role="owner",
         text=text,
         attachments=[] if attachments is None else attachments,
+        reply_to_external_id=reply_to_external_id,
         received_at=datetime.now(UTC),
     )
+
+
+def _upload(kind: AttachmentKind = "xml") -> Attachment:
+    """Return a pdf or xml upload attachment with a unique media reference."""
+    mime = "application/xml" if kind == "xml" else "application/pdf"
+    return Attachment(kind=kind, media_ref=f"ref-{uuid4().hex}", mime=mime, size=2048)
 
 
 def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
@@ -300,7 +312,7 @@ async def test_photo_creates_invoice_job_and_acknowledgement(
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo()])
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         assert result.status == "queued"
         invoice_id = result.invoice_id
         assert invoice_id is not None
@@ -340,8 +352,8 @@ async def test_redelivered_message_is_a_duplicate(
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo()])
 
     async with db_pool.connection() as conn:
-        first = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
-        second = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        first = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        second = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         counts = await _counts(conn, profile_id)
 
     assert first.status == "queued"
@@ -356,7 +368,7 @@ async def test_text_message_is_only_stored(db_pool: AsyncConnectionPool[AsyncCon
     msg = _message(profile_id, external_id=_external_id(), text="hola")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         counts = await _counts(conn, profile_id)
         cur = await conn.execute(
             "SELECT last_inbound_at FROM channel_windows WHERE channel = %s AND recipient = %s",
@@ -380,7 +392,10 @@ async def test_five_photos_are_claimed_in_arrival_order(
 
     async with db_pool.connection() as conn:
         await conn.execute("DELETE FROM jobs")
-        results = [await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED) for msg in messages]
+        results = [
+            await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+            for msg in messages
+        ]
         claimed: list[Job] = []
         for _ in range(5):
             job = await claim(conn, "worker-intake", LEASE_S)
@@ -400,7 +415,9 @@ async def test_back_pressure_replies_and_keeps_the_message(
     messages = [_message(profile_id, external_id=_external_id(), attachments=[_photo()]) for _ in range(3)]
 
     async with db_pool.connection() as conn:
-        results = [await handle_inbound(conn, msg, max_queued_per_sender=2) for msg in messages]
+        results = [
+            await handle_inbound(conn, msg, max_queued_per_sender=2, timezone=TIMEZONE) for msg in messages
+        ]
         counts = await _counts(conn, profile_id)
         cur = await conn.execute(
             """
@@ -433,16 +450,19 @@ async def test_back_pressure_is_per_profile(
             conn,
             _message(busy_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
+            timezone=TIMEZONE,
         )
         blocked = await handle_inbound(
             conn,
             _message(busy_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
+            timezone=TIMEZONE,
         )
         other = await handle_inbound(
             conn,
             _message(other_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
+            timezone=TIMEZONE,
         )
         busy_counts = await _counts(conn, busy_profile)
         other_counts = await _counts(conn, other_profile)
@@ -465,7 +485,7 @@ async def test_caller_rollback_leaves_nothing_behind(
     async with db_pool.connection() as conn:
         with pytest.raises(_Rollback):
             async with conn.transaction():
-                result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+                result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
                 assert result.status == "queued"
                 raise _Rollback
         counts = await _counts(conn, profile_id)
@@ -493,7 +513,7 @@ async def test_edit_reroutes_a_confirming_invoice(
     msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         total = await _field(conn, invoice_id, "total")
@@ -523,7 +543,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED
+            conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
         )
         older_flow = await _flow_data(conn, older)
         newer_flow = await _flow_data(conn, newer)
@@ -534,7 +554,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
 
     first = _message(profile_id, external_id=_external_id(), text="total=45.50")
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         older_total = await _field(conn, older, "total")
         newer_total = await _field(conn, newer, "total")
         older_flow = await _flow_data(conn, older)
@@ -546,7 +566,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
 
     second = _message(profile_id, external_id=_external_id(), text="total=46.00")
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         newer_total = await _field(conn, newer, "total")
 
     assert result.invoice_id == newer
@@ -563,8 +583,15 @@ async def test_editar_pin_is_cleared_by_another_press_on_its_invoice(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(invoice_id, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
-        await handle_inbound(conn, _press(invoice_id, "cancel", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(invoice_id, "edit", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "cancel", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+        )
         flow = await _flow_data(conn, invoice_id)
 
     assert "editing" not in flow
@@ -582,13 +609,15 @@ async def test_editar_pin_is_ignored_once_its_invoice_is_not_editable(
         db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
     )
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
     async with db_pool.connection() as conn, conn.transaction():
         await conn.execute("UPDATE invoices SET state = 'DELIVERING' WHERE id = %s", (older,))
 
     msg = _message(profile_id, external_id=_external_id(), text="total=45.50")
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         newer_total = await _field(conn, newer, "total")
 
     assert result.invoice_id == newer
@@ -603,13 +632,15 @@ async def test_editar_pin_stays_while_br_e01_asks_for_more(
     older = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
     await _invoice_in(db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03")
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(older, "edit", profile_id), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
 
     first = _message(profile_id, external_id=_external_id(), text="total=10.00")
     second = _message(profile_id, external_id=_external_id(), text=f"ruc={OWNER_RUC}")
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED)
-        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, first, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(conn, second, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         ruc = await _field(conn, older, "ruc_emisor")
 
     assert result.invoice_id == older
@@ -630,8 +661,12 @@ async def test_editar_pin_leaves_other_profiles_pins_alone(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, _press(their_invoice, "edit", theirs), max_queued_per_sender=MAX_QUEUED)
-        await handle_inbound(conn, _press(my_invoice, "edit", mine), max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(
+            conn, _press(their_invoice, "edit", theirs), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
+        await handle_inbound(
+            conn, _press(my_invoice, "edit", mine), max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE
+        )
         their_flow = await _flow_data(conn, their_invoice)
 
     assert their_flow == {"editing": True}
@@ -653,7 +688,7 @@ async def test_buyer_edit_drops_the_flow_and_buyer_answers(
     msg = _message(profile_id, external_id=_external_id(), text="cliente=20000000001")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         cur = await conn.execute(
             "SELECT flow_data_json->'answers' FROM invoices WHERE id = %s", (invoice_id,)
         )
@@ -675,7 +710,7 @@ async def test_complete_edit_reroutes_an_extract_failed_invoice(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         cur = await conn.execute(
@@ -705,7 +740,7 @@ async def test_complete_edit_resumes_a_parked_extract_failed_invoice(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         waiting = await _waiting_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -726,7 +761,7 @@ async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(
     msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -746,7 +781,7 @@ async def test_edit_in_delivering_is_refused_as_late(
 
     async with db_pool.connection() as conn:
         before = await _fields_json(conn, invoice_id)
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -771,7 +806,7 @@ async def test_bad_ruc_edit_answers_br_e02_and_changes_nothing(
 
     async with db_pool.connection() as conn:
         before = await _fields_json(conn, invoice_id)
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -800,7 +835,7 @@ async def test_cliente_edit_reroutes_a_br_r03_invoice(
 
     async with db_pool.connection() as conn:
         assert await _state_rule(conn, invoice_id) == ("CONFIRMING", "BR-R03")
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED)
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         buyer = await _field(conn, invoice_id, "num_doc_adq")
@@ -832,7 +867,10 @@ async def test_press_checks_the_state_under_the_row_lock(
     async def press() -> None:
         async with db_pool.connection() as conn:
             await handle_inbound(
-                conn, _press(invoice_id, "cancel", profile_id), max_queued_per_sender=MAX_QUEUED
+                conn,
+                _press(invoice_id, "cancel", profile_id),
+                max_queued_per_sender=MAX_QUEUED,
+                timezone=TIMEZONE,
             )
 
     async with db_pool.connection() as job_conn:
@@ -850,3 +888,195 @@ async def test_press_checks_the_state_under_the_row_lock(
 
     assert state_rule[0] == "DELIVERING"
     assert [rule_id for _text, rule_id in replies] == ["BR-S02"]
+
+
+async def test_xml_upload_links_the_newest_manual_required_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an XML upload links to the profile's MANUAL_REQUIRED invoice and queues attach_upload."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        cur = await conn.execute(
+            "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+            (msg.channel, msg.external_id),
+        )
+        linked = await cur.fetchone()
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert linked == (invoice_id,)
+    assert jobs == [ATTACH_STEP]
+
+
+async def test_upload_quoting_an_older_invoice_wins_over_the_newest(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an upload quoting an older MANUAL_REQUIRED invoice links to that one."""
+    profile_id = _profile()
+    older = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    newer = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    source = _message(profile_id, external_id=_external_id(), text="aquí van sus archivos")
+    async with db_pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, source) is True
+        await link_message_to_invoice(conn, source.channel, source.external_id, older)
+
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        attachments=[_upload("pdf")],
+        reply_to_external_id=source.external_id,
+    )
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+
+    assert result.invoice_id == older
+    assert older_jobs == [ATTACH_STEP]
+    assert newer_jobs == []
+
+
+async def test_ambiguous_upload_asks_which_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102: an unquoted upload with two open invoices lists both and links neither."""
+    profile_id = _profile()
+    older_reading = _reading(await _today(db_pool))
+    older = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", older_reading, rule_id="BR-F07")
+    newer_reading = _reading(await _today(db_pool))
+    newer = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", newer_reading, rule_id="BR-F07")
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+        cur = await conn.execute(
+            "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+            (msg.channel, msg.external_id),
+        )
+        linked = await cur.fetchall()
+
+    expected = MESSAGES["BR-D14"].format(
+        invoices=(
+            f"#{newer} {newer_reading.value('serie')}-{newer_reading.value('numero')}, "
+            f"#{older} {older_reading.value('serie')}-{older_reading.value('numero')}"
+        )
+    )
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert replies == [(expected, "BR-D14")]
+    assert linked == [(None,)]
+    assert older_jobs == []
+    assert newer_jobs == []
+
+
+async def test_ambiguous_upload_quoting_one_invoice_links_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: quoting one of several open invoices links that invoice, not BR-D14."""
+    profile_id = _profile()
+    older = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    newer = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    source = _message(profile_id, external_id=_external_id(), text="aquí van sus archivos")
+    async with db_pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, source) is True
+        await link_message_to_invoice(conn, source.channel, source.external_id, older)
+
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        attachments=[_upload("pdf")],
+        reply_to_external_id=source.external_id,
+    )
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+
+    assert result.invoice_id == older
+    assert replies == []
+    assert older_jobs == [ATTACH_STEP]
+    assert newer_jobs == []
+
+
+async def test_single_open_invoice_still_links_without_a_quote(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5, D102: with one open invoice an unquoted upload still links to it and asks nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.invoice_id == invoice_id
+    assert replies == []
+    assert jobs == [ATTACH_STEP]
+
+
+async def test_another_profiles_invoice_is_never_matched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an upload links only an invoice of the same profile, never another's."""
+    mine = _profile()
+    theirs = _profile()
+    foreign = await _invoice_in(db_pool, theirs, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    msg = _message(mine, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        jobs = await _jobs(conn, foreign)
+
+    assert result.invoice_id is None
+    assert jobs == []
+
+
+async def test_upload_with_no_stuck_invoice_queues_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: with no MANUAL_REQUIRED invoice an upload is stored and links nothing."""
+    profile_id = _profile()
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        counts = await _counts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert counts == (1, 0, 0, 0)
+
+
+async def test_confirming_invoice_is_not_matched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5, D101: a CONFIRMING invoice waits for read-more, so an upload links no invoice."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.invoice_id is None
+    assert jobs == []

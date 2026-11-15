@@ -1,12 +1,15 @@
-"""Pure URL and address checks for outbound requests (R-5.10).
+"""Outbound request checks and the operating system's resolver (R-5.10).
 
-Nothing here opens a socket or reads a clock: the functions take a URL or a resolver answer
-and return a reason code, so the same checks run in tests and in the browser helper (D82).
+The URL and address checks take a URL or a resolver answer and return a reason code, so the
+same checks run in tests and in the browser helper (D82). :class:`SystemResolver` resolves a
+host through the OS and returns the address list those checks judge.
 """
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import socket
 from collections.abc import Callable, Iterable
 from enum import StrEnum
 from typing import Protocol
@@ -21,6 +24,8 @@ SITE_LOCAL_NETWORK = ipaddress.ip_network("fec0::/10")
 _IPV4_MASK = 0xFFFFFFFF
 #: Schemes that may reach the network at all; everything else is blocked outright.
 NETWORK_SCHEMES = frozenset({"http", "https"})
+#: Longest a host may take to resolve before the guard treats it as unresolvable (R-5.10).
+DNS_TIMEOUT_S = 5.0
 
 
 class GuardReason(StrEnum):
@@ -43,6 +48,29 @@ class Resolver(Protocol):
     async def resolve(self, host: str) -> list[str]:
         """Return one address string per answer for ``host``."""
         ...
+
+
+class SystemResolver:
+    """Resolve hosts through the operating system's resolver, within a deadline (R-5.10)."""
+
+    def __init__(self, timeout_s: float = DNS_TIMEOUT_S) -> None:
+        self._timeout_s = timeout_s
+
+    async def resolve(self, host: str) -> list[str]:
+        """Return the host's unique address strings in answer order; none if it fails or times out."""
+        loop = asyncio.get_running_loop()
+        try:
+            async with asyncio.timeout(self._timeout_s):
+                answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+        except (TimeoutError, socket.gaierror, UnicodeError):
+            # UnicodeError: the idna codec refuses an empty or over-long label ("a..b.com").
+            return []
+        addresses: list[str] = []
+        for answer in answers:
+            address = answer[4][0]
+            if isinstance(address, str) and address not in addresses:
+                addresses.append(address)
+        return addresses
 
 
 def check_url(url: str, http_hosts: frozenset[str]) -> GuardReason | None:

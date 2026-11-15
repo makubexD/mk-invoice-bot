@@ -4,7 +4,9 @@ The body is untrusted: its size is capped while reading, the signature is
 verified over the raw bytes before any JSON parsing, and messages from senders
 outside the profile index are only ever logged through their hash. When
 Postgres is unreachable, or the invoice's state moved under the message, the
-route answers 503 so Meta retries the delivery against the new state (D95).
+route answers 503 so Meta retries the delivery against the new state (D95). A
+message the database refuses outright is skipped and the delivery acknowledged
+with 200, because no redelivery can ever store it (R-1.8).
 """
 
 from __future__ import annotations
@@ -41,6 +43,8 @@ class WebhookDeps:
     index: ProfileIndex
     owner_profile: str
     admin_profiles: frozenset[str]
+    #: The owner's timezone, for the dates commands print (S11.4).
+    timezone: str
     app_secret: str
     verify_token: str
     sender_hash_key: str
@@ -83,18 +87,27 @@ def make_router(deps: WebhookDeps) -> APIRouter:
         )
         for digest in dict.fromkeys(parsed.unknown_senders):
             logger.info("ignored sender %s", digest)
-        try:
-            await _persist(deps, parsed.messages)
-        except StateMoved as moved:
-            # An expected race (D95): the redelivery applies to the new state.
-            logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
-            return Response(status_code=503)
-        except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
-            logger.exception("webhook database error")
-            return Response(status_code=503)
-        return JSONResponse({"status": "ok"})
+        return await _intake(deps, parsed.messages)
 
     return router
+
+
+async def _intake(deps: WebhookDeps, messages: list[InboundMessage]) -> Response:
+    """Store the messages, mapping a state race or a transient database error to a response."""
+    try:
+        await _persist(deps, messages)
+    except StateMoved as moved:
+        # An expected race (D95): the redelivery applies to the new state.
+        logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
+        return Response(status_code=503)
+    except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed) as exc:
+        # Type and SQLSTATE only: a constraint error's DETAIL echoes the row's values.
+        logger.error(
+            "webhook database error",
+            extra={"error_type": type(exc).__name__, "sqlstate": exc.sqlstate},
+        )
+        return Response(status_code=503)
+    return JSONResponse({"status": "ok"})
 
 
 async def _read_body(request: Request) -> bytes | None:
@@ -122,12 +135,24 @@ def _parse_json(body: bytes) -> dict[str, Any] | None:
 
 
 async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
-    """Handle each message in its own pooled connection and transaction."""
+    """Handle each message in its own pooled connection and transaction.
+
+    A message the database refuses outright is logged and skipped, so the rest
+    of the delivery is still stored (R-1.8). The log names the error type and
+    SQLSTATE only: psycopg's message can echo the refused value.
+    """
     for msg in messages:
-        async with deps.pool.connection() as conn:
-            await handle_inbound(
-                conn,
-                msg,
-                max_queued_per_sender=deps.max_queued_per_sender,
-                admins=deps.admin_profiles,
+        try:
+            async with deps.pool.connection() as conn:
+                await handle_inbound(
+                    conn,
+                    msg,
+                    max_queued_per_sender=deps.max_queued_per_sender,
+                    timezone=deps.timezone,
+                    admins=deps.admin_profiles,
+                )
+        except psycopg.errors.DataError as exc:
+            logger.error(
+                "webhook message refused by the database",
+                extra={"error_type": type(exc).__name__, "sqlstate": exc.sqlstate},
             )

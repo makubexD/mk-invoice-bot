@@ -84,12 +84,18 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-F10 | *(post-MVP, D57)* An XML from email or a user upload has no valid XMLDSig signature, or the signer's RUC ≠ `ruc_emisor` | Kept as a **hint**: the file is stored and delivered, but its values don't replace the read data | *(one line in the summary)* `ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos.` |
 | BR-F07 | Every fetcher failed | `MANUAL_REQUIRED` (auto-resumable when a linked gap is fixed) | `❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:` + one `•` line per fetcher + `Puedes enviarme {manual_docs_desc} aquí y lo completo. {gap_line}` |
 
+**Texts outside the catalog** (`rules/messages_es.py` constants, not rules of their own):
+
+- BR-F07's other bullets (D100): `• {fetcher}: no encontré el comprobante` (not found), `• Portal del comercio: no lo conozco` (no portal entry), `• Portal {portal}: todavía no sé consultarlo` (portal `todo`), `• {fetcher}: falló por un error técnico` (technical failure or timeout), `• Correo: el buzón necesita reconectarse; ya avisé al administrador` (the mailbox needs a sign-in).
+- While the mailbox is retried (S11.9): `⏳ Comprobante #{id}: esperando correo del comercio. Lo vuelvo a buscar más tarde.`
+- Replies to an uploaded XML (D101), sent under BR-F06 and BR-F09: `El XML que enviaste no corresponde a {serie}-{numero}; no lo guardé.` and `El XML que enviaste no es válido; no lo guardé.`
+
 `{gap_line}`, when a gap is linked: `Ya avisé para agregar este portal; cuando esté listo lo reintento solo.`
 
 ### Delivery (D)
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
-| BR-D01 | A Google or Microsoft token expired or was revoked | `PENDING_AUTH` (auto-resumes after re-auth); **admin-only alert**, not a repo gap | User: `Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar.` Admin: `🔑 Reautoriza {provider}: ejecuta scripts/auth_{provider}.py` |
+| BR-D01 | A Google or Microsoft token expired or was revoked | `PENDING_AUTH` (auto-resumes after re-auth); **admin-only alert**, not a repo gap | User: `Tu comprobante quedó en cola; hay un problema de conexión con {provider}. Te aviso al terminar.` Admin: `🔑 Reautoriza {provider} ({account}): ejecuta scripts/auth_{provider}.py --account {account}` (D98) |
 | BR-D02 | The Excel template is missing, its SHA-256 doesn't match the pinned one, or a `cells:` expression references an unknown field | Raises gap `TEMPLATE_INVALID`; `DELIVERING` → `MANUAL_REQUIRED` | `No pude llenar la plantilla de Excel (configuración incompleta). Ya avisé para corregirlo; reintento automáticamente.` |
 | BR-D03 | The email can't be prepared or sent after retries | The batch goes `failed`; its invoice stays `BATCHED` (retry with `/reprocesar {id}`); admin alert | User: `No pude preparar el correo de {serie}-{numero}. Reintenta con /reprocesar {id}.` Admin: `📮 No se pudo enviar el correo del comprobante #{id} ({serie}-{numero}). Revisa la cuenta y ejecuta /reprocesar {id}.` |
 | BR-D04 | `/enviar` with an empty batch *(post-MVP, with `on_command`)* | No-op | `No hay comprobantes pendientes de envío.` |
@@ -102,6 +108,10 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-D11 | Flow B: the sender tapped [No llegó], or a laptop receipt is overdue by `mail.confirm_timeout` | Waits for the sender's choice; nothing is sent again on its own | `⚠️ El correo de {serie}-{numero} no está confirmado. ¿Cómo lo envío?` [Por la laptop] [Lo envío yo] [Ya llegó] |
 | BR-D12 | Flow B: the laptop agent hasn't picked up a job for `agent_stale_after` | Once per job; the job stays queued | `💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. Saldrá cuando la enciendas.` |
 | BR-D13 | Flow B: `inbox_rule` sent the email to the owner's inbox (trusted, D67) | The batch is `sent`; the invoice is `DONE` | `✅ Archivada en {folder}. El correo salió por tu regla de Outlook.` [No llegó] |
+| BR-D14 | A pdf/xml upload whose quote does not resolve while the profile has more than one stuck invoice (D102) | Not linked | `Tienes varios comprobantes esperando archivos: {invoices}. Vuelve a enviar el archivo respondiendo a la foto del comprobante.` |
+| BR-D15 | An uploaded pdf does not start with `%PDF-`, after an optional UTF-8 BOM and leading whitespace (D103) | Not stored; recorded as rejected | `El archivo que enviaste no es un PDF válido; no lo guardé.` |
+
+- BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, joined by `, `.
 
 ### Payments (P)
 | ID | Condition | Result | Chat message |

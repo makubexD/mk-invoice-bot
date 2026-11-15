@@ -30,6 +30,8 @@ from invoicebot.store.invoices import create_invoice, save_reading, set_state
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+#: The owner timezone, for the dates a command prints (S11.4).
+TIMEZONE = "America/Lima"
 # Both values come from tests/synthetic_rucs.txt; the unknown buyer fails its check digit.
 OWNER_RUC = "20000000001"
 WORK_RUC = "51900000000"
@@ -261,7 +263,7 @@ async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[Asy
         received_at=datetime.now(UTC),
     )
     async with db_pool.connection() as conn:
-        intake = await handle_inbound(conn, msg, max_queued_per_sender=5)
+        intake = await handle_inbound(conn, msg, max_queued_per_sender=5, timezone=TIMEZONE)
     assert intake.invoice_id is not None
     await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)), intake.invoice_id)
 
@@ -524,11 +526,12 @@ async def test_dni_buyer_asks_which_flow(
     assert rule_id == "BR-R03"
     assert "del DNI 40382716" in text
     assert buttons == [
-        {"id": button_id(invoice_id, "pick", 0), "title": "Mi empresa (Google)"},
-        {"id": button_id(invoice_id, "pick", 1), "title": "Trabajo (Microsoft)"},
+        {"id": button_id(invoice_id, "pick", 0, 0), "title": "Mi empresa (Google)"},
+        {"id": button_id(invoice_id, "pick", 1, 0), "title": "Trabajo (Microsoft)"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
     assert flow_data["choices"] == [OWNER_FLOW, WORK_FLOW]
+    assert flow_data["menu"] == 0
 
 
 async def test_answered_flow_is_routed_to_summary(
@@ -700,11 +703,12 @@ async def test_two_brand_store_with_unknown_serie_asks_brand(
     assert rule_id == "BR-R09"
     assert "Comercio Sintético" in text
     assert buttons == [
-        {"id": button_id(invoice_id, "brand", 0), "title": "Local Uno"},
-        {"id": button_id(invoice_id, "brand", 1), "title": "Local Dos"},
+        {"id": button_id(invoice_id, "brand", 0, 0), "title": "Local Uno"},
+        {"id": button_id(invoice_id, "brand", 1, 0), "title": "Local Dos"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
     assert flow_data["choices"] == ["Local Uno", "Local Dos"]
+    assert flow_data["menu"] == 0
 
 
 async def test_answered_comercio_skips_the_brand_question(
@@ -777,7 +781,7 @@ async def test_stale_answered_flow_is_dropped_and_reasked(
     _text, rule_id, buttons = outbox[0]
     assert rule_id == "BR-R03"
     assert buttons == [
-        {"id": button_id(invoice_id, "pick", 0), "title": "Mi empresa (Google)"},
+        {"id": button_id(invoice_id, "pick", 0, 0), "title": "Mi empresa (Google)"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
 

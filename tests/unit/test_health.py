@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 import invoicebot.app
 from invoicebot.app import create_app, lifespan
-from invoicebot.secrets import SECRET_ENV_SUFFIXES
+from invoicebot.secrets import SECRET_ENV_SUFFIXES, SecretStore
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
@@ -22,10 +22,24 @@ PARSING_RULES = REPO_ROOT / "config" / "parsing_rules.yaml"
 VERIFY_VALUE = "synthetic-verify-value"
 #: A port nothing listens on, so the pool never connects and no test needs Postgres.
 UNREACHABLE_DSN = "postgresql://invoicebot@127.0.0.1:1/invoicebot?connect_timeout=1"
+#: The synthetic secrets the WhatsApp channel declares (R-9.10).
+SECRET_VALUES = {
+    "whatsapp_token": "synthetic-token-value",
+    "whatsapp_app_secret": "synthetic-app-value",
+    "whatsapp_verify_token": VERIFY_VALUE,
+    "sender_hash_key": "synthetic-hash-value",
+}
 
 
 async def _no_ping() -> bool:
     return False
+
+
+class _NoToken:
+    """A token source startup never asks for; only the deliver wiring receives it."""
+
+    async def token(self) -> str:
+        raise AssertionError("startup requested a token")
 
 
 @pytest.fixture
@@ -53,13 +67,7 @@ def _write_runtime_files(directory: Path) -> None:
     (directory / "config.yaml").write_text(EXAMPLE_CONFIG.read_text(encoding="utf-8"), encoding="utf-8")
     identity = pyrage.x25519.Identity.generate()
     (directory / "identity.key").write_text(str(identity) + "\n", encoding="utf-8")
-    values = {
-        "whatsapp_token": "synthetic-token-value",
-        "whatsapp_app_secret": "synthetic-app-value",
-        "whatsapp_verify_token": VERIFY_VALUE,
-        "sender_hash_key": "synthetic-hash-value",
-    }
-    plaintext = yaml.safe_dump(values).encode("utf-8")
+    plaintext = yaml.safe_dump(SECRET_VALUES).encode("utf-8")
     (directory / "secrets.age").write_bytes(pyrage.encrypt(plaintext, [identity.to_public()]))
 
 
@@ -86,6 +94,30 @@ def test_lifespan_with_config_and_secrets_answers_the_handshake(runtime_env: Pat
 
     assert response.status_code == 200
     assert response.text == "c-123"
+
+
+def test_lifespan_without_age_identity_disables_the_inbox_fetcher(
+    runtime_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """S11.9, D98: without AGE_IDENTITY_PATH the Graph inbox fetcher is left out with a warning."""
+    _write_runtime_files(runtime_env)
+    monkeypatch.delenv("AGE_IDENTITY_PATH")
+    caplog.set_level(logging.WARNING, logger="invoicebot.app")
+    # The secrets file and the deliver wiring both need the identity; a plain in-memory
+    # store and a token source nothing calls keep startup going so the fetch wiring runs.
+    monkeypatch.setattr(invoicebot.app, "_load_secrets", lambda _settings: SecretStore(SECRET_VALUES))
+    monkeypatch.setattr(invoicebot.app, "build_token_provider", lambda *_args: _NoToken())
+    # configure_logging replaces the root handlers, which would hide the records from caplog.
+    monkeypatch.setattr(invoicebot.app, "configure_logging", lambda *_args, **_kwargs: None)
+
+    with TestClient(create_app(_no_ping, lifespan=lifespan)):
+        pass
+
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+    disabled = [record for record in caplog.records if record.getMessage() == "email_inbox fetcher disabled"]
+    assert any(getattr(record, "flow", None) == "work_microsoft" for record in disabled)
 
 
 def test_lifespan_with_missing_channel_secret_does_not_mount_the_webhook(runtime_env: Path) -> None:

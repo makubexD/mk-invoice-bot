@@ -16,7 +16,7 @@ from invoicebot.config.models import (
     CalendarField,
     ChannelTemplates,
     Config,
-    EmailInbox,
+    FlowInbox,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -252,9 +252,9 @@ def test_zero_portal_timeout_fails(tmp_path: Path) -> None:
     assert "retrieval.portal_timeout_s" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("timeout_s", [120, 299.5])
+@pytest.mark.parametrize("timeout_s", [120, 270])
 def test_portal_timeout_under_job_lease_is_valid(tmp_path: Path, timeout_s: float) -> None:
-    """R-5.1: a portal fetch shorter than the job lease loads."""
+    """R-5.1: a portal fetch ending at least the margin before the lease loads."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["retrieval"]["portal_timeout_s"] = timeout_s
     path = _write_yaml(tmp_path / "example.yaml", document)
@@ -262,9 +262,9 @@ def test_portal_timeout_under_job_lease_is_valid(tmp_path: Path, timeout_s: floa
     assert load_config(path).retrieval.portal_timeout_s == timeout_s
 
 
-@pytest.mark.parametrize("timeout_s", [300, 900])
+@pytest.mark.parametrize("timeout_s", [271, 300, 900])
 def test_portal_timeout_at_or_over_job_lease_fails(tmp_path: Path, timeout_s: float) -> None:
-    """R-5.1: a portal fetch may not outlive the job lease, so it fails to load."""
+    """R-5.1: a fetch must end at least the 30s margin before the 300s lease, so it fails."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["retrieval"]["portal_timeout_s"] = timeout_s
     path = _write_yaml(tmp_path / "example.yaml", document)
@@ -273,6 +273,7 @@ def test_portal_timeout_at_or_over_job_lease_fails(tmp_path: Path, timeout_s: fl
         load_config(path)
 
     assert "300" in str(excinfo.value)
+    assert "margin (30s)" in str(excinfo.value)
     assert str(timeout_s) in str(excinfo.value)
 
 
@@ -457,7 +458,7 @@ def test_retry_schedule_with_an_unknown_unit_fails() -> None:
 
 def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
     """D65: an email inbox retry schedule is typed and dumps back as canonical delay text."""
-    inbox = EmailInbox(provider="gmail", retry_schedule=["5m", "1h", "6h", "24h"])
+    inbox = FlowInbox(provider="gmail", account="invoices_a", retry_schedule=["5m", "1h", "6h", "24h"])
 
     assert inbox.retry_schedule == (
         timedelta(minutes=5),
@@ -471,12 +472,12 @@ def test_email_inbox_retry_schedule_parses_and_dumps_as_delays() -> None:
 def test_email_inbox_retry_schedule_with_an_unknown_unit_fails() -> None:
     """D65: an email inbox retry delay only uses minutes, hours or days."""
     with pytest.raises(ValidationError, match="5 minutes"):
-        EmailInbox(provider="gmail", retry_schedule=["5 minutes"])
+        FlowInbox(provider="gmail", account="invoices_a", retry_schedule=["5 minutes"])
 
 
 def test_email_inbox_retry_schedule_may_be_empty() -> None:
     """D65: an empty email inbox retry schedule is an empty tuple, as for a portal."""
-    inbox = EmailInbox(provider="gmail", retry_schedule=[])
+    inbox = FlowInbox(provider="gmail", account="invoices_a", retry_schedule=[])
 
     assert inbox.retry_schedule == ()
 
@@ -485,7 +486,8 @@ def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
     """R-9.6: the shipped example config's email inbox validates with the typed schedule."""
     cfg = load_config(EXAMPLE)
 
-    assert cfg.retrieval.email_inbox.retry_schedule == (
+    assert cfg.flows["personal_google"].email_inbox is not None
+    assert cfg.flows["personal_google"].email_inbox.retry_schedule == (
         timedelta(minutes=5),
         timedelta(hours=1),
         timedelta(hours=6),
@@ -493,9 +495,59 @@ def test_email_inbox_retry_schedule_in_the_example_config_loads() -> None:
     )
 
 
+def test_example_config_has_per_flow_inbox_settings() -> None:
+    """D98, R-5.2: the example config loads with the inbox settings under each flow.
+
+    ``config/config.yaml`` is the owner's untracked copy, so CI can load only the example.
+    """
+    cfg = load_config(EXAMPLE)
+
+    personal = cfg.flows["personal_google"].email_inbox
+    work = cfg.flows["work_microsoft"].email_inbox
+    assert personal is not None
+    assert (personal.provider, personal.account) == ("gmail", "invoices_a")
+    assert work is not None
+    assert (work.provider, work.account) == ("graph", "bot")
+
+
+def test_flow_listing_email_inbox_without_settings_fails_naming_the_flow(tmp_path: Path) -> None:
+    """D98, R-5.2: listing the email_inbox fetcher without settings fails naming the flow."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["email_inbox"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "personal_google" in str(excinfo.value)
+    assert "email_inbox" in str(excinfo.value)
+
+
+def test_retrieval_refuses_email_inbox_settings(tmp_path: Path) -> None:
+    """D98, R-5.2: inbox settings belong to the flow, so retrieval refuses them."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["email_inbox"] = {
+        "provider": "gmail",
+        "account": "invoices_a",
+        "retry_schedule": ["5m"],
+    }
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"retrieval\.email_inbox"):
+        load_config(path)
+
+
+def test_email_inbox_account_with_an_invalid_name_fails() -> None:
+    """D98, R-5.2: an inbox account is lowercase letters, digits and underscores only."""
+    with pytest.raises(ValidationError, match="account"):
+        FlowInbox(provider="gmail", account="Bad-Name", retry_schedule=["5m"])
+
+
 _RETRY_SCHEDULE_MODELS = [
     pytest.param(
-        lambda schedule: EmailInbox.model_validate({"provider": "gmail", "retry_schedule": schedule}),
+        lambda schedule: FlowInbox.model_validate(
+            {"provider": "gmail", "account": "invoices_a", "retry_schedule": schedule}
+        ),
         id="email-inbox",
     ),
     pytest.param(
@@ -509,7 +561,7 @@ _RETRY_SCHEDULE_MODELS = [
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_parses_and_dumps_the_same_delay_text(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a retry schedule parses to timedeltas and dumps back as the same text (D65)."""
     instance = model(["5m", "1h"])
@@ -520,7 +572,7 @@ def test_retry_schedule_parses_and_dumps_the_same_delay_text(
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_with_a_non_string_entry_fails(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a non-string delay is a ValidationError, not a TypeError (D65)."""
     with pytest.raises(ValidationError, match="must be a string"):
@@ -529,7 +581,7 @@ def test_retry_schedule_with_a_non_string_entry_fails(
 
 @pytest.mark.parametrize("model", _RETRY_SCHEDULE_MODELS)
 def test_retry_schedule_with_an_unknown_unit_is_a_validation_error(
-    model: Callable[[object], EmailInbox | Portal],
+    model: Callable[[object], FlowInbox | Portal],
 ) -> None:
     """R-9.6: a delay outside ``<number><m|h|d>`` fails naming the text (D65)."""
     with pytest.raises(ValidationError, match="5x"):
@@ -584,3 +636,52 @@ def test_whatsapp_template_language_rejects_a_dashed_locale() -> None:
 def test_whatsapp_template_language_defaults_to_es_pe() -> None:
     """R-9.6: a channel with no template_language sends templates in Spanish (Peru)."""
     assert _whatsapp_channel().template_language == "es_PE"
+
+
+def _config_with_profile(tmp_path: Path, profile_id: str) -> Path:
+    """Write the example config with its profiles replaced by one keyed by ``profile_id``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["profiles"] = {profile_id: document["profiles"]["yo"]}
+    return _write_yaml(tmp_path / "example.yaml", document)
+
+
+@pytest.mark.parametrize("profile_id", ["owner", "maku_2"])
+def test_config_with_valid_profile_id_loads(tmp_path: Path, profile_id: str) -> None:
+    """D93: a profile id of lowercase letters, digits, ``_`` or ``-`` is the natural key."""
+    cfg = load_config(_config_with_profile(tmp_path, profile_id))
+
+    assert list(cfg.profiles) == [profile_id]
+
+
+@pytest.mark.parametrize("profile_id", ["a|b", "Ana", ""])
+def test_config_with_invalid_profile_id_fails(tmp_path: Path, profile_id: str) -> None:
+    """D93: a profile id outside the natural-key pattern fails at load."""
+    with pytest.raises(ValidationError, match="profiles"):
+        load_config(_config_with_profile(tmp_path, profile_id))
+
+
+def test_example_config_declares_each_flows_manual_uploads() -> None:
+    """R-1.5: each flow declares the file kinds a sender may upload, in preference order."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.flows["personal_google"].manual_uploads == ["xml", "pdf"]
+    assert cfg.flows["work_microsoft"].manual_uploads == ["pdf", "xml"]
+
+
+def test_flow_with_an_unsupported_manual_upload_fails(tmp_path: Path) -> None:
+    """R-1.5: a sender may upload only a PDF or an XML, so a spreadsheet is refused at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["manual_uploads"] = ["xlsx"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="manual_uploads"):
+        load_config(path)
+
+
+def test_flow_without_manual_uploads_defaults_to_empty(tmp_path: Path) -> None:
+    """R-1.5: a flow that names no manual uploads accepts none by default."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["manual_uploads"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).flows["personal_google"].manual_uploads == []

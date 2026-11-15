@@ -15,12 +15,34 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Protocol
 
+#: A UTF-8 BOM may precede the first byte of a document.
+UTF8_BOM = b"\xef\xbb\xbf"
+#: ASCII whitespace that may precede the first byte of a document.
+ASCII_WHITESPACE = b" \t\n\r\f\v"
+
+_PDF_MAGIC = b"%PDF-"
+
+
+def is_pdf(data: bytes) -> bool:
+    """Return whether ``data`` starts with a PDF header, after an optional BOM and whitespace (R-5.6)."""
+    return data.removeprefix(UTF8_BOM).lstrip(ASCII_WHITESPACE).startswith(_PDF_MAGIC)
+
 
 class FetchReason(StrEnum):
     """Why one fetch ended; only ``OK`` carries files (S7.1)."""
 
     OK = "ok"
     NOT_FOUND_YET = "not_found_yet"
+    #: The source answered and holds no document; final (R-5.4).
+    NOT_FOUND = "not_found"
+    #: The source gave no document URL to request (R-5.4).
+    NO_URL = "no_url"
+    #: The store has no website to fetch from; its portal is manual (S10.10, R-5.4).
+    NO_WEBSITE = "no_website"
+    #: The portal shows a captcha the bot cannot solve (D99, R-5.4).
+    CAPTCHA_UNSOLVABLE = "captcha_unsolvable"
+    #: The source needs credentials the bot does not have (R-5.4).
+    AUTH_REQUIRED = "auth_required"
     NO_PORTAL = "no_portal"
     PORTAL_INACTIVE = "portal_inactive"
     TECHNICAL = "technical"
@@ -65,6 +87,7 @@ class FetchInvoice:
     numero: str
     fecha: date
     total: Decimal
+    document_url: str | None = None
 
 
 class Fetcher(Protocol):

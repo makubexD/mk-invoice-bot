@@ -46,7 +46,7 @@ from invoicebot.config.models import (
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.actions import SENT_ACTION
-from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
@@ -219,8 +219,8 @@ def make_deliver_handler(
                 await _automatic(context, delivery, prepared, mode)
             else:
                 await _assisted(context, delivery, mode)
-        except AuthRequired:
-            await _pending_auth(context, invoice)
+        except AuthRequired as required:
+            await _pending_auth(context, invoice, required.account)
             return
         except TemplateInvalid:
             await _template_invalid(context, invoice)
@@ -488,7 +488,7 @@ async def _crashed_send(
         _send_failed_text(prepared, delivery.invoice_id),
         [],
     )
-    await _notify_admins(
+    await queue_admin_alert(
         conn,
         profiles,
         RULE_SEND_FAILED_ADMIN,
@@ -510,7 +510,7 @@ async def _send_failed(
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
         await _notify(conn, delivery.head, delivery.invoice_id, RULE_SEND_FAILED, text, [])
-        await _notify_admins(
+        await queue_admin_alert(
             conn,
             context.cfg.profiles,
             RULE_SEND_FAILED_ADMIN,
@@ -536,44 +536,16 @@ def _send_failed_admin_text(prepared: _Values, invoice_id: int) -> str:
     )
 
 
-async def _pending_auth(context: _Context, invoice: _Invoice) -> None:
+async def _pending_auth(context: _Context, invoice: _Invoice, account: str) -> None:
     """Park the invoice until the account signs in and alert its sender and admins (BR-D01)."""
     text = MESSAGES[RULE_AUTH].format(provider=AUTH_PROVIDER_NAME)
-    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG)
+    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG, account=account)
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
         await set_state(conn, invoice.job.invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
         await _notify(conn, invoice.head, invoice.job.invoice_id, RULE_AUTH, text, [])
-        await _notify_admins(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
-
-
-async def _notify_admins(
-    conn: AsyncConnection[Any],
-    profiles: Mapping[str, Profile],
-    rule_id: str,
-    text: str,
-) -> None:
-    """Queue one rule's admin alert for every admin profile on its preferred channel."""
-    for profile_id, profile in profiles.items():
-        if profile.admin:
-            await _notify_admin(conn, profile_id, profile, rule_id, text)
-
-
-async def _notify_admin(
-    conn: AsyncConnection[Any],
-    profile_id: str,
-    profile: Profile,
-    rule_id: str,
-    text: str,
-) -> None:
-    """Queue a rule's admin text for one admin profile on its preferred channel, if it has one."""
-    channel = profile.preferred_channel
-    if channel is None:
-        # One unreachable admin must not undo the state change or the other alerts.
-        logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
-        return
-    await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id)
+        await queue_admin_alert(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
 
 
 async def _template_invalid(context: _Context, invoice: _Invoice) -> None:

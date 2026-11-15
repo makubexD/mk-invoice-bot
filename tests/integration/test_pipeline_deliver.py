@@ -774,7 +774,8 @@ async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
     assert invoice == ("PENDING_AUTH", "BR-D01")
     assert user == [(MESSAGES["BR-D01"].format(provider="Microsoft"), "BR-D01", [])]
     assert admins == [
-        [(MESSAGES["BR-D01_admin"].format(provider="microsoft"), "BR-D01_admin", [])] for _ in admin_ids
+        [(MESSAGES["BR-D01_admin"].format(provider="microsoft", account="personal"), "BR-D01_admin", [])]
+        for _ in admin_ids
     ]
 
 
