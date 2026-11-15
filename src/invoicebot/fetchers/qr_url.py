@@ -1,17 +1,40 @@
-"""Decide which QR document URLs the bot may request (R-5.2, R-5.10).
+"""Decide which QR document URLs the bot may request, and fetch them (R-5.2, R-5.6, R-5.10).
 
 A scanned QR code points at a document on SUNAT or on a configured portal. Only
 ``https`` URLs on those hosts are fetched; everything else is refused before a
-request is made.
+request is made. :class:`QrUrlFetcher` follows redirects one checked hop at a time
+and writes the invoice's files by kind.
 """
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urljoin, urlsplit
 
-from invoicebot.config.models import StoreDirectory
+import httpx
+
+from invoicebot.config.models import MediaMaxBytes, StoreDirectory
+from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.portal import sha256_hex, xml_reason
+from invoicebot.net.guard import GuardReason
+from invoicebot.net.http import GuardBlocked
 
 SUNAT_DOMAIN = "sunat.gob.pe"
+
+#: The name this fetcher uses in a flow's ``fetchers`` list (R-5.2).
+QR_URL_FETCHER = "qr_url"
+#: Redirect hops followed before the URL counts as a loop and is refused (R-5.10).
+MAX_REDIRECTS = 3
+#: A UTF-8 BOM may precede the first markup byte.
+_UTF8_BOM = b"\xef\xbb\xbf"
+#: ASCII whitespace that may precede the first markup byte.
+_ASCII_WHITESPACE = b" \t\n\r\f\v"
+#: The first bytes that make a ``<`` document an HTML page rather than an XML (R-5.4).
+_HTML_PREFIXES = (b"<!doctype html", b"<html")
+
+_DocumentKind = Literal["pdf", "xml", "html"]
 
 
 def allowed_hosts(directory: StoreDirectory) -> frozenset[str]:
@@ -42,3 +65,117 @@ def is_allowed(url: str, hosts: frozenset[str]) -> bool:
         return False
     host = host.lower()
     return host == SUNAT_DOMAIN or host.endswith("." + SUNAT_DOMAIN) or host in hosts
+
+
+@dataclass(frozen=True)
+class _Reply:
+    """One HTTP hop: its status, its redirect target and, for a 200, its body."""
+
+    status: int
+    location: str | None
+    body: bytes
+
+
+class _TooManyRedirects(Exception):
+    """The redirect chain is longer than ``MAX_REDIRECTS`` (R-5.10)."""
+
+
+class _BodyTooLarge(Exception):
+    """The body outgrew the larger of the PDF and XML caps (R-5.6)."""
+
+
+class QrUrlFetcher:
+    """Fetch an invoice's files from the URL its QR code carried (R-5.2, R-5.6)."""
+
+    def __init__(self, http: httpx.AsyncClient, hosts: frozenset[str], max_bytes: MediaMaxBytes) -> None:
+        self._http = http
+        self._hosts = hosts
+        self._max_bytes = max_bytes
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        """Fetch ``invoice``'s document from its QR URL and report why (R-5.2, R-5.6)."""
+        url = invoice.document_url
+        if url is None:
+            return FetchResult(FetchReason.NO_URL, (), None)
+        try:
+            reply = await self._follow(url)
+        except (GuardBlocked, _TooManyRedirects):
+            return FetchResult(FetchReason.GUARD_BLOCKED, (), None)
+        except httpx.TimeoutException:
+            return FetchResult(FetchReason.TIMEOUT, (), None)
+        except (httpx.HTTPError, _BodyTooLarge):
+            return FetchResult(FetchReason.TECHNICAL, (), None)
+        if reply.status != httpx.codes.OK:
+            return FetchResult(FetchReason.TECHNICAL, (), None)
+        return _store(reply.body, out_dir, invoice, self._max_bytes)
+
+    async def _follow(self, url: str) -> _Reply:
+        """Return the final hop, following at most ``MAX_REDIRECTS`` checked redirects (R-5.10)."""
+        current = url
+        redirects = 0
+        while True:
+            if not is_allowed(current, self._hosts):
+                raise GuardBlocked(GuardReason.BAD_URL)
+            reply = await self._send(current)
+            if not _is_redirect(reply.status) or reply.location is None:
+                return reply
+            if redirects >= MAX_REDIRECTS:
+                raise _TooManyRedirects
+            current = urljoin(current, reply.location)
+            redirects += 1
+
+    async def _send(self, url: str) -> _Reply:
+        """Make one un-followed GET, reading a 200's body under the larger cap (R-5.6)."""
+        async with self._http.stream("GET", url, follow_redirects=False) as response:
+            if response.status_code != httpx.codes.OK:
+                return _Reply(response.status_code, response.headers.get("location"), b"")
+            return _Reply(response.status_code, None, await self._read_body(response))
+
+    async def _read_body(self, response: httpx.Response) -> bytes:
+        """Read the body into memory, refusing it once past the larger kind cap (R-5.6)."""
+        cap = max(self._max_bytes.pdf, self._max_bytes.xml)
+        chunks: list[bytes] = []
+        total = 0
+        async for chunk in response.aiter_bytes():
+            total += len(chunk)
+            if total > cap:
+                raise _BodyTooLarge
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+
+def _is_redirect(status: int) -> bool:
+    """Return whether ``status`` is a redirect the fetcher follows (R-5.10)."""
+    return 300 <= status < 400
+
+
+def _classify(data: bytes) -> _DocumentKind | None:
+    """Return what the body is, judged by its first bytes (R-5.6)."""
+    body = data.removeprefix(_UTF8_BOM).lstrip(_ASCII_WHITESPACE)
+    if body.startswith(b"%PDF-"):
+        return "pdf"
+    if body.startswith(b"<"):
+        # HTML pages are a not-found answer (R-5.4).
+        if body[:64].lower().startswith(_HTML_PREFIXES):
+            return "html"
+        return "xml"
+    return None
+
+
+def _store(data: bytes, out_dir: Path, invoice: FetchInvoice, max_bytes: MediaMaxBytes) -> FetchResult:
+    """Write the body under its kind and return it, or why it is unusable (R-5.6)."""
+    kind = _classify(data)
+    if kind is None or kind == "html":
+        return FetchResult(FetchReason.NOT_FOUND, (), None)
+    cap = max_bytes.pdf if kind == "pdf" else max_bytes.xml
+    if len(data) > cap:
+        return FetchResult(FetchReason.TECHNICAL, (), None)
+    path = out_dir / f"{kind}.{kind}"
+    path.write_bytes(data)
+    digest = sha256_hex(path)
+    if kind == "xml":
+        reason = xml_reason(path, invoice)
+        if reason is not None:
+            path.unlink(missing_ok=True)
+            return FetchResult(reason, (), None)
+    return FetchResult(FetchReason.OK, (FetchedFile(kind, path, len(data), digest),), None)

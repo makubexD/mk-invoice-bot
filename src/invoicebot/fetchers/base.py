@@ -75,6 +75,7 @@ class FetchInvoice:
     numero: str
     fecha: date
     total: Decimal
+    document_url: str | None = None
 
 
 class Fetcher(Protocol):

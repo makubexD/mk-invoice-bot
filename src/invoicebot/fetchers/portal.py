@@ -165,7 +165,7 @@ def _validate_files(
             return reason
     for file in files:
         try:
-            digest = _sha256(file.path)
+            digest = sha256_hex(file.path)
         except OSError:
             return FetchReason.TECHNICAL
         if digest != file.sha256:
@@ -174,7 +174,7 @@ def _validate_files(
     xml = next((file for file in files if file.kind == "xml"), None)
     if xml is None:
         return FetchReason.MISSING_DOCS
-    reason = _xml_reason(xml, invoice)
+    reason = xml_reason(xml.path, invoice)
     return FetchReason.OK if reason is None else reason
 
 
@@ -192,7 +192,7 @@ def _too_large(file: HelperFile, max_bytes: MediaMaxBytes) -> FetchReason | None
     return FetchReason.TECHNICAL if file.kind == "pdf" else FetchReason.XML_INVALID
 
 
-def _sha256(path: Path) -> str:
+def sha256_hex(path: Path) -> str:
     """Return the SHA-256 hex digest of the file at ``path``, read in 64 KiB chunks (R-5.6).
 
     Raises:
@@ -205,22 +205,22 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _xml_reason(xml: HelperFile, invoice: FetchInvoice) -> FetchReason | None:
+def xml_reason(xml: Path, invoice: FetchInvoice) -> FetchReason | None:
     """Return the XML's failure reason, or ``None`` when it matches the invoice (R-5.6, BR-F09)."""
     try:
-        data = xml.path.read_bytes()
+        data = xml.read_bytes()
     except OSError:
         return FetchReason.TECHNICAL
     try:
         reading = parse_invoice_xml(data)
     except XmlRejected:
         return FetchReason.XML_INVALID
-    if not matches_invoice(reading, _invoice_reading(invoice)):
+    if not matches_invoice(reading, invoice_reading(invoice)):
         return FetchReason.XML_MISMATCH
     return None
 
 
-def _invoice_reading(invoice: FetchInvoice) -> Reading:
+def invoice_reading(invoice: FetchInvoice) -> Reading:
     """Return the stored invoice as a reading the match can compare (R-5.6).
 
     The stored values came from the photo reading, so they are marked ``ocr``; the source
