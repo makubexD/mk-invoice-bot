@@ -24,7 +24,9 @@ Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `specs/02-req
 - Spec 02: R-1.5 cites D102 (an ambiguous upload asks) and D103 (a rejected upload is answered once).
 - Roadmap: under "Carried over" for the next phase, the three items from "Design choices".
 
-Test: none (spec text only); `uv run pytest -q tests/unit/test_rules_parity.py` still passes.
+Also `rules/messages_es.py` and `rules/catalog.py`: BR-D14 and BR-D15 entries, since `test_rules_parity` keeps them in step with spec 06.
+
+Test: `uv run pytest -q tests/unit/test_rules_parity.py`.
 
 ## Step 2: One refused webhook message does not drop its batch `[worker]`
 
@@ -76,9 +78,9 @@ Test: `uv run pytest -q tests/unit/test_fetchers_email_inbox.py tests/unit/test_
 
 ## Step 6: A PDF upload must be a PDF (BR-D15) `[worker]`
 
-Files: `src/invoicebot/pipeline/uploads.py`, `src/invoicebot/rules/messages_es.py`, `tests/integration/test_pipeline_uploads.py`.
+Files: `src/invoicebot/pipeline/uploads.py`, `tests/integration/test_pipeline_uploads.py`.
 
-- `messages_es.py`: `MESSAGES["BR-D15"]` with spec 06's text (step 1). Add BR-D15 to `rules/catalog.py` only if `test_rules_parity` requires it; if it does, that file is allowed too.
+- `MESSAGES["BR-D15"]` and its `rules/catalog.py` entry already exist (step 1, kept in parity with spec 06); use them, don't add them again.
 - `uploads.py`: a `pdf` upload whose bytes fail `fetchers.base.is_pdf` is discarded like a rejected XML. Its rejection is `BR-D15`, recorded (step 4) and answered once.
 - Test (D103): an HTML body uploaded as a pdf leaves no files row, sends BR-D15 once, and the invoice stays `MANUAL_REQUIRED`.
 
@@ -86,11 +88,11 @@ Test: `uv run pytest -q tests/integration/test_pipeline_uploads.py tests/unit/te
 
 ## Step 7: An ambiguous upload asks which invoice (BR-D14) `[worker]`
 
-Files: `src/invoicebot/store/messages.py`, `src/invoicebot/pipeline/intake.py`, `src/invoicebot/rules/messages_es.py`, `tests/integration/test_intake.py`.
+Files: `src/invoicebot/store/messages.py`, `src/invoicebot/pipeline/intake.py`, `tests/integration/test_intake.py`.
 
 - `store/messages.py`: `find_open_invoice_for_attachment` keeps its quote branch. Without a resolved quote it returns the profile's open invoice only when there is exactly one. Add `list_open_invoices(conn, profile_id) -> list[tuple[int, str | None, str | None]]`: id, serie and numero of the profile's open invoices, newest first. The serie and numero come from the stored reading, as `load_reading` does. Update the docstring.
 - `intake._link_upload`: when nothing matched and `list_open_invoices` returns more than one invoice, queue BR-D14 to the sender in the caller's transaction (`queue_message`, as other intake replies do). The `{invoices}` items are `#{id} {serie}-{numero}`, with `#{id}` alone when the reading lacks a field. Nothing is linked.
-- `messages_es.py`: `MESSAGES["BR-D14"]` with spec 06's text (step 1). Add it to `rules/catalog.py` if `test_rules_parity` requires it.
+- `MESSAGES["BR-D14"]` and its `rules/catalog.py` entry already exist (step 1, kept in parity with spec 06); use them, don't add them again.
 - Tests (R-1.5, D102):
   - Two stuck invoices and a PDF with no quote: BR-D14 names both, and no `attach_upload` job is queued.
   - The same PDF quoting the older invoice's photo links to the older invoice.
