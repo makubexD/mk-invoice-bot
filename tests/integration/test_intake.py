@@ -15,7 +15,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, ChannelName, InboundMessage
+from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, RoutingRule, StoreDirectory
@@ -23,11 +23,13 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
+from invoicebot.store.messages import link_message_to_invoice, store_inbound
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -73,6 +75,7 @@ def _message(
     channel: ChannelName = "whatsapp",
     text: str = "",
     attachments: list[Attachment] | None = None,
+    reply_to_external_id: str | None = None,
 ) -> InboundMessage:
     """Build a canonical inbound message for profile_id."""
     return InboundMessage(
@@ -82,8 +85,15 @@ def _message(
         sender_role="owner",
         text=text,
         attachments=[] if attachments is None else attachments,
+        reply_to_external_id=reply_to_external_id,
         received_at=datetime.now(UTC),
     )
+
+
+def _upload(kind: AttachmentKind = "xml") -> Attachment:
+    """Return a pdf or xml upload attachment with a unique media reference."""
+    mime = "application/xml" if kind == "xml" else "application/pdf"
+    return Attachment(kind=kind, media_ref=f"ref-{uuid4().hex}", mime=mime, size=2048)
 
 
 def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
@@ -878,3 +888,105 @@ async def test_press_checks_the_state_under_the_row_lock(
 
     assert state_rule[0] == "DELIVERING"
     assert [rule_id for _text, rule_id in replies] == ["BR-S02"]
+
+
+async def test_xml_upload_links_the_newest_manual_required_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an XML upload links to the profile's MANUAL_REQUIRED invoice and queues attach_upload."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        cur = await conn.execute(
+            "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+            (msg.channel, msg.external_id),
+        )
+        linked = await cur.fetchone()
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert linked == (invoice_id,)
+    assert jobs == [ATTACH_STEP]
+
+
+async def test_upload_quoting_an_older_invoice_wins_over_the_newest(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an upload quoting an older MANUAL_REQUIRED invoice links to that one."""
+    profile_id = _profile()
+    older = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    newer = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    source = _message(profile_id, external_id=_external_id(), text="aquí van sus archivos")
+    async with db_pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, source) is True
+        await link_message_to_invoice(conn, source.channel, source.external_id, older)
+
+    msg = _message(
+        profile_id,
+        external_id=_external_id(),
+        attachments=[_upload("pdf")],
+        reply_to_external_id=source.external_id,
+    )
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        older_jobs = await _jobs(conn, older)
+        newer_jobs = await _jobs(conn, newer)
+
+    assert result.invoice_id == older
+    assert older_jobs == [ATTACH_STEP]
+    assert newer_jobs == []
+
+
+async def test_another_profiles_invoice_is_never_matched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: an upload links only an invoice of the same profile, never another's."""
+    mine = _profile()
+    theirs = _profile()
+    foreign = await _invoice_in(db_pool, theirs, "MANUAL_REQUIRED", None, rule_id="BR-F07")
+    msg = _message(mine, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        jobs = await _jobs(conn, foreign)
+
+    assert result.invoice_id is None
+    assert jobs == []
+
+
+async def test_upload_with_no_stuck_invoice_queues_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5: with no MANUAL_REQUIRED invoice an upload is stored and links nothing."""
+    profile_id = _profile()
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        counts = await _counts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert counts == (1, 0, 0, 0)
+
+
+async def test_confirming_invoice_is_not_matched(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-1.5, D101: a CONFIRMING invoice waits for read-more, so an upload links no invoice."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "CONFIRMING", _reading(await _today(db_pool)), rule_id="BR-R03"
+    )
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.invoice_id is None
+    assert jobs == []

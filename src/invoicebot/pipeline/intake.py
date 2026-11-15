@@ -18,11 +18,16 @@ from invoicebot.pipeline.commands import CommandContext, handle_command, parse_c
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
+from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import count_active_jobs, create_invoice, touch_window
-from invoicebot.store.messages import link_message_to_invoice, store_inbound
+from invoicebot.store.messages import (
+    find_open_invoice_for_attachment,
+    link_message_to_invoice,
+    store_inbound,
+)
 
 #: Rule that tells a sender their queue is full (BR-S01).
 RULE_BACK_PRESSURE = "BR-S01"
@@ -34,6 +39,8 @@ DOWNLOAD_STEP = "download_media"
 LOCK_PREFIX = "intake:"
 #: Attachment kind that starts an invoice (R-1.1).
 PHOTO_KIND = "photo"
+#: Attachment kinds a sender may upload for a stuck invoice (R-1.5, D101).
+UPLOAD_KINDS = ("pdf", "xml")
 
 type IntakeStatus = Literal["duplicate", "queued", "back_pressure", "stored"]
 
@@ -58,7 +65,8 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), a non-photo is ``stored`` and a text-only message may also
+    ``stored`` (R-3.5), a non-photo is ``stored`` (a pdf/xml upload is linked to
+    the stuck invoice it belongs to, R-1.5) and a text-only message may also
     run a command (R-10.1), apply its edits (D97) and store its overrides (D70). A photo
     becomes an invoice, with its caption's overrides, a ``download_media`` job and a
     BR-S09 acknowledgement, unless the sender already has ``max_queued_per_sender``
@@ -126,10 +134,11 @@ async def _store_with_overrides(
     (R-10.1). Otherwise it may hold both ``campo=valor`` edits when ``parse_edits`` finds
     fields or errors, and ``motivo``/``descripcion`` overrides (D70, D90, D97). Each is
     applied independently to the invoice it targets, and the result names the invoice the
-    edits first touched. A non-photo attachment, or a text with neither, changes nothing.
+    edits first touched. A pdf/xml upload is linked to the stuck invoice it belongs to
+    (R-1.5); another attachment kind, or a text with neither, changes nothing.
     """
     if msg.attachments:
-        return IntakeResult(status="stored", invoice_id=None)
+        return IntakeResult(status="stored", invoice_id=await _link_upload(conn, msg))
     command = parse_command(msg.text)
     if command is not None:
         context = CommandContext(admins=admins, timezone=timezone)
@@ -143,6 +152,24 @@ async def _store_with_overrides(
     if overrides:
         invoice_id = await apply_overrides(conn, msg, overrides) or invoice_id
     return IntakeResult(status="stored", invoice_id=invoice_id)
+
+
+async def _link_upload(conn: AsyncConnection[Any], msg: InboundMessage) -> int | None:
+    """Link a pdf/xml upload to the stuck invoice it belongs to (R-1.5, S7.5).
+
+    The invoice is the one the message quotes, else the profile's newest open
+    one. The link and the ``attach_upload`` job join the caller's transaction;
+    no invoice (or another attachment kind) links nothing.
+    """
+    if not any(attachment.kind in UPLOAD_KINDS for attachment in msg.attachments):
+        return None
+    reply_to = None if msg.reply_to_external_id is None else (msg.channel, msg.reply_to_external_id)
+    invoice_id = await find_open_invoice_for_attachment(conn, msg.profile_id, reply_to)
+    if invoice_id is None:
+        return None
+    await link_message_to_invoice(conn, msg.channel, msg.external_id, invoice_id)
+    await enqueue(conn, invoice_id, ATTACH_STEP)
+    return invoice_id
 
 
 async def _add_outbox(

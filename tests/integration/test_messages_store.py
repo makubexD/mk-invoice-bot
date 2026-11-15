@@ -202,7 +202,7 @@ async def test_quoted_invoice_of_another_profile_is_ignored(
 async def test_invoice_in_another_state_is_not_matched(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-1.5: only MANUAL_REQUIRED and CONFIRMING invoices accept attachments."""
+    """R-1.5, D101: only MANUAL_REQUIRED invoices accept attachments."""
     profile_id = _profile()
 
     async with db_pool.connection() as conn:

@@ -7,8 +7,9 @@ from psycopg.types.json import Jsonb
 
 from invoicebot.channels.base import ChannelName, InboundMessage
 
-# The two states in which R-1.5 accepts a document for an invoice.
-OPEN_STATES = ("MANUAL_REQUIRED", "CONFIRMING")
+# The states in which R-1.5 accepts a document for an invoice.
+# shortcut: D101 — CONFIRMING joins when read-more lands.
+OPEN_STATES = ("MANUAL_REQUIRED",)
 
 
 async def store_inbound(conn: AsyncConnection[Any], msg: InboundMessage) -> bool:
@@ -65,9 +66,9 @@ async def find_open_invoice_for_attachment(
             WHERE m.channel = %s
               AND m.external_id = %s
               AND i.profile_id = %s
-              AND i.state IN ('MANUAL_REQUIRED', 'CONFIRMING')
+              AND i.state = ANY(%s)
             """,
-            (channel, external_id, profile_id),
+            (channel, external_id, profile_id, list(OPEN_STATES)),
         )
         row = await cur.fetchone()
         if row is not None:
@@ -76,11 +77,11 @@ async def find_open_invoice_for_attachment(
         """
         SELECT id
         FROM invoices
-        WHERE profile_id = %s AND state IN ('MANUAL_REQUIRED', 'CONFIRMING')
+        WHERE profile_id = %s AND state = ANY(%s)
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         """,
-        (profile_id,),
+        (profile_id, list(OPEN_STATES)),
     )
     row = await cur.fetchone()
     return None if row is None else int(row[0])
