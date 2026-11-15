@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -74,6 +75,8 @@ PREPARED_REMIND_DAYS = 2
 MAX_PENDING_LINES = 20
 #: How many parked questions ``/pendientes`` sends again in one answer (S4.8).
 PENDING_REQUEUES = 3
+#: The least time between two sends of the same parked question (S4.8, D94).
+PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 
 #: A command applied in the caller's transaction: its connection, sender, argument and
 #: the admin profile ids (R-10.1).
@@ -271,7 +274,8 @@ async def _pendientes(
 
     Only the sender's own invoices are listed; a parked row shows the state it was
     waiting in (D94). The first :data:`PENDING_REQUEUES` parked invoices get their
-    question sent again with the same buttons, so a lapsed question comes back.
+    question sent again with the same buttons, so a lapsed question comes back, but
+    one sent within :data:`PENDING_REQUEUE_INTERVAL` is not repeated (S4.8).
     """
     rows, total = await list_pending(
         conn,
@@ -315,7 +319,7 @@ async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) ->
             return
         if row.state != PENDING_USER or row.waiting_rule_id is None:
             continue
-        await outbox.requeue_last(conn, row.id, row.waiting_rule_id)
+        await outbox.requeue_last(conn, row.id, row.waiting_rule_id, PENDING_REQUEUE_INTERVAL)
         requeued += 1
 
 

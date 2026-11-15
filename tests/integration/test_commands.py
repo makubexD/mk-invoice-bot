@@ -140,6 +140,24 @@ async def _question(
         )
 
 
+async def _backdate_questions(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    *,
+    minutes: int = 11,
+) -> None:
+    """Move the invoice's outbox rows back in time so /pendientes may re-send a question (S4.8, D94)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            UPDATE outbox
+            SET created_at = created_at - make_interval(mins => %s)
+            WHERE invoice_id = %s
+            """,
+            (minutes, invoice_id),
+        )
+
+
 async def _parked_invoice(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     profile_id: str,
@@ -698,6 +716,7 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
         Button(id=f"{invoice_id}:cancel", title=BUTTON_CANCEL),
     ]
     await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT, buttons)
+    await _backdate_questions(db_pool, invoice_id)
     msg = _message(profile_id, "/pendientes")
     line = PENDING_LINE.format(
         id=invoice_id,
@@ -721,6 +740,33 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     original, requeued = payloads
     assert original["buttons"] == requeued["buttons"]
     assert requeued["text"] == original["text"]
+
+
+async def test_pendientes_requeues_a_question_at_most_every_ten_minutes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S4.8, D94: /pendientes re-sends a parked question once, but not again within 10 minutes."""
+    profile_id = _profile()
+    invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
+    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED)
+        first = await _invoice_payloads(conn, invoice_id)
+        await handle_inbound(conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED)
+        second = await _invoice_payloads(conn, invoice_id)
+
+    assert [payload.get("rule_id") for payload in first] == ["BR-R03", "BR-R03"]
+    assert second == first
+
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, _message(profile_id, "/pendientes"), max_queued_per_sender=MAX_QUEUED)
+        third = await _invoice_payloads(conn, invoice_id)
+
+    assert [payload.get("rule_id") for payload in third] == ["BR-R03", "BR-R03", "BR-R03"]
 
 
 async def test_pendientes_lists_a_prepared_batch_older_than_the_reminder(
