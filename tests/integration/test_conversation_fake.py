@@ -6,29 +6,39 @@ sender handing each message to :class:`FakeChannel`.
 """
 
 import itertools
+from collections.abc import Callable
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+import httpx
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.fake import FakeChannel
+from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config, RoutingRule, StoreDirectory
+from invoicebot.config.models import Brand, Config, RoutingRule, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.pipeline.extract import ROUTE_STEP
+from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.park import park_stale_questions
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.outbox import OutboxSender
+from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import compile_rules
+from invoicebot.rules.messages_es import FETCH_NOT_FOUND_LINE, MESSAGES, fetcher_desc
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -46,6 +56,17 @@ OWNER_FLOW = "personal_google"
 WORK_FLOW = "work_microsoft"
 FULL_PROFILE = "yo"
 TOTAL = "49.90"
+#: The store's one comercio, named in BR-F11's bullet (BR-F07).
+COMERCIO = "Tienda Sintética"
+PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
+#: The fake Meta host and the media ids the upload handler downloads (R-1.5).
+GRAPH_HOST = "graph.facebook.com"
+GRAPH_VERSION = "v23.0"
+PHONE_NUMBER_ID = "123456789"
+BEARER = "synthetic-bearer-value"
+MEDIA_URL = "https://mmg.whatsapp.net/v/t62/{}"
+#: Enough runs for the portal's final failure plus the inbox's four retries and the exhaustion check.
+MAX_FETCH_RUNS = 10
 #: One unique numero per reading, in a range no other test file uses (D93).
 _NEXT_NUMERO = itertools.count(50000)
 
@@ -500,3 +521,168 @@ async def test_estado_on_another_profiles_invoice_sends_br_s07(
         assert await _state_rule(conn, invoice_id) == ("FETCHING_DOCS", "BR-R02")
     assert fake.rule_ids() == ["BR-S07"]
     assert fake.texts() == [f"No encontré el comprobante #{invoice_id}."]
+
+
+class _NotFoundInbox:
+    """An ``email_inbox`` fetcher whose mailbox never has the invoice (R-5.5)."""
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        """Report the invoice as not found yet, whatever the mailbox holds."""
+        del invoice, out_dir
+        return FetchResult(FetchReason.NOT_FOUND_YET, (), None)
+
+
+def _matching_xml(serie: str, numero: int, total: str, fecha: date) -> bytes:
+    """Return a synthetic UBL invoice that matches the reading (R-5.6)."""
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
+  <ID>{serie}-{numero}</ID>
+  <IssueDate>{fecha.isoformat()}</IssueDate>
+  <InvoiceTypeCode>01</InvoiceTypeCode>
+  <AccountingSupplierParty>
+    <Party>
+      <PartyIdentification><ID>{OWNER_RUC}</ID></PartyIdentification>
+      <PartyLegalEntity><RegistrationName>Restaurante La Lena S.A.C.</RegistrationName></PartyLegalEntity>
+    </Party>
+  </AccountingSupplierParty>
+  <LegalMonetaryTotal>
+    <PayableAmount>{total}</PayableAmount>
+  </LegalMonetaryTotal>
+</Invoice>
+""".encode()
+
+
+def _media_server(media: dict[str, tuple[str, bytes]]) -> Callable[[httpx.Request], httpx.Response]:
+    """Serve each media id's info and bytes from a fake Meta (R-1.5)."""
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        media_id = request.url.path.rsplit("/", 1)[-1]
+        mime, body = media[media_id]
+        if request.url.host == GRAPH_HOST:
+            return httpx.Response(
+                200,
+                json={"url": MEDIA_URL.format(media_id), "mime_type": mime, "file_size": len(body)},
+            )
+        return httpx.Response(200, content=body)
+
+    return handle
+
+
+def _job(job_id: int, invoice_id: int, step: str) -> Job:
+    """Build the claimed job a handler receives."""
+    return Job(
+        id=job_id,
+        invoice_id=invoice_id,
+        step=step,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
+    )
+
+
+async def _newest_job_id(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, step: str) -> int:
+    """Return the id of invoice_id's newest job of ``step``."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT max(id) FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, step)
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None
+    return int(row[0])
+
+
+async def _fetch_to_manual(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    handler: Handler,
+    invoice_id: int,
+) -> None:
+    """Run the fetch chain's queued jobs until the invoice leaves FETCHING_DOCS (BR-F07)."""
+    for _ in range(MAX_FETCH_RUNS):
+        async with pool.connection() as conn:
+            state, _rule = await _state_rule(conn, invoice_id)
+        if state != "FETCHING_DOCS":
+            return
+        await handler(_job(await _newest_job_id(pool, invoice_id, FETCH_STEP), invoice_id, FETCH_STEP))
+    raise AssertionError("the fetch chain never reached MANUAL_REQUIRED")
+
+
+async def test_manual_portal_exhausts_the_chain_then_uploads_deliver(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-5.5, R-1.5, S7.4: a manual portal ends in BR-F07, then a PDF and its XML deliver."""
+    profile_id = _profile()
+    cfg = _config(profile_id)
+    flow = cfg.flows[WORK_FLOW].model_copy(update={"manual_uploads": ["pdf", "xml"]})
+    cfg = cfg.model_copy(update={"flows": {**cfg.flows, WORK_FLOW: flow}})
+    today = await _today(db_pool)
+    numero = next(_NEXT_NUMERO)
+    reading = _reading(today, numero)
+    directory = StoreDirectory(
+        stores={
+            OWNER_RUC: Store(
+                ruc=OWNER_RUC,
+                razon_social="Comercio Sintético",
+                tipo="01",
+                brands=[Brand(comercio=COMERCIO)],
+                portal="manual",
+            )
+        },
+        portals={},
+    )
+    invoice_id = await _photo_invoice(db_pool, profile_id, cfg, reading)
+    fetch = make_fetch_handler(
+        db_pool,
+        cfg,
+        directory,
+        {
+            WORK_FLOW: {
+                "portal_registry": PortalFetcher(
+                    directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s
+                ),
+                "email_inbox": _NotFoundInbox(),
+            }
+        },
+        tmp_path,
+    )
+    await _fetch_to_manual(db_pool, fetch, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _state_rule(conn, invoice_id) == ("MANUAL_REQUIRED", "BR-F07")
+    fake = FakeChannel()
+    sender = _sender(db_pool, fake)
+    await sender.send_pending()
+    assert "BR-F07" in fake.rule_ids()
+    text = fake.texts()[fake.rule_ids().index("BR-F07")]
+    assert MESSAGES["BR-F11"].format(comercio=COMERCIO) in text
+    assert FETCH_NOT_FOUND_LINE.format(fetcher=fetcher_desc("email_inbox")) in text
+    assert MESSAGES["BR-F01"] in text
+
+    pdf_ref = f"pdf-{uuid4().hex}"
+    xml_ref = f"xml-{uuid4().hex}"
+    xml_bytes = _matching_xml(reading.value("serie") or "", numero, TOTAL, today)
+    upload = _message(
+        profile_id,
+        attachments=[
+            Attachment(kind="pdf", media_ref=pdf_ref, mime="application/pdf", size=len(PDF_BYTES)),
+            Attachment(kind="xml", media_ref=xml_ref, mime="application/xml", size=len(xml_bytes)),
+        ],
+    )
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, upload, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+    attach_job_id = await _newest_job_id(db_pool, invoice_id, ATTACH_STEP)
+
+    media = {pdf_ref: ("application/pdf", PDF_BYTES), xml_ref: ("application/xml", xml_bytes)}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_media_server(media))) as http:
+        client = WhatsAppClient(
+            http,
+            phone_number_id=PHONE_NUMBER_ID,
+            graph_api_version=GRAPH_VERSION,
+            token=BEARER,
+        )
+        attach = make_attach_handler(db_pool, cfg, client, tmp_path, cfg.limits.media)
+        await attach(_job(attach_job_id, invoice_id, ATTACH_STEP))
+
+    async with db_pool.connection() as conn:
+        assert await _state_rule(conn, invoice_id) == ("DELIVERING", None)
