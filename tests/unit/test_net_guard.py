@@ -134,3 +134,9 @@ async def test_resolve_and_check_uses_the_given_check() -> None:
         PUBLIC_ADDRESS,
         GuardReason.PRIVATE_ADDRESS,
     )
+
+
+@pytest.mark.parametrize("host", ["a..b.example", "a" * 64 + ".example"])
+async def test_system_resolver_returns_nothing_for_a_malformed_host(host: str) -> None:
+    """R-5.10: a host the idna codec refuses resolves to no addresses instead of raising."""
+    assert await SystemResolver().resolve(host) == []

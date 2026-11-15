@@ -62,7 +62,8 @@ class SystemResolver:
         try:
             async with asyncio.timeout(self._timeout_s):
                 answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
-        except (TimeoutError, socket.gaierror):
+        except (TimeoutError, socket.gaierror, UnicodeError):
+            # UnicodeError: the idna codec refuses an empty or over-long label ("a..b.com").
             return []
         addresses: list[str] = []
         for answer in answers:

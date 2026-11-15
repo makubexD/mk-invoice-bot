@@ -36,6 +36,7 @@ EXPECTED_TABLES = {
     "padron",
     "pending_actions",
     "taught_links",
+    "upload_rejections",
 }
 
 INSERT_MESSAGE = """

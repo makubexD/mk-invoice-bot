@@ -150,7 +150,8 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         httpx.AsyncClient(
             transport=GuardedTransport(
                 # A pinned request reaches httpcore by IP, so a pooled connection would carry an
-                # earlier host's TLS check to another host on the same IP (R-5.10).
+                # earlier host's TLS check to another host on the same IP (R-5.10). HTTP/2 must
+                # stay off for the same reason: one h2 connection multiplexes hosts on an IP.
                 httpx.AsyncHTTPTransport(limits=httpx.Limits(max_keepalive_connections=0)),
                 SystemResolver(),
             ),

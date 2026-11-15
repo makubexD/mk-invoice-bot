@@ -957,6 +957,11 @@ async def test_ambiguous_upload_asks_which_invoice(
         replies = await _replies(conn, profile_id)
         older_jobs = await _jobs(conn, older)
         newer_jobs = await _jobs(conn, newer)
+        cur = await conn.execute(
+            "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+            (msg.channel, msg.external_id),
+        )
+        linked = await cur.fetchall()
 
     expected = MESSAGES["BR-D14"].format(
         invoices=(
@@ -967,6 +972,7 @@ async def test_ambiguous_upload_asks_which_invoice(
     assert result.status == "stored"
     assert result.invoice_id is None
     assert replies == [(expected, "BR-D14")]
+    assert linked == [(None,)]
     assert older_jobs == []
     assert newer_jobs == []
 

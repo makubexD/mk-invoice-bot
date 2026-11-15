@@ -377,19 +377,25 @@ async def test_one_refused_message_does_not_drop_the_rest_of_the_batch(
     assert "Traceback" not in caplog.text
 
 
-async def test_database_operational_error_returns_503(db_pool: Pool, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_database_operational_error_returns_503(
+    db_pool: Pool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """R-1.8: a transient database failure still asks Meta to redeliver."""
     sender = _sender()
 
     async def down(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
-        raise psycopg.errors.OperationalError("down")
+        raise psycopg.errors.OperationalError("down: Failing row contains (secret-value)")
 
     monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", down)
-    async with _client(_deps(db_pool, sender)) as client:
-        response = await _post(client, _body(_photo_payload(sender.number)))
+    with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
+        async with _client(_deps(db_pool, sender)) as client:
+            response = await _post(client, _body(_photo_payload(sender.number)))
 
     assert response.status_code == 503
     assert response.content == b""
+    assert "webhook database error" in caplog.text
+    assert "secret-value" not in caplog.text  # the error text can echo row values
+    assert "Traceback" not in caplog.text
 
     """R-1.9: a signed status-only payload returns 200 and stores nothing."""
     sender = _sender()

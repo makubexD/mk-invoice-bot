@@ -138,16 +138,7 @@ async def test_fetch_xml_and_pdf_are_written_with_their_digests(tmp_path: Path) 
     assert files["xml"].sha256 == hashlib.sha256(xml).hexdigest()
     assert files["pdf"].path == tmp_path / "pdf.pdf"
     assert files["pdf"].sha256 == hashlib.sha256(PDF).hexdigest()
-    assert mailbox.searches == [(f"{SERIE}-{NUMERO}", SEARCH_TOP)]
-
-
-async def test_fetch_searches_the_mailbox_for_the_serie_and_numero(tmp_path: Path) -> None:
-    """R-5.5: the mailbox search names the invoice as serie-numero."""
-    mailbox = FakeMailbox([], {}, {})
-
-    await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
-
-    assert mailbox.searches == [("F001-123", SEARCH_TOP)]
+    assert mailbox.searches == [(SERIE, SEARCH_TOP)]
 
 
 async def test_fetch_matches_a_zero_padded_name(tmp_path: Path) -> None:

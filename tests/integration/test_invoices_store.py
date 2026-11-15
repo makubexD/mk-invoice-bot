@@ -748,17 +748,18 @@ async def test_record_upload_rejection_hides_only_its_upload(
 async def test_record_upload_rejection_twice_keeps_one_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D103: recording the same rejection twice raises nothing and leaves exactly one row."""
+    """D103: recording the same rejection twice leaves one row and says only the first added it."""
     async with db_pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, "yo", CHANNEL)
-        await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
-        await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
+        first = await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
+        second = await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
         cur = await conn.execute(
             "SELECT rule_id, count(*) FROM upload_rejections WHERE invoice_id = %s GROUP BY rule_id",
             (invoice_id,),
         )
         rows = await cur.fetchall()
 
+    assert (first, second) == (True, False)
     assert rows == [("BR-D15", 1)]
 
 

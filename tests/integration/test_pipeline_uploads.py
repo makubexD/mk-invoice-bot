@@ -21,7 +21,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
-from invoicebot.channels.whatsapp.client import WhatsAppClient
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
@@ -680,3 +680,29 @@ async def test_media_info_404_is_skipped_and_a_valid_pdf_is_stored(
     assert state == "MANUAL_REQUIRED"
     assert [(kind, ref) for kind, _path, ref in files] == [("pdf", pdf_ref)]
     assert outbox == [(f"Recibí el PDF. Aún falta el XML para completar {SERIE}-{NUMERO}.", "BR-D09")]
+
+
+async def test_media_info_503_fails_the_job_so_the_queue_retries(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.11: a Meta error a retry can fix fails the job instead of silently dropping the upload."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    pdf_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", pdf_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    with pytest.raises(WhatsAppError):
+        await _run(db_pool, tmp_path, invoice_id, {}, options=_RunOptions(statuses={pdf_ref: 503}))
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == []

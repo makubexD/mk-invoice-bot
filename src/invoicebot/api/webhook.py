@@ -100,8 +100,12 @@ async def _intake(deps: WebhookDeps, messages: list[InboundMessage]) -> Response
         # An expected race (D95): the redelivery applies to the new state.
         logger.warning("webhook invoice %s moved; asking for redelivery", moved.invoice_id)
         return Response(status_code=503)
-    except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed):
-        logger.exception("webhook database error")
+    except (psycopg.Error, psycopg_pool.PoolTimeout, psycopg_pool.PoolClosed) as exc:
+        # Type and SQLSTATE only: a constraint error's DETAIL echoes the row's values.
+        logger.error(
+            "webhook database error",
+            extra={"error_type": type(exc).__name__, "sqlstate": exc.sqlstate},
+        )
         return Response(status_code=503)
     return JSONResponse({"status": "ok"})
 

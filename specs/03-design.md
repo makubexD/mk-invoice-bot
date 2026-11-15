@@ -93,6 +93,7 @@ jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_er
 batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason /*enum code*/, ms, at) -- R-5.7
+upload_rejections(invoice_id, media_ref, rule_id, created_at, PRIMARY KEY(invoice_id, media_ref)) -- D103
 outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo or subscriber*/,
        payload_json, template NULL, state /*pending|sent|dead*/, attempts, created_at,
        run_after, last_error NULL, sent_at NULL)                        -- outbox pattern; run_after drives retry backoff

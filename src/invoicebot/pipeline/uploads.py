@@ -61,6 +61,10 @@ from invoicebot.store.invoices import (
 
 logger = logging.getLogger(__name__)
 
+#: Meta answers a retry can fix: a 5xx, or an expired token, a lost permission, a timeout
+#: or a rate limit. Any other 4xx, or an error before the request, means the media is gone.
+HTTP_SERVER_ERROR = 500
+RETRYABLE_STATUSES = frozenset({401, 403, 408, 429})
 #: BR-F09's reply when an uploaded XML is unsafe or invalid.
 RULE_XML_INVALID = "BR-F09"
 #: BR-F06's reply when an uploaded XML is not this invoice's.
@@ -214,11 +218,18 @@ async def _download(
         )
         return None
     except (WhatsAppError, MediaChecksumMismatch) as exc:
+        if isinstance(exc, WhatsAppError) and _retryable(exc):
+            raise  # the queue retries the job; a skip would lose the upload
         logger.warning(
             "upload skipped",
             extra={"invoice_id": invoice_id, "type": type(exc).__name__},
         )
         return None
+
+
+def _retryable(exc: WhatsAppError) -> bool:
+    """Return whether a retry can fix the error: a server, rate, auth or timeout status (R-1.11)."""
+    return exc.status >= HTTP_SERVER_ERROR or exc.status in RETRYABLE_STATUSES
 
 
 async def _rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:
@@ -240,8 +251,6 @@ async def _pdf_rejection(media: DownloadedMedia, upload: Attachment) -> _Rejecti
 
 async def _xml_rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:
     """Return the reply for an XML that is unsafe or not this invoice's, or None (BR-F06, BR-F09)."""
-    if upload.kind != "xml":
-        return None
     try:
         xml = parse_invoice_xml(await asyncio.to_thread(media.path.read_bytes))
     except XmlRejected:
@@ -268,12 +277,11 @@ async def _commit(inputs: _Inputs, outcome: _Outcome) -> bool:
             return False
         addressee = Addressee(inputs.head.origin_channel, inputs.head.profile_id)
         for rejection in outcome.replies:
-            await record_upload_rejection(
-                conn,
-                inputs.job.invoice_id,
-                rejection.media_ref,
-                rejection.rule_id,
+            recorded = await record_upload_rejection(
+                conn, inputs.job.invoice_id, rejection.media_ref, rejection.rule_id
             )
+            if not recorded:
+                continue  # an overlapping run already answered this upload (D103)
             await queue_message(
                 conn,
                 addressee,
@@ -289,7 +297,7 @@ async def _commit(inputs: _Inputs, outcome: _Outcome) -> bool:
         if not missing:
             await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=MANUAL_REQUIRED)
             await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
-        elif outcome.stored_kinds:
+        else:
             await _reply_missing(conn, inputs, outcome, missing, addressee)
     return True
 

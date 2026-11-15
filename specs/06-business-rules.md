@@ -109,7 +109,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-D12 | Flow B: the laptop agent hasn't picked up a job for `agent_stale_after` | Once per job; the job stays queued | `💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. Saldrá cuando la enciendas.` |
 | BR-D13 | Flow B: `inbox_rule` sent the email to the owner's inbox (trusted, D67) | The batch is `sent`; the invoice is `DONE` | `✅ Archivada en {folder}. El correo salió por tu regla de Outlook.` [No llegó] |
 | BR-D14 | A pdf/xml upload whose quote does not resolve while the profile has more than one stuck invoice (D102) | Not linked | `Tienes varios comprobantes esperando archivos: {invoices}. Vuelve a enviar el archivo respondiendo a la foto del comprobante.` |
-| BR-D15 | An uploaded pdf does not start with `%PDF-` (D103) | Not stored; recorded as rejected | `El archivo que enviaste no es un PDF válido; no lo guardé.` |
+| BR-D15 | An uploaded pdf does not start with `%PDF-`, after an optional UTF-8 BOM and leading whitespace (D103) | Not stored; recorded as rejected | `El archivo que enviaste no es un PDF válido; no lo guardé.` |
 
 - BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, joined by `, `.
 

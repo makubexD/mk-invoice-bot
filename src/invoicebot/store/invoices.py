@@ -630,13 +630,13 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
 
 async def record_upload_rejection(
     conn: AsyncConnection[Any], invoice_id: int, media_ref: str, rule_id: str
-) -> None:
+) -> bool:
     """Record that invoice_id's upload at media_ref was rejected under rule_id (D103).
 
-    A redelivered job records the same rejection again without raising: the first row
-    stands, so the reply is not repeated. Does not commit.
+    Returns whether this call added the row. A second run that records the same
+    rejection gets ``False``, so its caller does not repeat the reply. Does not commit.
     """
-    await conn.execute(
+    cur = await conn.execute(
         """
         INSERT INTO upload_rejections (invoice_id, media_ref, rule_id)
         VALUES (%s, %s, %s)
@@ -644,6 +644,7 @@ async def record_upload_rejection(
         """,
         (invoice_id, media_ref, rule_id),
     )
+    return cur.rowcount == 1
 
 
 async def list_unattached_uploads(
