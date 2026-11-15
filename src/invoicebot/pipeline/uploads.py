@@ -3,9 +3,11 @@
 :func:`make_attach_handler` builds the handler of the ``attach_upload`` job step. It acts
 on a ``MANUAL_REQUIRED`` invoice only (D101): each linked PDF or XML the flow lets a sender
 upload is downloaded, an XML is checked like a fetched one (R-5.6), and the kept files are
-stored with their media ref in one transaction. When every required document is present
-the invoice moves to ``DELIVERING`` with its deliver job; otherwise BR-D09 says what is
-still missing. A run that stores nothing leaves the invoice as it was.
+stored with their media ref in one transaction. A rejected upload is answered once and its
+media ref recorded, so a later job neither fetches nor answers it again (D103). When every
+required document is present the invoice moves to ``DELIVERING`` with its deliver job;
+otherwise BR-D09 says what is still missing. A run that stores nothing records its
+rejections and leaves the invoice in ``MANUAL_REQUIRED``.
 """
 
 from __future__ import annotations
@@ -23,8 +25,8 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Attachment
 from invoicebot.channels.media_limits import MediaRejected
-from invoicebot.channels.whatsapp.client import WhatsAppClient
-from invoicebot.channels.whatsapp.media import DownloadedMedia, download_media
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.whatsapp.media import DownloadedMedia, MediaChecksumMismatch, download_media
 from invoicebot.config.models import Config, Flow, MediaLimits
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
@@ -40,6 +42,7 @@ from invoicebot.rules.messages_es import (
     UPLOAD_XML_MISMATCH,
     docs_desc,
 )
+from invoicebot.states import DELIVERING, MANUAL_REQUIRED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
     FileKind,
@@ -51,15 +54,12 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    record_upload_rejection,
     set_state,
 )
 
 logger = logging.getLogger(__name__)
 
-#: The only state this handler acts on; any other leaves the invoice as it is (R-1.5, D101).
-MANUAL_STATE = "MANUAL_REQUIRED"
-#: Where an invoice goes once every required document is stored (R-1.5).
-DELIVERING_STATE = "DELIVERING"
 #: BR-F09's reply when an uploaded XML is unsafe or invalid.
 RULE_XML_INVALID = "BR-F09"
 #: BR-F06's reply when an uploaded XML is not this invoice's.
@@ -84,8 +84,9 @@ class _Inputs:
 
 @dataclass(frozen=True)
 class _Rejection:
-    """A reply the sender gets for one upload that was not kept."""
+    """A reply the sender gets for one upload that was not kept (D103)."""
 
+    media_ref: str
     rule_id: str
     text: str
 
@@ -116,7 +117,7 @@ def make_attach_handler(
     async def handle(job: Job) -> None:
         async with pool.connection() as conn:
             head = await load_invoice_head(conn, job.invoice_id)
-            if head is None or head.state != MANUAL_STATE:
+            if head is None or head.state != MANUAL_REQUIRED:
                 return
             uploads = await list_unattached_uploads(conn, job.invoice_id, UPLOAD_KINDS)
             if not uploads:
@@ -176,8 +177,6 @@ async def _collect(
         if media is None:
             continue
         rejection = await _xml_rejection(media, upload, inputs)
-        # shortcut: a rejected XML leaves no files row, so a later attach job for this
-        # invoice re-checks it and repeats the reply; settle in the plan's finish review.
         if rejection is not None:
             _discard(media)
             replies.append(rejection)
@@ -211,6 +210,12 @@ async def _download(
             extra={"invoice_id": invoice_id, "reason": str(rejected)},
         )
         return None
+    except (WhatsAppError, MediaChecksumMismatch) as exc:
+        logger.warning(
+            "upload skipped",
+            extra={"invoice_id": invoice_id, "type": type(exc).__name__},
+        )
+        return None
 
 
 async def _xml_rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:
@@ -220,28 +225,35 @@ async def _xml_rejection(media: DownloadedMedia, upload: Attachment, inputs: _In
     try:
         xml = parse_invoice_xml(await asyncio.to_thread(media.path.read_bytes))
     except XmlRejected:
-        return _Rejection(RULE_XML_INVALID, UPLOAD_XML_INVALID)
+        return _Rejection(upload.media_ref, RULE_XML_INVALID, UPLOAD_XML_INVALID)
     if matches_invoice(xml, inputs.reading):
         return None
     return _Rejection(
+        upload.media_ref,
         RULE_XML_MISMATCH,
         UPLOAD_XML_MISMATCH.format(serie=inputs.serie, numero=inputs.numero),
     )
 
 
 async def _commit(inputs: _Inputs, outcome: _Outcome) -> bool:
-    """Store the kept files and move the invoice on, in one transaction; return whether it stored any.
+    """Store the kept files and record each rejection in one transaction; return whether it stored any.
 
-    The state is re-read first, so a run whose invoice moved on writes nothing (D95).
+    The state is re-read first, so a run whose invoice moved on writes nothing (D95). A run
+    that stored no file records its rejections and returns without the missing-docs check or
+    the move to ``DELIVERING`` (D103).
     """
     async with inputs.pool.connection() as conn, conn.transaction():
         head = await load_invoice_head(conn, inputs.job.invoice_id)
-        if head is None or head.state != MANUAL_STATE:
+        if head is None or head.state != MANUAL_REQUIRED:
             return False
-        for record in outcome.kept:
-            await add_file(conn, inputs.job.invoice_id, record)
         addressee = Addressee(inputs.head.origin_channel, inputs.head.profile_id)
         for rejection in outcome.replies:
+            await record_upload_rejection(
+                conn,
+                inputs.job.invoice_id,
+                rejection.media_ref,
+                rejection.rule_id,
+            )
             await queue_message(
                 conn,
                 addressee,
@@ -249,13 +261,17 @@ async def _commit(inputs: _Inputs, outcome: _Outcome) -> bool:
                 rule_id=rejection.rule_id,
                 text=rejection.text,
             )
+        if not outcome.kept:
+            return False
+        for record in outcome.kept:
+            await add_file(conn, inputs.job.invoice_id, record)
         missing = await _missing_docs(conn, inputs)
         if not missing:
-            await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE, expected=MANUAL_STATE)
+            await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=MANUAL_REQUIRED)
             await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
         elif outcome.stored_kinds:
             await _reply_missing(conn, inputs, outcome, missing, addressee)
-    return bool(outcome.kept)
+    return True
 
 
 async def _missing_docs(conn: AsyncConnection[Any], inputs: _Inputs) -> list[str]:
