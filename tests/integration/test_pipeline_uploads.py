@@ -1,0 +1,486 @@
+"""Integration tests for the attach-upload job handler (S7.5, R-1.5, R-5.6, BR-D09, D66, D101).
+
+Postgres is real and ``httpx.MockTransport`` stands in for Meta's media API.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import hashlib
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import httpx
+import pytest
+from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
+
+from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
+from invoicebot.channels.whatsapp.client import WhatsAppClient
+from invoicebot.config.loader import load_config
+from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
+from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.uploads import make_attach_handler
+from invoicebot.queue.jobs import Job
+from invoicebot.rules.messages_es import UPLOAD_XML_INVALID, UPLOAD_XML_MISMATCH
+from invoicebot.store.invoices import (
+    create_invoice,
+    get_file_path,
+    save_reading,
+    set_flow,
+    set_state,
+)
+from invoicebot.store.messages import link_message_to_invoice, store_inbound
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+FLOW = "work_microsoft"
+# From tests/synthetic_rucs.txt; no real RUC appears here.
+STORE_RUC = "20000000001"
+SERIE = "F001"
+NUMERO = "15160"
+GRAPH_HOST = "graph.facebook.com"
+GRAPH_VERSION = "v23.0"
+PHONE_NUMBER_ID = "123456789"
+BEARER = "synthetic-bearer-value"
+MEDIA_URL = "https://mmg.whatsapp.net/v/t62/{}"
+MEGABYTE = 1024 * 1024
+PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
+XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
+<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
+  <ID>F001-15160</ID>
+  <IssueDate>2026-11-05</IssueDate>
+  <InvoiceTypeCode>01</InvoiceTypeCode>
+  <AccountingSupplierParty>
+    <Party>
+      <PartyIdentification><ID>20000000001</ID></PartyIdentification>
+      <PartyLegalEntity><RegistrationName>Restaurante La Lena S.A.C.</RegistrationName></PartyLegalEntity>
+    </Party>
+  </AccountingSupplierParty>
+  <TaxTotal><TaxAmount>7.61</TaxAmount></TaxTotal>
+  <LegalMonetaryTotal>
+    <LineExtensionAmount>40.00</LineExtensionAmount>
+    <ChargeTotalAmount>4.00</ChargeTotalAmount>
+    <PayableAmount>51.61</PayableAmount>
+  </LegalMonetaryTotal>
+</Invoice>
+"""
+NEWER_XML_BYTES = XML_BYTES.replace(b"</Invoice>", b"<!-- newer upload -->\n</Invoice>")
+MISMATCH_XML_BYTES = XML_BYTES.replace(b"F001-15160", b"F001-99999")
+DOCTYPE_XML_BYTES = b'<?xml version="1.0"?>\n<!DOCTYPE Invoice>\n<Invoice/>'
+MIME: dict[AttachmentKind, str] = {
+    "pdf": "application/pdf",
+    "xml": "application/xml",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "photo": "image/png",
+    "captcha": "image/png",
+}
+
+
+def _config() -> Config:
+    """Return the example config with the work flow requiring the PDF and the XML."""
+    cfg = load_config(EXAMPLE)
+    flow = cfg.flows[FLOW].model_copy(
+        update={"required_docs": ["xml", "pdf"], "manual_uploads": ["pdf", "xml"]}
+    )
+    return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
+
+
+def _limits() -> MediaLimits:
+    """Limits with synthetic byte caps larger than every test body."""
+    return MediaLimits(
+        max_megapixels=40,
+        max_bytes=MediaMaxBytes(
+            image=8 * MEGABYTE,
+            pdf=16 * MEGABYTE,
+            xml=2 * MEGABYTE,
+            zip=4 * MEGABYTE,
+        ),
+        zip_max_entries=20,
+        zip_max_ratio=50,
+    )
+
+
+def _field(value: str) -> Field:
+    return Field(value=value, source="qr", confidence=1.0)
+
+
+def _reading() -> Reading:
+    """Build the synthetic reading a stuck invoice keeps."""
+    return Reading(
+        fields={
+            "ruc_emisor": _field(STORE_RUC),
+            "tipo": _field("01"),
+            "serie": _field(SERIE),
+            "numero": _field(NUMERO),
+            "total": _field("51.61"),
+            "fecha_emision": _field("2026-11-05"),
+        },
+        document_url=None,
+    )
+
+
+@contextlib.asynccontextmanager
+async def _make_client(media: dict[str, tuple[str, bytes]]) -> AsyncIterator[WhatsAppClient]:
+    """Serve each media id's info and bytes from a fake Meta."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        media_id = request.url.path.rsplit("/", 1)[-1]
+        mime, body = media[media_id]
+        if request.url.host == GRAPH_HOST:
+            return httpx.Response(
+                200,
+                json={"url": MEDIA_URL.format(media_id), "mime_type": mime, "file_size": len(body)},
+            )
+        return httpx.Response(200, content=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        yield WhatsAppClient(
+            http,
+            phone_number_id=PHONE_NUMBER_ID,
+            graph_api_version=GRAPH_VERSION,
+            token=BEARER,
+        )
+
+
+async def _invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    state: str = "MANUAL_REQUIRED",
+) -> int:
+    """Create a routed invoice with a stored reading in ``state`` and return its id."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, _reading())
+        await set_flow(conn, invoice_id, FLOW)
+        rule_id = "BR-F07" if state == "MANUAL_REQUIRED" else None
+        await set_state(conn, invoice_id, state, rule_id=rule_id)
+    return invoice_id
+
+
+@dataclass(frozen=True)
+class _Upload:
+    """One synthetic inbound upload."""
+
+    kind: AttachmentKind
+    media_ref: str
+    body: bytes
+    received_at: datetime
+
+
+async def _link_upload(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    profile_id: str,
+    upload: _Upload,
+) -> None:
+    """Store one inbound upload and link it to the invoice, as intake does (R-1.5)."""
+    msg = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        attachments=[
+            Attachment(
+                kind=upload.kind,
+                media_ref=upload.media_ref,
+                mime=MIME[upload.kind],
+                size=len(upload.body),
+            )
+        ],
+        received_at=upload.received_at,
+    )
+    async with pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, msg)
+        await link_message_to_invoice(conn, msg.channel, msg.external_id, invoice_id)
+
+
+def _job(invoice_id: int, job_id: int = 1) -> Job:
+    """Build the attach job the handler receives for ``invoice_id``."""
+    return Job(
+        id=job_id,
+        invoice_id=invoice_id,
+        step=ATTACH_STEP,
+        attempts=0,
+        crashes=0,
+        lease_until=datetime.now(UTC),
+    )
+
+
+async def _run(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    invoice_id: int,
+    media: dict[str, tuple[str, bytes]],
+    job_id: int = 1,
+) -> None:
+    """Run the attach handler once, serving ``media`` from the fake Meta."""
+    async with _make_client(media) as client:
+        handler = make_attach_handler(pool, _config(), client, tmp_path, _limits())
+        await handler(_job(invoice_id, job_id))
+
+
+async def _state(conn: AsyncConnection[Any], invoice_id: int) -> str:
+    cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _files(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[str, str, str | None]]:
+    """Return ``(kind, local_path, remote_ref)`` of the invoice's files, oldest first."""
+    cur = await conn.execute(
+        "SELECT kind, local_path, remote_ref FROM files WHERE invoice_id = %s ORDER BY id",
+        (invoice_id,),
+    )
+    return [
+        (str(kind), str(path), None if ref is None else str(ref)) for kind, path, ref in await cur.fetchall()
+    ]
+
+
+async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text', payload_json->>'rule_id'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [(str(text), None if rule is None else str(rule)) for text, rule in await cur.fetchall()]
+
+
+async def _deliver_jobs(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    cur = await conn.execute(
+        "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = 'deliver'",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def test_pdf_then_xml_in_two_messages_missing_then_delivering(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, BR-D09, D66: a PDF says what is missing; the following XML moves the invoice on."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    pdf_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", pdf_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {pdf_ref: (MIME["pdf"], PDF_BYTES)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert [kind for kind, _path, _ref in files] == ["pdf"]
+    assert outbox == [(f"Recibí el PDF. Aún falta el XML para completar {SERIE}-{NUMERO}.", "BR-D09")]
+
+    xml_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("xml", xml_ref, XML_BYTES, datetime(2026, 11, 14, 10, 5, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {xml_ref: (MIME["xml"], XML_BYTES)}, job_id=2)
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert state == "DELIVERING"
+    assert [kind for kind, _path, _ref in files] == ["pdf", "xml"]
+    assert files[1][2] == xml_ref
+    assert deliver_jobs == 1
+
+
+async def test_mismatching_xml_replies_br_f06_and_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.6, BR-F06, D101: an XML for another invoice is removed and answered, none stored."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("xml", media_ref, MISMATCH_XML_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {media_ref: (MIME["xml"], MISMATCH_XML_BYTES)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == [(UPLOAD_XML_MISMATCH.format(serie=SERIE, numero=NUMERO), "BR-F06")]
+
+
+async def test_xml_with_a_doctype_replies_br_f09(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.6, BR-F09, D101: an XML with a DOCTYPE is removed and answered, none stored."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("xml", media_ref, DOCTYPE_XML_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {media_ref: (MIME["xml"], DOCTYPE_XML_BYTES)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == [(UPLOAD_XML_INVALID, "BR-F09")]
+
+
+async def test_xlsx_attachment_is_ignored(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, D66: a kind the flow does not accept is never downloaded or stored."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload(
+            "xlsx",
+            f"ref-{uuid4().hex}",
+            b"synthetic xlsx bytes",
+            datetime(2026, 11, 14, 10, tzinfo=UTC),
+        ),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == []
+    assert deliver_jobs == 0
+
+
+async def test_running_the_same_job_twice_stores_the_file_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, D101: a redelivered job finds no unattached upload and writes nothing new."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+    media = {media_ref: (MIME["pdf"], PDF_BYTES)}
+
+    await _run(db_pool, tmp_path, invoice_id, media)
+    await _run(db_pool, tmp_path, invoice_id, media)
+
+    async with db_pool.connection() as conn:
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert [kind for kind, _path, _ref in files] == ["pdf"]
+    assert len(outbox) == 1
+
+
+async def test_invoice_not_manual_required_is_left_alone(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, D101: an invoice past MANUAL_REQUIRED gets no files, no job and no reply."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id, state="DELIVERING")
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+
+    await _run(db_pool, tmp_path, invoice_id, {media_ref: (MIME["pdf"], PDF_BYTES)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert state == "DELIVERING"
+    assert files == []
+    assert outbox == []
+    assert deliver_jobs == 0
+
+
+async def test_two_xml_uploads_leave_the_newest_for_delivery(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, D101: with two XML uploads, delivery reads the newest one."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    older_ref = f"ref-{uuid4().hex}"
+    newer_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("xml", older_ref, XML_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("xml", newer_ref, NEWER_XML_BYTES, datetime(2026, 11, 14, 10, 5, tzinfo=UTC)),
+    )
+
+    await _run(
+        db_pool,
+        tmp_path,
+        invoice_id,
+        {
+            older_ref: (MIME["xml"], XML_BYTES),
+            newer_ref: (MIME["xml"], NEWER_XML_BYTES),
+        },
+    )
+
+    async with db_pool.connection() as conn:
+        rows = await _files(conn, invoice_id)
+        delivered = await get_file_path(conn, invoice_id, "xml")
+    assert [ref for _kind, _path, ref in rows] == [older_ref, newer_ref]
+    assert rows[0][1] != rows[1][1]
+    newer_bytes = await asyncio.to_thread(Path(rows[1][1]).read_bytes)
+    assert hashlib.sha256(newer_bytes).hexdigest() == hashlib.sha256(NEWER_XML_BYTES).hexdigest()
+    assert delivered == rows[1][1]

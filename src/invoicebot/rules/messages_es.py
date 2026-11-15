@@ -298,6 +298,10 @@ FETCHER_DESC: dict[str, str] = {
 }
 #: es-PE names of the required document kinds, used in BR-F07's ``{manual_docs_desc}``.
 DOC_DESC: dict[str, str] = {"pdf": "el PDF", "xml": "el XML"}
+#: Reply to an uploaded XML that is unsafe or invalid (BR-F09, D101).
+UPLOAD_XML_INVALID = "El XML que enviaste no es válido; no lo guardé."
+#: Reply to an uploaded XML that is not the invoice it was sent for (BR-F06, D101).
+UPLOAD_XML_MISMATCH = "El XML que enviaste no corresponde a {serie}-{numero}; no lo guardé."
 
 
 def fetcher_desc(name: str) -> str:

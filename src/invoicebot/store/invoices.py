@@ -12,7 +12,7 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
-from invoicebot.channels.base import AttachmentKind, ChannelName
+from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName
 from invoicebot.extract.fields import Reading, reading_from_json, reading_to_json
 from invoicebot.rules.catalog import RULES
 from invoicebot.states import (
@@ -627,14 +627,53 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     return reading_from_json(row[0])
 
 
+async def list_unattached_uploads(conn: AsyncConnection[Any], invoice_id: int) -> list[Attachment]:
+    """Return the invoice's linked pdf/xml uploads that no file row points at, oldest first.
+
+    The attachments travel in the stored message payload; a kept upload records its media
+    ref as ``files.remote_ref``, so a redelivered job finds nothing left (R-1.5, D101).
+    Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT attachment->>'kind',
+               attachment->>'media_ref',
+               attachment->>'mime',
+               attachment->>'size'
+        FROM messages AS m
+        CROSS JOIN LATERAL jsonb_array_elements(m.payload_json->'attachments')
+             WITH ORDINALITY AS a(attachment, position)
+        WHERE m.invoice_id = %s
+          AND attachment->>'kind' IN ('pdf', 'xml')
+          AND NOT EXISTS (
+              SELECT 1
+              FROM files AS f
+              WHERE f.invoice_id = m.invoice_id
+                AND f.remote_ref = attachment->>'media_ref'
+          )
+        ORDER BY m.received_at, m.external_id, a.position
+        """,
+        (invoice_id,),
+    )
+    return [
+        Attachment(
+            kind=cast(AttachmentKind, kind),
+            media_ref=str(media_ref),
+            mime=str(mime),
+            size=int(size),
+        )
+        for kind, media_ref, mime, size in await cur.fetchall()
+    ]
+
+
 async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: FileKind) -> str | None:
-    """Return the local path of the invoice's first file of ``kind``, or None."""
+    """Return the local path of the invoice's newest file of ``kind``, or None."""
     cur = await conn.execute(
         """
         SELECT local_path
         FROM files
         WHERE invoice_id = %s AND kind = %s
-        ORDER BY id
+        ORDER BY id DESC -- newest upload wins (D101)
         LIMIT 1
         """,
         (invoice_id, kind),
