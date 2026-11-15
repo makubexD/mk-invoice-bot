@@ -277,12 +277,14 @@ async def _pendientes(
     question sent again with the same buttons, so a lapsed question comes back, but
     one sent within :data:`PENDING_REQUEUE_INTERVAL` is not repeated (S4.8).
     """
+    # shortcut: commands get no owner timezone yet (step 13), so the date is UTC.
     rows, total = await list_pending(
         conn,
         msg.profile_id,
         limit=MAX_PENDING_LINES,
         remind_days=PREPARED_REMIND_DAYS,
         prepared_batch_state=PREPARED_BATCH_STATE,
+        timezone="UTC",
     )
     if not rows:
         await _reply(conn, msg, None, PENDING_NONE)
@@ -298,8 +300,6 @@ def _pending_line(row: PendingRow) -> str:
     """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
     issuer = row.razon_social or PENDING_NO_ISSUER
     if row.state == BATCHED:
-        # shortcut: prepared_at is the database session's date, not the owner's timezone,
-        # so late evenings in Lima show the next day; commands get no timezone yet.
         return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
     total = "—" if row.total is None else f"{row.total:.2f}"
     state = row.waiting_state if row.state == PENDING_USER and row.waiting_state else row.state

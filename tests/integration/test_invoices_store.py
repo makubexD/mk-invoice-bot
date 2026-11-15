@@ -6,6 +6,7 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from alembic import command
@@ -16,7 +17,8 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import ChannelName
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
-from invoicebot.states import CANCELLED, FAILED, StateMoved
+from invoicebot.states import BATCHED, CANCELLED, FAILED, StateMoved
+from invoicebot.store.flow_b import open_batch
 from invoicebot.store.invoices import (
     Duplicate,
     FileRecord,
@@ -30,6 +32,7 @@ from invoicebot.store.invoices import (
     get_state,
     get_waiting,
     has_file,
+    list_pending,
     load_flow,
     load_invoice_head,
     load_reading,
@@ -664,6 +667,40 @@ async def test_claim_natural_key_replaces_the_invoices_old_key(
 
     assert duplicate is None
     assert stored == new_key
+
+
+@pytest.mark.parametrize(
+    ("timezone", "expected"),
+    [("America/Lima", date(2024, 11, 13)), ("UTC", date(2024, 11, 14))],
+)
+async def test_list_pending_dates_a_prepared_batch_in_the_owner_timezone(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    timezone: str,
+    expected: date,
+) -> None:
+    """S11.4: a prepared batch's date is its updated_at in the caller's timezone."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, profile_id, CHANNEL)
+        await set_flow(conn, invoice_id, "work_microsoft")
+        await open_batch(conn, invoice_id, "work_microsoft", "prepared")
+        await set_state(conn, invoice_id, BATCHED)
+        await conn.execute(
+            "UPDATE invoices SET updated_at = TIMESTAMPTZ '2024-11-14 03:30:00+00' WHERE id = %s",
+            (invoice_id,),
+        )
+        rows, total = await list_pending(
+            conn,
+            profile_id,
+            limit=20,
+            remind_days=2,
+            prepared_batch_state="prepared",
+            timezone=timezone,
+        )
+
+    assert total == 1
+    assert [row.batch_prepared_at for row in rows] == [expected]
 
 
 async def test_migration_0004_downgrades_to_0003_and_upgrades_again(

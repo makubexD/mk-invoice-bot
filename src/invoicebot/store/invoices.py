@@ -5,7 +5,7 @@ owns the transaction (R-1.1, R-1.4, R-1.10).
 """
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Literal, cast
 
@@ -84,7 +84,7 @@ class PendingRow:
     waiting_rule_id: str | None
     razon_social: str | None
     total: Decimal | None
-    batch_prepared_at: datetime | None
+    batch_prepared_at: date | None
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -344,15 +344,17 @@ async def list_pending(
     limit: int,
     remind_days: int,
     prepared_batch_state: str,
+    timezone: str,
 ) -> tuple[list[PendingRow], int]:
     """Return the profile's invoices that wait on it, oldest first, and how many match.
 
     A row waits on the sender when it is ``PENDING_USER``, ``WAITING_FOR_USER`` or
     ``MANUAL_REQUIRED``, or when it is ``BATCHED`` on a ``prepared_batch_state`` batch
     that has sat at least ``remind_days`` days (S4.8, S11.4). ``limit`` caps the rows
-    returned; the count covers every match. The database clock measures a batch's age,
-    and ``updated_at`` stamps it because nothing updates a ``BATCHED`` invoice until it
-    leaves that state. Does not commit.
+    returned; the count covers every match. ``timezone`` is the owner's zone: a batch's
+    ``batch_prepared_at`` is its ``updated_at`` as a date there. The database clock
+    measures a batch's age, and ``updated_at`` stamps it because nothing updates a
+    ``BATCHED`` invoice until it leaves that state. Does not commit.
     """
     cur = await conn.execute(
         """
@@ -362,7 +364,7 @@ async def list_pending(
                i.waiting_rule_id,
                i.razon_social,
                i.total,
-               i.updated_at,
+               (i.updated_at AT TIME ZONE %s)::date,
                count(*) OVER () AS total_count
         FROM invoices AS i
         LEFT JOIN batches AS b ON b.id = i.batch_id
@@ -379,6 +381,7 @@ async def list_pending(
         LIMIT %s
         """,
         (
+            timezone,
             profile_id,
             [PENDING_USER, MANUAL_REQUIRED, *WAITING_FOR_USER],
             BATCHED,
@@ -396,7 +399,7 @@ async def list_pending(
             waiting_rule_id=None if row[3] is None else str(row[3]),
             razon_social=None if row[4] is None else str(row[4]),
             total=cast(Decimal | None, row[5]),
-            batch_prepared_at=cast(datetime, row[6]) if str(row[1]) == BATCHED else None,
+            batch_prepared_at=cast(date, row[6]) if str(row[1]) == BATCHED else None,
         )
         for row in raw
     ]
