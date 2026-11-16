@@ -22,12 +22,14 @@ PARSING_RULES = REPO_ROOT / "config" / "parsing_rules.yaml"
 VERIFY_VALUE = "synthetic-verify-value"
 #: A port nothing listens on, so the pool never connects and no test needs Postgres.
 UNREACHABLE_DSN = "postgresql://invoicebot@127.0.0.1:1/invoicebot?connect_timeout=1"
-#: The synthetic secrets the WhatsApp channel declares (R-9.10).
+#: The synthetic secrets the WhatsApp channel and the example config's GitHub gap transport declare (R-9.10).
+#: The GitHub key is parsed only when a token is needed, so a placeholder lets startup finish.
 SECRET_VALUES = {
     "whatsapp_token": "synthetic-token-value",
     "whatsapp_app_secret": "synthetic-app-value",
     "whatsapp_verify_token": VERIFY_VALUE,
     "sender_hash_key": "synthetic-hash-value",
+    "github_app_private_key": "synthetic-github-app-key",
 }
 
 
