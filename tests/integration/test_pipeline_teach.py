@@ -15,11 +15,15 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Profile
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.gaps.kinds import fingerprint
 from invoicebot.net.guard import Resolver
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.teach import TeachContext, TeachSetup, answer, teach
+from invoicebot.pipeline.teach import TeachContext, TeachSetup, answer, handle_press, teach
+from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES
 from invoicebot.store import taught_links
+from invoicebot.store.gaps import get_gap
 from invoicebot.store.invoices import create_invoice, save_reading
 from invoicebot.store.taught_links import TaughtLink
 
@@ -33,6 +37,13 @@ GOOD_URL = "https://portal.example.pe/consulta"
 OTHER_URL = "https://portal.example.pe/otra"
 RAZON_SOCIAL = "Tienda Example"
 SENDER = "asistente"
+#: The owner profile is the example config's only admin (R-11.4).
+ADMIN = "yo"
+#: The ops repo an approved link is commented onto when GitHub is enabled (D118).
+GITHUB_REPO = "owner/mk-invoice-bot-ops"
+#: The synthetic issue the PORTAL_MISSING gap was reported to.
+ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
+GAP_FINGERPRINT = fingerprint("PORTAL_MISSING", str(ISSUER_RUC))
 
 
 class FakeResolver(Resolver):
@@ -47,9 +58,11 @@ class FakeResolver(Resolver):
 async def clean_teach_tables(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> AsyncIterator[None]:
-    """Start each test from empty taught links and outbox rows."""
+    """Start each test from empty taught links, gaps and outbox rows."""
     async with db_pool.connection() as conn:
         await conn.execute("DELETE FROM taught_links")
+        await conn.execute("DELETE FROM invoice_gaps")
+        await conn.execute("DELETE FROM gaps")
         await conn.execute("DELETE FROM outbox")
     yield
 
@@ -255,10 +268,40 @@ def _message(profile_id: str, text: str) -> InboundMessage:
     )
 
 
-def _setup() -> TeachSetup:
-    """Return a teach setup from the example profiles and a fake resolver."""
+def _setup(*, github_repo: str | None = None) -> TeachSetup:
+    """Return a teach setup from the example profiles, a fake resolver and an optional repo."""
     ctx = _context()
-    return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver)
+    return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver, github_repo=github_repo)
+
+
+def _press(profile_id: str, *, approved: bool) -> InboundMessage:
+    """Build a BR-S06 decision press from ``profile_id`` (D118)."""
+    suffix = "ok" if approved else "no"
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        button_id=f"t{ISSUER_RUC}:{suffix}",
+        received_at=datetime.now(UTC),
+    )
+
+
+async def _insert_gap(conn: AsyncConnection[Any], *, issue_url: str | None = None) -> None:
+    """Insert the PORTAL_MISSING gap an approved taught link fills (D118)."""
+    await conn.execute(
+        """
+        INSERT INTO gaps (fingerprint, kind, subject, state, issue_url)
+        VALUES (%s, 'PORTAL_MISSING', %s, 'open', %s)
+        """,
+        (GAP_FINGERPRINT, f"RUC {ISSUER_RUC}", issue_url),
+    )
+
+
+async def _github_rows(conn: AsyncConnection[Any]) -> list[dict[str, Any]]:
+    """Return the github channel's outbox payloads, oldest first."""
+    cur = await conn.execute("SELECT payload_json FROM outbox WHERE channel = 'github' ORDER BY id")
+    return [cast(dict[str, Any], payload) for (payload,) in await cur.fetchall()]
 
 
 async def test_answer_url_proposes_the_link(
@@ -359,3 +402,161 @@ async def test_answer_with_no_question_does_nothing(
 
     assert handled is False
     assert link is None
+
+
+# BR-S06's [Aprobar] and [Rechazar] (D118)
+
+
+async def _outbox_count(conn: AsyncConnection[Any]) -> int:
+    """Return how many outbox rows there are."""
+    cur = await conn.execute("SELECT count(*) FROM outbox")
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def test_press_approve_marks_the_link_and_the_gap_hint(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: [Aprobar] sets the link approved, stores the gap's hint and answers the admin."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        gap = await get_gap(conn, GAP_FINGERPRINT)
+        admin_rows = await _outbox(conn, ADMIN)
+
+    expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert gap is not None
+    assert gap.hint_url == GOOD_URL
+    assert admin_rows == [(expected, "BR-S06_approved", [])]
+
+
+async def test_press_approve_queues_one_comment_on_the_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: with an issue and GitHub enabled, [Aprobar] queues exactly one comment row."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn, issue_url=ISSUE_URL)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+        rows = await _github_rows(conn)
+
+    assert rows == [
+        {
+            "op": "comment",
+            "fingerprint": GAP_FINGERPRINT,
+            "issue_url": ISSUE_URL,
+            "hint_url": GOOD_URL,
+        }
+    ]
+
+
+async def test_press_approve_sets_the_pending_issue_hint(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: with no issue yet, [Aprobar] writes the link into the pending create_issue fields."""
+    fields: dict[str, Any] = {
+        "kind": "PORTAL_MISSING",
+        "fingerprint": GAP_FINGERPRINT,
+        "hint_url": None,
+    }
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn)
+        await outbox.add(
+            conn,
+            "github",
+            GITHUB_REPO,
+            {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": fields},
+        )
+        await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+        rows = await _github_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["fields"]["hint_url"] == GOOD_URL
+
+
+async def test_press_second_press_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: a second [Aprobar] finds no proposed link and adds no outbox row."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn)
+        setup = _setup()
+        await handle_press(conn, _press(ADMIN, approved=True), setup)
+        before = await _outbox_count(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), setup)
+        after = await _outbox_count(conn)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        gap = await get_gap(conn, GAP_FINGERPRINT)
+
+    assert before == after == 1
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert gap is not None
+    assert gap.hint_url == GOOD_URL
+
+
+async def test_press_from_a_non_admin_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: only an admin's press counts; another sender's press changes nothing."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn)
+        await handle_press(conn, _press(SENDER, approved=True), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        gap = await get_gap(conn, GAP_FINGERPRINT)
+        sender_rows = await _outbox(conn, SENDER)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert gap is not None
+    assert gap.hint_url is None
+    assert sender_rows == []
+
+
+async def test_press_reject_sets_rejected_and_a_later_teach_proposes_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: [Rechazar] sets the link rejected and a later proposal is accepted again."""
+    ctx = _context()
+    async with db_pool.connection() as conn:
+        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, GOOD_URL)
+        await conn.execute("DELETE FROM outbox")
+        await handle_press(conn, _press(ADMIN, approved=False), _setup())
+        rejected = await taught_links.get(conn, ISSUER_RUC)
+        admin_rows = await _outbox(conn, ADMIN)
+        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, OTHER_URL)
+        reproposed = await taught_links.get(conn, ISSUER_RUC)
+
+    expected = MESSAGES["BR-S06_rejected"].format(ruc_emisor=ISSUER_RUC)
+    assert rejected == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
+    assert admin_rows == [(expected, "BR-S06_rejected", [])]
+    assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+
+
+async def test_press_through_intake_approves_without_an_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: intake hands a ``t<ruc>:ok`` press to teach and stores it without an invoice."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        await _insert_gap(conn)
+        result = await handle_inbound(
+            conn,
+            _press(ADMIN, approved=True),
+            max_queued_per_sender=5,
+            timezone="America/Lima",
+            roles=IntakeRoles(teach=_setup()),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+        gap = await get_gap(conn, GAP_FINGERPRINT)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert gap is not None
+    assert gap.hint_url == GOOD_URL

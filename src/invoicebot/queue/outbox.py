@@ -112,6 +112,29 @@ async def add(
     return int(row[0])
 
 
+async def set_pending_issue_hint(
+    conn: AsyncConnection[Any],
+    fingerprint: str,
+    hint_url: str,
+) -> None:
+    """Put an approved portal link into a pending ``create_issue`` row's fields (D118).
+
+    The issue does not exist yet, so the hint waits in the row the transport will send
+    and becomes part of the issue body. A fingerprint with no pending row changes
+    nothing. Does not commit.
+    """
+    await conn.execute(
+        """
+        UPDATE outbox
+        SET payload_json = jsonb_set(payload_json, '{fields,hint_url}', to_jsonb(%s::text))
+        WHERE channel = 'github' AND state = 'pending'
+          AND payload_json->>'op' = 'create_issue'
+          AND payload_json->>'fingerprint' = %s
+        """,
+        (hint_url, fingerprint),
+    )
+
+
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
     """Return the newest stored text for invoice_id whose payload names rule_id.
 

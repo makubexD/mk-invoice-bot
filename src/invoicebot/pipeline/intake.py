@@ -20,7 +20,16 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
-from invoicebot.pipeline.teach import TeachSetup, answer
+from invoicebot.pipeline.teach import (
+    BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
+)
+from invoicebot.pipeline.teach import (
+    TeachSetup,
+    answer,
+)
+from invoicebot.pipeline.teach import (
+    handle_press as handle_teach_press,
+)
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.flow_b import merge_flow_data
@@ -91,8 +100,9 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), except a payment proposal press, which is answered as stored
-    without an invoice (R-7.12), a non-photo is ``stored`` (a pdf/xml upload is linked to
+    ``stored`` (R-3.5), except a payment proposal press (R-7.12) or a BR-S06 decision
+    press (D118), which are answered as stored without an invoice, a non-photo is
+    ``stored`` (a pdf/xml upload is linked to
     the stuck invoice it belongs to, R-1.5) and a text-only message may also
     run a command (R-10.1), answer a BR-F02 portal question (R-11.4), apply its edits
     (D97) and store its overrides (D70). A photo
@@ -110,6 +120,9 @@ async def handle_inbound(
         if msg.button_id is not None:
             if msg.button_id.startswith(PAYMENT_BUTTON_PREFIX):
                 await handle_payment_press(conn, msg)
+                return IntakeResult(status="stored", invoice_id=None)
+            if msg.button_id.startswith(TEACH_BUTTON_PREFIX) and roles.teach is not None:
+                await handle_teach_press(conn, msg, roles.teach)
                 return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg, roles.laptop_flows)
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):

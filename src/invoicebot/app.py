@@ -285,7 +285,11 @@ def _teach_setup(cfg: Config) -> TeachSetup | None:
     """Return the teaching setup, or None when chat teaching is off (R-11.4, BR-F02)."""
     if not cfg.gaps.teach_via_chat:
         return None
-    return TeachSetup(profiles=cfg.profiles, resolver=SystemResolver())
+    return TeachSetup(
+        profiles=cfg.profiles,
+        resolver=SystemResolver(),
+        github_repo=cfg.gaps.github.repo if cfg.gaps.github.enabled else None,
+    )
 
 
 def _payment_flow(cfg: Config) -> PaymentFlow | None:
