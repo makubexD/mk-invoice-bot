@@ -164,6 +164,14 @@ MESSAGES: dict[str, str] = {
 #: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
 GAP_DIGEST_LINE = "• {kind_desc} — {subject}"
 
+#: BR-D05 ``reason_desc``: what each GitHub token-failure reason means, keyed by reason.
+TOKEN_REASON_DESC: dict[str, str] = {
+    "bad_key": "la clave privada no es válida",
+    "uninstalled": "la App no está instalada en el repositorio",
+    "no_permission": "le falta el permiso de Issues",
+    "unreachable": "GitHub no responde",
+}
+
 #: Spec 06 §3 ``kind_desc``: the capability each gap kind is missing, keyed by kind.
 KIND_DESC: dict[str, str] = {
     "PORTAL_MISSING": "portal de descarga desconocido",

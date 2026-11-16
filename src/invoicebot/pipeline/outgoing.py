@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -18,10 +19,17 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, ChannelName, OutboundMessage
 from invoicebot.config.models import Profile
 from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import MESSAGES, state_desc
+from invoicebot.rules.messages_es import MESSAGES, TOKEN_REASON_DESC, state_desc
+from invoicebot.store.ops_state import claim
 
 #: Rule that tells the sender a button or override no longer applies (BR-S02).
 RULE_STALE_BUTTON = "BR-S02"
+
+#: BR-D05's alert ceiling: at most one per day.
+TOKEN_ALERT_EVERY = timedelta(hours=24)
+
+#: Rule and rate-limit key of the GitHub token alert (BR-D05).
+RULE_GITHUB_ALERT = "BR-D05"
 
 logger = logging.getLogger(__name__)
 
@@ -107,3 +115,35 @@ async def _notify_admin(
         logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
         return
     await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id)
+
+
+async def queue_rate_limited_alert(
+    conn: AsyncConnection[Any],
+    profiles: Mapping[str, Profile],
+    key: str,
+    every: timedelta,
+    rule_id: str,
+    text: str,
+) -> bool:
+    """Queue a rule's admin alert only when its window elapsed, and report whether it did.
+
+    The rate limit lives in ``ops_state`` and uses the database clock, so every
+    process sharing the database sees the same window (BR-O01, BR-D05).
+    """
+    if not await claim(conn, key, every):
+        return False
+    await queue_admin_alert(conn, profiles, rule_id, text)
+    return True
+
+
+async def queue_token_error_alert(
+    conn: AsyncConnection[Any],
+    profiles: Mapping[str, Profile],
+    repo: str,
+    reason: str,
+) -> bool:
+    """Queue BR-D05's admin alert at most once a day (BR-D05)."""
+    text = MESSAGES[RULE_GITHUB_ALERT].format(repo=repo, reason_desc=TOKEN_REASON_DESC[reason])
+    return await queue_rate_limited_alert(
+        conn, profiles, RULE_GITHUB_ALERT, TOKEN_ALERT_EVERY, RULE_GITHUB_ALERT, text
+    )
