@@ -311,12 +311,11 @@ def _deliver_handlers(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
     bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
-    laptop_flow = _laptop_flow(cfg)
+    found = _laptop_root_and_key(cfg, store)
     laptop: LaptopOutlook | None = None
     laptop_task: TaskFactory | None = None
-    if laptop_flow is not None:
-        root = _laptop_root(laptop_flow)
-        key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+    if found is not None:
+        root, key = found
         laptop = LaptopOutlook(drive, root, key)
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
@@ -333,8 +332,8 @@ def _laptop_flow(cfg: Config) -> Flow | None:
     return next((flow for flow in cfg.flows.values() if _lists_laptop(flow)), None)
 
 
-def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook | None:
-    """Build the laptop mode when a flow lists it, or None when none does (R-7.14, D108).
+def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] | None:
+    """Return the laptop flow's OneDrive root and agent key, or None when no flow lists it (R-7.14).
 
     The flow that lists ``laptop_outlook`` names the personal OneDrive root that holds
     the agent's ``_outbox``; the config validator guarantees it has a folder sink. The
@@ -345,6 +344,15 @@ def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook
         return None
     root = _laptop_root(flow)
     key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+    return root, key
+
+
+def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook | None:
+    """Build the laptop mode when a flow lists it, or None when none does (R-7.14, D108)."""
+    found = _laptop_root_and_key(cfg, store)
+    if found is None:
+        return None
+    root, key = found
     return LaptopOutlook(drive, root, key)
 
 

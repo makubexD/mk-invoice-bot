@@ -1,11 +1,15 @@
 """The receipt poller for ``laptop_outlook`` deliveries (R-7.8, R-7.14, D108).
 
-The laptop agent writes one receipt per job into ``_outbox/receipts``. A sent
-receipt closes the prepared batch as ``sent``, files the invoice ``DONE`` with
-BR-D10 and queues the ``folder_status`` job; an error receipt records the error
-and asks the sender how the mail went out (BR-D11), leaving the batch
-``prepared``. Each receipt is applied in its own transaction, and an unknown or
-already-handled job changes nothing.
+The laptop agent writes one receipt per job into ``_outbox/receipts``. Each
+receipt is applied in its own transaction and its file is deleted once that
+transaction commits; a file that is too large, does not parse or fails its HMAC
+stays on the drive and is logged. A sent receipt closes a prepared batch as
+``sent``, files the invoice ``DONE`` with BR-D10 and queues the ``folder_status``
+job; on a batch already ``sent`` it only stamps the job and queues BR-D10. An
+error receipt records the error and asks the sender how the mail went out
+(BR-D11), leaving a prepared batch ``prepared``. A receipt for an unknown or
+already-handled job changes nothing and is deleted too, and one receipt that
+raises never stops the sweep.
 """
 
 from __future__ import annotations
@@ -61,12 +65,16 @@ async def poll_receipts(pool: Pool, drive: Drive, root: str, key: bytes) -> None
 
     Each receipt file is downloaded with a :data:`RECEIPT_MAX_BYTES` cap and
     handled in its own transaction. A file that is too large or does not parse
-    or whose HMAC does not verify under ``key`` is logged and skipped, so one
-    bad receipt never blocks the others.
+    or whose HMAC does not verify under ``key`` is logged and left in place; a
+    file whose application raises is logged by name and also left in place, so
+    one bad receipt never blocks the others and the sweep goes on.
     """
     folder = f"{root}/_outbox/receipts"
     for name in await drive.list_names(folder):
-        await _apply_file(pool, drive, f"{folder}/{name}", name, key)
+        try:
+            await _apply_file(pool, drive, f"{folder}/{name}", name, key)
+        except Exception:  # one bad receipt must not stop the sweep (R-7.14)
+            logger.exception("receipt %s failed", name)
 
 
 async def check_overdue(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
@@ -117,7 +125,11 @@ async def _notify_overdue(pool: Pool, job: OpenMailJob) -> None:
 
 
 async def _apply_file(pool: Pool, drive: Drive, path: str, name: str, key: bytes) -> None:
-    """Read one receipt and apply it; the photo files it frees are deleted after the commit."""
+    """Apply one receipt and delete it once the commit stands (R-7.14).
+
+    The photo files a completed delivery frees are deleted first. Nothing is
+    deleted when applying raises, so the next sweep retries the receipt.
+    """
     receipt = await _read(drive, path, name, key)
     if receipt is None:
         return
@@ -125,6 +137,7 @@ async def _apply_file(pool: Pool, drive: Drive, path: str, name: str, key: bytes
         photos = await _apply(conn, receipt)
     for photo in photos:
         await asyncio.to_thread(photo.unlink, missing_ok=True)
+    await drive.delete(path)
 
 
 async def _read(drive: Drive, path: str, name: str, key: bytes) -> Receipt | None:
@@ -137,21 +150,50 @@ async def _read(drive: Drive, path: str, name: str, key: bytes) -> Receipt | Non
 
 
 async def _apply(conn: AsyncConnection[Any], receipt: Receipt) -> list[Path]:
-    """Apply a receipt whose job is known, waiting, and whose batch is prepared (R-7.8).
+    """Apply a receipt for a known job still without one (R-7.8, R-7.14).
 
-    Returns the photo paths a completed delivery frees, for deletion after the
-    transaction commits; an unknown job, an already-handled one, or any other
-    batch state returns none and changes nothing.
+    A prepared batch follows today's behaviour. A batch already ``sent`` — an
+    ``inbox_rule`` batch the laptop resent, or a late receipt after [Ya llegó] —
+    only stamps the job and, for a sent receipt, queues BR-D10. Any other batch
+    state stamps the job alone. Returns the photo paths a completed delivery
+    frees, for deletion after the transaction commits.
     """
     job = await get_mail_job(conn, receipt.job_id)
     if job is None or job.has_receipt:
         return []
-    if await get_batch_state(conn, job.invoice_id) != PREPARED_BATCH_STATE:
-        return []
+    state = await get_batch_state(conn, job.invoice_id)
+    if state == PREPARED_BATCH_STATE:
+        return await _apply_prepared(conn, job.invoice_id, receipt)
+    if state == SENT_BATCH_STATE:
+        await _apply_sent(conn, job.invoice_id, receipt)
+    else:
+        await _stamp(conn, receipt)
+    return []
+
+
+async def _apply_prepared(conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt) -> list[Path]:
+    """Apply a receipt to a prepared batch: close it or ask the sender (R-7.8, R-7.14)."""
     if receipt.sent_at is None:
-        await _not_confirmed(conn, job.invoice_id, receipt.job_id, receipt.error or "")
+        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "")
         return []
-    return await _sent(conn, job.invoice_id, receipt.job_id)
+    return await _sent(conn, invoice_id, receipt.job_id)
+
+
+async def _apply_sent(conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt) -> None:
+    """Stamp a receipt on an already-sent batch without touching its state (R-7.8, R-7.14)."""
+    if receipt.sent_at is None:
+        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "")
+        return
+    await _queue_done(conn, invoice_id)
+    await set_receipt_at(conn, receipt.job_id)
+
+
+async def _stamp(conn: AsyncConnection[Any], receipt: Receipt) -> None:
+    """Record a receipt on a job whose batch is neither prepared nor sent (R-7.14)."""
+    if receipt.sent_at is None:
+        await set_receipt_error(conn, receipt.job_id, receipt.error or "")
+    else:
+        await set_receipt_at(conn, receipt.job_id)
 
 
 async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> list[Path]:
@@ -163,6 +205,13 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> lis
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
     await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_DONE)
+    await _queue_done(conn, invoice_id)
+    await set_receipt_at(conn, job_id)
+    return await take_photo_paths(conn, invoice_id)
+
+
+async def _queue_done(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Queue BR-D10 to the invoice's sender with the folder the delivery filed (R-7.8, R-7.14)."""
     folder = (await load_flow_data(conn, invoice_id))["folder"]
     await queue_message(
         conn,
@@ -172,8 +221,6 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> lis
         rule_id=RULE_DONE,
         buttons=[],
     )
-    await set_receipt_at(conn, job_id)
-    return await take_photo_paths(conn, invoice_id)
 
 
 async def _not_confirmed(conn: AsyncConnection[Any], invoice_id: int, job_id: str, error: str) -> None:

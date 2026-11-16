@@ -63,6 +63,7 @@ class FakeDrive:
     def __init__(self, files: dict[str, bytes] | None = None) -> None:
         self.files = dict(files or {})
         self.downloads: list[str] = []
+        self.deleted: list[str] = []
 
     async def list_names(self, path: str) -> list[str]:
         """Return the names directly under ``path``."""
@@ -81,6 +82,11 @@ class FakeDrive:
             raise FileTooLarge(max_bytes)
         return data
 
+    async def delete(self, path: str) -> None:
+        """Record the delete and drop the file; deleting a missing file is accepted."""
+        self.deleted.append(path)
+        self.files.pop(path, None)
+
 
 def _field(value: str) -> Field:
     return Field(value=value, source="qr", confidence=1.0)
@@ -98,10 +104,10 @@ def _reading() -> Reading:
     )
 
 
-def _signed_receipt(fields: dict[str, str]) -> bytes:
+def _signed_receipt(fields: dict[str, str], key: bytes = KEY) -> bytes:
     """Return a receipt file carrying the HMAC the laptop agent writes."""
     text = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    signature = hmac.new(KEY, text.encode("ascii"), hashlib.sha256).hexdigest()
+    signature = hmac.new(key, text.encode("ascii"), hashlib.sha256).hexdigest()
     return json.dumps({**fields, "hmac": signature}).encode()
 
 
@@ -113,6 +119,11 @@ def _sent_receipt(job_id: str) -> bytes:
 def _error_receipt(job_id: str, error: str = ERROR_TEXT) -> bytes:
     """Return the signed receipt the laptop writes when Outlook fails."""
     return _signed_receipt({"job_id": job_id, "error": error})
+
+
+def _forged_receipt(job_id: str) -> bytes:
+    """Return a sent receipt signed with a key other than the bot's."""
+    return _signed_receipt({"job_id": job_id, "sent_at": SENT_AT}, key=b"another-key")
 
 
 def _path(name: str) -> str:
@@ -149,6 +160,23 @@ async def _prepared_invoice(
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await save_reading(conn, invoice_id, _reading())
         await set_flow(conn, invoice_id, FLOW)
+        await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
+        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, "folder_path": f"{ROOT}/{FOLDER}"})
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "prepared")
+        await add_mail_job(conn, job_id, invoice_id)
+    return invoice_id
+
+
+async def _prepared_invoice_without_flow(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    job_id: str,
+) -> int:
+    """Create a BATCHED invoice with a prepared batch, a mail job and no flow yet."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, _reading())
         await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
         await merge_flow_data(conn, invoice_id, {"folder": FOLDER, "folder_path": f"{ROOT}/{FOLDER}"})
         batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
@@ -357,6 +385,144 @@ async def test_a_receipt_for_an_unknown_job_changes_nothing(
     assert jobs == []
     assert outbox == []
     assert receipt == (None, None)
+
+
+async def test_a_failing_receipt_is_logged_and_the_next_receipt_is_applied(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-7.14: a receipt whose job's invoice has no flow is logged and left for the next sweep."""
+    profile_id = f"laptop-{uuid4().hex}"
+    failing_id = uuid4().hex
+    job_id = uuid4().hex
+    await _prepared_invoice_without_flow(db_pool, profile_id, failing_id)
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    failing_name = f"{failing_id}.json"
+    applied_name = f"{job_id}.json"
+    drive = FakeDrive(
+        {
+            _path(failing_name): _sent_receipt(failing_id),
+            _path(applied_name): _sent_receipt(job_id),
+        }
+    )
+
+    with caplog.at_level(logging.ERROR, logger="invoicebot.pipeline.laptop"):
+        await poll_receipts(db_pool, drive, ROOT, KEY)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        receipt = await _receipt_row(conn, job_id)
+        failing_receipt = await _receipt_row(conn, failing_id)
+    assert invoice == ("DONE", "BR-D10")
+    assert receipt[0] is not None
+    assert failing_receipt == (None, None)
+    assert _path(failing_name) in drive.files
+    assert _path(applied_name) not in drive.files
+    assert failing_name in caplog.text
+
+
+async def test_an_applied_receipt_is_deleted(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.14: a receipt applied to a prepared batch is deleted after its transaction commits."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    await _prepared_invoice(db_pool, profile_id, job_id)
+    name = f"{job_id}.json"
+    drive = _drive(name, _sent_receipt(job_id))
+
+    await poll_receipts(db_pool, drive, ROOT, KEY)
+
+    assert drive.deleted == [_path(name)]
+    assert drive.files == {}
+
+
+async def test_a_forged_receipt_is_not_applied_nor_deleted(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.14: a receipt signed with another key changes nothing and stays on the drive."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    name = f"{job_id}.json"
+    drive = _drive(name, _forged_receipt(job_id))
+
+    await poll_receipts(db_pool, drive, ROOT, KEY)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        receipt = await _receipt_row(conn, job_id)
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "prepared"
+    assert receipt == (None, None)
+    assert drive.deleted == []
+    assert _path(name) in drive.files
+
+
+async def test_a_sent_receipt_on_a_sent_batch_stamps_the_job_and_queues_br_d10(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8, R-7.14: a late sent receipt on a sent batch only stamps the job and queues BR-D10."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "sent")
+    name = f"{job_id}.json"
+    drive = _drive(name, _sent_receipt(job_id))
+
+    await poll_receipts(db_pool, drive, ROOT, KEY)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        receipt = await _receipt_row(conn, job_id)
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "sent"
+    assert jobs == []
+    assert outbox == [(MESSAGES["BR-D10"].format(folder=FOLDER), "BR-D10", [])]
+    assert receipt[0] is not None
+    assert receipt[1] is None
+    assert _path(name) not in drive.files
+
+
+async def test_check_overdue_runs_after_a_sweep_with_a_failing_receipt(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-7.14: a raising receipt is caught, so the same sweep reaches check_overdue."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice_without_flow(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 25)
+    name = f"{job_id}.json"
+    drive = _drive(name, _sent_receipt(job_id))
+
+    with caplog.at_level(logging.ERROR, logger="invoicebot.pipeline.laptop"):
+        await poll_receipts(db_pool, drive, ROOT, KEY)
+        await check_overdue(db_pool, drive, ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        receipt = await _receipt_row(conn, job_id)
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, VIA_LAPTOP_ACTION), "title": BUTTON_VIA_LAPTOP},
+                {"id": button_id(invoice_id, SELF_SEND_ACTION), "title": BUTTON_SELF_SEND},
+                {"id": button_id(invoice_id, ARRIVED_ACTION), "title": BUTTON_ARRIVED},
+            ],
+        ),
+    ]
+    assert receipt == (None, None)
+    assert _path(name) in drive.files
+    assert name in caplog.text
 
 
 async def test_a_stale_job_in_the_outbox_gets_one_br_d12(
