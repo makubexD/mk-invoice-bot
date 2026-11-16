@@ -43,7 +43,7 @@ from invoicebot.pipeline.questions import (
     YES_ACTION,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
-from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
+from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
@@ -80,7 +80,7 @@ SENT_ACTION = "sent"
 NOT_ARRIVED_ACTION = "not_arrived"
 #: BR-D11's [Ya llegó] action (R-7.8).
 ARRIVED_ACTION = "arrived"
-#: BR-D11's two resend choices; step 31 adds their handlers (D109).
+#: BR-D11's two resend choices (R-7.14, R-7.8, D109).
 VIA_LAPTOP_ACTION = "via_laptop"
 SELF_SEND_ACTION = "self_send"
 
@@ -111,6 +111,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     SENT_ACTION: frozenset({BATCHED_STATE}),
     NOT_ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
     ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
+    VIA_LAPTOP_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
+    SELF_SEND_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
 }
 
 #: The rule each question action answers; a parked invoice resumes only for its own (D94).
@@ -311,6 +313,29 @@ async def _arrived(
     return photos
 
 
+async def _via_laptop(
+    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+) -> tuple[Path, ...]:
+    """Enqueue the laptop resend; its job sends and answers (R-7.14, D109).
+
+    The press runs in intake's transaction, so no file, drive or mail call may happen
+    here: the job does that work after the commit.
+    """
+    await enqueue(conn, invoice_id, RESEND_LAPTOP_STEP)
+    return ()
+
+
+async def _self_send(
+    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+) -> tuple[Path, ...]:
+    """Enqueue the .eml resend; its job rewrites the file and answers (R-7.8).
+
+    Like [Por la laptop], the press only enqueues so all I/O happens after the commit.
+    """
+    await enqueue(conn, invoice_id, RESEND_EML_STEP)
+    return ()
+
+
 async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rule_id: str) -> bool:
     """Return whether the invoice still waits on rule_id's question (BR-S02).
 
@@ -421,4 +446,6 @@ ACTIONS: Mapping[str, Action] = {
     SENT_ACTION: _sent,
     NOT_ARRIVED_ACTION: _not_arrived,
     ARRIVED_ACTION: _arrived,
+    VIA_LAPTOP_ACTION: _via_laptop,
+    SELF_SEND_ACTION: _self_send,
 }

@@ -960,3 +960,49 @@ async def test_arrived_on_a_sent_batch_only_answers_br_d10(
     assert batch_state == "sent"
     assert jobs == []
     assert messages == [(RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER), [])]
+
+
+async def test_via_laptop_enqueues_one_resend_job_and_changes_no_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.14: [Por la laptop] enqueues one resend_laptop job and changes no invoice or batch state."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id, batch_state="sent")
+    msg = _press(invoice_id, "via_laptop", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        messages = await _messages(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (DONE, RULE_INBOX)
+    assert batch_state == "sent"
+    assert jobs == ["resend_laptop"]
+    assert messages == []
+
+
+async def test_self_send_enqueues_one_resend_job_and_changes_no_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8: [Lo envío yo] enqueues one resend_eml job and changes no invoice or batch state."""
+    profile_id = _profile()
+    invoice_id = await _prepared_laptop_invoice(db_pool, profile_id)
+    msg = _press(invoice_id, "self_send", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        messages = await _messages(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (BATCHED, RULE_BATCHED)
+    assert batch_state == "prepared"
+    assert jobs == ["resend_eml"]
+    assert messages == []
