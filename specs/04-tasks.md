@@ -324,14 +324,14 @@ Anything bigger gets split before work starts.
 | S7.7 | *Moved to E3 (phase 3, D55).* | | | |
 
 ## E8 · Gaps, GitHub and admin alerts
-**S8.1 · Gap registry + dedupe** · S · Reqs R-11.2
+**S8.1 · Gap registry + dedupe** · S · Reqs R-11.2 · Phase 6e (D112; D115)
 - *As the owner, I want 10 invoices from the same unknown store to create one gap, not ten, so that alerts stay useful.*
 - **AC:**
   - `raise_gap()` upserts by fingerprint in the same transaction.
   - `invoice_gaps` links the invoices.
   - The fetcher chain keeps running.
 
-**S8.2 · Teach the portal link via chat** · M · Rules BR-F02, BR-S06 · Reqs R-11.4, R-10.2 · Deps S8.1
+**S8.2 · Teach the portal link via chat** · M · Rules BR-F02, BR-S06 · Reqs R-11.4, R-10.2 · Deps S8.1 · Phase 6e (D112; D118)
 - *As a sender, I want the bot to ask me for the store's download link when it doesn't know it, so that the fix is mostly done by the time someone looks at it.*
 - **AC:**
   - The question is asked only when the chain ended in `MANUAL_REQUIRED` with no portal entry, once per issuer, not per invoice.
@@ -341,7 +341,7 @@ Anything bigger gets split before work starts.
   - `printed_urls` are offered as a suggestion.
   - A taught link is stored as `proposed` and used only after the owner taps [Aprobar] (BR-S06).
 
-**S8.3 · GitHub issue in the ops repo (idempotent)** · M · Reqs R-11.5, R-11.10 · Rules BR-D05 · Deps S1.5, S8.1, S0.10
+**S8.3 · GitHub issue in the ops repo (idempotent)** · M · Reqs R-11.5, R-11.10 · Rules BR-D05 · Deps S1.5, S8.1, S0.10 · Phase 6e (D112; D116, D117)
 - **AC:**
   - Created through the outbox in `gaps.github.repo` from `gaps/templates/gap_issue.md`, with labels `gap` and `gap:<kind>`, using a GitHub App installation token.
   - A hidden `<!-- gap:fp -->` marker prevents duplicates even after a DB loss.
@@ -349,7 +349,7 @@ Anything bigger gets split before work starts.
   - A verified fix closes the issue with a comment (spec 06 §3).
   - Token failures (bad key, App uninstalled, missing permission) raise BR-D05 and leave the rows in the outbox.
 
-**S8.5 · Owner chat alert + digest** · M · Reqs R-11.8, R-11.11
+**S8.5 · Owner chat alert + digest** · M · Reqs R-11.8, R-11.11 · Phase 6e (D112; D116)
 - **AC:**
   - One alert per new fingerprint, with the issue link, on each admin profile's preferred channel.
   - Re-alerts are rate-limited to `realert_days`.
@@ -359,30 +359,30 @@ Anything bigger gets split before work starts.
 
 *S8.4 and S8.6 moved to E16 (post-MVP, D44).*
 
-**S8.7 · Config reload + auto-resume** · M · Reqs R-11.9, R-9.6 · Deps S1.2, S8.1, S12.2
+**S8.7 · Config reload + auto-resume** · M · Reqs R-11.9, R-9.6 · Deps S1.2, S8.1, S12.2 · Phase `ops` (D112)
 - *As a sender, I want my stuck invoice to finish by itself once the portal is added, so that I don't resend anything.*
 - **AC:**
   - `SIGHUP` reloads the config, which is validated **before** it is swapped in (a bad config keeps the old one and alerts the owner).
   - `reevaluate()` marks fixed gaps, re-enqueues the linked invoices and notifies their senders (`resume_notice`).
   - End-to-end: a CI deploy that adds an `active` portal entry resumes a `MANUAL_REQUIRED` invoice.
 
-**S8.8 · PORTAL_BROKEN detection** · S · Rules BR-F03 · Deps S7.1, S8.3
+**S8.8 · PORTAL_BROKEN detection** · S · Rules BR-F03 · Deps S7.1, S8.3 · Phase 6e (D112; D115)
 - **AC:**
   - `broken_after` consecutive *technical* failures (not "not found") raise the gap and its issue.
   - The owner sets `status: broken` by hand (D44); the bot-made flip PR is S16.1 (post-MVP).
 
-**S8.9 · Admin commands + GitHub App health** · S · Rules BR-D05 · Reqs R-10, R-11.10
+**S8.9 · Admin commands + GitHub App health** · S · Rules BR-D05 · Reqs R-10, R-11.10 · Phase `ops` (D112)
 - **AC:**
   - `/gaps` lists open gaps with their issue links.
   - `/gap ignorar <id>` silences one.
   - A daily check obtains an installation token and raises BR-D05 if it fails.
 
-**S8.10 · `{gap_line}` in user messages** · S · Reqs R-11.3 · Deps S8.1, S7.4
+**S8.10 · `{gap_line}` in user messages** · S · Reqs R-11.3 · Deps S8.1, S7.4 · Phase 6e (D112)
 - **AC:**
   - When a gap is linked, BR-F07 and BR-D02 messages include `{gap_line}`, saying what is missing and that the bot will retry by itself.
   - With no linked gap, the line is omitted (snapshot tests for both).
 
-**S8.11 · Gap issue text safety** · S · Reqs R-11.12 · Deps S8.3
+**S8.11 · Gap issue text safety** · S · Reqs R-11.12 · Deps S8.3 · Phase 6e (D112; D117)
 - **AC:**
   - The issue is rendered only from typed fields: an 11-digit RUC, the padrón business name, CPE type, reason codes, and a URL reduced to `https://host/path` matching `[A-Za-z0-9._~/-]`, in a code fence.
   - `@` is stripped; OCR text, sender text, counts and dates never appear (snapshot test with hostile inputs: markdown, mentions, `javascript:` URLs, control characters).
@@ -468,7 +468,7 @@ Anything bigger gets split before work starts.
 ## E15 · Operations baseline (M4)
 | ID | Story | Size | Key AC | Reqs / rules |
 |---|---|---|---|---|
-| S12.3 | *(moved from E12)* Nightly encrypted `pg_dump` (without `kv` and `padron`) + config backup, encrypted to an `age` public key, stored off-site in the owner's personal OneDrive (D60) | S | RPO ≤ 24 h; `restore_drill.sh` restores into an empty Postgres and passes smoke queries; drill run before go-live; a failed backup raises BR-O04 | R-9.11 |
+| S12.3 | *(moved from E12)* Nightly encrypted `pg_dump` (without `kv` and `padron`) + config backup, encrypted to an `age` public key, stored off-site in the owner's personal OneDrive (D60; at a time of day, D114; built as D119) | S | RPO ≤ 24 h; `restore_drill.sh` restores into an empty Postgres and passes smoke queries; drill run before go-live; a failed backup raises BR-O04 | R-9.11 |
 | S15.1 | Retention per table | S | `messages.payload_json` nulled after 30 days; `outbox`, `events`, `jobs` deleted after 90 days; `invoices` kept; logs about non-allowlisted senders carry only a hash | R-9.12, R-1.2 |
 | S15.2 | Health, uptime and self-alerts | M | `/health` returns 503 with the DB down; an external uptime check is configured; failed jobs (BR-S03), outbox backlog (BR-O01), disk usage (BR-O02) and channel token problems (BR-O03) alert the owner, rate-limited; with Postgres stopped the webhook returns 503 and a replayed delivery succeeds after restart | R-9.14, R-9.15 |
 

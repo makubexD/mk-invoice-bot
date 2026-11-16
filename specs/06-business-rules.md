@@ -92,6 +92,8 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 
 `{gap_line}`, when a gap is linked: `Ya avisé para agregar este portal; cuando esté listo lo reintento solo.`
 
+BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sender whose newest question is BR-F02, answers it; `/portal <ruc> <url>` does the same from any sender. A URL goes to BR-S06. "no sé" stores nothing and gets `Gracias. Ya avisé al administrador para agregar este portal.` (`BR-F02_dont_know`).
+
 ### Delivery (D)
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
@@ -134,6 +136,8 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-S08 | A question isn't answered within `limits.question_timeout_h` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
 | BR-S09 | An allowlisted sender sends a photo and it is queued (R-1.1) | Invoice created in `RECEIVED`; job enqueued | `📥 Recibido. Estoy leyendo tu comprobante #{id}.` |
 
+BR-S06's owner answers (D118), outside the catalog: [Aprobar] sets the link `approved` and the PORTAL_MISSING gap's `hint_url`, then answers `✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.` (`BR-S06_approved`). [Rechazar] sets it `rejected` and answers `Descarté el portal propuesto para RUC {ruc_emisor}.` (`BR-S06_rejected`). Only an admin's press counts.
+
 ### Operations (O) · admin-only
 | ID | Condition | Result | Chat message (admin) |
 |---|---|---|---|
@@ -147,13 +151,15 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 ## 3. Capability gaps
 A **gap** is a missing capability that only a change to the repository can fix. Gaps are deduplicated by **fingerprint**, so 10 invoices from the same unknown store make **1** issue and **1** owner alert. Issues go only to the **private ops repo** (D44).
 
-| Kind | Fingerprint | Raised by | GitHub (ops repo) | Owner alert (chat) | Auto-resume when |
-|---|---|---|---|---|---|
-| `PORTAL_MISSING` | `portal_missing:{ruc_emisor}` | BR-F02, only when the chain ended in `MANUAL_REQUIRED` | Issue, with the approved taught URL if any | Yes | A deployed store directory has the RUC with an `active` portal |
-| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | Issue; the owner sets the entry to `status: broken` | Yes | The entry is `active` again and the version has changed |
-| `TEMPLATE_INVALID` | `template_invalid:{flow}:{sink}` | BR-D02 | Issue | Yes | The config reloads and passes validation |
-| `PARSER_MISS` | `parser_miss:{ruc_emisor}` | BR-E06 | Issue | Digest only | — (the user already typed the data) |
-| `UNROUTED_BUYER` | `unrouted:{num_doc_adq}` | BR-R06 | Issue ("add a routing rule or a new flow?") | Digest only | — |
+| Kind | Fingerprint | Raised by | Raised at (D115) | GitHub (ops repo) | Owner alert (chat) | `kind_desc` — subject | Auto-resume when |
+|---|---|---|---|---|---|---|---|
+| `PORTAL_MISSING` | `portal_missing:{ruc_emisor}` | BR-F02, only when the chain ended in `MANUAL_REQUIRED` | 1st | Issue, with the approved taught URL if any | Yes | `portal de descarga desconocido` — `RUC {ruc_emisor}` | A deployed store directory has the RUC with an `active` portal |
+| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | 1st | Issue; the owner sets the entry to `status: broken` | Yes | `portal con fallas` — `{portal_key}` | The entry is `active` again and the version has changed |
+| `TEMPLATE_INVALID` | `template_invalid:{flow}:{sink}` | BR-D02 | 1st | Issue | Yes | `plantilla inválida` — `{flow}/{sink}` | The config reloads and passes validation |
+| `PARSER_MISS` | `parser_miss:{ruc_emisor}` | BR-E06 | 2nd | Issue | Digest only | `no puedo leer los comprobantes de un emisor` — `RUC {ruc_emisor}` | — (the user already typed the data) |
+| `UNROUTED_BUYER` | `unrouted:{num_doc_adq}` | BR-R06 | 3rd within 30 days | Issue ("add a routing rule or a new flow?") | Digest only | `RUC comprador sin flujo` — `RUC {num_doc_adq}` | — |
+
+**Owner alert texts** (D116, `rules/messages_es.py`): `GAP_admin` `🧩 Falta configurar: {kind_desc} — {subject}.{issue_line}`, where `{issue_line}` is ` Issue: {issue_url}` once the issue exists, else empty. `GAP_DIGEST_admin` `🧩 Pendientes de configuración:` followed by one `• {kind_desc} — {subject}` line per gap. A gap is *raised* (issue, alert) once, when its count first reaches the "Raised at" count; a kind with a window restarts its count when `last_seen` is older than the window (D115). With GitHub enabled the alert is sent when the issue opens, with its link; with GitHub disabled, when the gap is raised; a raised gap still without an issue after 24 h is alerted without a link by the daily digest task (R-11.11). Digest kinds go only into the daily `GAP_DIGEST_admin`.
 
 A PR from a template that adds the missing `stores/` and `portals/` files comes at the end of development (S16.2, D52); the `gap-watch` workflow and the other draft PRs are post-MVP (D44, spec 04 E16).
 
