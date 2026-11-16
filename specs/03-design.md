@@ -85,18 +85,23 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
          sunat_status_json, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,
          flow_data_json /*data only this invoice's flow uses: folder ref and seq, comercio, claimed amount, reason overrides (D75)*/,
-         payment_id NULL /*R-7.12*/,
+         payment_id NULL /*R-7.12, D107*/,
          error, created_at, updated_at)
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
       remote_ref NULL, sha256, size, xml_trust NULL /*post-MVP, D57*/, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_error) -- queue
 batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
+payment_proposals(id PK, profile_id, flow_id, paid_on DATE, amount NUMERIC, sets_json,
+                  state /*pending|confirmed|rejected|expired*/, created_at)      -- /pagado buttons (D107)
+mail_jobs(job_id TEXT PK, invoice_id, created_at, receipt_at NULL, receipt_error NULL,
+          stale_alerted_at NULL, overdue_alerted_at NULL)                      -- laptop_outlook jobs (D108, D109)
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason /*enum code*/, ms, at) -- R-5.7
 upload_rejections(invoice_id, media_ref, rule_id, created_at, PRIMARY KEY(invoice_id, media_ref)) -- D103
 outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo or subscriber*/,
        payload_json, template NULL, state /*pending|sent|dead*/, attempts, created_at,
-       run_after, last_error NULL, sent_at NULL)                        -- outbox pattern; run_after drives retry backoff
+       run_after, last_error NULL, sent_at NULL,
+       channel_message_id NULL /*the channel's id for the sent message; a quote of it resolves its invoice (D102)*/)  -- outbox pattern; run_after drives retry backoff
 gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|ignored*/,
      hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL)
 invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint))
@@ -115,7 +120,7 @@ channel_windows(channel, recipient /*profile id*/, last_inbound_at,
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
-`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id` and the `payments` table arrive with S11.11 (`/pagado`, `widen-b`), their first caller. Merged revisions are not edited.
+`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id`, `payments`, `payment_proposals` and `mail_jobs` arrive with `widen-b-deliver` (S11.11, S11.15), their first callers, and `outbox.channel_message_id` with the quote match of D102. Merged revisions are not edited.
 
 - **Profiles** (people) live in config, not in a table: each links one WhatsApp number and one Telegram user id (R-1.9). `profile_id` is the config key.
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
@@ -308,7 +313,7 @@ work_microsoft:
       attach: [excel_template, pdf, xml]
 # top level, next to `flows:`
 env: development                         # production is required for mail.send_enabled: true (R-7.7, D89)
-mail: { send_enabled: false }
+mail: { send_enabled: false, owner_work_address: null, confirm_timeout: 24h, agent_stale_after: 4h }   # D108, D109
 microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 ```
 

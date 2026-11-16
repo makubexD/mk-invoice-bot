@@ -13,7 +13,8 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                                                           | part of M4 | Nothing                                                                          |
 | 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                                                                   | part of M4 | Nothing                                                                          |
 | 6c  | `widen-b-fetch` (done 2026-11-14)  | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
-| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                                                                     | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
+| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; review leftovers (`widen-b-fetch`) (D105)                                                                               | part of M4 | S0.11; the bot's Outlook.com mailbox; M3 run (all for the live check only)       |
+| 6e  | `widen-b-gaps-ops`                 | E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2); gap leftovers (`shortcut:` logs, BR-E06, BR-R06, BR-F03) (D105)                                            | M4         | S0.10; an `age` recipient and the backup target                                  |
 | 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                                                            | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
 | 8   | `flow-a`                           | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
 | 9   | `ops`                              | E12, then S12.7 (repo private), then S16.2                                                                                                                      | M7         | VPS chosen (D42)                                                                 |
@@ -98,7 +99,7 @@ Each item goes into the named phase's plan.
 - ~~The PKCE loopback login and the work-account attempt (S11.1, S0.8) go to `widen-b` with `inbox_rule`: the personal account allows device code.~~ Dropped by D91.
 - The `_Sent` rename goes to `widen-b` with S11.12; `payments` and `payment_id` go there with S11.11.
 - `/pendientes` listing a batch `prepared` for 2 days (S11.4) goes with the commands of `widen-b`.
-- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E15, `widen-b`).
+- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E8, `widen-b-gaps-ops`, D105).
 - **M3 live run (deferred by the owner on 2026-11-14):** the code is merged, the demo is not. Run `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" once the Entra app, the Excel template on the host and a test inbox are ready, before `widen-b` starts.
 
 ## Carried over from the `file-b` review
@@ -128,11 +129,11 @@ Each item goes into the named phase's plan.
 
 Each item goes into the named phase's plan.
 
-- **`widen-b-deliver`:** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
-- **`widen-b-deliver`:** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
-- **`widen-b-deliver`:** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
-- **`widen-b-deliver` (from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
-- **`widen-b-deliver`:** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
+- **`widen-b-deliver` (widen-b-deliver):** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
+- **`widen-b-deliver` (widen-b-deliver):** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
+- **`widen-b-deliver` (widen-b-deliver):** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
+- **`widen-b-deliver` (widen-b-deliver; from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
+- **`widen-b-deliver` (widen-b-deliver):** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
 - **`ops`:** `SystemResolver`'s deadline abandons the `getaddrinfo` thread without stopping it, so a hung resolver fills the default executor that `asyncio.to_thread` shares. Give DNS its own small executor. Reachable today only through allowlisted hosts.
 - **`ops`:** pin the Docker base image by digest and set `UV_PYTHON_DOWNLOADS=never`; cap the BR-D14 list (e.g. 10 items and "…"); add a webhook test where a real NUL byte makes Postgres refuse the middle message.
 
@@ -149,5 +150,5 @@ The specs run ahead of the code in these places; each has a named story that clo
 ## Notes for later phase plans
 
 - `routing`: S4.5 also owns the reply to `EXTRACT_FAILED` (a better photo or `campo=valor`); today a new photo creates a new invoice.
-- `widen-b`: E8 owns BR-E06 and BR-R06.
+- `widen-b-gaps-ops`: E8 owns BR-E06 and BR-R06 (D105).
 - `file-b`: the R-8.2 failure message is specified in S9.4 (flow A); E11 must cover it for flow B.

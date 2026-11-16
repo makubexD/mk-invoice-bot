@@ -105,7 +105,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-D08 | Flow B: the sender tapped [Ya lo envié] | The batch is `sent`; the invoice is `DONE`; the folder gets `_Sent` | `👍 Marcada como enviada.` |
 | BR-D09 | The sender sent a document for a stuck invoice, but `required_docs` is still incomplete (R-1.5, D66) | The document is attached; the invoice stays `MANUAL_REQUIRED` | `Recibí {received_desc}. Aún falta {missing_desc} para completar {serie}-{numero}.` |
 | BR-D10 | Flow B: the email was sent and confirmed (`graph` accepted it, or the laptop wrote its receipt) | The batch is `sent`; the invoice is `DONE` | `✅ Archivada en {folder} y enviada por correo.` |
-| BR-D11 | Flow B: the sender tapped [No llegó], or a laptop receipt is overdue by `mail.confirm_timeout` | Waits for the sender's choice; nothing is sent again on its own | `⚠️ El correo de {serie}-{numero} no está confirmado. ¿Cómo lo envío?` [Por la laptop] [Lo envío yo] [Ya llegó] |
+| BR-D11 | Flow B: the sender tapped [No llegó], or a laptop receipt is overdue by `mail.confirm_timeout` | Waits for the sender's choice; nothing is sent again on its own. [Por la laptop] (shown only when the flow lists `laptop_outlook`) writes a new laptop job; [Lo envío yo] writes the `.eml` draft and answers BR-D07's text, with [Ya lo envié] only while the batch is `prepared`; [Ya llegó] completes a `prepared` batch with BR-D10, and on a `sent` batch only answers BR-D10 (D109) | `⚠️ El correo de {serie}-{numero} no está confirmado. ¿Cómo lo envío?` [Por la laptop] [Lo envío yo] [Ya llegó] |
 | BR-D12 | Flow B: the laptop agent hasn't picked up a job for `agent_stale_after` | Once per job; the job stays queued | `💻 Tu laptop no ha enviado el correo de {serie}-{numero} desde hace {hours} h. Saldrá cuando la enciendas.` |
 | BR-D13 | Flow B: `inbox_rule` sent the email to the owner's inbox (trusted, D67) | The batch is `sent`; the invoice is `DONE` | `✅ Archivada en {folder}. El correo salió por tu regla de Outlook.` [No llegó] |
 | BR-D14 | A pdf/xml upload whose quote does not resolve while the profile has more than one stuck invoice (D102) | Not linked | `Tienes varios comprobantes esperando archivos: {invoices}. Vuelve a enviar el archivo respondiendo a la foto del comprobante.` |
@@ -117,7 +117,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-P01 | `/pagado`: exactly one set of sent, unpaid invoices adds up to the amount | Waits for [Sí] / [No] | `Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?` |
-| BR-P02 | `/pagado`: several sets add up | Up to 3 sets as buttons, oldest invoices first | `Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?` |
+| BR-P02 | `/pagado`: several sets add up | Up to 3 sets as buttons, oldest invoices first, each labeled `{fecha_min}…: {n} facturas, #12 #14`, plus [No] (D107) | `Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?` |
 | BR-P03 | `/pagado`: no set adds up, or the listed invoices don't sum to the amount | No change | `Ninguna combinación de facturas enviadas suma S/ {monto}. Pendientes de pago:` + `{invoice_lines}` + `Indícalas así: /pagado {fecha} #12 #14` |
 | BR-P04 | `/pagado` confirmed | The payment is stored; folder jobs are queued | `✅ Pago registrado: {n} carpetas marcadas como pagadas.` |
 
