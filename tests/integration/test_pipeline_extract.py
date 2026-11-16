@@ -25,10 +25,12 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
+from invoicebot.gaps.kinds import fingerprint
 from invoicebot.pipeline import extract as extract_module
 from invoicebot.pipeline.extract import (
     MAX_HELPER_OUTPUT_BYTES,
@@ -36,6 +38,7 @@ from invoicebot.pipeline.extract import (
     _parse_result,
     make_extract_handler,
 )
+from invoicebot.pipeline.gaps import RULE_GAP_ADMIN, GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
@@ -59,6 +62,7 @@ UNSUPPORTED_TIPO_PAYLOAD = (
 )
 WHITE = 255
 RULES_PATH = Path(__file__).resolve().parents[2] / "config" / "parsing_rules.yaml"
+EXAMPLE_CONFIG = RULES_PATH.parent / "example.yaml"
 CANVAS = 800  # height and width, in pixels
 QR_SCALE = 6
 QR_TOP = 100
@@ -78,6 +82,8 @@ PRINTED_LINES = (
 )
 #: The OCR total when the printed value disagrees with the QR (D81).
 CONFLICT_TOTAL = "12.50"
+#: The gap two unreadable invoices from SYNTHETIC_RUC share (BR-E06, D115).
+PARSER_MISS_FINGERPRINT = fingerprint("PARSER_MISS", SYNTHETIC_RUC)
 #: A QR payload carrying the same values as PRINTED_LINES (D81).
 CONFIRMING_PAYLOAD = (
     f"{SYNTHETIC_RUC}|01|{SERIE}|{NUMERO}|{IGV}|{TOTAL}|{PRINTED_DATE.isoformat()}|6|{SYNTHETIC_RUC}"
@@ -136,6 +142,12 @@ def _config(*, helper_timeout_s: float = HELPER_TIMEOUT_S) -> Extraction:
     if helper_timeout_s == HELPER_TIMEOUT_S:
         return config
     return config.model_copy(update={"helper_timeout_s": helper_timeout_s})
+
+
+def _gap_context() -> GapContext:
+    """Return the example config's profiles and gaps settings, PARSER_MISS a digest kind."""
+    cfg = load_config(EXAMPLE_CONFIG)
+    return GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps)
 
 
 def _canvas() -> np.ndarray:
@@ -225,9 +237,13 @@ async def _run_handler(
     helper_timeout_s: float = HELPER_TIMEOUT_S,
 ) -> None:
     """Run the extract handler once for invoice_id."""
-    await make_extract_handler(pool, _config(helper_timeout_s=helper_timeout_s), MEDIA, RULES_PATH)(
-        _job(invoice_id)
-    )
+    await make_extract_handler(
+        pool,
+        _config(helper_timeout_s=helper_timeout_s),
+        MEDIA,
+        RULES_PATH,
+        _gap_context(),
+    )(_job(invoice_id))
 
 
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -260,6 +276,43 @@ async def _outbox_rows(conn: AsyncConnection[Any], profile_id: str, rule_id: str
         (profile_id, rule_id),
     )
     return [str(text) for (text,) in await cur.fetchall()]
+
+
+async def _clear_gaps(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+    """Start a gap test from no gaps, no invoice links and an empty outbox."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("DELETE FROM invoice_gaps")
+        await conn.execute("DELETE FROM gaps")
+        await conn.execute("DELETE FROM outbox")
+
+
+async def _gap_state(conn: AsyncConnection[Any], gap_fingerprint: str) -> tuple[int, datetime | None] | None:
+    """Return a gap's count and raised_at, or None when it has no row."""
+    cur = await conn.execute("SELECT count, raised_at FROM gaps WHERE fingerprint = %s", (gap_fingerprint,))
+    row = await cur.fetchone()
+    return None if row is None else (int(row[0]), row[1])
+
+
+async def _gap_admin_rows(conn: AsyncConnection[Any]) -> int:
+    """Return how many GAP_admin owner alerts the outbox holds."""
+    cur = await conn.execute(
+        "SELECT count(*) FROM outbox WHERE payload_json->>'rule_id' = %s", (RULE_GAP_ADMIN,)
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _unreadable_photo_with_issuer_ruc(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+    name: str,
+) -> int:
+    """Create an invoice whose photo shows only the issuer RUC, so BR-E01 keeps the reading."""
+    photo = _write_printed_photo((f"RUC {SYNTHETIC_RUC}",), tmp_path / f"{name}{PNG}", draw_text)
+    invoice_id, _profile_id = await _invoice_with_photo(pool, photo)
+    return invoice_id
 
 
 async def test_valid_qr_photo_saves_the_reading_and_queues_routing(
@@ -371,6 +424,87 @@ async def test_blank_photo_fails_with_br_e01(
     assert route_jobs == 0
     assert len(messages) == 1
     assert "No pude leer este comprobante" in messages[0]
+
+
+async def test_two_unreadable_photos_raise_parser_miss_on_the_second(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+) -> None:
+    """BR-E06: two BR-E01 photos from one issuer count the gap, and the second raises it.
+
+    PARSER_MISS is a digest kind, so neither photo queues a GAP_admin owner alert.
+    """
+    await _clear_gaps(db_pool)
+    first = await _unreadable_photo_with_issuer_ruc(db_pool, tmp_path, draw_text, "parser-miss-1")
+
+    await _run_handler(db_pool, first)
+
+    async with db_pool.connection() as conn:
+        after_first = await _gap_state(conn, PARSER_MISS_FINGERPRINT)
+        alerts_after_first = await _gap_admin_rows(conn)
+        first_state = await _invoice_row(conn, first)
+
+    assert after_first is not None
+    assert (after_first[0], after_first[1]) == (1, None)
+    assert alerts_after_first == 0
+    assert first_state == ("EXTRACT_FAILED", "BR-E01")
+
+    second = await _unreadable_photo_with_issuer_ruc(db_pool, tmp_path, draw_text, "parser-miss-2")
+
+    await _run_handler(db_pool, second)
+
+    async with db_pool.connection() as conn:
+        after_second = await _gap_state(conn, PARSER_MISS_FINGERPRINT)
+        alerts_after_second = await _gap_admin_rows(conn)
+        second_state = await _invoice_row(conn, second)
+
+    assert after_second is not None
+    assert after_second[0] == 2
+    assert after_second[1] is not None
+    assert alerts_after_second == 0
+    assert second_state == ("EXTRACT_FAILED", "BR-E01")
+
+
+async def test_one_unreadable_photo_raises_no_parser_miss_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    draw_text: Callable[[np.ndarray, Sequence[str]], None],
+) -> None:
+    """BR-E06: one BR-E01 photo counts the gap but raises it and alerts nobody."""
+    await _clear_gaps(db_pool)
+    invoice_id = await _unreadable_photo_with_issuer_ruc(db_pool, tmp_path, draw_text, "parser-miss-one")
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        gap = await _gap_state(conn, PARSER_MISS_FINGERPRINT)
+        alerts = await _gap_admin_rows(conn)
+
+    assert gap is not None
+    assert (gap[0], gap[1]) == (1, None)
+    assert alerts == 0
+
+
+async def test_unreadable_photo_without_a_ruc_adds_no_parser_miss_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-E06: a BR-E01 photo that shows no issuer RUC adds no gap row and alerts nobody."""
+    await _clear_gaps(db_pool)
+    invoice_id, _profile_id = await _invoice_with_photo(
+        db_pool, _write_blank_photo(tmp_path / f"parser-miss-no-ruc{PNG}")
+    )
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        gap = await _gap_state(conn, PARSER_MISS_FINGERPRINT)
+        alerts = await _gap_admin_rows(conn)
+        state = await _invoice_row(conn, invoice_id)
+
+    assert gap is None
+    assert alerts == 0
+    assert state == ("EXTRACT_FAILED", "BR-E01")
 
 
 async def test_bad_issuer_check_digit_fails_with_br_e02(

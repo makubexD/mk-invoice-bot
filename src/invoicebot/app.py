@@ -58,7 +58,7 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
-from invoicebot.pipeline.gaps import issue_opened, writes_today
+from invoicebot.pipeline.gaps import GapContext, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
@@ -216,6 +216,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.extraction,
                 cfg.limits.media,
                 settings.parsing_rules_path,
+                GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             ),
             ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(

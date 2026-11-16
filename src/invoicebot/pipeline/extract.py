@@ -11,9 +11,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
@@ -24,12 +26,15 @@ from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
+from invoicebot.gaps.kinds import fingerprint
+from invoicebot.github.issue_text import IssueFields
 from invoicebot.helper import run_helper
+from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
-from invoicebot.rules.messages_es import MESSAGES, tipo_phrase
+from invoicebot.rules.messages_es import KIND_SUBJECT, MESSAGES, tipo_phrase
 from invoicebot.states import EXTRACTING, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import InvoiceHead, get_file_path, load_invoice_head, save_reading, set_state
@@ -52,12 +57,24 @@ ACTIVE_STATES = frozenset({"RECEIVED", "EXTRACTING"})
 CANCELLED_STATE = "CANCELLED"
 #: No QR, an unreadable photo or a required field missing (BR-E01).
 RULE_UNREADABLE: RuleId = "BR-E01"
+#: The gap a repeating unreadable invoice from one issuer raises (BR-E06).
+PARSER_MISS = "PARSER_MISS"
+#: A RUC is the 11-digit document number (R-11.12).
+_RUC_DIGITS = re.compile(r"[0-9]{11}")
 #: State each failure rule leaves the invoice in (spec 06).
 FAILURE_STATE: dict[RuleId, str] = {
     RULE_UNREADABLE: "EXTRACT_FAILED",
     RULE_BAD_RUC: "EXTRACT_FAILED",
     RULE_UNSUPPORTED_TIPO: CANCELLED_STATE,
 }
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """The rule an invoice failed with and the partial reading that shows why (BR-E01, BR-E06)."""
+
+    rule_id: RuleId
+    reading: Reading | None
 
 
 class _HelperResult(BaseModel):
@@ -73,18 +90,25 @@ class _HelperResult(BaseModel):
 
 
 def make_extract_handler(
-    pool: Pool, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+    pool: Pool,
+    extraction_cfg: Extraction,
+    media: MediaLimits,
+    rules_path: Path,
+    gaps: GapContext,
 ) -> Handler:
     """Build the handler that reads an invoice's photo and queues its routing (S3.11).
 
-    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with. The handler
-    acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no photo file —
-    a PDF or XML attachment until read-more ships — ends with BR-E01 and a message asking for a
-    photo or typed data. A photo it cannot read, a required field it does not find, a bad
-    issuer RUC and an unsupported document type end the invoice with BR-E01, BR-E02 or BR-E05
-    and a message to the sender. A reading that passes them is stored and the invoice moves to
-    ``ROUTING`` with a ``route`` job. A helper that exits non-zero for any other reason raises,
-    so the queue retries and, after its limit, fails the invoice with BR-S03.
+    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
+    ``gaps`` is who hears about an issuer whose invoices keep being unreadable (BR-E06).
+    The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no
+    photo file — a PDF or XML attachment until read-more ships — ends with BR-E01 and a message
+    asking for a photo or typed data. A photo it cannot read, a required field it does not find,
+    a bad issuer RUC and an unsupported document type end the invoice with BR-E01, BR-E02 or
+    BR-E05 and a message to the sender. A BR-E01 reading that still shows the issuer's 11-digit
+    RUC counts one PARSER_MISS sighting for that issuer. A reading that passes them is stored
+    and the invoice moves to ``ROUTING`` with a ``route`` job. A helper that exits non-zero for
+    any other reason raises, so the queue retries and, after its limit, fails the invoice with
+    BR-S03.
     """
 
     async def handle(job: Job) -> None:
@@ -97,7 +121,14 @@ def make_extract_handler(
         if path is None:
             # shortcut: PDF and XML input arrive in read-more; until then a non-photo
             # file asks for a photo or typed data (BR-E01).
-            await _finish(pool, job.invoice_id, invoice, RULE_UNREADABLE, None, expected=invoice.state)
+            await _finish(
+                pool,
+                job.invoice_id,
+                invoice,
+                _Failure(RULE_UNREADABLE, None),
+                gaps,
+                expected=invoice.state,
+            )
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
             return
 
@@ -111,13 +142,22 @@ def make_extract_handler(
         try:
             result = await _run_helper(path, extraction_cfg, media, rules_path)
         except TimeoutError:
-            await _finish(pool, job.invoice_id, invoice, RULE_UNREADABLE, None, expected=EXTRACTING)
+            await _finish(
+                pool,
+                job.invoice_id,
+                invoice,
+                _Failure(RULE_UNREADABLE, None),
+                gaps,
+                expected=EXTRACTING,
+            )
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
             return
 
         rule_id, reading = _classify(result, extraction_cfg.supported_tipos)
         if rule_id is not None:
-            await _finish(pool, job.invoice_id, invoice, rule_id, reading, expected=EXTRACTING)
+            await _finish(
+                pool, job.invoice_id, invoice, _Failure(rule_id, reading), gaps, expected=EXTRACTING
+            )
             _log_outcome(job.invoice_id, result, rule_id, started)
             return
         if reading is None:
@@ -194,7 +234,8 @@ def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId |
         # The helper's payload quotes values such as a RUC or an amount (R-9.16).
         raise RuntimeError("extract helper printed malformed JSON") from None
     if reading.missing_required():
-        return RULE_UNREADABLE, None
+        # Keep the partial reading so BR-E06 can still see an issuer RUC it did read.
+        return RULE_UNREADABLE, reading
     issuer = reading.fields["ruc_emisor"].value
     if (rule_id := check_issuer(issuer)) is not None:
         return rule_id, reading
@@ -208,16 +249,19 @@ async def _finish(
     pool: Pool,
     invoice_id: int,
     invoice: InvoiceHead,
-    rule_id: RuleId,
-    reading: Reading | None,
+    failure: _Failure,
+    gaps: GapContext,
     *,
     expected: str,
 ) -> None:
     """Record a failure rule and tell the sender why, in one transaction (BR-E01).
 
     The write only lands while the invoice is still in ``expected``: an invoice moved on
-    by ``/cancelar`` or an edit wins and nothing here is stored (D95).
+    by ``/cancelar`` or an edit wins, ``set_state`` raises :class:`StateMoved` and the
+    transaction rolls back, so no message and no BR-E06 gap is stored (D95). A BR-E01
+    reading that still carries the issuer's RUC counts one PARSER_MISS sighting there.
     """
+    rule_id = failure.rule_id
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
         await queue_message(
@@ -225,8 +269,42 @@ async def _finish(
             Addressee(invoice.origin_channel, invoice.profile_id),
             invoice_id=invoice_id,
             rule_id=rule_id,
-            text=_message(rule_id, reading),
+            text=_message(rule_id, failure.reading),
         )
+        if (
+            rule_id == RULE_UNREADABLE
+            and (sighting := _parser_miss_sighting(invoice_id, failure.reading)) is not None
+        ):
+            await raise_gap(conn, gaps, sighting)
+
+
+def _parser_miss_sighting(invoice_id: int, reading: Reading | None) -> GapSighting | None:
+    """Build one PARSER_MISS sighting from the reading's issuer RUC (BR-E06, R-11.12).
+
+    Returns ``None`` when the reading is missing or its issuer RUC is not exactly 11
+    digits, so an unreadable photo that shows no usable issuer raises nothing.
+    """
+    if reading is None:
+        return None
+    ruc_emisor = reading.value("ruc_emisor")
+    if ruc_emisor is None or _RUC_DIGITS.fullmatch(ruc_emisor) is None:
+        return None
+    return GapSighting(
+        kind=PARSER_MISS,
+        parts=(ruc_emisor,),
+        subject=KIND_SUBJECT[PARSER_MISS].format(ruc_emisor=ruc_emisor),
+        invoice_id=invoice_id,
+        fields=IssueFields(
+            kind=PARSER_MISS,
+            fingerprint=fingerprint(PARSER_MISS, ruc_emisor),
+            ruc_emisor=int(ruc_emisor),
+            razon_social=reading.value("razon_social"),
+            tipo=reading.value("tipo"),
+            reasons=(),
+            portal_key=None,
+            hint_url=None,
+        ),
+    )
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:

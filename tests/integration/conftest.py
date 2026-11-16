@@ -25,6 +25,7 @@ from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config as AppConfig
 from invoicebot.config.models import RoutingRule, StoreDirectory
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
@@ -236,9 +237,13 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             await add_file(conn, invoice_id, record)
             extract_job = await enqueue(conn, invoice_id, EXTRACT_STEP)
 
-        await make_extract_handler(db_pool, cfg.extraction, cfg.limits.media, PARSING_RULES_PATH)(
-            _job(extract_job, invoice_id, EXTRACT_STEP)
-        )
+        await make_extract_handler(
+            db_pool,
+            cfg.extraction,
+            cfg.limits.media,
+            PARSING_RULES_PATH,
+            GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
+        )(_job(extract_job, invoice_id, EXTRACT_STEP))
         async with db_pool.connection() as conn:
             cur = await conn.execute(
                 "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, ROUTE_STEP)
