@@ -175,12 +175,61 @@ class Routing(BaseModel):
     unmatched: Literal["ask", "reject"]
 
 
+_DELAY = re.compile(r"(\d+)([mhd])")
+_MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
+
+
+def parse_delay(text: str) -> timedelta:
+    """Parse a portal's interval such as ``90m``, ``6h`` or ``2d``."""
+    match = _DELAY.fullmatch(text)
+    if match is None:
+        raise ValueError(f"invalid delay: {text!r}")
+    amount, unit = match.groups()
+    return timedelta(minutes=int(amount) * _MINUTES[unit])
+
+
+def format_delay(delay: timedelta) -> str:
+    """Write ``delay`` back in ``parse_delay``'s form, in the largest whole unit."""
+    minutes = int(delay.total_seconds()) // 60
+    for unit in ("d", "h"):
+        if minutes % _MINUTES[unit] == 0:
+            return f"{minutes // _MINUTES[unit]}{unit}"
+    return f"{minutes}m"
+
+
+def _delay(value: object) -> timedelta:
+    """Refuse a non-string entry so pydantic reports a ``ValidationError``, then parse it."""
+    if not isinstance(value, str):
+        raise ValueError(f"delay must be a string such as '1h', got {value!r}")
+    return parse_delay(value)
+
+
+#: D65: one retry delay, written as ``<number><m|h|d>`` and dumped back as that text.
+Delay = Annotated[timedelta, BeforeValidator(_delay), PlainSerializer(format_delay)]
+
+_EMAIL_ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+$")
+
+
 class Mail(BaseModel):
     """Flow mail switches; real sending only in production (R-7.7, D89)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     send_enabled: bool = False
+    #: R-7.7: the owner's work mailbox the inbox_rule mode sends the mail to.
+    owner_work_address: str | None = None
+    #: R-7.8: how long a mail waits for the owner to confirm the receipt.
+    confirm_timeout: Delay = timedelta(hours=24)
+    #: R-7.8: how long a laptop job may stay unfinished before it is stale.
+    agent_stale_after: Delay = timedelta(hours=4)
+
+    @field_validator("owner_work_address")
+    @classmethod
+    def _owner_address_is_an_address(cls, value: str | None) -> str | None:
+        """R-7.7: the owner's work mailbox is one plain address."""
+        if value is not None and _EMAIL_ADDRESS.fullmatch(value) is None:
+            raise ValueError(f"owner_work_address {value!r} is not an email address")
+        return value
 
 
 class Microsoft(BaseModel):
@@ -280,9 +329,7 @@ class ExcelTemplateSink(BaseModel):
         return self
 
 
-type MailMode = Literal["dry_run", "graph"]
-
-_EMAIL_ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+$")
+type MailMode = Literal["dry_run", "graph", "inbox_rule", "laptop_outlook"]
 
 
 class MailerSink(BaseModel):
@@ -294,6 +341,8 @@ class MailerSink(BaseModel):
     trigger: Literal["per_invoice"]
     modes: list[MailMode] = Field(min_length=1)
     account: Literal["personal"]
+    #: R-7.7: the inbox_rule mode sends through the bot's own mailbox.
+    inbox_rule_account: Literal["bot"] = "bot"
     to: list[str] = Field(min_length=1)
     cc: list[str] = Field(default_factory=list)
     subject: str
@@ -521,6 +570,18 @@ class Limits(BaseModel):
 PROFILE_ID_PATTERN = r"^[a-z0-9_-]+$"
 
 
+def _lists_mail_mode(flow: Flow, mode: MailMode) -> bool:
+    """True when ``flow`` has a mailer sink that lists ``mode``."""
+    return any(isinstance(sink, MailerSink) and mode in sink.modes for sink in flow.sinks)
+
+
+def _has_personal_onedrive_sink(flow: Flow) -> bool:
+    """True when ``flow`` has an onedrive_folder sink targeting the personal drive."""
+    return any(
+        isinstance(sink, OneDriveFolderSink) and "onedrive_personal" in sink.targets for sink in flow.sinks
+    )
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -567,6 +628,27 @@ class Config(BaseModel):
         for index, rule in enumerate(self.routing.rules):
             if rule.flow not in self.flows:
                 raise ValueError(f"routing.rules[{index}] ({rule.id}) names unknown flow '{rule.flow}'")
+        return self
+
+    @model_validator(mode="after")
+    def _inbox_rule_needs_the_owner_address(self) -> Self:
+        """R-7.7: a flow that sends through the inbox_rule mode names the owner's work mailbox."""
+        for name, flow in self.flows.items():
+            if _lists_mail_mode(flow, "inbox_rule") and self.mail.owner_work_address is None:
+                raise ValueError(
+                    f"flow '{name}' lists mail mode 'inbox_rule' without mail.owner_work_address"
+                )
+        return self
+
+    @model_validator(mode="after")
+    def _laptop_outlook_needs_a_personal_onedrive(self) -> Self:
+        """R-7.14: a flow that hands mail to the laptop agent files it on the personal OneDrive."""
+        for name, flow in self.flows.items():
+            if _lists_mail_mode(flow, "laptop_outlook") and not _has_personal_onedrive_sink(flow):
+                raise ValueError(
+                    f"flow '{name}' lists mail mode 'laptop_outlook' without an "
+                    "'onedrive_folder' sink on 'onedrive_personal'"
+                )
         return self
 
 
@@ -642,39 +724,6 @@ class PortalDownloads(BaseModel):
 
     xml: str | None = None
     pdf: str | None = None
-
-
-_DELAY = re.compile(r"(\d+)([mhd])")
-_MINUTES = {"m": 1, "h": 60, "d": 24 * 60}
-
-
-def parse_delay(text: str) -> timedelta:
-    """Parse a portal's interval such as ``90m``, ``6h`` or ``2d``."""
-    match = _DELAY.fullmatch(text)
-    if match is None:
-        raise ValueError(f"invalid delay: {text!r}")
-    amount, unit = match.groups()
-    return timedelta(minutes=int(amount) * _MINUTES[unit])
-
-
-def format_delay(delay: timedelta) -> str:
-    """Write ``delay`` back in ``parse_delay``'s form, in the largest whole unit."""
-    minutes = int(delay.total_seconds()) // 60
-    for unit in ("d", "h"):
-        if minutes % _MINUTES[unit] == 0:
-            return f"{minutes // _MINUTES[unit]}{unit}"
-    return f"{minutes}m"
-
-
-def _delay(value: object) -> timedelta:
-    """Refuse a non-string entry so pydantic reports a ``ValidationError``, then parse it."""
-    if not isinstance(value, str):
-        raise ValueError(f"delay must be a string such as '1h', got {value!r}")
-    return parse_delay(value)
-
-
-#: D65: one retry delay, written as ``<number><m|h|d>`` and dumped back as that text.
-Delay = Annotated[timedelta, BeforeValidator(_delay), PlainSerializer(format_delay)]
 
 
 #: D65: a portal's default "not found yet" retry delays, in order.

@@ -91,7 +91,11 @@ routing:
 
 # Flow B's mail (R-7.7, D89) and the Graph app id (D84). The client id is public, not a secret.
 env: development                         # production is required for mail.send_enabled: true
-mail: { send_enabled: false }            # false turns every mail mode into dry_run at startup
+mail:
+  send_enabled: false                    # false turns every mail mode into dry_run at startup
+  owner_work_address: "owner@example.com" # inbox_rule sends here (R-7.7)
+  confirm_timeout: "24h"                 # how long a mail waits for confirmation (R-7.8)
+  agent_stale_after: "4h"                # a laptop job older than this is stale (R-7.8)
 microsoft: { client_id: "00000000-0000-0000-0000-000000000000", timeout_s: 30 }
 
 flows:
@@ -170,6 +174,7 @@ flows:
         trigger: per_invoice
         modes: [graph]                  # MVP. Later: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
         account: personal
+        inbox_rule_account: bot         # inbox_rule sends through the bot mailbox (R-7.7)
         to: ["me@example.com"]          # MVP: the owner's test inbox (D68)
         cc: []
         subject: "Support release {fecha:%d/%m/%Y}"

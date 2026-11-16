@@ -95,6 +95,51 @@ def test_mail_send_enabled_in_production_loads(tmp_path: Path) -> None:
     assert load_config(path).mail.send_enabled is True
 
 
+def test_inbox_rule_without_owner_work_address_fails_naming_flow(tmp_path: Path) -> None:
+    """R-7.7: inbox_rule needs the owner's work mailbox, so a flow listing it without one fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][2]["modes"] = ["inbox_rule"]
+    del document["mail"]["owner_work_address"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="work_microsoft"):
+        load_config(path)
+
+
+def test_laptop_outlook_without_a_personal_onedrive_sink_fails_naming_flow(tmp_path: Path) -> None:
+    """R-7.14: laptop_outlook needs a personal OneDrive sink, so a flow without one fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["work_microsoft"]["sinks"][0]
+    document["flows"]["work_microsoft"]["sinks"][1]["modes"] = ["laptop_outlook"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="work_microsoft"):
+        load_config(path)
+
+
+def test_mail_delays_default_to_24h_and_4h(tmp_path: Path) -> None:
+    """R-7.8: without explicit delays a mail waits 24 h and a laptop job is stale after 4 h."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["mail"]["confirm_timeout"]
+    del document["mail"]["agent_stale_after"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert cfg.mail.confirm_timeout == timedelta(hours=24)
+    assert cfg.mail.agent_stale_after == timedelta(hours=4)
+
+
+def test_owner_work_address_that_is_not_an_address_fails(tmp_path: Path) -> None:
+    """R-7.7: the owner's work mailbox is one plain address, so a mistyped one fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["mail"]["owner_work_address"] = "not-an-address"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="owner_work_address"):
+        load_config(path)
+
+
 def test_xlsm_template_without_allow_macros_fails(tmp_path: Path) -> None:
     """R-7.10: a macro-enabled template needs an explicit opt-in."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
