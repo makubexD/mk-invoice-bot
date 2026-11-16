@@ -9,6 +9,7 @@ caller's transaction.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
@@ -213,7 +214,7 @@ async def _answer_amount(
     found: list[Candidate],
 ) -> None:
     """Propose every set adding up to the amount, or list the pending invoices (R-7.12)."""
-    sets = match_sets(found, int(parsed.amount * 100))
+    sets = await asyncio.to_thread(match_sets, found, int(parsed.amount * 100))
     if not sets:
         text = _pending_text(parsed.paid_on, parsed.amount, found)
         await _reply(conn, msg, _RULE_NO_MATCH, text)

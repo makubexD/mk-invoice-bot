@@ -23,6 +23,9 @@ __all__ = ["Candidate", "PagadoAmount", "PagadoIds", "claimed_cents", "match_set
 MAX_PAGADO_IDS = 20
 """The most invoice ids a ``/pagado dd/mm #id #id …`` argument may name (R-7.12)."""
 
+#: The most search nodes one :func:`match_sets` call visits before it stops (R-7.12).
+MAX_NODES = 200_000
+
 # The digit caps keep an amount inside NUMERIC(12,2) and an id inside INTEGER.
 _AMOUNT_RE = re.compile(
     r"(?P<day>\d{1,2})/(?P<month>\d{1,2})\s+(?:[Ss]/\s*)?(?P<amount>\d{1,10}(?:[.,]\d{1,2})?)"
@@ -102,6 +105,8 @@ def match_sets(candidates: Sequence[Candidate], target_cents: int, limit: int = 
 
     Candidates are searched oldest first, and each set is a tuple of invoice ids in that
     order. The result is sorted by the oldest invoice's ``fecha``, then by set size.
+    The search stops after visiting :data:`MAX_NODES` nodes and returns the sets found so
+    far.
     """
     if target_cents <= 0 or limit <= 0:
         return []
@@ -111,24 +116,37 @@ def match_sets(candidates: Sequence[Candidate], target_cents: int, limit: int = 
             key=lambda candidate: (candidate.fecha, candidate.invoice_id),
         )
     )
-    found = _search(eligible, target_cents, limit)
+    found = _search(eligible, target_cents, limit, [0])
     oldest = {candidate.invoice_id: candidate.fecha for candidate in eligible}
     found.sort(key=lambda ids: (oldest[ids[0]], len(ids)))
     return found
 
 
-def _search(candidates: tuple[Candidate, ...], target_cents: int, limit: int) -> list[tuple[int, ...]]:
-    """Depth-first search for at most ``limit`` subsets summing to the target (R-7.12)."""
+def _search(
+    candidates: tuple[Candidate, ...],
+    target_cents: int,
+    limit: int,
+    nodes: list[int],
+) -> list[tuple[int, ...]]:
+    """Depth-first search for at most ``limit`` subsets summing to the target (R-7.12).
+
+    ``nodes`` is a one-item counter of the nodes visited, shared by the whole search; the
+    walk stops once it reaches :data:`MAX_NODES`.
+    """
     suffix_sums = _suffix_sums(candidates)
     found: list[tuple[int, ...]] = []
 
     def walk(start: int, running: int, chosen: list[int]) -> None:
+        if nodes[0] >= MAX_NODES:
+            return
+        nodes[0] += 1
         if running == target_cents:
             found.append(tuple(chosen))
             return
         for index in range(start, len(candidates)):
-            if len(found) >= limit:
+            if len(found) >= limit or nodes[0] >= MAX_NODES:
                 return
+            nodes[0] += 1
             if running + suffix_sums[index] < target_cents:
                 return
             claimed = candidates[index].claimed_cents

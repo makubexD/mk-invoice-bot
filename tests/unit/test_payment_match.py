@@ -83,6 +83,19 @@ def test_match_sets_prunes_twenty_candidates_quickly() -> None:
     assert elapsed < 1.0
 
 
+def test_match_sets_caps_the_nodes_of_an_unreachable_target() -> None:
+    """R-7.12: 20 equal claims and an unreachable target return [] in under 1 s (node cap)."""
+    start = date(2026, 1, 1)
+    candidates = [Candidate(index, start + timedelta(days=index), 100) for index in range(20)]
+
+    started = time.perf_counter()
+    sets = match_sets(candidates, 1050)
+    elapsed = time.perf_counter() - started
+
+    assert sets == []
+    assert elapsed < 1.0
+
+
 @pytest.mark.parametrize(
     ("total", "cap", "expected"),
     [
