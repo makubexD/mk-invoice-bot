@@ -25,6 +25,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.parse import parse_webhook
 from invoicebot.channels.whatsapp.signature import verify_handshake, verify_signature
+from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
@@ -49,6 +50,8 @@ class WebhookDeps:
     verify_token: str
     sender_hash_key: str
     max_queued_per_sender: int
+    #: The flow that tracks payments (R-7.12), when one opts in.
+    payment_flow: PaymentFlow | None = None
 
 
 def make_router(deps: WebhookDeps) -> APIRouter:
@@ -150,6 +153,7 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
                     max_queued_per_sender=deps.max_queued_per_sender,
                     timezone=deps.timezone,
                     admins=deps.admin_profiles,
+                    payment_flow=deps.payment_flow,
                 )
         except psycopg.errors.DataError as exc:
             logger.error(

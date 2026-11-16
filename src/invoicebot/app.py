@@ -43,6 +43,7 @@ from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hos
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
+from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
@@ -237,7 +238,17 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
+        payment_flow=_payment_flow(cfg),
     )
+
+
+def _payment_flow(cfg: Config) -> PaymentFlow | None:
+    """Return the first flow that tracks payments, or None when no flow opts in (R-7.12)."""
+    for name, flow in cfg.flows.items():
+        reimbursement = flow.reimbursement
+        if reimbursement is not None and reimbursement.track_payments:
+            return PaymentFlow(flow_id=name, cap=reimbursement.cap)
+    return None
 
 
 def _load_secrets(settings: Settings) -> SecretStore:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -80,11 +81,20 @@ PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
+class PaymentFlow:
+    """The flow whose payments a sender may record (R-7.12): its id and reimbursement cap."""
+
+    flow_id: str
+    cap: Decimal | None
+
+
+@dataclass(frozen=True)
 class CommandContext:
-    """What a command needs beyond its message: the admin profile ids and the owner timezone."""
+    """What a command needs beyond its message: admin ids, the owner timezone and the payment flow."""
 
     admins: frozenset[str]
     timezone: str
+    payment_flow: PaymentFlow | None = None
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.
