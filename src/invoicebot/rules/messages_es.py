@@ -125,7 +125,7 @@ MESSAGES: dict[str, str] = {
     "BR-D15": "El archivo que enviaste no es un PDF válido; no lo guardé.",
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
-    "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?",
+    "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",
     "BR-P03": (
         "Ninguna combinación de facturas enviadas suma S/ {monto}. Pendientes de pago:\n"
         "{invoice_lines}\n"
@@ -394,8 +394,10 @@ HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
 #: ``/pagado``'s own line in the command list (R-7.12).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_PAGADO = "/pagado dd/mm monto, o /pagado dd/mm #12 #14: registra un reembolso recibido"
-#: BR-P02's button label for one matching set; ``{fecha_min}`` is its oldest invoice (D107).
-PAYMENT_SET_LABEL = "{fecha_min}…: {n} facturas, {ids}"
+#: One BR-P02 set line in the body, numbered from 1 (R-7.12, D107).
+PAYMENT_SET_LINE = "Opción {n}: {fecha_min}…, {count} facturas: {ids}"
+#: BR-P02's short button title for one matching set, numbered from 1 (R-7.12, D107).
+BUTTON_OPTION = "Opción {n}"
 #: One invoice line of BR-P03's pending list (R-7.12, BR-P03).
 PAYMENT_LINE = "#{id} · {fecha} · S/ {monto}"
 #: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).

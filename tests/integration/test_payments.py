@@ -14,7 +14,8 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import ChannelName, InboundMessage
+from invoicebot.channels.base import Button, ChannelName, InboundMessage
+from invoicebot.channels.whatsapp.payloads import buttons_payload
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command
 from invoicebot.pipeline.intake import handle_inbound
@@ -25,7 +26,7 @@ from invoicebot.rules.messages_es import (
     HELP_PAGADO,
     MESSAGES,
     PAYMENT_LINE,
-    PAYMENT_SET_LABEL,
+    PAYMENT_SET_LINE,
     state_desc,
 )
 from invoicebot.states import DONE
@@ -273,19 +274,43 @@ async def test_command_amount_with_two_sets_lists_them_oldest_first_as_br_p02(
     proposal_id, _paid_on, amount, sets = proposals[0]
     assert amount == Decimal("100.00")
     assert sets == [[old_a, old_b], [new_a, new_b]]
-    old_label = PAYMENT_SET_LABEL.format(fecha_min="01/11", n=2, ids=f"#{old_a} #{old_b}")
-    new_label = PAYMENT_SET_LABEL.format(fecha_min="03/11", n=2, ids=f"#{new_a} #{new_b}")
+    old_line = PAYMENT_SET_LINE.format(n=1, fecha_min="01/11", count=2, ids=f"#{old_a} #{old_b}")
+    new_line = PAYMENT_SET_LINE.format(n=2, fecha_min="03/11", count=2, ids=f"#{new_a} #{new_b}")
     assert replies == [
         (
-            MESSAGES["BR-P02"].format(monto="100.00"),
+            MESSAGES["BR-P02"].format(monto="100.00", set_lines=f"{old_line}\n{new_line}"),
             "BR-P02",
             [
-                _button(f"p{proposal_id}:pay:0", old_label),
-                _button(f"p{proposal_id}:pay:1", new_label),
+                _button(f"p{proposal_id}:pay:0", "Opción 1"),
+                _button(f"p{proposal_id}:pay:1", "Opción 2"),
                 _button(f"p{proposal_id}:pay_no", BUTTON_NO),
             ],
         )
     ]
+
+
+async def test_br_p02_outbox_buttons_build_a_valid_whatsapp_payload(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: BR-P02's outbox buttons build a WhatsApp payload, so no title overflows Meta's limit."""
+    profile_id = _unique("profile")
+    flow = _flow()
+    older = datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
+    newer = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    async with db_pool.connection() as conn:
+        await _invoice(conn, profile_id, flow.flow_id, "60.00", created_at=older)
+        await _invoice(conn, profile_id, flow.flow_id, "40.00", created_at=older)
+        await _invoice(conn, profile_id, flow.flow_id, "70.00", created_at=newer)
+        await _invoice(conn, profile_id, flow.flow_id, "30.00", created_at=newer)
+        await _run(conn, profile_id, "15/11 100.00", flow)
+        replies = await _replies(conn, profile_id)
+
+    body, rule_id, buttons = replies[0]
+    assert rule_id == "BR-P02"
+    payload = buttons_payload(
+        profile_id, body, [Button(id=button["id"], title=button["title"]) for button in buttons]
+    )
+    assert len(payload["interactive"]["action"]["buttons"]) == len(buttons)
 
 
 async def test_command_amount_without_a_matching_set_lists_pending_as_br_p03(

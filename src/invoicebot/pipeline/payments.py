@@ -31,11 +31,12 @@ from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     BUTTON_NO,
+    BUTTON_OPTION,
     BUTTON_YES,
     HELP_PAGADO,
     MESSAGES,
     PAYMENT_LINE,
-    PAYMENT_SET_LABEL,
+    PAYMENT_SET_LINE,
 )
 from invoicebot.states import DONE
 from invoicebot.store.payments import (
@@ -222,8 +223,8 @@ async def _answer_amount(
         text = _br_p01_text(parsed.paid_on, parsed.amount, sets[0])
         await _reply(conn, msg, _RULE_PAY, text, _yes_buttons(proposal_id))
         return
-    text = MESSAGES[_RULE_CHOOSE].format(monto=_money(parsed.amount))
-    await _reply(conn, msg, _RULE_CHOOSE, text, _set_buttons(proposal_id, sets, found, timezone))
+    text = _br_p02_text(parsed.amount, sets, found, timezone)
+    await _reply(conn, msg, _RULE_CHOOSE, text, _set_buttons(proposal_id, sets))
 
 
 async def _answer_ids(
@@ -291,28 +292,40 @@ def _yes_buttons(proposal_id: int) -> list[Button]:
     ]
 
 
-def _set_buttons(
-    proposal_id: int,
+def _br_p02_text(
+    amount: Decimal,
     sets: Sequence[tuple[int, ...]],
     found: Sequence[Candidate],
     timezone: str,
-) -> list[Button]:
-    """Return BR-P02's one button per set plus [No], oldest set first (R-7.12, D107)."""
+) -> str:
+    """Return BR-P02's text listing every matching set, oldest first (R-7.12, D107)."""
     by_id = {candidate.invoice_id: candidate for candidate in found}
+    set_lines = "\n".join(_set_line(number, ids, by_id, timezone) for number, ids in enumerate(sets, start=1))
+    return MESSAGES[_RULE_CHOOSE].format(monto=_money(amount), set_lines=set_lines)
+
+
+def _set_buttons(proposal_id: int, sets: Sequence[tuple[int, ...]]) -> list[Button]:
+    """Return BR-P02's one button per set plus [No], oldest set first (R-7.12, D107)."""
     buttons = [
-        Button(id=f"p{proposal_id}:pay:{index}", title=_set_label(ids, by_id, timezone))
-        for index, ids in enumerate(sets)
+        Button(id=f"p{proposal_id}:pay:{index}", title=BUTTON_OPTION.format(n=index + 1))
+        for index in range(len(sets))
     ]
     buttons.append(Button(id=f"p{proposal_id}:pay_no", title=BUTTON_NO))
     return buttons
 
 
-def _set_label(ids: Sequence[int], by_id: Mapping[int, Candidate], timezone: str) -> str:
-    """Return BR-P02's label for one set, dated by its oldest invoice (D107)."""
+def _set_line(
+    number: int,
+    ids: Sequence[int],
+    by_id: Mapping[int, Candidate],
+    timezone: str,
+) -> str:
+    """Return one BR-P02 set line numbered from 1, dated by its oldest invoice (R-7.12, D107)."""
     oldest = min(by_id[invoice_id].created_at for invoice_id in ids)
-    return PAYMENT_SET_LABEL.format(
+    return PAYMENT_SET_LINE.format(
+        n=number,
         fecha_min=_day_month(_local_date(oldest, timezone)),
-        n=len(ids),
+        count=len(ids),
         ids=_id_list(ids),
     )
 

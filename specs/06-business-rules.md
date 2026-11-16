@@ -117,7 +117,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-P01 | `/pagado`: exactly one set of sent, unpaid invoices adds up to the amount | Waits for [Sí] / [No] | `Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?` |
-| BR-P02 | `/pagado`: several sets add up | Up to 3 sets as buttons, oldest invoices first, each labeled `{fecha_min}…: {n} facturas, #12 #14`, plus [No] (D107) | `Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?` |
+| BR-P02 | `/pagado`: several sets add up | Up to 3 sets listed in the text as `Opción {n}: {fecha_min}…, {count} facturas: #12 #14`, oldest first, buttons [Opción 1]…[Opción 3] plus [No] (D107) | `Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?` + `{set_lines}` |
 | BR-P03 | `/pagado`: no set adds up, or the listed invoices don't sum to the amount | No change | `Ninguna combinación de facturas enviadas suma S/ {monto}. Pendientes de pago:` + `{invoice_lines}` + `Indícalas así: /pagado {fecha} #12 #14` |
 | BR-P04 | `/pagado` confirmed | The payment is stored; folder jobs are queued | `✅ Pago registrado: {n} carpetas marcadas como pagadas.` |
 
