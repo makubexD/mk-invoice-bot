@@ -437,6 +437,8 @@ HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
 #: ``/pagado``'s own line in the command list (R-7.12).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_PAGADO = "/pagado dd/mm monto, o /pagado dd/mm #12 #14: registra un reembolso recibido"
+#: ``/portal``'s own line in the command list (R-11.4).
+HELP_PORTAL = "/portal 20100000001 https://…: propone el portal de descarga de ese RUC"
 #: One BR-P02 set line in the body, numbered from 1 (R-7.12, D107).
 PAYMENT_SET_LINE = "Opción {n}: {fecha_min}…, {count} facturas: {ids}"
 #: BR-P02's short button title for one matching set, numbered from 1 (R-7.12, D107).

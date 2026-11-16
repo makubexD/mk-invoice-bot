@@ -4,22 +4,34 @@ Commands are reached through :func:`handle_inbound` and :func:`resolve_target`, 
 real Postgres; every test uses its own profile, so no outbox row leaks between them.
 """
 
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.config.loader import load_config
+from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.actions import cancel_invoice
-from invoicebot.pipeline.commands import COMMANDS, parse_command, resolve_target
+from invoicebot.pipeline.commands import (
+    COMMANDS,
+    CommandContext,
+    handle_command,
+    help_text,
+    parse_command,
+    resolve_target,
+)
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
     CANCEL_LATE,
@@ -27,6 +39,7 @@ from invoicebot.rules.messages_es import (
     COMMAND_NEEDS_ID,
     HELP_AYUDA,
     HELP_HEADER,
+    HELP_PORTAL,
     MESSAGES,
     PENDING_BATCH_LINE,
     PENDING_HEADER,
@@ -42,6 +55,7 @@ from invoicebot.rules.messages_es import (
     state_desc,
 )
 from invoicebot.states import StateMoved
+from invoicebot.store import taught_links
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
 from invoicebot.store.invoices import (
     InvoiceHead,
@@ -50,6 +64,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
 )
+from invoicebot.store.taught_links import TaughtLink
 
 MAX_QUEUED = 10
 #: The owner's timezone, for the dates a command prints (S11.4).
@@ -889,3 +904,156 @@ async def test_pendientes_caps_the_list_and_counts_the_rest(
 
     assert result.status == "stored"
     assert replies == [(expected, None)]
+
+
+# /portal (R-11.4)
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+#: The synthetic issuer RUC the command tests teach a link for.
+ISSUER_RUC = 20100000001
+ISSUER_RUC_TEXT = "20100000001"
+GOOD_URL = "https://portal.example.pe/x"
+PUBLIC_ADDRESS = "93.184.216.34"
+SENDER = "asistente"
+
+
+class FakeResolver(Resolver):
+    """A ``Resolver`` that answers the fixed public address, whatever the host is."""
+
+    async def resolve(self, host: str) -> list[str]:
+        """Return the fixed public address."""
+        return [PUBLIC_ADDRESS]
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def clean_teach_tables(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> AsyncIterator[None]:
+    """Start each test from empty taught links and outbox rows."""
+    async with db_pool.connection() as conn:
+        await conn.execute("DELETE FROM taught_links")
+        await conn.execute("DELETE FROM outbox")
+    yield
+
+
+def _portal_context(*, teach: bool = True) -> CommandContext:
+    """Return a context with the example profiles, teaching wired when asked."""
+    setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver()) if teach else None
+    return CommandContext(admins=frozenset(), timezone=TIMEZONE, teach=setup)
+
+
+def _portal_message(text: str) -> InboundMessage:
+    """Build a canonical message from the sender profile."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=SENDER,
+        sender_role="owner",
+        text=text,
+        attachments=[],
+        received_at=datetime.now(UTC),
+    )
+
+
+async def _portal_run(
+    conn: AsyncConnection[Any],
+    name: str,
+    arg: str,
+    context: CommandContext,
+) -> None:
+    """Run ``/name arg`` for the sender in the caller's transaction."""
+    await handle_command(conn, _portal_message(f"/{name} {arg}".strip()), name, arg, context=context)
+
+
+async def _portal_outbox(
+    conn: AsyncConnection[Any],
+    recipient: str,
+) -> list[tuple[str, str | None, list[dict[str, str]]]]:
+    """Return a recipient's outbox ``(text, rule_id, buttons)`` rows, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'text', payload_json->>'rule_id', payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (recipient,),
+    )
+    rows = await cur.fetchall()
+    return [(str(text), rule_id, cast(list[dict[str, str]], buttons)) for text, rule_id, buttons in rows]
+
+
+async def _link_count(conn: AsyncConnection[Any]) -> int:
+    """Return how many taught links exist."""
+    cur = await conn.execute("SELECT count(*) FROM taught_links")
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT count over taught_links yielded no row")
+    return int(row[0])
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_portal_proposes_the_link_and_asks_the_owner(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a well-formed /portal stores a proposed link and queues BR-S06 to the sender."""
+    async with db_pool.connection() as conn:
+        await _portal_run(conn, "portal", f"{ISSUER_RUC_TEXT} {GOOD_URL}", _portal_context())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _portal_outbox(conn, SENDER)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_portal_bad_ruc_answers_the_usage_line_and_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a RUC that is not 11 digits answers HELP_PORTAL and stores nothing."""
+    async with db_pool.connection() as conn:
+        await _portal_run(conn, "portal", f"123 {GOOD_URL}", _portal_context())
+        sender_rows = await _portal_outbox(conn, SENDER)
+        links = await _link_count(conn)
+
+    assert sender_rows == [(HELP_PORTAL, None, [])]
+    assert links == 0
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_portal_without_url_answers_the_usage_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: /portal with a RUC but no URL answers HELP_PORTAL."""
+    async with db_pool.connection() as conn:
+        await _portal_run(conn, "portal", ISSUER_RUC_TEXT, _portal_context())
+        sender_rows = await _portal_outbox(conn, SENDER)
+
+    assert sender_rows == [(HELP_PORTAL, None, [])]
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_ayuda_lists_the_portal_command(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-10.1: /ayuda lists /portal next to the other commands."""
+    async with db_pool.connection() as conn:
+        await _portal_run(conn, "ayuda", "", _portal_context())
+        sender_rows = await _portal_outbox(conn, SENDER)
+
+    assert sender_rows == [(help_text(), None, [])]
+    assert HELP_PORTAL in sender_rows[0][0]
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_portal_with_teaching_off_answers_the_help_and_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: /portal with no TeachSetup answers the help and stores nothing."""
+    async with db_pool.connection() as conn:
+        await _portal_run(conn, "portal", f"{ISSUER_RUC_TEXT} {GOOD_URL}", _portal_context(teach=False))
+        sender_rows = await _portal_outbox(conn, SENDER)
+        links = await _link_count(conn)
+
+    assert sender_rows == [(help_text(), None, [])]
+    assert links == 0

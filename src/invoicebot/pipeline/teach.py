@@ -35,6 +35,14 @@ BUTTON_NO_SUFFIX = "no"
 
 
 @dataclass(frozen=True)
+class TeachSetup:
+    """What teaching a link needs from the runtime: the admin profiles and the DNS resolver."""
+
+    profiles: Mapping[str, Profile]
+    resolver: Resolver
+
+
+@dataclass(frozen=True)
 class TeachContext:
     """Who teaches, who decides and how a taught link is validated."""
 
