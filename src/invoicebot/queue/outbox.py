@@ -3,12 +3,12 @@
 A row is written with :func:`add` in the caller's transaction, so the message
 exists exactly when the state change that produced it commits (R-1.8).
 :class:`OutboxSender` picks due rows with ``FOR UPDATE SKIP LOCKED``, calls the
-transport for the row's channel while holding the row lock and marks it
-``sent``. A failure increments ``attempts``, stores ``last_error`` and
-reschedules the row with exponential backoff; once ``max_attempts`` is reached
-the row becomes ``dead`` and is logged. A :class:`PermanentSendError` marks the
-row ``dead`` at once, whatever the attempt count. All scheduling uses the
-database clock.
+transport for the row's channel while holding the row lock, marks it ``sent``
+and stores the message id the channel returned. A failure increments
+``attempts``, stores ``last_error`` and reschedules the row with exponential
+backoff; once ``max_attempts`` is reached the row becomes ``dead`` and is
+logged. A :class:`PermanentSendError` marks the row ``dead`` at once, whatever
+the attempt count. All scheduling uses the database clock.
 """
 
 import logging
@@ -41,8 +41,9 @@ class OutboxRow:
     attempts: int
 
 
-#: A coroutine that delivers one outbox row; raising means the send failed.
-Transport = Callable[[OutboxRow], Awaitable[None]]
+#: A coroutine that delivers one outbox row and returns the channel's message id,
+#: or None when the channel assigns none; raising means the send failed.
+Transport = Callable[[OutboxRow], Awaitable[str | None]]
 
 
 class PermanentSendError(Exception):
@@ -190,31 +191,36 @@ class OutboxSender:
                     if raw is None:
                         return sent
                     row = _outbox_row(raw)
-                    failure = await self._deliver(row)
+                    message_id, failure = await self._deliver(row)
                     if failure is None:
                         await conn.execute(
-                            "UPDATE outbox SET state = 'sent', sent_at = now() WHERE id = %(id)s",
-                            {"id": row.id},
+                            """
+                            UPDATE outbox
+                            SET state = 'sent', sent_at = now(), channel_message_id = %(message_id)s
+                            WHERE id = %(id)s
+                            """,
+                            {"id": row.id, "message_id": message_id},
                         )
                         sent += 1
                     else:
                         error, permanent = failure
                         await self._record_failure(conn, row, error, permanent=permanent)
 
-    async def _deliver(self, row: OutboxRow) -> tuple[str, bool] | None:
+    async def _deliver(self, row: OutboxRow) -> tuple[str | None, tuple[str, bool] | None]:
         """Call the row's transport.
 
-        Return the error description and whether it is permanent, or None when
-        the row was delivered.
+        Return the channel's message id and no failure when the row was
+        delivered, or None and the error description with whether it is
+        permanent.
         """
         transport = self._transports.get(row.channel)
         if transport is None:
-            return f"no transport for channel {row.channel}", False
+            return None, (f"no transport for channel {row.channel}", False)
         try:
-            await transport(row)
+            message_id = await transport(row)
         except Exception as exc:  # CancelledError is a BaseException and propagates
-            return describe_error(exc), isinstance(exc, PermanentSendError)
-        return None
+            return None, (describe_error(exc), isinstance(exc, PermanentSendError))
+        return message_id, None
 
     async def _record_failure(
         self,

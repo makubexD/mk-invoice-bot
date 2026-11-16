@@ -41,6 +41,14 @@ async def _fetch_row(conn: AsyncConnection[Any], outbox_id: int) -> tuple[Any, .
     return await cur.fetchone()
 
 
+async def _fetch_channel_message_id(conn: AsyncConnection[Any], outbox_id: int) -> str | None:
+    """Return the channel's message id stored for one outbox row."""
+    cur = await conn.execute("SELECT channel_message_id FROM outbox WHERE id = %s", (outbox_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
 async def test_row_from_a_rolled_back_transaction_is_never_sent(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -92,6 +100,52 @@ async def test_committed_row_is_sent_once(
     assert row is not None
     assert row[0] == "sent"
     assert row[3] is not None
+
+
+async def test_sent_row_stores_the_channel_message_id(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102: a transport that returns a channel message id leaves it on the sent row."""
+
+    async def transport(row: OutboxRow) -> str | None:
+        return "wamid.X"
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "whatsapp", "+51900000011", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"whatsapp": transport})
+    assert await sender.send_pending() == 1
+
+    async with db_pool.connection() as conn:
+        row = await _fetch_row(conn, outbox_id)
+        channel_message_id = await _fetch_channel_message_id(conn, outbox_id)
+    assert row is not None
+    assert row[0] == "sent"
+    assert channel_message_id == "wamid.X"
+
+
+async def test_sent_row_without_a_channel_message_id_keeps_it_null(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102: a transport that returns None leaves channel_message_id NULL."""
+
+    async def transport(row: OutboxRow) -> str | None:
+        return None
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "telegram", "42", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"telegram": transport})
+    assert await sender.send_pending() == 1
+
+    async with db_pool.connection() as conn:
+        row = await _fetch_row(conn, outbox_id)
+        channel_message_id = await _fetch_channel_message_id(conn, outbox_id)
+    assert row is not None
+    assert row[0] == "sent"
+    assert channel_message_id is None
 
 
 async def test_failure_doubles_the_retry_delay(
