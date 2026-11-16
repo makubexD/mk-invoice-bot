@@ -73,6 +73,18 @@ class Drive(Protocol):
         """Write ``data`` to the file at ``path``, replacing what was there."""
         ...
 
+    async def download(self, path: str, max_bytes: int) -> bytes:
+        """Return the bytes of the file at ``path``, refusing a body over ``max_bytes`` (R-7.14).
+
+        The body is read while streaming, so a file larger than ``max_bytes`` never
+        arrives whole; reading stops as soon as the cap is passed.
+
+        Raises:
+            FolderMissing: the file at ``path`` does not exist.
+            FileTooLarge: the body exceeds ``max_bytes``.
+        """
+        ...
+
     async def move(self, path: str, new_parent: str, new_name: str) -> None:
         """Move and rename the item at ``path`` to ``new_parent/new_name`` (R-7.11).
 

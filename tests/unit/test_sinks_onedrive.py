@@ -15,6 +15,7 @@ from invoicebot.sinks.onedrive import (
     MAX_LIST_PAGES,
     NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
+    FileTooLarge,
     FolderExists,
     FolderMissing,
     GraphDrive,
@@ -78,6 +79,43 @@ async def test_list_names_of_a_missing_folder_returns_empty() -> None:
         names = await drive.list_names("/missing")
 
     assert names == []
+
+
+async def test_download_returns_the_body_of_the_content_endpoint() -> None:
+    """R-7.14: a download reads the file's /content and returns its bytes."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"receipt")
+
+    async with _make_drive(handler) as drive:
+        data = await drive.download("/root/_outbox/receipts/a.json", 4096)
+
+    assert data == b"receipt"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/root/_outbox/receipts/a.json:/content"
+
+
+async def test_download_of_a_missing_file_raises_folder_missing() -> None:
+    """R-7.14: a 404 on download raises FolderMissing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(FolderMissing):
+            await drive.download("/missing.json", 4096)
+
+
+async def test_download_over_the_cap_raises_file_too_large() -> None:
+    """R-7.14: a body one byte over the cap is abandoned with FileTooLarge."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 4097)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(FileTooLarge, match="4096"):
+            await drive.download("/big.json", 4096)
 
 
 async def test_list_names_at_the_root_uses_the_root_children_endpoint() -> None:

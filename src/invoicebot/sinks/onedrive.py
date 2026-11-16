@@ -62,6 +62,14 @@ class FolderExists(GraphError):
     """An entry with the target name already exists under the new parent (R-7.11)."""
 
 
+class FileTooLarge(Exception):
+    """A download's body passed the caller's cap and was abandoned (R-7.14)."""
+
+    def __init__(self, max_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        super().__init__(f"file is larger than {max_bytes} bytes")
+
+
 class GraphTransient(Exception):
     """A Graph failure the queue retries (429 or 5xx; R-7.3)."""
 
@@ -294,6 +302,33 @@ class GraphDrive:
             raise_graph_error(response, self._account)
             return
         await self._upload_in_session(encoded, data, token)
+
+    async def download(self, path: str, max_bytes: int) -> bytes:
+        """Return the file at ``path``, abandoning a body over ``max_bytes`` (R-7.14).
+
+        The body is read while streaming, so a file larger than ``max_bytes`` is
+        never held whole: reading stops as soon as the cap is passed. A missing
+        file raises :class:`FolderMissing`.
+        """
+        encoded = _encode_path(path)
+        if encoded == "/":
+            raise ValueError("cannot download the drive root")
+        token = await self._tokens.token()
+        async with self._client.stream(
+            "GET",
+            f"{GRAPH_BASE_URL}/me/drive/root:{encoded}:/content",
+            headers=auth_headers(token),
+            timeout=self._timeout_s,
+        ) as response:
+            if response.status_code == 404:
+                raise FolderMissing(404)
+            raise_graph_error(response, self._account)
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_bytes:
+                    raise FileTooLarge(max_bytes)
+            return bytes(body)
 
     async def move(self, path: str, new_parent: str, new_name: str) -> None:
         """Move and rename the item at ``path`` to ``new_parent/new_name`` (R-7.11).
