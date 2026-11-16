@@ -83,7 +83,7 @@ Test: `uv run pytest -q tests/integration/test_outbox.py -k send_later`.
 
 Files: `src/invoicebot/gaps/__init__.py`, `src/invoicebot/gaps/kinds.py`, `tests/unit/test_gap_kinds.py`.
 
-- A package `invoicebot/gaps/` with no imports from `pipeline`, `queue`, `store`, `api`, `events` (step 13 adds the contract). `kinds.py`: `GapKind` frozen dataclass `(kind, fingerprint_prefix, threshold, window_days: int | None, desc_key)` and `GAP_KINDS: Mapping[str, GapKind]` with the five kinds of spec 06 §3 and D115 (`portal_missing`, `portal_broken`, `template_invalid`, `parser_miss`, `unrouted` prefixes). `fingerprint(kind: str, *parts: str) -> str` joins the prefix and the parts with `:`, refusing a part that contains `:` or is empty (`ValueError`).
+- A package `invoicebot/gaps/` with no imports from `pipeline`, `queue`, `store`, `api`, `events` (step 14 adds the contract). `kinds.py`: `GapKind` frozen dataclass `(kind, fingerprint_prefix, threshold, window_days: int | None, desc_key)` and `GAP_KINDS: Mapping[str, GapKind]` with the five kinds of spec 06 §3 and D115 (`portal_missing`, `portal_broken`, `template_invalid`, `parser_miss`, `unrouted` prefixes). `fingerprint(kind: str, *parts: str) -> str` joins the prefix and the parts with `:`, refusing a part that contains `:` or is empty (`ValueError`).
 - `KIND_DESC` texts and the subject formats live in `rules/messages_es.py` (one home for user text), keyed by kind; `kinds.py` holds only the keys.
 - Tests: BR-F02 `fingerprint("PORTAL_MISSING", "20100000001") == "portal_missing:20100000001"`; R-11.2 a part with `:` raises; BR-R06 UNROUTED_BUYER has threshold 3 and window 30; BR-E06 PARSER_MISS has threshold 2; R-11.2 every kind in spec 06 §3 is in `GAP_KINDS` (read the table like `test_rules_parity.py` reads rules).
 
@@ -153,17 +153,7 @@ Files: `src/invoicebot/pipeline/gaps.py`, `tests/integration/test_pipeline_gaps.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_gaps.py`.
 
-## Step 13: Wire GitHub into `app.py`; import contracts `[worker]`
-
-Files: `src/invoicebot/app.py`, `.importlinter`, `tests/unit/test_app_wiring.py` (or the repo's app wiring test; find it with `grep -rln "make_transport" tests`).
-
-- With `cfg.gaps.github.enabled`, `app.py` scopes the secret `github_app_private_key` (`store.scoped("github", {"github_app_private_key"})`), builds `GitHubApp` on the shared `http` client and registers `"github": make_github_transport(...)` beside `"whatsapp"`, with `on_issue` bound to `pipeline.gaps.issue_opened` and `on_token_error` to the BR-D05 alert (step 14). Disabled: no transport and no secret read.
-- `.importlinter`: `invoicebot.gaps` and `invoicebot.github` join `leaf-packages`-style contracts: `gaps` imports nothing but `config`, `fetchers.base` and the standard library; `github` must not import `api`, `events`, `pipeline`, `queue.worker`, `store`. Add both to `zero-consumer`.
-- Tests: R-11.10 with GitHub disabled the transports mapping has no `github` and the secret store is not asked; with it enabled and the secret missing, startup fails with the secret's name (not its value).
-
-Test: `uv run pytest -q tests/unit/test_app_wiring.py && uv run lint-imports`.
-
-## Step 14: `ops_state` and the rate-limited admin alert `[worker]`
+## Step 13: `ops_state` and the rate-limited admin alert `[worker]`
 
 Files: `src/invoicebot/store/ops_state.py`, `src/invoicebot/pipeline/outgoing.py`, `tests/integration/test_store_ops_state.py`.
 
@@ -172,6 +162,16 @@ Files: `src/invoicebot/store/ops_state.py`, `src/invoicebot/pipeline/outgoing.py
 - Tests: BR-O01 two claims within `every` → the second is false; after `every` → true; two concurrent claims → exactly one true; BR-D05 two token errors in one day queue one alert per admin.
 
 Test: `uv run pytest -q tests/integration/test_store_ops_state.py`.
+
+## Step 14: Wire GitHub into `app.py`; import contracts `[worker]`
+
+Files: `src/invoicebot/app.py`, `.importlinter`, `tests/unit/test_app_wiring.py` (or the repo's app wiring test; find it with `grep -rln "make_transport" tests`).
+
+- With `cfg.gaps.github.enabled`, `app.py` scopes the secret `github_app_private_key` (`store.scoped("github", {"github_app_private_key"})`), builds `GitHubApp` on the shared `http` client and registers `"github": make_github_transport(...)` beside `"whatsapp"`, with `on_issue` bound to `pipeline.gaps.issue_opened` and `on_token_error` to the BR-D05 alert (step 13). Disabled: no transport and no secret read.
+- `.importlinter`: `invoicebot.gaps` and `invoicebot.github` join `leaf-packages`-style contracts: `gaps` imports nothing but `config`, `fetchers.base` and the standard library; `github` must not import `api`, `events`, `pipeline`, `queue.worker`, `store`. Add both to `zero-consumer`.
+- Tests: R-11.10 with GitHub disabled the transports mapping has no `github` and the secret store is not asked; with it enabled and the secret missing, startup fails with the secret's name (not its value).
+
+Test: `uv run pytest -q tests/unit/test_app_wiring.py && uv run lint-imports`.
 
 ## Step 15: PORTAL_MISSING at BR-F07 and `{gap_line}` (S8.10) `[worker]`
 
