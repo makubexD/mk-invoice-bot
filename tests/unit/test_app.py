@@ -10,24 +10,16 @@ import pyrage
 import pytest
 import yaml
 
-from invoicebot.app import LAPTOP_AGENT_KEY, _laptop_mode, _payment_flow
+from invoicebot.app import LAPTOP_AGENT_KEY, _laptop_root_and_key, _payment_flow
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.secrets import SecretMissing, SecretStore
-from invoicebot.sinks.mailer import LaptopOutlook
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
 #: The example flow that carries reimbursement settings.
 REIMBURSING_FLOW = "work_microsoft"
-
-
-class _FakeDrive:
-    """A Drive stand-in; the laptop mode only keeps it until a delivery needs it (R-7.14)."""
-
-    async def upload(self, path: str, data: bytes) -> None:
-        """Accept an upload; these tests never deliver."""
 
 
 def _config(tmp_path: Path, *, track_payments: bool) -> Config:
@@ -81,15 +73,20 @@ def test_laptop_mode_without_the_agent_key_raises_secret_missing(tmp_path: Path)
     store = _loaded(tmp_path, {"other_key": "synthetic-other-value"})
 
     with pytest.raises(SecretMissing):
-        _laptop_mode(cfg, store, _FakeDrive())
+        _laptop_root_and_key(cfg, store)
 
 
-def test_laptop_mode_with_the_agent_key_returns_the_mode(tmp_path: Path) -> None:
-    """R-7.14: a flow listing laptop_outlook builds the mode from the key and the drive."""
+def test_laptop_mode_with_the_agent_key_returns_its_root_and_key(tmp_path: Path) -> None:
+    """R-7.14: a flow listing laptop_outlook gets its OneDrive root and the agent key."""
     cfg = _mail_config(tmp_path, "laptop_outlook")
     store = _loaded(tmp_path, {LAPTOP_AGENT_KEY: "test-key"})
 
-    assert isinstance(_laptop_mode(cfg, store, _FakeDrive()), LaptopOutlook)
+    found = _laptop_root_and_key(cfg, store)
+
+    assert found is not None
+    root, key = found
+    assert root
+    assert key == b"test-key"
 
 
 def test_laptop_mode_without_a_listing_flow_is_none(tmp_path: Path) -> None:
@@ -97,4 +94,4 @@ def test_laptop_mode_without_a_listing_flow_is_none(tmp_path: Path) -> None:
     cfg = _mail_config(tmp_path, None)
     store = _loaded(tmp_path, {LAPTOP_AGENT_KEY: "test-key"})
 
-    assert _laptop_mode(cfg, store, _FakeDrive()) is None
+    assert _laptop_root_and_key(cfg, store) is None

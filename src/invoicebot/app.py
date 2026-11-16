@@ -355,15 +355,6 @@ def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] |
     return root, key
 
 
-def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook | None:
-    """Build the laptop mode when a flow lists it, or None when none does (R-7.14, D108)."""
-    found = _laptop_root_and_key(cfg, store)
-    if found is None:
-        return None
-    root, key = found
-    return LaptopOutlook(drive, root, key)
-
-
 def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
     """Return the names of the flows whose mailer sink lists ``laptop_outlook`` (D109)."""
     return frozenset(name for name, flow in cfg.flows.items() if _lists_laptop(flow))
