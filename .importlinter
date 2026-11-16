@@ -18,6 +18,9 @@ source_modules =
     invoicebot.fetchers
     invoicebot.sinks
     invoicebot.auth
+    invoicebot.gaps
+    invoicebot.github
+    invoicebot.ops
 forbidden_modules =
     invoicebot.api
     invoicebot.events
@@ -57,6 +60,40 @@ forbidden_modules =
     invoicebot.queue
     invoicebot.store
     invoicebot.channels
+
+[importlinter:contract:gaps-is-leaf]
+name = Gaps imports only config and fetchers.base from the app (R-11.2, D117)
+type = forbidden
+source_modules =
+    invoicebot.gaps
+forbidden_modules =
+    invoicebot.api
+    invoicebot.events
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
+    invoicebot.channels
+    invoicebot.github
+    invoicebot.rules
+    invoicebot.extract
+    invoicebot.routing
+    invoicebot.net
+    invoicebot.sinks
+    invoicebot.auth
+
+[importlinter:contract:github-is-low]
+name = GitHub never imports the layers that use it (D117)
+type = forbidden
+source_modules =
+    invoicebot.github
+forbidden_modules =
+    invoicebot.api
+    invoicebot.events
+    invoicebot.pipeline
+    invoicebot.queue.worker
+    invoicebot.store
+# The transport implements the outbox port, whose module opens the store's pool.
+allow_indirect_imports = true
 
 [importlinter:contract:store-is-low]
 name = Store never imports the layers that use it

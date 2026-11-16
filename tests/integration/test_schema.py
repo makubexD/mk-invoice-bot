@@ -33,6 +33,7 @@ EXPECTED_TABLES = {
     "llm_usage",
     "mail_jobs",
     "messages",
+    "ops_state",
     "outbox",
     "payment_proposals",
     "payments",
@@ -272,3 +273,27 @@ async def test_payment_with_zero_amount_is_rejected(
         row = await cur.fetchone()
     assert row is not None
     assert row[0] == 0
+
+
+async def test_job_without_created_at_gets_now(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-9.12: a job inserted without created_at gets the database clock's now()."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(INSERT_INVOICE, ("owner", "whatsapp", "RECEIVED"))
+        invoice = await cur.fetchone()
+        assert invoice is not None
+        cur = await conn.execute(
+            "INSERT INTO jobs (invoice_id, step) VALUES (%s, %s) RETURNING created_at, now()",
+            (invoice[0], "extract"),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == row[1]
+
+
+async def test_gaps_gains_raised_at(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.2: gaps has the raised_at column after upgrade head (D115)."""
+    assert "raised_at" in await _columns(db_pool, "gaps")

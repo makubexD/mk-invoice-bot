@@ -22,6 +22,7 @@ from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPAR
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
+from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
@@ -33,6 +34,7 @@ from invoicebot.rules.messages_es import (
     HELP_HEADER,
     HELP_PAGADO,
     HELP_PENDIENTES,
+    HELP_PORTAL,
     HELP_REPROCESAR,
     MESSAGES,
     PENDING_BATCH_LINE,
@@ -72,6 +74,8 @@ from invoicebot.store.invoices import (
 RULE_NOT_FOUND = "BR-S07"
 #: The most digits an invoice id may have; any 18-digit number fits a BIGINT (R-12.8).
 MAX_ID_DIGITS = 18
+#: A RUC's exact number of digits (R-11.4).
+RUC_DIGITS = 11
 #: How long a prepared batch waits before ``/pendientes`` mentions it (S11.4).
 PREPARED_REMIND_DAYS = 2
 #: The most lines ``/pendientes`` lists before it counts the rest (S11.4).
@@ -92,11 +96,12 @@ class PaymentFlow:
 
 @dataclass(frozen=True)
 class CommandContext:
-    """What a command needs beyond its message: admin ids, the owner timezone and the payment flow."""
+    """What a command needs beyond its message: admin ids, the timezone, the payment flow and teaching."""
 
     admins: frozenset[str]
     timezone: str
     payment_flow: PaymentFlow | None = None
+    teach: TeachSetup | None = None
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.
@@ -342,6 +347,43 @@ async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) ->
         requeued += 1
 
 
+async def _portal(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    context: CommandContext,
+) -> None:
+    """Propose the named issuer's portal link and ask the owner to approve it (R-11.4).
+
+    A malformed argument answers the usage line; when teaching is not wired, the
+    command is unknown and answers the help (R-10.1).
+    """
+    if context.teach is None:
+        await _reply(conn, msg, None, help_text())
+        return
+    parts = arg.split()
+    if len(parts) != 2 or not _is_ruc(parts[0]):
+        await _reply(conn, msg, None, HELP_PORTAL)
+        return
+    ruc, url = parts
+    await teach(
+        conn,
+        TeachContext(
+            profiles=context.teach.profiles,
+            sender=Addressee(msg.channel, msg.profile_id),
+            resolver=context.teach.resolver,
+        ),
+        int(ruc),
+        None,
+        url,
+    )
+
+
+def _is_ruc(token: str) -> bool:
+    """Return whether ``token`` is exactly :data:`RUC_DIGITS` ASCII digits (R-11.4)."""
+    return token.isascii() and token.isdigit() and len(token) == RUC_DIGITS
+
+
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -360,4 +402,5 @@ COMMANDS: Mapping[str, Command] = {
     "reprocesar": Command(_reprocesar, HELP_REPROCESAR),
     "pendientes": Command(_pendientes, HELP_PENDIENTES),
     "pagado": Command(pagado, HELP_PAGADO),
+    "portal": Command(_portal, HELP_PORTAL),
 }

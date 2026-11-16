@@ -103,13 +103,15 @@ outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo 
        run_after, last_error NULL, sent_at NULL,
        channel_message_id NULL /*the channel's id for the sent message; a quote of it resolves its invoice (D102)*/)  -- outbox pattern; run_after drives retry backoff
 gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|ignored*/,
-     hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL)
+     hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL,
+     raised_at NULL /*when count first reached the kind's threshold, D115*/)
 invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint))
 taught_links(ruc_emisor bigint PK, url, profile_id, state /*proposed|approved|rejected*/,
              approved_at NULL, at)                                    -- R-11.4, R-10.2
 pending_actions(id PK, kind, invoice_id, requested_by /*token name or profile*/,
                 state /*pending|approved|rejected|expired*/, created_at, decided_at) -- R-12.8
 llm_usage(id PK, invoice_id, provider, model, tokens_in, tokens_out, cost_usd, at)  -- R-2.11
+ops_state(key PK, last_at)             -- last run of a daily task, last self-alert per key (D114)
 kv(key PK, value, expires_at)          -- UNLOGGED; token cache; excluded from plain dumps (R-9.9)
 padron(ruc bigint PK, razon_social, estado, condicion)
 api_tokens(id PK, name, token_hash, scopes text[], created_at, last_used_at, revoked_at)   -- R-12.3
@@ -120,7 +122,7 @@ channel_windows(channel, recipient /*profile id*/, last_inbound_at,
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
-`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id`, `payments`, `payment_proposals` and `mail_jobs` arrive with `widen-b-deliver` (S11.11, S11.15), their first callers, and `outbox.channel_message_id` with the quote match of D102. Merged revisions are not edited.
+`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `ops_state`, `gaps.raised_at` and `jobs.created_at` (for retention) arrive with `widen-b-gaps-ops`; `payment_id`, `payments`, `payment_proposals` and `mail_jobs` arrive with `widen-b-deliver` (S11.11, S11.15), their first callers, and `outbox.channel_message_id` with the quote match of D102. Merged revisions are not edited.
 
 - **Profiles** (people) live in config, not in a table: each links one WhatsApp number and one Telegram user id (R-1.9). `profile_id` is the config key.
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
@@ -362,10 +364,10 @@ mk-invoice-bot/
     routing/router.py    # ordered rules → flow id
     rules/catalog.py     # BR-* ids → (state, message key); parity test vs specs/06
     rules/messages_es.py # es-PE message templates, keyed by rule ID
-    gaps/{service,github_app,alerts}.py   # gaps/templates/gap_issue.md; stubs.py is post-MVP (D44)
+    gaps/kinds.py; github/{app_token,issue_text,transport}.py; pipeline/gaps.py   # D117; stubs.py is post-MVP (D44)
     net/guard.py         # outbound request guard (R-5.10)
     secrets/loader.py    # age / systemd-creds, per-adapter scoping (R-9.9, R-9.10)
-    ops/{backup,health,selfcheck}.py
+    ops/{daily,backup,selfcheck}.py
     extract/{image,qr,ocr,parse,validate,padron,ubl,pdf,llm_fallback}.py
     sunat/{validez,sol}.py
     fetchers/{base,qr_url,portal_registry,email_inbox,sunat_sol,paid_api,manual}.py
@@ -419,11 +421,12 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **Idempotency:**
   - The fingerprint is the gaps PK.
   - Before creating anything, the issue search uses the label `gap` plus a hidden marker `<!-- gap:fingerprint -->` in the body, so a lost DB row never duplicates an issue.
-- **Issue text (R-11.12):** rendered from `gaps/templates/gap_issue.md` with typed fields only: the 11-digit issuer RUC, the padrón business name, the CPE type, fetcher reason codes, and the URL (if any) reduced to `https://host/path` with characters in `[A-Za-z0-9._~/-]`, inside a code fence. `@` is stripped. No OCR text, no sender text, no counts or dates. A snapshot test covers the template.
+- **Issue text (R-11.12):** rendered by `github/issue_text.py` (a constant, D117) with typed fields only: the 11-digit issuer RUC, the padrón business name, the CPE type, fetcher reason codes, and the URL (if any) reduced to `https://host/path` with characters in `[A-Za-z0-9._~/-]`, inside a code fence. `@` is stripped. No OCR text, no sender text, no counts or dates. A snapshot test covers the template.
 - **Lifecycle:** the bot opens the issue (REPORTED). The owner fixes the capability in the main repo and merges; CI deploys (§15). After the `SIGHUP` reload, `GapService.reevaluate()` marks the gap FIXED and re-enqueues the linked invoices. When one of them gets past the failing step (or, with no linked invoice left, right after the re-check), the gap is CLOSED and the bot closes the issue with a comment (spec 06 §3).
 - **CI and portal status (R-11.6):** `ci.yml` runs lint, typecheck, tests, the rules↔catalog parity test (R-11.1) and `check_config.py`, which validates all YAML with the same pydantic models as the app. A `todo`/`broken` portal entry fails only a **pull request that adds or changes its file** (CI passes the PR's changed files to `check_config.py --pr`); elsewhere it is listed in the job summary, so deploys and unrelated PRs never freeze (D83). The owner sets `status: broken` by hand when BR-F03 reports a broken portal.
 - **Owner alert (chat):** `🧩 Falta configurar: {kind_desc} — {subject}. Issue: {issue_url}`. Sent once per fingerprint per `realert_days`; "digest" kinds are batched into one daily message. It goes to each `admins` profile on its preferred channel. On WhatsApp it is a free-form service message inside the 24 h window, and the approved **utility template** `admin_alert` outside it (R-1.10).
-- **Credential (D45):** a **GitHub App** installed only on the ops repo, with the **Issues** permission only. The bot signs a JWT with the App's private key (from the encrypted secrets file) and exchanges it for a short-lived installation token, cached in `kv` until shortly before it expires. Failure to get a token (key revoked, App uninstalled, permission missing) raises BR-D05.
+- **Credential (D45):** a **GitHub App** installed only on the ops repo, with the **Issues** permission only. The bot signs a JWT with the App's private key (from the encrypted secrets file) and exchanges it for a short-lived installation token, cached in memory until 5 minutes before it expires (D117). Failure to get a token (key revoked, App uninstalled, permission missing) raises BR-D05 at most daily, and the row is rescheduled with the outbox's `SendLater`, which does not count an attempt; so are writes over the daily budget and GitHub 5xx answers.
+- **Thresholds and alerts (D115, D116):** `raise_gap` always upserts; the gap is raised once, when its count reaches the kind's threshold (spec 06 §3). With GitHub enabled the owner alert is queued when the issue opens, with its link; with GitHub disabled, when the gap is raised. The daily digest task sends the digest kinds and alerts, without a link, a raised gap still without an issue after 24 h (R-11.11).
 - **Budget:** the gap service holds no memory. It is one table plus outbox rows, and it sends ≤ 20 GitHub calls a day.
 - **End of development (S16.2, D52):** once the main repo is private, a `PORTAL_MISSING` gap also opens a PR that adds `config/stores/<ruc>.yaml` and `config/portals/<key>.yaml` from templates with `status: todo`, so CI stays red until the owner completes it. The App gets Contents and Pull requests on the main repo for this only; YAML is written with a serializer plus a parse-back equality check, and nothing is pushed to the default branch. **Post-MVP (D44, E16):** the `gap-watch` workflow and bot-made `status: broken` flips.
 
@@ -453,7 +456,8 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
   5. on failure, roll back to the previous image (migrations are expand/contract, so the previous image still works, R-9.13).
   - When only config changed, the deploy copies it and sends `SIGHUP`; the app validates it before swapping it in (R-9.6), then `GapService.reevaluate()` resumes the affected invoices (R-11.9).
   - There is no pull timer on the host and no `deploy.config_pull` setting.
-- **Backups (R-9.11):** a nightly job runs `pg_dump` (excluding `kv`) and tars the config, encrypts both to an `age` public key (the private key is kept off the host), and uploads them off-site. RPO ≤ 24 h. `scripts/restore_drill.sh` restores the latest dump into an empty Postgres and runs smoke queries; the drill is run before go-live and after schema changes. A failed backup raises BR-O04.
+- **Daily tasks (D114):** `ops/daily.py` wakes every 5 minutes and runs each task (backup at `ops.backup.at`, retention, the gap digest at `gaps.digest_at`, local times) once per local day, recorded in `ops_state`.
+- **Backups (R-9.11, D119):** a nightly job runs `pg_dump` (excluding the data of `kv` and `padron`) and tars the config, encrypts both to an `age` public key (the private key is kept off the host), and uploads them off-site. RPO ≤ 24 h. `scripts/restore_drill.sh` restores the latest dump into an empty Postgres and runs smoke queries; the drill is run before go-live and after schema changes. A failed backup raises BR-O04.
 - **Retention (R-9.12):** see §3.
 - **Health (R-9.14):** `/health` runs `SELECT 1` and returns 503 when the DB is unreachable. An external uptime check (any free monitor) polls it through the tunnel.
 - **Self-alerts (R-9.14):** a scheduler job checks every 5 minutes for failed jobs (BR-S03), outbox backlog (BR-O01), disk usage (BR-O02) and channel token problems (BR-O03), and alerts the owner on the preferred channel. Each alert is rate-limited per condition.

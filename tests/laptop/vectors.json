@@ -1,5 +1,4 @@
 {
-  "key": "test-key",
   "jobs": [
     {
       "attachments": [
@@ -7,14 +6,16 @@
         "F001-123.pdf"
       ],
       "body": "Hola, adjunto el reembolso año 2026.",
+      "created_at": "2026-11-16T12:00:00Z",
       "folder": "Reembolsos/2026-11/F001-123",
-      "hmac": "9aba7878ed08ea53945366b2dcd2c76cd85d2bb299ee50ced008ce1c8ff0c098",
+      "hmac": "6d9d98ca9c8d1eee944fb9b9c2b75730fa9fcb2335ae5aee04adabffa80aee41",
       "invoice_id": 1,
       "job_id": "0123456789abcdef0123456789abcdef",
       "subject": "Support release 0001",
       "to": [
         "hr@example.com"
-      ]
+      ],
+      "type": "job"
     },
     {
       "attachments": [
@@ -22,26 +23,31 @@
         "F001-124.pdf"
       ],
       "body": "Hola, adjunto los documentos.",
+      "created_at": "2026-11-16T12:05:00Z",
       "folder": "Reembolsos/2026-11/F001-124",
-      "hmac": "1952176defbef49754a11903b41f19ee53b78ed6b79c3a24029b3fa73e2c662b",
+      "hmac": "5c38e2754c15078aee5112534e78cfa84a15a0d32d991ee0031f34ade2177fb7",
       "invoice_id": 2,
       "job_id": "fedcba9876543210fedcba9876543210",
       "subject": "Support release 0002",
       "to": [
         "hr@example.com"
-      ]
+      ],
+      "type": "job"
     }
   ],
+  "key": "test-key",
   "receipts": {
+    "error": {
+      "error": "COMException: outlook refused to send",
+      "hmac": "b2ff6cdf163e71dd223d6171dc0f7ea401071d254627489a0939f7ac4b51c5d0",
+      "job_id": "fedcba9876543210fedcba9876543210",
+      "type": "receipt"
+    },
     "sent": {
+      "hmac": "c6884008bc4c07c3aeb7ab58bbaeebbb6704e0886be808e149f0dc86cf4d305d",
       "job_id": "0123456789abcdef0123456789abcdef",
       "sent_at": "2026-11-16T12:34:56.7890000Z",
-      "hmac": "4c69e76a0ffb86b1c2ffa98d10805a63520a75da50348e53426afbce75e1f43d"
-    },
-    "error": {
-      "job_id": "fedcba9876543210fedcba9876543210",
-      "error": "COMException: outlook refused to send",
-      "hmac": "45b2aec59cc3b8888126b5323931555c7bcf8584cd4478c0b97726818bd92965"
+      "type": "receipt"
     }
   }
 }

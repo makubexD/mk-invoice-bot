@@ -1,5 +1,6 @@
 """Integration tests for the outbox: transactional writes and delivery (R-1.8, R-11.5)."""
 
+from datetime import timedelta
 from typing import Any
 
 import pytest
@@ -7,7 +8,14 @@ from psycopg import AsyncConnection
 from psycopg.errors import ForeignKeyViolation
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, add, last_rule
+from invoicebot.queue.outbox import (
+    OutboxRow,
+    OutboxSender,
+    PermanentSendError,
+    SendLater,
+    add,
+    last_rule,
+)
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -524,3 +532,95 @@ async def test_last_rule_without_a_stored_rule_returns_none(
         rule = await last_rule(conn, invoice_id, "BR-S02")
 
     assert rule is None
+
+
+async def test_send_later_reschedules_the_row_without_an_attempt(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.10: a SendLater leaves the row pending with the reason and a one-hour delay."""
+
+    async def transport(row: OutboxRow) -> None:
+        raise SendLater(timedelta(hours=1), "budget")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "github", "org/repo", {"issue": 1})
+
+    sender = OutboxSender(db_pool, {"github": transport})
+    assert await sender.send_pending() == 0
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT state, attempts, last_error,
+                   run_after >= now() + interval '59 minutes',
+                   run_after <= now() + interval '61 minutes'
+            FROM outbox
+            WHERE id = %s
+            """,
+            (outbox_id,),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    state, attempts, last_error, after_59, before_61 = row
+    assert state == "pending"
+    assert attempts == 0
+    assert last_error == "budget"
+    assert after_59 is True
+    assert before_61 is True
+
+
+async def test_send_later_row_is_not_picked_again_before_run_after(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.10: a row rescheduled by SendLater is not sent again before run_after."""
+    calls = 0
+
+    async def transport(row: OutboxRow) -> None:
+        nonlocal calls
+        calls += 1
+        raise SendLater(timedelta(hours=1), "budget")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        await add(conn, "github", "org/repo", {"issue": 1})
+
+    sender = OutboxSender(db_pool, {"github": transport})
+    assert await sender.send_pending() == 0
+    assert await sender.send_pending() == 0
+    assert calls == 1
+
+
+async def test_send_later_never_lets_the_row_go_dead(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.10: twenty SendLater reschedules keep the row pending with attempts 0."""
+    calls = 0
+
+    async def transport(row: OutboxRow) -> None:
+        nonlocal calls
+        calls += 1
+        raise SendLater(timedelta(hours=1), "budget")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "github", "org/repo", {"issue": 1})
+
+    sender = OutboxSender(db_pool, {"github": transport}, max_attempts=3)
+    for _ in range(20):
+        assert await sender.send_pending() == 0
+        async with db_pool.connection() as conn:
+            await conn.execute(
+                """
+                UPDATE outbox SET run_after = now()
+                WHERE id = %s AND state = 'pending'
+                """,
+                (outbox_id,),
+            )
+
+    assert calls == 20
+    async with db_pool.connection() as conn:
+        row = await _fetch_row(conn, outbox_id)
+    assert row is not None
+    assert row[0] == "pending"
+    assert row[1] == 0

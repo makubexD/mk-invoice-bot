@@ -70,6 +70,7 @@ MESSAGES: dict[str, str] = {
         'Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. '
         'Si no, responde "no sé".'
     ),
+    "BR-F02_dont_know": "Gracias. Ya avisé al administrador para agregar este portal.",
     "BR-F03": "• Portal {portal}: con fallas, ya avisé para arreglarlo",
     "BR-F04": "• Portal {portal}: captcha que no puedo resolver",
     "BR-F05": "Se venció el tiempo del captcha; sigo con otras opciones.",
@@ -144,6 +145,8 @@ MESSAGES: dict[str, str] = {
     "BR-S06_owner": (
         "🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?"
     ),
+    "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.",
+    "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
     "BR-S07": "No encontré el comprobante #{id}.",
     "BR-S08": (
         "Dejé el comprobante #{id} en pendientes porque no tuve respuesta. "
@@ -154,6 +157,51 @@ MESSAGES: dict[str, str] = {
     "BR-O02": "💾 El disco está al {pct}%.",
     "BR-O03": "🔑 El token de {channel} no funciona. Renuévalo.",
     "BR-O04": "🗄️ Falló la copia de seguridad de anoche ({reason_desc}).",
+    "GAP_admin": "🧩 Falta configurar: {kind_desc} — {subject}.{issue_line}",
+    "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
+}
+
+#: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
+GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
+
+#: ``{razon_social}`` in BR-F02 and BR-S06 when the issuer's name is unknown.
+UNKNOWN_ISSUER = "este emisor"
+
+#: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
+GAP_DIGEST_LINE = "• {kind_desc} — {subject}"
+
+#: BR-D05 ``reason_desc``: what each GitHub token-failure reason means, keyed by reason.
+TOKEN_REASON_DESC: dict[str, str] = {
+    "bad_key": "la clave privada no es válida",
+    "uninstalled": "la App no está instalada en el repositorio",
+    "no_permission": "le falta el permiso de Issues",
+    "unreachable": "GitHub no responde",
+}
+
+#: BR-O04 ``reason_desc``: which backup stage failed, keyed by ``BackupError.reason`` (D119).
+BACKUP_REASON_DESC: dict[str, str] = {
+    "dump": "no pude exportar la base de datos",
+    "too_large": "el respaldo supera el tamaño máximo",
+    "encrypt": "no pude cifrar el respaldo",
+    "upload": "no pude subirlo a OneDrive",
+}
+
+#: Spec 06 §3 ``kind_desc``: the capability each gap kind is missing, keyed by kind.
+KIND_DESC: dict[str, str] = {
+    "PORTAL_MISSING": "portal de descarga desconocido",
+    "PORTAL_BROKEN": "portal con fallas",
+    "TEMPLATE_INVALID": "plantilla inválida",
+    "PARSER_MISS": "no puedo leer los comprobantes de un emisor",
+    "UNROUTED_BUYER": "RUC comprador sin flujo",
+}
+
+#: Spec 06 §3 subject format of each gap kind, keyed by kind.
+KIND_SUBJECT: dict[str, str] = {
+    "PORTAL_MISSING": "RUC {ruc_emisor}",
+    "PORTAL_BROKEN": "{portal_key}",
+    "TEMPLATE_INVALID": "{flow}/{sink}",
+    "PARSER_MISS": "RUC {ruc_emisor}",
+    "UNROUTED_BUYER": "RUC {num_doc_adq}",
 }
 
 STATE_DESC: dict[str, str] = {
@@ -350,6 +398,9 @@ BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
 BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
+#: BR-S06's two owner buttons (D118).
+BUTTON_APPROVE = "Aprobar"
+BUTTON_REJECT = "Rechazar"
 #: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
 LIST_BUTTON = "Elegir"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
@@ -394,12 +445,20 @@ HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
 #: ``/pagado``'s own line in the command list (R-7.12).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_PAGADO = "/pagado dd/mm monto, o /pagado dd/mm #12 #14: registra un reembolso recibido"
+#: ``/portal``'s own line in the command list (R-11.4).
+HELP_PORTAL = "/portal 20100000001 https://…: propone el portal de descarga de ese RUC"
 #: One BR-P02 set line in the body, numbered from 1 (R-7.12, D107).
 PAYMENT_SET_LINE = "Opción {n}: {fecha_min}…, {count} facturas: {ids}"
 #: BR-P02's short button title for one matching set, numbered from 1 (R-7.12, D107).
 BUTTON_OPTION = "Opción {n}"
 #: One invoice line of BR-P03's pending list (R-7.12, BR-P03).
 PAYMENT_LINE = "#{id} · {fecha} · S/ {monto}"
+#: BR-P03 for the ``#id`` form when a named invoice is not pending: the list, no amount (R-7.12).
+PAYMENT_IDS_NOT_PENDING = (
+    "Alguna de esas facturas no está pendiente de pago. Pendientes de pago:\n"
+    "{invoice_lines}\n"
+    "Indícalas así: /pagado {fecha} #12 #14"
+)
 #: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_NONE = "No tienes comprobantes pendientes."

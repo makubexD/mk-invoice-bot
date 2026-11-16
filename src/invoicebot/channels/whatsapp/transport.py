@@ -12,7 +12,8 @@ across the HTTP call.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
+from datetime import timedelta
 from typing import Any
 
 from invoicebot.channels.base import OutboundMessage
@@ -25,7 +26,7 @@ from invoicebot.channels.whatsapp.payloads import (
     text_payload,
 )
 from invoicebot.config.models import ChannelTemplates
-from invoicebot.queue.outbox import OutboxRow, PermanentSendError, Transport
+from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.rules.messages_es import LIST_BUTTON
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import window_open
@@ -46,10 +47,24 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-D03_admin": "admin_alert",
     "BR-E08_admin": "admin_alert",
     "BR-S03_admin": "admin_alert",
+    "GAP_admin": "admin_alert",
+    "GAP_DIGEST_admin": "admin_alert",
+    "BR-O02": "admin_alert",
+    "BR-O03": "admin_alert",
+    "BR-O04": "admin_alert",
+    "BR-D05": "admin_alert",
 }
 
 #: Meta caps one template body parameter at 1024 characters.
 TEMPLATE_PARAM_MAX_CHARS = 1024
+
+#: A rejected channel token: Meta's status and error code for an expired or invalid token (BR-O03).
+TOKEN_REJECTED_STATUS = 401
+TOKEN_REJECTED_CODE = 190
+#: How long a row waits for the token to be renewed before it is tried again (BR-O03).
+TOKEN_RETRY_DELAY = timedelta(minutes=15)
+#: The rule whose alert tells the owner to renew the channel token (BR-O03).
+RULE_TOKEN_REJECTED = "BR-O03"  # noqa: S105  # nosec B105  # a rule id, not a secret
 
 
 class TemplateMissing(Exception):
@@ -72,11 +87,14 @@ def make_transport(
     numbers: Mapping[str, str],
     templates: ChannelTemplates,
     language: str,
+    on_token_rejected: Callable[[], Awaitable[None]],
 ) -> Transport:
     """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4).
 
     The returned id is Meta's message id, or None when Meta's answer carried
     none, which the outbox stores as the row's ``channel_message_id`` (D102).
+    A rejected token awaits ``on_token_rejected`` so the owner is alerted, then
+    reschedules the row instead of failing it (BR-O03).
     """
 
     async def transport(row: OutboxRow) -> str | None:
@@ -87,7 +105,7 @@ def make_transport(
             raise PermanentSendError(f"no WhatsApp number for {row.to}") from exc
         if await _recipient_window_open(pool, msg, row.to):
             try:
-                message_id = await _send(client, _free_form_payload(to, msg))
+                message_id = await _send(client, _free_form_payload(to, msg), on_token_rejected)
                 return _channel_message_id(row, message_id)
             except WindowExpired:
                 pass
@@ -96,18 +114,31 @@ def make_transport(
         except TemplateMissing as exc:
             raise PermanentSendError(str(exc)) from exc
         message_id = await _send(
-            client, template_payload(to, name, language, [_template_parameter(msg.text)])
+            client,
+            template_payload(to, name, language, [_template_parameter(msg.text)]),
+            on_token_rejected,
         )
         return _channel_message_id(row, message_id)
 
     return transport
 
 
-async def _send(client: WhatsAppClient, payload: dict[str, Any]) -> str | None:
-    """Send one payload and return Meta's message id, making a permanent code fail at once (R-11.5)."""
+async def _send(
+    client: WhatsAppClient,
+    payload: dict[str, Any],
+    on_token_rejected: Callable[[], Awaitable[None]],
+) -> str | None:
+    """Send one payload and return Meta's message id (R-11.5, BR-O03).
+
+    A permanent Meta code fails at once; a rejected token alerts and waits for
+    the token to be renewed instead.
+    """
     try:
         return await client.send(payload)
     except WhatsAppError as exc:
+        if exc.status == TOKEN_REJECTED_STATUS or exc.code == TOKEN_REJECTED_CODE:
+            await on_token_rejected()
+            raise SendLater(TOKEN_RETRY_DELAY, RULE_TOKEN_REJECTED) from exc
         if exc.code in PERMANENT_META_CODES:
             raise PermanentSendError(str(exc)) from exc
         raise

@@ -1,11 +1,11 @@
 """The ``laptop_outlook`` job and receipt file formats (R-7.14, D61, D111).
 
-A job is the JSON the bot drops in the personal OneDrive ``_outbox/``: the mail
-to send, the invoice's folder relative to the OneDrive root, and an HMAC over
-every other field, so only the bot can make the laptop send. A receipt is the
-JSON the agent writes back into ``_outbox/receipts/``: the sent time, or the
-error, and an HMAC over every other field, so only the laptop can report a
-mail sent (R-7.14).
+A job is the JSON the bot drops in the personal OneDrive ``_outbox/``: its type
+and creation time, the mail to send, the invoice's folder relative to the
+OneDrive root, and an HMAC over every other field, so only the bot can make the
+laptop send. A receipt is the JSON the agent writes back into
+``_outbox/receipts/``: its type, the sent time, or the error, and an HMAC over
+every other field, so only the laptop can report a mail sent (R-7.14).
 """
 
 from __future__ import annotations
@@ -16,10 +16,17 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 
 #: A job id is 32 lowercase hex characters, the form of ``uuid4().hex``.
 JOB_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+
+#: The signed ``type`` of a job file and of a receipt (R-7.14).
+JOB_TYPE = "job"
+RECEIPT_TYPE = "receipt"
+
+#: The exact UTC format the job's ``created_at`` is signed in (R-7.14).
+JOB_TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 #: The largest receipt file the bot reads (4 KiB, R-7.14).
 MAX_RECEIPT_BYTES = 4096
@@ -27,25 +34,30 @@ MAX_RECEIPT_BYTES = 4096
 #: The longest error text a receipt carries.
 MAX_ERROR_LENGTH = 500
 
+#: The signed type key every job and receipt carries.
+_TYPE_KEY = "type"
+
 #: The signed key of every receipt; the agent computes it, the bot checks it.
 _RECEIPT_HMAC_KEY = "hmac"
-_SENT_KEYS = frozenset({"job_id", "sent_at", _RECEIPT_HMAC_KEY})
-_ERROR_KEYS = frozenset({"job_id", "error", _RECEIPT_HMAC_KEY})
+_SENT_KEYS = frozenset({_TYPE_KEY, "job_id", "sent_at", _RECEIPT_HMAC_KEY})
+_ERROR_KEYS = frozenset({_TYPE_KEY, "job_id", "error", _RECEIPT_HMAC_KEY})
 #: Characters that would let an attachment name leave the invoice folder on the laptop.
 _PATH_CHARS = ("/", "\\", ":", "\x00")
 
 
 #: One mail the laptop agent sends through Outlook classic (R-7.14, D111).
 #:
-#: ``folder`` is the invoice's folder relative to the OneDrive root, each
-#: ``/``-separated segment a plain name. ``attachments`` are plain file names
-#: inside that folder; the agent refuses a job whose HMAC does not verify or
-#: whose folder or attachments leave the root.
+#: ``created_at`` is when the bot wrote the job, in any timezone; it is signed
+#: as UTC. ``folder`` is the invoice's folder relative to the OneDrive root,
+#: each ``/``-separated segment a plain name. ``attachments`` are plain file
+#: names inside that folder; the agent refuses a job whose HMAC does not verify,
+#: whose folder or attachments leave the root, or whose creation time is too old.
 @dataclass(frozen=True)
 class LaptopJob:
-    """One mail handed to the laptop agent: its id, invoice, folder and content."""
+    """One mail handed to the laptop agent: its id, creation time, invoice, folder and content."""
 
     job_id: str
+    created_at: datetime
     invoice_id: int
     folder: str
     to: tuple[str, ...]
@@ -74,7 +86,7 @@ def job_hmac(job: LaptopJob, key: bytes) -> str:
         The 64-character lowercase hex digest.
 
     Raises:
-        ValueError: the job id, folder or an attachment is not valid.
+        ValueError: the job id, creation time, folder or an attachment is not valid.
     """
     return _signature(_job_fields(job), key)
 
@@ -90,7 +102,7 @@ def job_document(job: LaptopJob, key: bytes) -> bytes:
         Canonical UTF-8 JSON, with lists in place of the job's tuples.
 
     Raises:
-        ValueError: the job id, folder or an attachment is not valid.
+        ValueError: the job id, creation time, folder or an attachment is not valid.
     """
     fields = _job_fields(job)
     return _canonical({**fields, "hmac": _signature(fields, key)})
@@ -108,9 +120,10 @@ def parse_receipt(data: bytes, key: bytes) -> Receipt:
 
     Raises:
         ValueError: the file is too large, is not UTF-8 JSON, has keys other
-            than ``job_id`` with ``sent_at`` or ``error`` and ``hmac``, its
-            ``hmac`` is missing, is not a string or does not verify, or a
-            field is invalid. Messages name the field, never its value.
+            than ``type``, ``job_id`` with ``sent_at`` or ``error``, and
+            ``hmac``, its ``hmac`` is missing, is not a string or does not
+            verify, its ``type`` is not ``receipt``, or a field is invalid.
+            Messages name the field, never its value.
     """
     if len(data) >= MAX_RECEIPT_BYTES:
         raise ValueError(f"receipt is too large: {len(data)} bytes")
@@ -135,6 +148,7 @@ def parse_receipt(data: bytes, key: bytes) -> Receipt:
     expected_hmac = _signature(fields, key).encode()
     if not hmac.compare_digest(received_hmac.encode(), expected_hmac):
         raise ValueError("receipt hmac does not verify")
+    _check_receipt_type(fields)
     job_id = payload["job_id"]
     if not isinstance(job_id, str) or JOB_ID_PATTERN.fullmatch(job_id) is None:
         raise ValueError("invalid job id")
@@ -143,16 +157,26 @@ def parse_receipt(data: bytes, key: bytes) -> Receipt:
     return Receipt(job_id=job_id, sent_at=None, error=_parse_error(payload["error"]))
 
 
+def _check_receipt_type(fields: Mapping[str, object]) -> None:
+    """Raise unless the signed ``type`` value is a receipt's."""
+    if fields[_TYPE_KEY] != RECEIPT_TYPE:
+        raise ValueError("receipt has an invalid type")
+
+
 def _job_fields(job: LaptopJob) -> dict[str, object]:
-    """Return the job's signed fields, refusing an invalid id, folder or attachment."""
+    """Return the job's signed fields, refusing an invalid id, time, folder or attachment."""
     if JOB_ID_PATTERN.fullmatch(job.job_id) is None:
         raise ValueError(f"invalid job id {job.job_id!r}")
+    if job.created_at.tzinfo is None:
+        raise ValueError("created_at has no timezone")
     if not _is_plain_folder(job.folder):
         raise ValueError(f"invalid folder {job.folder!r}")
     for name in job.attachments:
         if not _is_plain_file_name(name):
             raise ValueError(f"invalid attachment {name!r}")
     return {
+        _TYPE_KEY: JOB_TYPE,
+        "created_at": job.created_at.astimezone(UTC).strftime(JOB_TIME_FORMAT),
         "job_id": job.job_id,
         "invoice_id": job.invoice_id,
         "folder": job.folder,

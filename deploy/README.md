@@ -144,6 +144,53 @@ What rollback **does not** do:
 
 If no previous tag is recorded, the failure is reported and nothing is restarted.
 
+## Restore drill (R-9.11)
+
+Run the drill before go-live and after every schema change. It decrypts one
+nightly dump, restores it into an **empty** database and runs smoke queries: the
+`invoices`, `outbox` and `gaps` tables must exist, and it prints
+`invoices: <n>`.
+
+Download the latest `db-<date>.dump.age` from the OneDrive backup folder, use
+the age identity that matches the backup recipient (kept off the bot host and
+never under `config/`, which the backup tars), and never target the live
+database:
+
+```sh
+createdb -U invoicebot invoicebot_drill
+./scripts/restore_drill.sh ~/age-backup-identity.txt /path/to/db-2026-11-16.dump.age \
+    "postgresql://invoicebot:invoicebot@localhost:5432/invoicebot_drill"
+```
+
+The age CLI is not installed on the development host or in CI, so the script
+decrypts with `pyrage` inside the repository's `uv` environment: it reads the
+`AGE-SECRET-KEY-` line of the identity file and clears the plaintext dump on
+exit. It needs `psql` and `pg_restore`. The drill refuses a target that already
+has an `invoices` table, never echoes the database URL, and fails on any restore
+error other than the `transaction_timeout` setting that a `pg_restore` newer
+than the Postgres 16 server always adds.
+
+Record each run:
+
+| Date | Dump | Result |
+|---|---|---|
+| _before go-live_ | | |
+
+## Uptime check (R-9.14)
+
+`/health` runs `SELECT 1` and answers `200 {"status": "ok", "db": "ok"}`; when
+Postgres is unreachable it answers `503 {"status": "degraded", "db": "down"}`.
+Point an external uptime monitor (any free service) at the public tunnel URL's
+`/health` and alert on any non-200.
+
+## Postgres down: the webhook answers 503 (R-9.15)
+
+If Postgres is unreachable, the webhook returns 503 without acknowledging the
+delivery. Meta (and Telegram) retry, so no message is lost while the outage is
+shorter than their retry window. Leave the endpoint enabled: answering 200
+during an outage makes Meta treat the delivery as accepted and drop it. After
+Postgres is back, a redelivery is stored once.
+
 ## WhatsApp channel
 
 The app serves `/health` only until `CONFIG_DIR` holds both `config.yaml` and

@@ -1,0 +1,108 @@
+"""Taught links: the portal a buyer taught for an issuer (BR-F02, BR-S06).
+
+A link is stored per issuer RUC and moves through ``proposed``, ``approved`` or
+``rejected``: a sender proposes it (BR-S06) and the owner decides. Every
+function takes the caller's connection and never commits: the caller owns the
+transaction.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
+from psycopg import AsyncConnection
+
+
+@dataclass(frozen=True)
+class TaughtLink:
+    """One issuer's taught portal link and where it is in the owner's review."""
+
+    ruc_emisor: int
+    url: str
+    profile_id: str
+    state: str
+
+
+async def exists(conn: AsyncConnection[Any], ruc_emisor: int) -> bool:
+    """Return True when any taught link row exists for ``ruc_emisor`` (BR-F02); does not commit."""
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM taught_links WHERE ruc_emisor = %s)",
+        (ruc_emisor,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT EXISTS over taught_links yielded no row")
+    return bool(row[0])
+
+
+async def get(conn: AsyncConnection[Any], ruc_emisor: int) -> TaughtLink | None:
+    """Return the issuer's taught link in any state, or None (BR-S06); does not commit."""
+    cur = await conn.execute(
+        "SELECT ruc_emisor, url, profile_id, state FROM taught_links WHERE ruc_emisor = %s",
+        (ruc_emisor,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return TaughtLink(ruc_emisor=row[0], url=row[1], profile_id=row[2], state=row[3])
+
+
+async def propose(
+    conn: AsyncConnection[Any],
+    ruc_emisor: int,
+    url: str,
+    profile_id: str,
+) -> bool:
+    """Store ``url`` as proposed, or replace a rejected one (BR-S06); does not commit.
+
+    Returns False when a proposed or approved link is already there: the first
+    proposal waits for the owner and an approved link is not replaced.
+    """
+    cur = await conn.execute(
+        """
+        INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
+        VALUES (%s, %s, %s, 'proposed')
+        ON CONFLICT (ruc_emisor) DO UPDATE
+        SET url = EXCLUDED.url, profile_id = EXCLUDED.profile_id,
+            state = 'proposed', approved_at = NULL, at = now()
+        WHERE taught_links.state = 'rejected'
+        RETURNING ruc_emisor
+        """,
+        (ruc_emisor, url, profile_id),
+    )
+    row = await cur.fetchone()
+    return row is not None
+
+
+async def decide(
+    conn: AsyncConnection[Any],
+    ruc_emisor: int,
+    approved: bool,
+) -> TaughtLink | None:
+    """Move a proposed link to approved or rejected (BR-S06); does not commit.
+
+    The proposed row is locked first, so two presses cannot both decide it.
+    Returns None when there is no proposed link.
+    """
+    cur = await conn.execute(
+        """
+        SELECT url, profile_id FROM taught_links
+        WHERE ruc_emisor = %s AND state = 'proposed'
+        FOR UPDATE
+        """,
+        (ruc_emisor,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    state = "approved" if approved else "rejected"
+    await conn.execute(
+        """
+        UPDATE taught_links
+        SET state = %s, approved_at = CASE WHEN %s THEN now() ELSE NULL END
+        WHERE ruc_emisor = %s
+        """,
+        (state, approved, ruc_emisor),
+    )
+    return TaughtLink(ruc_emisor=ruc_emisor, url=row[0], profile_id=row[1], state=state)

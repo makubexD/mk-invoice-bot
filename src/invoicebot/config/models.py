@@ -7,7 +7,7 @@ silently ignored.
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import time, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -483,12 +483,13 @@ class Gaps(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     github: GapsGithub
-    admins: list[str]
     teach_via_chat: bool
     realert_days: int
     broken_after: int
-    digest_kinds: list[str]
-    digest_cron: str
+    digest_kinds: list[
+        Literal["PORTAL_MISSING", "PORTAL_BROKEN", "TEMPLATE_INVALID", "PARSER_MISS", "UNROUTED_BUYER"]
+    ]
+    digest_at: time
 
 
 class BackupTarget(BaseModel):
@@ -501,7 +502,8 @@ class BackupTarget(BaseModel):
 class Backup(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    cron: str
+    at: time
+    max_mb: int = Field(200, gt=0)
     age_recipient: str
     target: BackupTarget
 
@@ -527,6 +529,7 @@ class SelfAlerts(BaseModel):
 
     outbox_backlog: OutboxBacklog
     disk_pct: int
+    realert_hours: int = Field(6, gt=0)
 
 
 class Ops(BaseModel):

@@ -100,6 +100,14 @@ XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
 </Invoice>
 """
 
+#: The fixed time the laptop mode stamps on every job it writes here.
+LAPTOP_NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+
+
+def _laptop_clock() -> datetime:
+    """Return the fixed time the laptop mode signs jobs with."""
+    return LAPTOP_NOW
+
 
 class FakeDrive:
     """An in-memory Drive: folders hold their entry names and uploads keep their bytes."""
@@ -164,11 +172,11 @@ class FakeInboxRuleMode(FakeGraphMode):
 class RaisingMode:
     """An automatic mode whose send raises the error the test installed (BR-D01, R-7.3, BR-D03)."""
 
-    completion = "accepted"
     done_rule = "BR-D10"
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, completion: str = "accepted") -> None:
         self._error = error
+        self.completion = completion
 
     async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Raise the installed error instead of sending."""
@@ -511,6 +519,27 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
 
 
+async def _clear_gaps(conn: AsyncConnection[Any]) -> None:
+    """Delete every gap and invoice link so one test's raise cannot leak into another."""
+    await conn.execute("DELETE FROM invoice_gaps")
+    await conn.execute("DELETE FROM gaps")
+
+
+async def _gaps(conn: AsyncConnection[Any]) -> list[tuple[str, str, int]]:
+    """Return each gap's fingerprint, kind and count."""
+    cur = await conn.execute("SELECT fingerprint, kind, count FROM gaps ORDER BY fingerprint")
+    return [(str(fp), str(kind), int(count)) for fp, kind, count in await cur.fetchall()]
+
+
+async def _gap_links(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the fingerprints of the gaps linked to ``invoice_id``."""
+    cur = await conn.execute(
+        "SELECT fingerprint FROM invoice_gaps WHERE invoice_id = %s ORDER BY fingerprint",
+        (invoice_id,),
+    )
+    return [str(row[0]) for row in await cur.fetchall()]
+
+
 async def test_dry_run_batches_the_invoice_with_br_d07(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -713,7 +742,12 @@ async def test_laptop_outlook_writes_one_signed_job_and_batches(
     key = b"test-key"
 
     await _handler(
-        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, key), mode_name="laptop_outlook"
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        LaptopOutlook(drive, root, key, _laptop_clock),
+        mode_name="laptop_outlook",
     )(_job(invoice_id))
 
     async with db_pool.connection() as conn:
@@ -727,6 +761,7 @@ async def test_laptop_outlook_writes_one_signed_job_and_batches(
     document = json.loads(drive.uploads[job_paths[0]])
     job = LaptopJob(
         job_id=document["job_id"],
+        created_at=datetime.fromisoformat(document["created_at"]),
         invoice_id=document["invoice_id"],
         folder=document["folder"],
         to=tuple(document["to"]),
@@ -1019,6 +1054,73 @@ async def test_a_bad_template_hash_requires_a_manual_fix(
     assert outbox == [(MESSAGES["BR-D02"], "BR-D02", [])]
 
 
+async def test_an_invalid_template_raises_one_gap_linked_to_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02, R-11.2: an invalid template raises one TEMPLATE_INVALID gap linked to the invoice."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    expected = f"template_invalid:{FLOW}:excel_template"
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        links = await _gap_links(conn, invoice_id)
+    assert gaps == [(expected, "TEMPLATE_INVALID", 1)]
+    assert links == [expected]
+
+
+async def test_two_invoices_failing_the_same_template_raise_one_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02, R-11.2: two invoices failing one template make one gap with both links."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    first_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    second_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    expected = f"template_invalid:{FLOW}:excel_template"
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
+
+    handler = _handler(db_pool, cfg, FakeDrive(), tmp_path)
+    await handler(_job(first_id))
+    await handler(_job(second_id))
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        first_links = await _gap_links(conn, first_id)
+        second_links = await _gap_links(conn, second_id)
+    assert gaps == [(expected, "TEMPLATE_INVALID", 2)]
+    assert first_links == [expected]
+    assert second_links == [expected]
+
+
+async def test_the_invalid_template_text_to_the_user_is_unchanged(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02: an invalid template still moves the invoice and sends BR-D02's text unchanged."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-D02")
+    assert outbox == [(MESSAGES["BR-D02"], "BR-D02", [])]
+
+
 async def test_graph_error_fails_the_batch_and_keeps_the_invoice_batched(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -1139,7 +1241,7 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     drive = FakeDrive()
     key = b"test-key"
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, key)}
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, key, _laptop_clock)}
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1155,6 +1257,7 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     document = json.loads(drive.uploads[job_paths[0]])
     job = LaptopJob(
         job_id=document["job_id"],
+        created_at=datetime.fromisoformat(document["created_at"]),
         invoice_id=document["invoice_id"],
         folder=document["folder"],
         to=tuple(document["to"]),
@@ -1172,6 +1275,45 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     assert outbox == []
 
 
+async def test_resend_laptop_with_a_dry_run_mode_writes_nothing_and_asks_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.10: with sending off, [Por la laptop] writes no job and asks BR-D11 again."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    assert cfg.mail.send_enabled is False
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    handlers = _resend_handlers(
+        db_pool,
+        cfg,
+        FakeDrive(),
+        tmp_path,
+        {"laptop_outlook": DryRun(tmp_path)},
+        laptop_flows=frozenset({FLOW}),
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    eml = tmp_path / "mail" / f"{invoice_id}.eml"
+    async with db_pool.connection() as conn:
+        jobs = await _mail_jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert jobs == []
+    assert not eml.is_file()
+    assert "resending" not in flow_data
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, "self_send"), "title": "Lo envío yo"},
+                {"id": button_id(invoice_id, "arrived"), "title": "Ya llegó"},
+            ],
+        )
+    ]
+
+
 async def test_resend_laptop_after_a_folder_rename_keeps_one_folder(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -1184,7 +1326,11 @@ async def test_resend_laptop_after_a_folder_rename_keeps_one_folder(
     invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, flow_data={"folder_path": renamed})
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1217,7 +1363,7 @@ async def test_resend_laptop_with_a_resending_marker_asks_again(
         cfg,
         drive,
         tmp_path,
-        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")},
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
         laptop_flows=frozenset({FLOW}),
     )
 
@@ -1253,7 +1399,11 @@ async def test_resend_laptop_after_a_sign_in_failure_clears_the_marker(
     cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
     invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
     handlers = _resend_handlers(
-        db_pool, cfg, FakeDrive(), tmp_path, {"laptop_outlook": RaisingMode(AuthRequired("personal"))}
+        db_pool,
+        cfg,
+        FakeDrive(),
+        tmp_path,
+        {"laptop_outlook": RaisingMode(AuthRequired("personal"), completion="receipt")},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1308,7 +1458,11 @@ async def test_resend_laptop_with_a_waiting_job_queues_br_d12(
     root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1341,7 +1495,11 @@ async def test_resend_laptop_after_an_error_receipt_writes_a_new_job(
     root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1368,7 +1526,12 @@ async def test_a_graph_error_on_the_job_upload_fails_the_batch_with_br_d03(
     drive = FailingJobUploadDrive()
 
     await _handler(
-        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, b"test-key"), mode_name="laptop_outlook"
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        LaptopOutlook(drive, root, b"test-key", _laptop_clock),
+        mode_name="laptop_outlook",
     )(_job(invoice_id))
 
     async with db_pool.connection() as conn:

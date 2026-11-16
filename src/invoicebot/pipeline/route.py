@@ -7,7 +7,8 @@ buyer confidence (BR-R04), reimbursement cap (BR-D06) and brand (BR-R09). The fi
 unanswered check moves the invoice to ``CONFIRMING`` with its rule and its question; when
 every check passes the invoice stores its flow, gets one summary, queues its ``fetch`` job
 and waits in ``FETCHING_DOCS`` (S11.13). A refused invoice is cancelled with the rule's
-message. The state change, the next job and the outbox row commit together.
+message. When no routing rule matches the buyer, BR-R03's question is asked and BR-R06's
+gap is raised. The state change, the next job and the outbox row commit together.
 """
 
 from __future__ import annotations
@@ -26,8 +27,11 @@ from invoicebot.channels.base import MENU_MAX, Button
 from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
+from invoicebot.gaps.kinds import fingerprint
+from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
 from invoicebot.pipeline.fetch import FETCH_STEP
+from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import (
     RULE_BRAND,
@@ -52,6 +56,7 @@ from invoicebot.routing.router import (
     route,
 )
 from invoicebot.rules.messages_es import (
+    KIND_SUBJECT,
     MESSAGES,
     SUMMARY,
     SUMMARY_DATE_FORMAT,
@@ -81,6 +86,8 @@ logger = logging.getLogger(__name__)
 
 #: The rule that cancels an invoice whose natural key another invoice holds (BR-E04, D93).
 RULE_DUPLICATE = "BR-E04"
+#: The gap a buyer RUC with no matching routing rule raises on its third sighting (BR-R06).
+UNROUTED_BUYER = "UNROUTED_BUYER"
 #: The reading fields that make up an invoice's natural key, in key order (D93).
 NATURAL_KEY_FIELDS = ("ruc_emisor", "tipo", "serie", "numero")
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
@@ -119,6 +126,8 @@ class _Step:
     choices: tuple[str, ...] = ()
     #: The menu number the question's choice buttons carry, stored with ``choices`` (R-3.5).
     menu: int | None = None
+    #: The buyer document number BR-R03 could not route, raised as a gap (BR-R06).
+    unrouted_buyer: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +198,7 @@ def make_route_handler(
                     )
                 )
                 await _write(conn, invoice, job.invoice_id, step)
+                await _raise_unrouted(conn, cfg, job.invoice_id, reading, step)
                 rule_id = step.rule_id
         logger.info(
             "step done",
@@ -262,6 +272,7 @@ def _resolve_flow(decision: _Decision) -> _Resolved | _Step:
             buttons,
             choices=tuple(flow_id for flow_id, _ in candidates),
             menu=decision.menu,
+            unrouted_buyer=reading.value("num_doc_adq"),
         )
     return _Resolved(
         flow_id=cast(str, result.flow),
@@ -400,6 +411,50 @@ async def _write(
             await merge_flow_data(conn, invoice_id, {"choices": list(step.choices), "menu": step.menu})
         await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text, step.buttons)
+
+
+async def _raise_unrouted(
+    conn: AsyncConnection[Any],
+    cfg: Config,
+    invoice_id: int,
+    reading: Reading,
+    step: _Step,
+) -> None:
+    """Raise BR-R06's gap when no routing rule matched and the buyer is known (BR-R06)."""
+    if step.unrouted_buyer is None:
+        return
+    await raise_gap(
+        conn,
+        GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
+        _unrouted_sighting(invoice_id, reading, step.unrouted_buyer),
+    )
+
+
+def _unrouted_sighting(invoice_id: int, reading: Reading, num_doc_adq: str) -> GapSighting:
+    """Build one UNROUTED_BUYER sighting from the buyer document (BR-R06, R-11.12, D120)."""
+    return GapSighting(
+        kind=UNROUTED_BUYER,
+        parts=(num_doc_adq,),
+        subject=KIND_SUBJECT[UNROUTED_BUYER].format(num_doc_adq=num_doc_adq),
+        invoice_id=invoice_id,
+        fields=IssueFields(
+            kind=UNROUTED_BUYER,
+            fingerprint=fingerprint(UNROUTED_BUYER, num_doc_adq),
+            ruc_emisor=_ruc_int(reading.value("ruc_emisor")),
+            razon_social=reading.value("razon_social"),
+            tipo=reading.value("tipo"),
+            reasons=(),
+            portal_key=None,
+            hint_url=None,
+        ),
+    )
+
+
+def _ruc_int(value: str | None) -> int | None:
+    """Return ``value`` as an int when it is 11 digits, else None (R-11.12)."""
+    if value is None or len(value) != 11 or not value.isdecimal():
+        return None
+    return int(value)
 
 
 def _next_menu(flow_data: Mapping[str, Any]) -> int:

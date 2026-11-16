@@ -10,6 +10,8 @@ from psycopg import AsyncConnection
 
 #: The FetchReason.OK value; the store does not import invoicebot.fetchers.
 OK_REASON = "ok"
+#: The FetchReason values BR-F03 counts as a technical failure (spec 06 §3).
+_TECHNICAL_REASONS = frozenset({"technical", "timeout"})
 
 
 async def record_attempt(
@@ -28,6 +30,28 @@ async def record_attempt(
         """,
         (invoice_id, fetcher, portal_key, reason == OK_REASON, reason, ms),
     )
+
+
+async def technical_streak(conn: AsyncConnection[Any], portal_key: str, n: int) -> bool:
+    """Return True when the portal's newest ``n`` attempts all failed technically (BR-F03).
+
+    ``n`` rows must exist and every one must be ``technical`` or ``timeout``; a
+    portal with fewer attempts has no streak. Does not commit.
+    """
+    if n < 1:
+        return False
+    cur = await conn.execute(
+        """
+        SELECT reason
+        FROM fetch_attempts
+        WHERE portal_key = %s
+        ORDER BY at DESC, id DESC
+        LIMIT %s
+        """,
+        (portal_key, n),
+    )
+    rows = await cur.fetchall()
+    return len(rows) == n and all(row[0] in _TECHNICAL_REASONS for row in rows)
 
 
 async def list_attempts(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[str, str]]:

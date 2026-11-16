@@ -6,7 +6,7 @@ import email
 import email.policy
 import json
 from dataclasses import replace
-from datetime import date
+from datetime import UTC, date, datetime
 from email.message import Message
 from pathlib import Path
 
@@ -249,9 +249,14 @@ LAPTOP_KEY = b"synthetic-laptop-key"
 LAPTOP_ROOT = "/Personal"
 
 
+def _fixed_clock() -> datetime:
+    """Return the fixed time every laptop job is signed with."""
+    return datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+
+
 def test_laptop_outlook_reports_receipt_and_br_d10() -> None:
     """R-7.14, D108: the laptop mode completes on a receipt and reports under BR-D10."""
-    mode = LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY)
+    mode = LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock)
 
     assert (mode.completion, mode.done_rule) == ("receipt", "BR-D10")
 
@@ -259,7 +264,7 @@ def test_laptop_outlook_reports_receipt_and_br_d10() -> None:
 async def test_laptop_outlook_writes_one_signed_job() -> None:
     """R-7.14, D111: deliver uploads one job whose HMAC verifies and whose folder is the invoice's."""
     drive = FakeDrive()
-    mode = LaptopOutlook(drive, LAPTOP_ROOT, LAPTOP_KEY)
+    mode = LaptopOutlook(drive, LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock)
 
     job_id = await mode.deliver(7, MAIL, FOLDER)
 
@@ -267,10 +272,13 @@ async def test_laptop_outlook_writes_one_signed_job() -> None:
     assert all(char in "0123456789abcdef" for char in job_id)
     assert list(drive.uploads) == [f"{LAPTOP_ROOT}/_outbox/{job_id}.json"]
     payload = json.loads(drive.uploads[f"{LAPTOP_ROOT}/_outbox/{job_id}.json"])
+    assert payload["type"] == "job"
+    assert payload["created_at"] == "2026-11-16T12:00:00Z"
     assert payload["folder"] == "Reembolsos/2026-11/001 - Synthetic"
     assert payload["attachments"] == ["invoice.xlsx", "invoice.pdf", "invoice.xml"]
     job = LaptopJob(
         job_id=payload["job_id"],
+        created_at=datetime.fromisoformat(payload["created_at"]),
         invoice_id=payload["invoice_id"],
         folder=payload["folder"],
         to=tuple(payload["to"]),
@@ -291,7 +299,7 @@ def test_mail_modes_add_laptop_outlook_only_when_given(tmp_path: Path) -> None:
         DryRun(tmp_path),
         GraphSend(FakeMailer()),
         FakeMailer(),
-        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY),
+        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock),
     )
 
     assert "laptop_outlook" not in without
@@ -308,7 +316,7 @@ def test_mail_modes_map_laptop_outlook_to_the_dry_run_when_disabled(tmp_path: Pa
         dry_run,
         GraphSend(FakeMailer()),
         FakeMailer(),
-        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY),
+        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock),
     )
 
     assert modes["laptop_outlook"] is dry_run

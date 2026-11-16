@@ -205,26 +205,27 @@ gaps:                           # R-11 · capability gaps → issue in the priva
     labels: [gap]
     daily_write_budget: 20
     # secret: GITHUB_APP_PRIVATE_KEY
-  admins: [yo]                  # profile ids; alerts go to each profile's preferred channel
   teach_via_chat: true          # BR-F02: ask the user for the portal link (once per issuer); owner approves (BR-S06)
   realert_days: 7
   # gap_sla_days: 3             # post-MVP: gap-watch workflow (D44)
   broken_after: 3               # consecutive technical failures → PORTAL_BROKEN issue; the owner sets status: broken
   digest_kinds: [PARSER_MISS, UNROUTED_BUYER]
-  digest_cron: "0 8 * * *"
+  digest_at: "08:00"            # daily digest, local to owner.timezone (D114)
 
 # Deploy: one path (D46). A green CI run on main deploys code and config; the app reloads
 # config on SIGHUP. There is no pull timer on the host.
 
 ops:                            # R-9.11 to R-9.14
   backup:
-    cron: "0 3 * * *"           # nightly pg_dump (without kv) + config tarball
+    at: "03:00"                 # nightly pg_dump (without kv) + config tarball, local time (D114)
+    max_mb: 200                 # refuse a backup larger than this (BR-O04, D119)
     age_recipient: "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # public key only
     target: { kind: onedrive, path: "/Backups/mk-invoice-bot" }
   retention_days: { messages_payload: 30, outbox: 90, events: 90, jobs: 90 }
   self_alerts:
     outbox_backlog: { max_rows: 20, max_age_min: 15 }   # BR-O01
     disk_pct: 80                                        # BR-O02
+    realert_hours: 6                                    # at most one self-alert per key per window (BR-O01, D114)
 
 limits:
   max_queued_per_sender: 20     # BR-S01

@@ -8,7 +8,9 @@ and stores the message id the channel returned. A failure increments
 ``attempts``, stores ``last_error`` and reschedules the row with exponential
 backoff; once ``max_attempts`` is reached the row becomes ``dead`` and is
 logged. A :class:`PermanentSendError` marks the row ``dead`` at once, whatever
-the attempt count. All scheduling uses the database clock.
+the attempt count, and a :class:`SendLater` reschedules the row by the delay it
+carries without counting an attempt (R-11.10). All scheduling uses the database
+clock.
 """
 
 import logging
@@ -50,6 +52,28 @@ class PermanentSendError(Exception):
     """The row can never be sent; retrying is pointless."""
 
 
+class SendLater(Exception):
+    """Reschedule the row by ``delay`` without counting an attempt (R-11.10).
+
+    A transport raises it when sending must wait rather than fail, such as a
+    daily budget or a 5xx answer, so the row never goes dead from the delay.
+    """
+
+    def __init__(self, delay: timedelta, reason: str) -> None:
+        super().__init__(reason)
+        self.delay = delay
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """How one delivery failed and how the row is scheduled again (R-11.10)."""
+
+    error: str
+    permanent: bool = False
+    delay: timedelta | None = None
+
+
 async def add(
     conn: AsyncConnection[Any],
     channel: str,
@@ -86,6 +110,29 @@ async def add(
     if row is None:
         raise RuntimeError("INSERT INTO outbox RETURNING id yielded no row")
     return int(row[0])
+
+
+async def set_pending_issue_hint(
+    conn: AsyncConnection[Any],
+    fingerprint: str,
+    hint_url: str,
+) -> None:
+    """Put an approved portal link into a pending ``create_issue`` row's fields (D118).
+
+    The issue does not exist yet, so the hint waits in the row the transport will send
+    and becomes part of the issue body. A fingerprint with no pending row changes
+    nothing. Does not commit.
+    """
+    await conn.execute(
+        """
+        UPDATE outbox
+        SET payload_json = jsonb_set(payload_json, '{fields,hint_url}', to_jsonb(%s::text))
+        WHERE channel = 'github' AND state = 'pending'
+          AND payload_json->>'op' = 'create_issue'
+          AND payload_json->>'fingerprint' = %s
+        """,
+        (hint_url, fingerprint),
+    )
 
 
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
@@ -133,6 +180,33 @@ async def last_rule(conn: AsyncConnection[Any], invoice_id: int, ignore: str) ->
     if row is None or row[0] is None:
         return None
     return str(row[0])
+
+
+async def last_question(conn: AsyncConnection[Any], recipient: str, ignore: str) -> tuple[str, int] | None:
+    """Return the recipient's newest question's ``(rule_id, invoice_id)``, skipping ``ignore``.
+
+    A question is an outbox row addressed to ``recipient`` (a profile id) that carries
+    both a rule id and an invoice id (R-11.4). BR-S02 answers a stale press, not the
+    question the invoice waits on, so callers pass it as ``ignore``. A row without one
+    of the two ids, and a recipient with no such row, give None. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'rule_id', invoice_id
+        FROM outbox
+        WHERE "to" = %(recipient)s
+          AND payload_json->>'rule_id' IS NOT NULL
+          AND payload_json->>'rule_id' <> %(ignore)s
+          AND invoice_id IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"recipient": recipient, "ignore": ignore},
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None
+    return str(row[0]), int(row[1])
 
 
 async def requeue_last(
@@ -228,50 +302,59 @@ class OutboxSender:
                         )
                         sent += 1
                     else:
-                        error, permanent = failure
-                        await self._record_failure(conn, row, error, permanent=permanent)
+                        await self._record_failure(conn, row, failure)
 
-    async def _deliver(self, row: OutboxRow) -> tuple[str | None, tuple[str, bool] | None]:
+    async def _deliver(self, row: OutboxRow) -> tuple[str | None, _Failure | None]:
         """Call the row's transport.
 
         Return the channel's message id and no failure when the row was
-        delivered, or None and the error description with whether it is
-        permanent.
+        delivered, or None and how the send failed (R-11.10).
         """
         transport = self._transports.get(row.channel)
         if transport is None:
-            return None, (f"no transport for channel {row.channel}", False)
+            return None, _Failure(f"no transport for channel {row.channel}")
         try:
             message_id = await transport(row)
+        except SendLater as exc:
+            return None, _Failure(exc.reason, delay=exc.delay)
         except Exception as exc:  # CancelledError is a BaseException and propagates
-            return None, (describe_error(exc), isinstance(exc, PermanentSendError))
+            return None, _Failure(describe_error(exc), permanent=isinstance(exc, PermanentSendError))
         return message_id, None
 
     async def _record_failure(
         self,
         conn: AsyncConnection[Any],
         row: OutboxRow,
-        error: str,
-        *,
-        permanent: bool,
+        failure: _Failure,
     ) -> None:
         """Increment ``attempts`` and reschedule the row, or mark it dead."""
+        if failure.delay is not None:
+            await conn.execute(
+                """
+                UPDATE outbox
+                SET last_error = %(error)s,
+                    run_after = now() + make_interval(secs => %(delay)s)
+                WHERE id = %(id)s
+                """,
+                {"error": failure.error, "delay": failure.delay.total_seconds(), "id": row.id},
+            )
+            return
         attempts = row.attempts + 1
-        if permanent or attempts >= self._max_attempts:
+        if failure.permanent or attempts >= self._max_attempts:
             await conn.execute(
                 """
                 UPDATE outbox
                 SET attempts = %(attempts)s, last_error = %(error)s, state = 'dead'
                 WHERE id = %(id)s
                 """,
-                {"attempts": attempts, "error": error, "id": row.id},
+                {"attempts": attempts, "error": failure.error, "id": row.id},
             )
             logger.error(
                 "outbox row %d on channel %s is dead after %d attempts: %s",
                 row.id,
                 row.channel,
                 attempts,
-                error,
+                failure.error,
             )
             return
         await conn.execute(
@@ -284,7 +367,7 @@ class OutboxSender:
             """,
             {
                 "attempts": attempts,
-                "error": error,
+                "error": failure.error,
                 "backoff": backoff_minutes(attempts),
                 "id": row.id,
             },

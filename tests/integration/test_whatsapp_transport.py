@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from typing import Any
 
 import httpx
@@ -15,7 +16,14 @@ from invoicebot.channels.base import Button, OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
 from invoicebot.config.models import ChannelTemplates
-from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, Transport, add
+from invoicebot.queue.outbox import (
+    OutboxRow,
+    OutboxSender,
+    PermanentSendError,
+    SendLater,
+    Transport,
+    add,
+)
 from invoicebot.rules.messages_es import LIST_BUTTON, MESSAGES
 from invoicebot.store.db import Pool
 
@@ -85,6 +93,10 @@ async def _prepare(pool: Pool, *, window_hours_ago: int | None) -> None:
         )
 
 
+async def _noop_token_rejected() -> None:
+    """Record nothing: the tests that do not inspect a rejected token pass this callback."""
+
+
 @asynccontextmanager
 async def _transport(
     pool: Pool,
@@ -92,6 +104,7 @@ async def _transport(
     *,
     templates: ChannelTemplates = TEMPLATES,
     language: str = "es_PE",
+    on_token_rejected: Callable[[], Awaitable[None]] = _noop_token_rejected,
 ) -> AsyncIterator[tuple[Transport, list[Payload]]]:
     """Yield a transport plus the payloads it sends, answered through ``handler``."""
     sent: list[Payload] = []
@@ -113,6 +126,7 @@ async def _transport(
             numbers={PROFILE: NUMBER},
             templates=templates,
             language=language,
+            on_token_rejected=on_token_rejected,
         )
         yield transport, sent
 
@@ -277,6 +291,64 @@ async def test_a_transient_meta_code_stays_a_whatsapp_error(db_pool: Pool) -> No
     async with _transport(db_pool, handler) as (transport, _sent):
         with pytest.raises(WhatsAppError):
             await transport(_row(_message(rule_id="BR-F07")))
+
+
+async def test_a_401_token_rejection_reschedules_and_alerts(db_pool: Pool) -> None:
+    """BR-O03: a 401 reschedules the row for 15 minutes, without an attempt, and alerts once."""
+    await _prepare(db_pool, window_hours_ago=1)
+    rejected: list[None] = []
+
+    async def on_token_rejected() -> None:
+        rejected.append(None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"code": 190, "message": "Expired"}})
+
+    async with _transport(db_pool, handler, on_token_rejected=on_token_rejected) as (transport, _sent):
+        with pytest.raises(SendLater) as raised:
+            await transport(_row(_message()))
+
+    assert raised.value.delay == timedelta(minutes=15)
+    assert raised.value.reason == "BR-O03"
+    assert len(rejected) == 1
+
+
+async def test_a_400_with_token_code_190_reschedules_and_alerts(db_pool: Pool) -> None:
+    """BR-O03: Meta's code 190 on a 400 reschedules the row for 15 minutes and alerts once."""
+    await _prepare(db_pool, window_hours_ago=1)
+    rejected: list[None] = []
+
+    async def on_token_rejected() -> None:
+        rejected.append(None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": 190, "message": "Invalid token"}})
+
+    async with _transport(db_pool, handler, on_token_rejected=on_token_rejected) as (transport, _sent):
+        with pytest.raises(SendLater) as raised:
+            await transport(_row(_message()))
+
+    assert raised.value.delay == timedelta(minutes=15)
+    assert raised.value.reason == "BR-O03"
+    assert len(rejected) == 1
+
+
+async def test_a_non_token_400_keeps_the_whatsapp_error(db_pool: Pool) -> None:
+    """BR-O03: a 400 with another non-permanent code stays a WhatsAppError and does not alert."""
+    await _prepare(db_pool, window_hours_ago=1)
+    rejected: list[None] = []
+
+    async def on_token_rejected() -> None:
+        rejected.append(None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": 2, "message": "Service unavailable"}})
+
+    async with _transport(db_pool, handler, on_token_rejected=on_token_rejected) as (transport, _sent):
+        with pytest.raises(WhatsAppError):
+            await transport(_row(_message()))
+
+    assert rejected == []
 
 
 async def test_template_language_comes_from_the_transport(db_pool: Pool) -> None:

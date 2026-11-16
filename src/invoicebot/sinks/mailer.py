@@ -10,8 +10,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -171,10 +172,11 @@ class LaptopOutlook:
     completion: Completion = "receipt"
     done_rule: str = "BR-D10"
 
-    def __init__(self, drive: Drive, root: str, key: bytes) -> None:
+    def __init__(self, drive: Drive, root: str, key: bytes, clock: Callable[[], datetime]) -> None:
         self._drive = drive
         self._root = root
         self._key = key
+        self._clock = clock
 
     async def deliver(self, invoice_id: int, mail: OutgoingMail, folder_path: str) -> str:
         """Upload the signed job for ``mail`` and return its id (R-7.14, D111).
@@ -188,6 +190,7 @@ class LaptopOutlook:
         job_id = uuid.uuid4().hex
         job = LaptopJob(
             job_id=job_id,
+            created_at=self._clock(),
             invoice_id=invoice_id,
             folder=folder_path.lstrip("/"),
             to=mail.to,

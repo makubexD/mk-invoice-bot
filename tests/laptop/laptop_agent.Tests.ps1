@@ -6,6 +6,8 @@ BeforeAll {
         Get-Content -LiteralPath (Join-Path -Path $script:Here -ChildPath 'vectors.json') -Raw
     )
     $script:Allowlist = @('hr@example.com')
+    # Fixed so jobs built from the 2026-11-16 vectors never age out of the tests.
+    $script:Now = [datetime]::new(2026, 11, 17, 0, 0, 0, [System.DateTimeKind]::Utc)
 
     function script:New-InvoiceFolder {
         param(
@@ -168,9 +170,12 @@ BeforeAll {
     function script:New-SendFixture {
         param(
             [string[]] $Attachments = @('F001-123.pdf'),
-            [string] $Body = 'Hola, adjunto el reembolso.'
+            [string] $Body = 'Hola, adjunto el reembolso.',
+            [string] $CreatedAt = '2026-11-16T12:00:00Z'
         )
         $job = New-SignedJob -Fields ([ordered] @{
+                type        = 'job'
+                created_at  = $CreatedAt
                 job_id      = '0123456789abcdef0123456789abcdef'
                 invoice_id  = 1
                 folder      = 'Reembolsos/2026-11/F001-123'
@@ -207,7 +212,7 @@ Describe 'Test-JobFile' {
             Write-JobJson -Path $path -Job $job
 
             $verified = Test-JobFile -Path $path -Key $script:Vectors.key `
-                -Allowlist $script:Allowlist -Root $root
+                -Allowlist $script:Allowlist -Root $root -Now $script:Now
             $verified | Should -Not -BeNullOrEmpty
             $verified.job_id | Should -Be $job.job_id
         }
@@ -223,7 +228,7 @@ Describe 'Test-JobFile' {
 
         $warnings = @()
         $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-            -Allowlist $script:Allowlist -Root $root `
+            -Allowlist $script:Allowlist -Root $root -Now $script:Now `
             -WarningAction SilentlyContinue -WarningVariable warnings
         $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'hmac does not verify'
@@ -238,7 +243,7 @@ Describe 'Test-JobFile' {
 
         $warnings = @()
         $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-            -Allowlist @('other@example.com') -Root $root `
+            -Allowlist @('other@example.com') -Root $root -Now $script:Now `
             -WarningAction SilentlyContinue -WarningVariable warnings
         $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'recipient is not allowlisted'
@@ -247,6 +252,8 @@ Describe 'Test-JobFile' {
     It 'R-7.14 refuses an attachment that leaves the invoice folder' {
         foreach ($name in @('..\x.pdf', '../x.pdf')) {
             $job = New-SignedJob -Fields ([ordered] @{
+                    type        = 'job'
+                    created_at  = '2026-11-16T12:00:00Z'
                     job_id      = $script:Vectors.jobs[0].job_id
                     invoice_id  = 1
                     folder      = $script:Vectors.jobs[0].folder
@@ -263,7 +270,7 @@ Describe 'Test-JobFile' {
 
             $warnings = @()
             $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-                -Allowlist $script:Allowlist -Root $root `
+                -Allowlist $script:Allowlist -Root $root -Now $script:Now `
                 -WarningAction SilentlyContinue -WarningVariable warnings
             $refused | Should -BeNullOrEmpty
             [string] $warnings[0] | Should -Match 'attachment is not a plain file name'
@@ -272,6 +279,8 @@ Describe 'Test-JobFile' {
 
     It 'R-7.14 refuses an attachment missing from the invoice folder' {
         $job = New-SignedJob -Fields ([ordered] @{
+                type        = 'job'
+                created_at  = '2026-11-16T12:00:00Z'
                 job_id      = $script:Vectors.jobs[0].job_id
                 invoice_id  = 1
                 folder      = $script:Vectors.jobs[0].folder
@@ -287,7 +296,7 @@ Describe 'Test-JobFile' {
 
         $warnings = @()
         $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-            -Allowlist $script:Allowlist -Root $root `
+            -Allowlist $script:Allowlist -Root $root -Now $script:Now `
             -WarningAction SilentlyContinue -WarningVariable warnings
         $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'attachment is not in the invoice folder'
@@ -300,7 +309,7 @@ Describe 'Test-JobFile' {
 
         $warnings = @()
         $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-            -Allowlist $script:Allowlist -Root $TestDrive `
+            -Allowlist $script:Allowlist -Root $TestDrive -Now $script:Now `
             -WarningAction SilentlyContinue -WarningVariable warnings
         $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'job file is too large'
@@ -314,6 +323,8 @@ Describe 'Test-JobFile' {
                 @{ Id = '0123456789abcdef0123456789abcdef' + "`n"; Name = '0123456789abcdef0123456789abcdef.json' }
             )) {
             $job = New-SignedJob -Fields ([ordered] @{
+                    type        = 'job'
+                    created_at  = '2026-11-16T12:00:00Z'
                     job_id      = $case.Id
                     invoice_id  = 1
                     folder      = 'Reembolsos/2026-11/F001-123'
@@ -329,7 +340,7 @@ Describe 'Test-JobFile' {
 
             $warnings = @()
             $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-                -Allowlist $script:Allowlist -Root $root `
+                -Allowlist $script:Allowlist -Root $root -Now $script:Now `
                 -WarningAction SilentlyContinue -WarningVariable warnings
             $refused | Should -BeNullOrEmpty
             [string] $warnings[0] | Should -Match 'job id is invalid'
@@ -346,7 +357,7 @@ Describe 'Test-JobFile' {
 
             $warnings = @()
             $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-                -Allowlist $script:Allowlist -Root $root `
+                -Allowlist $script:Allowlist -Root $root -Now $script:Now `
                 -WarningAction SilentlyContinue -WarningVariable warnings
             $refused | Should -BeNullOrEmpty
             [string] $warnings[0] | Should -Match 'job file name does not match job id'
@@ -355,6 +366,8 @@ Describe 'Test-JobFile' {
 
     It 'R-7.14 refuses a folder with a .. segment' {
         $job = New-SignedJob -Fields ([ordered] @{
+                type        = 'job'
+                created_at  = '2026-11-16T12:00:00Z'
                 job_id      = '0123456789abcdef0123456789abcdef'
                 invoice_id  = 1
                 folder      = 'Reembolsos/../F001-123'
@@ -370,15 +383,98 @@ Describe 'Test-JobFile' {
 
         $warnings = @()
         $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
-            -Allowlist $script:Allowlist -Root $root `
+            -Allowlist $script:Allowlist -Root $root -Now $script:Now `
             -WarningAction SilentlyContinue -WarningVariable warnings
         $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'folder is not a plain relative path'
     }
+
+    It 'R-7.14 refuses a receipt placed in _outbox' {
+        # The receipt's own job_id names the file, so only the key set can refuse it.
+        $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        $outbox = Join-Path -Path $root -ChildPath '_outbox'
+        New-Item -ItemType Directory -Path $outbox -Force | Out-Null
+        $vector = $script:Vectors.receipts.sent
+        $path = Join-Path -Path $outbox -ChildPath ($vector.job_id + '.json')
+        [System.IO.File]::WriteAllText(
+            $path,
+            (ConvertTo-Json -InputObject $vector -Compress),
+            [System.Text.UTF8Encoding]::new($false)
+        )
+
+        $warnings = @()
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $root -Now $script:Now `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
+        [string] $warnings[0] | Should -Match 'job keys are not the expected set'
+    }
+
+    It 'R-7.14 refuses a job with one extra key' {
+        $job = New-SignedJob -Fields ([ordered] @{
+                type        = 'job'
+                created_at  = '2026-11-16T12:00:00Z'
+                job_id      = '0123456789abcdef0123456789abcdef'
+                invoice_id  = 1
+                folder      = 'Reembolsos/2026-11/F001-123'
+                to          = @('hr@example.com')
+                subject     = 'Support release 0001'
+                body        = 'Hola.'
+                attachments = @('F001-123.pdf')
+                dry_run     = $true
+            })
+        $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        New-InvoiceFolder -Root $root -RelativeFolder $job.folder -Files @($job.attachments) | Out-Null
+        $path = Join-Path -Path $root -ChildPath ($job.job_id + '.json')
+        Write-JobJson -Path $path -Job $job
+
+        $warnings = @()
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $root -Now $script:Now `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
+        [string] $warnings[0] | Should -Match 'job keys are not the expected set'
+    }
+
+    It 'R-7.14 accepts a fresh job' {
+        $fixture = New-SendFixture
+
+        $verified = Test-JobFile -Path $fixture.JobFile -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $fixture.Root -Now $script:Now
+
+        $verified | Should -Not -BeNullOrEmpty
+        $verified.type | Should -Be 'job'
+        $verified.created_at | Should -Be '2026-11-16T12:00:00Z'
+    }
+
+    It 'R-7.14 refuses an 8-day-old job and sends nothing' {
+        $fixture = New-SendFixture -CreatedAt '2026-11-09T00:00:00Z'
+        $outlook = New-FakeOutlook
+        $warnings = @()
+
+        # The agent's loop: only a job Test-JobFile returned reaches Send-Job.
+        foreach ($jobFile in @(Get-ChildItem -LiteralPath $fixture.Outbox -Filter '*.json' -File)) {
+            $job = Test-JobFile -Path $jobFile.FullName -Key $script:Vectors.key `
+                -Allowlist $script:Allowlist -Root $fixture.Root -Now $script:Now `
+                -WarningAction SilentlyContinue -WarningVariable warnings
+            if ($null -ne $job) {
+                Send-Job -Job $job -Folder $fixture.Folder -Outlook $outlook `
+                    -StateFile $fixture.StateFile -Path $jobFile.FullName -Outbox $fixture.Outbox `
+                    -Key $script:Vectors.key -LogFile $fixture.LogFile
+            }
+        }
+
+        [string] $warnings[0] | Should -Match 'job is too old'
+        $outlook.CreateItemCalls.Count | Should -Be 0
+        $outlook.SentItems.Count | Should -Be 0
+        Test-Path -LiteralPath $fixture.JobFile -PathType Leaf | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') | Should -BeFalse
+        Test-Path -LiteralPath $fixture.StateFile | Should -BeFalse
+    }
 }
 
 Describe 'Write-JobReceipt' {
-    It 'R-7.14 a sent receipt has exactly job_id, sent_at and a verifiable hmac' {
+    It 'R-7.14 a sent receipt has exactly job_id, sent_at, type and a verifiable hmac' {
         $receipts = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
         $vector = $script:Vectors.receipts.sent
 
@@ -387,19 +483,22 @@ Describe 'Write-JobReceipt' {
 
         $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath (
                 Join-Path -Path $receipts -ChildPath ($vector.job_id + '.json')) -Raw)
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,hmac'
+        # The ordered payload writes job_id, sent_at, type; the hmac is appended.
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,type,hmac'
         $receipt.job_id | Should -Be $vector.job_id
         $receipt.sent_at | Should -Be $vector.sent_at
+        $receipt.type | Should -Be 'receipt'
         $receipt.hmac | Should -Match '^[0-9a-f]{64}$'
         $receipt.hmac | Should -Be (Get-ReceiptSignature -Key $script:Vectors.key -Fields ([ordered] @{
                     job_id  = $vector.job_id
                     sent_at = $vector.sent_at
+                    type    = 'receipt'
                 }))
         # Python's `_signature` produced this vector: the same bytes, same key.
         $receipt.hmac | Should -Be $vector.hmac
     }
 
-    It 'R-7.14 an error receipt has exactly job_id, error and a verifiable hmac' {
+    It 'R-7.14 an error receipt has exactly job_id, error, type and a verifiable hmac' {
         $receipts = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
         $vector = $script:Vectors.receipts.error
 
@@ -408,13 +507,15 @@ Describe 'Write-JobReceipt' {
 
         $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath (
                 Join-Path -Path $receipts -ChildPath ($vector.job_id + '.json')) -Raw)
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,hmac'
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,type,hmac'
         $receipt.job_id | Should -Be $vector.job_id
         $receipt.error | Should -Be $vector.error
+        $receipt.type | Should -Be 'receipt'
         $receipt.hmac | Should -Match '^[0-9a-f]{64}$'
         $receipt.hmac | Should -Be (Get-ReceiptSignature -Key $script:Vectors.key -Fields ([ordered] @{
                     job_id = $vector.job_id
                     error  = $vector.error
+                    type   = 'receipt'
                 }))
         # Python's `_signature` produced this vector: the same bytes, same key.
         $receipt.hmac | Should -Be $vector.hmac
@@ -448,7 +549,7 @@ Describe 'Send-Job' {
             -ChildPath ($fixture.Job.job_id + '.json')
         Test-Path -LiteralPath $receiptPath -PathType Leaf | Should -BeTrue
         $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath $receiptPath -Raw)
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,hmac'
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,type,hmac'
         $receipt.job_id | Should -Be $fixture.Job.job_id
         { [DateTimeOffset]::Parse($receipt.sent_at) } | Should -Not -Throw
         $receipt.sent_at | Should -Match 'Z$'
@@ -488,7 +589,7 @@ Describe 'Send-Job' {
             -ChildPath ($fixture.Job.job_id + '.json')
         Test-Path -LiteralPath $receiptPath -PathType Leaf | Should -BeTrue
         $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,hmac'
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,type,hmac'
         $receipt.job_id | Should -Be $fixture.Job.job_id
         $receipt.error | Should -BeOfType [string]
         $receipt.error.Length | Should -BeLessOrEqual 500
@@ -531,13 +632,15 @@ Describe 'Send-Job' {
     It 'R-7.14 sends the content Test-JobFile verified, not a later file' {
         $fixture = New-SendFixture
         $verified = Test-JobFile -Path $fixture.JobFile -Key $script:Vectors.key `
-            -Allowlist $script:Allowlist -Root $fixture.Root
+            -Allowlist $script:Allowlist -Root $fixture.Root -Now $script:Now
         $verified | Should -Not -BeNullOrEmpty
         $verified.attachments.Count | Should -Be 1
 
         # The file on disk changes after it was verified; already only the
         # returned object reaches Send-Job.
         $replacement = New-SignedJob -Fields ([ordered] @{
+                type        = 'job'
+                created_at  = $verified.created_at
                 job_id      = $verified.job_id
                 invoice_id  = 1
                 folder      = $verified.folder

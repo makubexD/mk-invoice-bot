@@ -34,7 +34,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from invoicebot.rules.catalog import RULES
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import GAP_DIGEST_LINE, KIND_DESC, KIND_SUBJECT, MESSAGES
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "specs" / "06-business-rules.md"
 
@@ -69,6 +69,12 @@ _ROLE_RE = re.compile(r"\b(User|Admin|Owner|Sender):")
 
 _ROLE_PRIORITY = {None: 0, "user": 0, "sender": 0, "owner": 1, "admin": 2}
 _ROLE_SUFFIXES = {"admin": "_admin", "owner": "_owner", "sender": "_sender", "user": "_user"}
+
+_GAPS_SECTION_START = "## 3. Capability gaps"
+_GAPS_SECTION_END = "### Gap lifecycle"
+_GAP_KIND_ROW_RE = re.compile(r"^\|\s*`([A-Z_]+)`\s*\|")
+_GAP_ALERT_RE = re.compile(r"`(GAP_[A-Za-z_]+)`\s+`([^`]*)`")
+_GAP_DIGEST_LINE_RE = re.compile(r"`(• \{kind_desc\} — \{subject\})`")
 
 
 @dataclass(frozen=True)
@@ -220,3 +226,78 @@ def test_messages_match_the_spec() -> None:
                     f"      spec:    {expected_text!r}"
                 )
     assert not offenders, _failure("message text parity", offenders)
+
+
+@lru_cache(maxsize=1)
+def _parse_gap_section() -> tuple[dict[str, tuple[str, str]], dict[str, str], str]:
+    """Return spec 06 §3's ``kind_desc``/subject pairs, owner alert texts and digest line."""
+    text = SPEC_PATH.read_text(encoding="utf-8")
+    section = text.split(_GAPS_SECTION_START, 1)[1].split(_GAPS_SECTION_END, 1)[0]
+
+    pairs: dict[str, tuple[str, str]] = {}
+    for line in section.splitlines():
+        match = _GAP_KIND_ROW_RE.match(line)
+        if match is None:
+            continue
+        cells = line.strip().strip("|").split("|")
+        if len(cells) != 8:
+            raise AssertionError(f"unparsed gap-table row in {SPEC_PATH.name}: {line!r}")
+        spans = _CODE_SPAN_RE.findall(cells[6])
+        if len(spans) != 2:
+            raise AssertionError(f"gap row without a kind_desc/subject pair: {line!r}")
+        pairs[match.group(1)] = (spans[0], spans[1])
+
+    alerts = dict(_GAP_ALERT_RE.findall(section))
+    digest_line = _GAP_DIGEST_LINE_RE.search(section)
+    if digest_line is None:
+        raise AssertionError(f"no digest line in the owner alert texts of {SPEC_PATH.name}")
+    return pairs, alerts, digest_line.group(1)
+
+
+def test_gap_kind_desc_and_subject_match_the_spec() -> None:
+    """R-11.1: each gap kind's kind_desc and subject format equal spec 06 §3."""
+    pairs, _, _ = _parse_gap_section()
+    offenders = []
+    for kind in sorted(pairs):
+        desc, subject = pairs[kind]
+        if KIND_DESC.get(kind) != desc:
+            offenders.append(
+                f"{kind}: kind_desc differs from spec 06\n"
+                f"      catalog: {KIND_DESC.get(kind)!r}\n"
+                f"      spec:    {desc!r}"
+            )
+        if KIND_SUBJECT.get(kind) != subject:
+            offenders.append(
+                f"{kind}: subject differs from spec 06\n"
+                f"      catalog: {KIND_SUBJECT.get(kind)!r}\n"
+                f"      spec:    {subject!r}"
+            )
+    assert not offenders, _failure("gap kind_desc/subject parity", offenders)
+
+
+def test_gap_alert_texts_match_the_spec() -> None:
+    """R-11.1: the two owner alert texts equal spec 06 §3."""
+    _, alerts, spec_digest_line = _parse_gap_section()
+    expected = {
+        "GAP_admin": alerts.get("GAP_admin"),
+        "GAP_DIGEST_admin": (
+            None if alerts.get("GAP_DIGEST_admin") is None else alerts["GAP_DIGEST_admin"] + "\n{gap_lines}"
+        ),
+    }
+    offenders = []
+    for key, expected_text in expected.items():
+        if expected_text is None:
+            offenders.append(f"{key}: alert text missing from spec 06 §3")
+        elif MESSAGES.get(key) != expected_text:
+            offenders.append(
+                f"{key}: text differs from spec 06\n"
+                f"      catalog: {MESSAGES.get(key)!r}\n"
+                f"      spec:    {expected_text!r}"
+            )
+    if spec_digest_line != GAP_DIGEST_LINE:
+        offenders.append(
+            "GAP_DIGEST_LINE: line differs from spec 06\n"
+            f"      catalog: {GAP_DIGEST_LINE!r}\n"
+            f"      spec:    {spec_digest_line!r}"
+        )
+    assert not offenders, _failure("gap alert text parity", offenders)

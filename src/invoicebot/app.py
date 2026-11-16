@@ -12,8 +12,9 @@ import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
+from typing import cast
 
 import httpx
 from fastapi import FastAPI
@@ -43,9 +44,14 @@ from invoicebot.fetchers.email_inbox import EmailInboxFetcher
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
+from invoicebot.github.app_token import GitHubApp
+from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
+from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, run_backup
+from invoicebot.ops.daily import DailyTask, daily_forever
+from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
@@ -56,17 +62,21 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
+from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
+from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.uploads import make_attach_handler
-from invoicebot.queue.outbox import OutboxSender
+from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
+from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
@@ -74,6 +84,7 @@ from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
+from invoicebot.store.retention import prune
 
 logger = logging.getLogger(__name__)
 
@@ -96,12 +107,25 @@ BOT_ACCOUNT = "bot"
 LAPTOP_ADAPTER = "laptop_outlook"
 #: The age-store secret the laptop job's HMAC is keyed with (R-7.14).
 LAPTOP_AGENT_KEY = "laptop_agent_key"
+#: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
+GITHUB_ADAPTER = "github"
+GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
 LAPTOP_SWEEP_S = 300.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
+#: The only backup target this build uploads to: the personal OneDrive (D119).
+BACKUP_TARGET_KIND = "onedrive"
+#: The dump command; the connection details reach it through the child's environment (D119).
+PG_DUMP_CMD = ("pg_dump",)
+#: BR-O04's alert ceiling: at most one backup-failure alert per twelve hours.
+BACKUP_ALERT_EVERY = timedelta(hours=12)
+#: Retention runs half an hour after the backup, so it prunes what the dump kept (S15.1).
+RETENTION_DELAY = timedelta(minutes=30)
+#: The rule id and rate-limit key of the backup-failure alert (BR-O04).
+RULE_BACKUP_ALERT = "BR-O04"
 
 
 @dataclass(frozen=True)
@@ -208,6 +232,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.extraction,
                 cfg.limits.media,
                 settings.parsing_rules_path,
+                GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             ),
             ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(
@@ -233,23 +258,34 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             handlers.update(deliver.resends)
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
-        sender = OutboxSender(
-            pool,
-            {
-                WHATSAPP_ADAPTER: make_transport(
-                    client,
-                    pool,
-                    numbers=numbers,
-                    templates=channel.templates,
-                    language=channel.template_language,
-                )
-            },
+        transports = {
+            WHATSAPP_ADAPTER: make_transport(
+                client,
+                pool,
+                numbers=numbers,
+                templates=channel.templates,
+                language=channel.template_language,
+                on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
+            ),
+            **_github_transports(cfg, store, http, pool),
+        }
+        sender = OutboxSender(pool, transports)
+        drive = _personal_drive(settings, cfg, http)
+        daily_tasks = _daily_tasks(
+            cfg,
+            partial(_run_backup, settings, cfg, pool, drive),
+            partial(_run_retention, pool, cfg),
+            partial(daily_digest, pool, cfg.profiles, cfg.gaps),
         )
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
             "outbox": partial(_send_forever, sender),
             "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
         }
+        background["daily"] = partial(daily_forever, pool, cfg.owner.timezone, daily_tasks)
+        background["selfcheck"] = partial(
+            selfcheck_forever, pool, cfg.profiles, cfg.ops.self_alerts, settings.data_dir, disk_used_pct
+        )
         if deliver is not None and deliver.laptop is not None:
             background["laptop"] = deliver.laptop
         async with _background(background):
@@ -270,6 +306,18 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
         payment_flow=_payment_flow(cfg),
+        teach=_teach_setup(cfg),
+    )
+
+
+def _teach_setup(cfg: Config) -> TeachSetup | None:
+    """Return the teaching setup, or None when chat teaching is off (R-11.4, BR-F02)."""
+    if not cfg.gaps.teach_via_chat:
+        return None
+    return TeachSetup(
+        profiles=cfg.profiles,
+        resolver=SystemResolver(),
+        github_repo=cfg.gaps.github.repo if cfg.gaps.github.enabled else None,
     )
 
 
@@ -323,7 +371,7 @@ def _deliver_handlers(
     laptop_task: TaskFactory | None = None
     if found is not None:
         root, key = found
-        laptop = LaptopOutlook(drive, root, key)
+        laptop = LaptopOutlook(drive, root, key, partial(datetime.now, UTC))
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
     context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)
@@ -353,6 +401,153 @@ def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] |
     root = _laptop_root(flow)
     key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
     return root, key
+
+
+def _github_transports(
+    cfg: Config, store: SecretStore, http: httpx.AsyncClient, pool: Pool
+) -> dict[str, Transport]:
+    """Return the GitHub gap transport, or none when gaps stay local (R-11.5, R-11.10).
+
+    A disabled transport reads no secret and asks the store for nothing. With it
+    enabled, the App's private key comes from the age store, so a missing one
+    stops startup (R-9.9); the hooks read the daily write budget, report an
+    opened issue and raise BR-D05's token alert.
+    """
+    github = cfg.gaps.github
+    if not github.enabled:
+        return {}
+    private_key_pem = store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).get(GITHUB_APP_PRIVATE_KEY)
+    app = GitHubApp(
+        http,
+        app_id=github.app_id,
+        installation_id=github.installation_id,
+        private_key_pem=private_key_pem,
+        timeout_s=REQUEST_TIMEOUT_SECONDS,
+    )
+    hooks = GitHubHooks(
+        writes_today=partial(writes_today, pool, cfg.owner.timezone),
+        on_issue=partial(issue_opened, pool, cfg.profiles, cfg.gaps),
+        on_token_error=partial(_alert_token_error, pool, cfg),
+    )
+    return {
+        GITHUB_ADAPTER: make_github_transport(
+            app,
+            http,
+            github.repo,
+            github.labels,
+            budget=github.daily_write_budget,
+            hooks=hooks,
+        )
+    }
+
+
+async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
+    """Queue BR-D05's rate-limited owner alert for a rejected installation token (BR-D05)."""
+    async with pool.connection() as conn, conn.transaction():
+        await queue_token_error_alert(conn, cfg.profiles, cfg.gaps.github.repo, reason)
+
+
+async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
+    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
+    logger.error("channel token rejected", extra={"channel": channel})
+    # shortcut: the alert goes out through the same WhatsApp channel whose token
+    # failed, so it waits in the outbox until the token works; the ERROR log is the
+    # only immediate signal until a second channel exists.
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn,
+            cfg.profiles,
+            f"BR-O03:{channel.lower()}",
+            timedelta(hours=cfg.ops.self_alerts.realert_hours),
+            "BR-O03",
+            MESSAGES["BR-O03"].format(channel=channel),
+        )
+
+
+def _daily_tasks(
+    cfg: Config,
+    backup: Callable[[], Awaitable[None]],
+    retention: Callable[[], Awaitable[None]],
+    digest: Callable[[], Awaitable[None]],
+) -> list[DailyTask]:
+    """Build the backup, retention and digest tasks, failing on an unknown target (R-9.11).
+
+    Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
+    ``date.min`` base so a late backup wraps to the next day's early time.
+    """
+    kind = cfg.ops.backup.target.kind
+    if kind != BACKUP_TARGET_KIND:
+        raise ValueError(
+            f"unsupported backup target kind {kind!r}: only {BACKUP_TARGET_KIND!r} is implemented"
+        )
+    backup_at = cfg.ops.backup.at
+    retention_at = (datetime.combine(date.min, backup_at) + RETENTION_DELAY).time()
+    return [
+        DailyTask(key="backup", at=backup_at, run=backup),
+        DailyTask(key="retention", at=retention_at, run=retention),
+        DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
+    ]
+
+
+def _personal_drive(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> GraphDrive:
+    """Build the personal OneDrive drive the backup uploads through (D119)."""
+    provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
+    return GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
+
+
+def _backup_job(settings: Settings, cfg: Config) -> BackupJob:
+    """Build the nightly backup's inputs; the database URL is required (D119)."""
+    database_url = settings.database_url
+    if database_url is None:
+        raise RuntimeError("the backup needs DATABASE_URL")
+    backup = cfg.ops.backup
+    return BackupJob(
+        cmd=PG_DUMP_CMD,
+        database_url=database_url,
+        config_dir=settings.config_path.parent,
+        excluded_paths=tuple(
+            path for path in (settings.secrets_path, settings.age_identity_path) if path is not None
+        ),
+        recipient=backup.age_recipient,
+        target=backup.target.path,
+        max_bytes=backup.max_mb * 1024 * 1024,
+    )
+
+
+async def _owner_today(pool: Pool, timezone: str) -> date:
+    """Return the owner's local date from the database clock, for the artifact names (D119)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
+        row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT (now() AT TIME ZONE %s)::date yielded no row")
+    return cast(date, row[0])
+
+
+async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive) -> None:
+    """Back up once, alerting BR-O04 by stage instead of retrying or raising (BR-O04)."""
+    today = await _owner_today(pool, cfg.owner.timezone)
+    try:
+        await run_backup(_backup_job(settings, cfg), drive, today)
+    except BackupError as error:
+        logger.warning("backup failed", extra={"reason": error.reason})
+        await _alert_backup_failure(pool, cfg, error.reason)
+
+
+async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -> None:
+    """Queue BR-O04's rate-limited admin alert for a failed backup stage (BR-O04)."""
+    text = MESSAGES[RULE_BACKUP_ALERT].format(reason_desc=BACKUP_REASON_DESC[reason])
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn, cfg.profiles, RULE_BACKUP_ALERT, BACKUP_ALERT_EVERY, RULE_BACKUP_ALERT, text
+        )
+
+
+async def _run_retention(pool: Pool, cfg: Config) -> None:
+    """Apply the retention windows in one transaction and log the counts once (R-9.12)."""
+    async with pool.connection() as conn, conn.transaction():
+        counts = await prune(conn, cfg.ops.retention_days)
+    logger.info("retention pruned", extra={"counts": counts})
 
 
 def _laptop_flow_ids(cfg: Config) -> frozenset[str]:

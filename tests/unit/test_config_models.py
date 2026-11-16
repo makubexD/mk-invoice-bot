@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +66,57 @@ def test_example_config_loads() -> None:
 
     assert isinstance(cfg, Config)
     assert cfg.owner.ruc == "20XXXXXXXXX"
+
+
+def test_example_config_has_daily_times_and_ops_defaults() -> None:
+    """R-9.6: the example config names its daily times and ops limits as typed values (D114)."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.gaps.digest_at == time(8, 0)
+    assert cfg.ops.backup.at == time(3, 0)
+    assert cfg.ops.backup.max_mb == 200
+    assert cfg.ops.self_alerts.realert_hours == 6
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("admins", ["yo"]),
+        ("digest_cron", "0 8 * * *"),
+    ],
+)
+def test_removed_gaps_key_is_refused(tmp_path: Path, key: str, value: Any) -> None:
+    """R-9.6: ``gaps.admins`` and ``gaps.digest_cron`` are gone, so the load refuses them (D113, D114)."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["gaps"][key] = value
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert f"gaps.{key}" in str(excinfo.value)
+
+
+def test_digest_at_outside_the_clock_fails(tmp_path: Path) -> None:
+    """R-9.6: ``gaps.digest_at`` is a time of day, so 25:00 fails at load (D114)."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["gaps"]["digest_at"] = "25:00"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "gaps.digest_at" in str(excinfo.value)
+
+
+def test_unknown_digest_kind_fails(tmp_path: Path) -> None:
+    """R-11.8: the daily digest names only known gap kinds, so an unknown one fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["gaps"]["digest_kinds"] = ["PARSER_MISS", "BOGUS"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="BOGUS"):
+        load_config(path)
 
 
 def test_flow_without_reimbursement_loads_with_none() -> None:

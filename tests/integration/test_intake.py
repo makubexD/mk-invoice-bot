@@ -20,16 +20,21 @@ from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, RoutingRule, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.extract import ROUTE_STEP
-from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
+from invoicebot.store import taught_links
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
 from invoicebot.store.messages import link_message_to_invoice, store_inbound
+from invoicebot.store.taught_links import TaughtLink
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -47,6 +52,20 @@ DNI_BUYER = "40382716"
 FULL_PROFILE = "yo"
 #: One unique numero per reading, so no test claims another's natural key (D93).
 _NEXT_NUMERO = itertools.count(40000)
+#: One unique issuer RUC per taught-link test, so no test sees another's taught_links row.
+_NEXT_ISSUER_RUC = itertools.count(20000000100)
+#: A public address the fake resolver answers, so a taught URL passes the request guard.
+PUBLIC_ADDRESS = "93.184.216.34"
+#: A public https URL with no query string, so it is never parsed as an edit or override.
+GOOD_URL = "https://portal.example.pe/consulta"
+
+
+class FakeResolver(Resolver):
+    """A ``Resolver`` that answers the public address, whatever the host is."""
+
+    async def resolve(self, host: str) -> list[str]:
+        """Return the fixed public address."""
+        return [PUBLIC_ADDRESS]
 
 
 class _Rollback(Exception):
@@ -117,11 +136,13 @@ async def _today(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> date:
     return cast(date, row[0])
 
 
-def _reading(fecha: date, *, buyer: str = WORK_RUC, buyer_type: str = "6") -> Reading:
+def _reading(
+    fecha: date, *, buyer: str = WORK_RUC, buyer_type: str = "6", issuer: str = OWNER_RUC
+) -> Reading:
     """Build a complete reading for one invoice, with its own numero (D93)."""
     return Reading(
         fields={
-            "ruc_emisor": Field(OWNER_RUC, "qr", 1.0),
+            "ruc_emisor": Field(issuer, "qr", 1.0),
             "tipo": Field("01", "qr", 1.0),
             "serie": Field("F001", "qr", 1.0),
             "numero": Field(str(next(_NEXT_NUMERO)), "qr", 1.0),
@@ -242,6 +263,31 @@ async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[st
     )
     rows = await cur.fetchall()
     return [(str(text), rule_id) for text, rule_id in rows]
+
+
+def _teach_roles(profile_id: str) -> IntakeRoles:
+    """Return intake roles whose teach setup knows the sender and one admin."""
+    cfg = load_config(EXAMPLE)
+    profiles = {
+        "yo": cfg.profiles["yo"],
+        profile_id: cfg.profiles["asistente"],
+    }
+    return IntakeRoles(teach=TeachSetup(profiles=profiles, resolver=FakeResolver()))
+
+
+async def _queue_br_f02(
+    conn: AsyncConnection[Any], profile_id: str, invoice_id: int, ruc_emisor: str
+) -> None:
+    """Queue BR-F02 for the invoice's sender, as the fetch pipeline does (BR-F02)."""
+    text = MESSAGES["BR-F02"].format(razon_social="Tienda Example", ruc_emisor=ruc_emisor)
+    await queue_message(
+        conn, Addressee("whatsapp", profile_id), text, invoice_id=invoice_id, rule_id="BR-F02"
+    )
+
+
+def _issuer() -> str:
+    """Return a synthetic issuer RUC no other test uses."""
+    return str(next(_NEXT_ISSUER_RUC))
 
 
 async def _fields_json(conn: AsyncConnection[Any], invoice_id: int) -> str:
@@ -1080,3 +1126,199 @@ async def test_confirming_invoice_is_not_matched(
 
     assert result.invoice_id is None
     assert jobs == []
+
+
+async def test_br_f02_url_teaches_the_portal(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL after BR-F02 stores a proposed link and answers BR-S06."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "MANUAL_REQUIRED",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-F07",
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f02(conn, profile_id, invoice_id, issuer)
+    msg = _message(profile_id, external_id=_external_id(), text=GOOD_URL)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        link = await taught_links.get(conn, int(issuer))
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert link == TaughtLink(int(issuer), GOOD_URL, profile_id, "proposed")
+    assert replies[-1] == (MESSAGES["BR-S06"], "BR-S06")
+
+
+async def test_br_f02_dont_know_answers_and_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "MANUAL_REQUIRED",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-F07",
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f02(conn, profile_id, invoice_id, issuer)
+    msg = _message(profile_id, external_id=_external_id(), text="no sé")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        link = await taught_links.get(conn, int(issuer))
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert link is None
+    assert replies[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know")
+
+
+async def test_br_f02_url_after_a_newer_question_is_not_taken(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL after a newer BR-R03 question is not taken as a portal."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "CONFIRMING",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-R03",
+    )
+    async with db_pool.connection() as conn:
+        await queue_message(
+            conn,
+            Addressee("whatsapp", profile_id),
+            "¿Confirmas el flujo?",
+            invoice_id=invoice_id,
+            rule_id="BR-R03",
+        )
+    msg = _message(profile_id, external_id=_external_id(), text=GOOD_URL)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        link = await taught_links.get(conn, int(issuer))
+
+    assert result.status == "stored"
+    assert link is None
+
+
+async def test_br_f02_command_still_runs(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: /estado after BR-F02 still runs the command, not the portal answer."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "MANUAL_REQUIRED",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-F07",
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f02(conn, profile_id, invoice_id, issuer)
+    msg = _message(profile_id, external_id=_external_id(), text=f"/estado {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        link = await taught_links.get(conn, int(issuer))
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert link is None
+    assert replies[-1][1] is None
+    assert str(invoice_id) in replies[-1][0]
+
+
+async def test_br_f02_edit_still_edits(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.5: a serie=F001 edit after BR-F02 still edits, not the portal answer."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "MANUAL_REQUIRED",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-F07",
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f02(conn, profile_id, invoice_id, issuer)
+    msg = _message(profile_id, external_id=_external_id(), text="serie=F001")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        link = await taught_links.get(conn, int(issuer))
+        serie = await _field(conn, invoice_id, "serie")
+
+    assert result.invoice_id == invoice_id
+    assert link is None
+    assert serie == ("F001", "user")
+
+
+async def test_br_f02_url_without_teach_roles_is_not_taken(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: with roles.teach None a URL after BR-F02 goes the usual way."""
+    profile_id = _profile()
+    issuer = _issuer()
+    invoice_id = await _invoice_in(
+        db_pool,
+        profile_id,
+        "MANUAL_REQUIRED",
+        _reading(await _today(db_pool), issuer=issuer),
+        rule_id="BR-F07",
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f02(conn, profile_id, invoice_id, issuer)
+    msg = _message(profile_id, external_id=_external_id(), text=GOOD_URL)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        link = await taught_links.get(conn, int(issuer))
+
+    assert result.status == "stored"
+    assert link is None

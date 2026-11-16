@@ -1,8 +1,8 @@
 """Intake: persist one inbound message, acknowledge it and queue its invoice.
 
-This module owns the first pipeline step only (R-1.1, R-1.8, BR-S01). It makes
-no network calls and never commits: everything happens in the caller's
-transaction, so a later failure leaves no message, invoice, job or outbox row.
+This module owns the first pipeline step only (R-1.1, R-1.8, BR-S01). It never
+commits: everything happens in the caller's transaction, so a later failure
+leaves no message, invoice, job or outbox row.
 The photo files a button press releases are deleted after that transaction (R-9.7).
 """
 
@@ -20,6 +20,16 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.teach import (
+    BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
+)
+from invoicebot.pipeline.teach import (
+    TeachSetup,
+    answer,
+)
+from invoicebot.pipeline.teach import (
+    handle_press as handle_teach_press,
+)
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.flow_b import merge_flow_data
@@ -62,13 +72,16 @@ class IntakeRoles:
     """The config-derived roles intake hands on: who is an admin and which flows are special.
 
     ``admins`` holds the profile ids a command may reach another profile's invoice for,
-    ``payment_flow`` is the flow whose payments a command may record (R-7.12), and
-    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109).
+    ``payment_flow`` is the flow whose payments a command may record (R-7.12),
+    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109), and
+    ``teach`` is the profiles and resolver a /portal or BR-F02 answer teaches with,
+    None when ``gaps.teach_via_chat`` is off (R-11.4).
     """
 
     admins: frozenset[str] = frozenset()
     payment_flow: PaymentFlow | None = None
     laptop_flows: frozenset[str] = frozenset()
+    teach: TeachSetup | None = None
 
 
 #: No admins, no payment flow and no laptop flows: what a caller without config passes.
@@ -87,10 +100,12 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), except a payment proposal press, which is answered as stored
-    without an invoice (R-7.12), a non-photo is ``stored`` (a pdf/xml upload is linked to
+    ``stored`` (R-3.5), except a payment proposal press (R-7.12) or a BR-S06 decision
+    press (D118), which are answered as stored without an invoice, a non-photo is
+    ``stored`` (a pdf/xml upload is linked to
     the stuck invoice it belongs to, R-1.5) and a text-only message may also
-    run a command (R-10.1), apply its edits (D97) and store its overrides (D70). A photo
+    run a command (R-10.1), answer a BR-F02 portal question (R-11.4), apply its edits
+    (D97) and store its overrides (D70). A photo
     becomes an invoice, with its caption's overrides, a ``download_media`` job and a
     BR-S09 acknowledgement, unless the sender already has ``max_queued_per_sender``
     active jobs, in which case it is answered with BR-S01 and ``back_pressure`` (BR-S01).
@@ -105,6 +120,9 @@ async def handle_inbound(
         if msg.button_id is not None:
             if msg.button_id.startswith(PAYMENT_BUTTON_PREFIX):
                 await handle_payment_press(conn, msg)
+                return IntakeResult(status="stored", invoice_id=None)
+            if msg.button_id.startswith(TEACH_BUTTON_PREFIX) and roles.teach is not None:
+                await handle_teach_press(conn, msg, roles.teach)
                 return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg, roles.laptop_flows)
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
@@ -157,7 +175,8 @@ async def _store_with_overrides(
     """Store a non-photo text, running its command or applying its edits and overrides.
 
     A text starting with ``/`` is a command and is answered before anything else
-    (R-10.1). Otherwise it may hold both ``campo=valor`` edits when ``parse_edits`` finds
+    (R-10.1). A text that answers the sender's newest BR-F02 question teaches a portal
+    (R-11.4). Otherwise it may hold both ``campo=valor`` edits when ``parse_edits`` finds
     fields or errors, and ``motivo``/``descripcion`` overrides (D70, D90, D97). Each is
     applied independently to the invoice it targets, and the result names the invoice the
     edits first touched. A pdf/xml upload is linked to the stuck invoice it belongs to
@@ -167,8 +186,15 @@ async def _store_with_overrides(
         return IntakeResult(status="stored", invoice_id=await _link_upload(conn, msg))
     command = parse_command(msg.text)
     if command is not None:
-        context = CommandContext(admins=roles.admins, timezone=timezone, payment_flow=roles.payment_flow)
+        context = CommandContext(
+            admins=roles.admins,
+            timezone=timezone,
+            payment_flow=roles.payment_flow,
+            teach=roles.teach,
+        )
         await handle_command(conn, msg, command[0], command[1], context=context)
+        return IntakeResult(status="stored", invoice_id=None)
+    if roles.teach is not None and await answer(conn, roles.teach, msg):
         return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)
     invoice_id = None
