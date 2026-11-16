@@ -22,6 +22,8 @@ from invoicebot.channels.whatsapp.client import WhatsAppError
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.intake import IntakeResult, handle_inbound
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.jobs import Job
@@ -305,6 +307,73 @@ async def _deliver_jobs(conn: AsyncConnection[Any], invoice_id: int) -> int:
     cur = await conn.execute(
         "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = 'deliver'",
         (invoice_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _queue_bot_message(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    profile_id: str,
+    channel: ChannelName = "whatsapp",
+) -> str:
+    """Queue a bot message about ``invoice_id`` and return its channel message id (D102)."""
+    channel_message_id = f"wamid-{uuid4().hex}"
+    async with pool.connection() as conn, conn.transaction():
+        outbox_id = await queue_message(
+            conn,
+            Addressee(channel, profile_id),
+            "Synthetic bot message about the invoice.",
+            invoice_id=invoice_id,
+            rule_id="BR-F07",
+        )
+        await conn.execute(
+            "UPDATE outbox SET channel_message_id = %s WHERE id = %s",
+            (channel_message_id, outbox_id),
+        )
+    return channel_message_id
+
+
+async def _send_upload(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    reply_to: str | None,
+    kind: AttachmentKind = "pdf",
+) -> tuple[IntakeResult, InboundMessage]:
+    """Send an upload quoting ``reply_to`` through intake and return its result and message (R-1.5)."""
+    body = PDF_BYTES if kind == "pdf" else XML_BYTES
+    msg = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        attachments=[Attachment(kind=kind, media_ref=f"ref-{uuid4().hex}", mime=MIME[kind], size=len(body))],
+        reply_to_external_id=reply_to,
+        received_at=datetime.now(UTC),
+    )
+    async with pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=10, timezone="America/Lima")
+    return result, msg
+
+
+async def _message_invoice(conn: AsyncConnection[Any], external_id: str) -> int | None:
+    """Return the invoice the stored upload was linked to, if any (R-1.5)."""
+    cur = await conn.execute(
+        "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+        ("whatsapp", external_id),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return None if row[0] is None else int(row[0])
+
+
+async def _attach_jobs(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    """Return how many attach jobs the invoice has queued (R-1.5)."""
+    cur = await conn.execute(
+        "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = %s",
+        (invoice_id, ATTACH_STEP),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -762,3 +831,73 @@ async def test_upload_from_a_channel_with_no_source_fails_the_job(
     assert state == "MANUAL_REQUIRED"
     assert files == []
     assert outbox == []
+
+
+async def test_upload_quote_of_a_bot_message_links_its_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: an upload quoting invoice A's BR-F07 message links A, not B."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_a = await _invoice(db_pool, profile_id)
+    invoice_b = await _invoice(db_pool, profile_id)
+    quoted_id = await _queue_bot_message(db_pool, invoice_a, profile_id)
+
+    result, upload = await _send_upload(db_pool, profile_id, quoted_id)
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        outbox = await _outbox(conn, profile_id)
+        attach_a = await _attach_jobs(conn, invoice_a)
+        attach_b = await _attach_jobs(conn, invoice_b)
+    assert result.invoice_id == invoice_a
+    assert linked == invoice_a
+    assert outbox == [("Synthetic bot message about the invoice.", "BR-F07")]
+    assert attach_a == 1
+    assert attach_b == 0
+
+
+async def test_upload_quote_of_another_profiles_bot_message_answers_br_d14(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: a bot message about another profile's invoice links nothing and asks."""
+    profile_id = f"uploads-{uuid4().hex}"
+    other_profile = f"uploads-{uuid4().hex}"
+    invoice_a = await _invoice(db_pool, profile_id)
+    invoice_b = await _invoice(db_pool, profile_id)
+    other_invoice = await _invoice(db_pool, other_profile)
+    quoted_id = await _queue_bot_message(db_pool, other_invoice, other_profile)
+
+    result, upload = await _send_upload(db_pool, profile_id, quoted_id)
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        replies = await _outbox(conn, profile_id)
+        attach_a = await _attach_jobs(conn, invoice_a)
+        attach_b = await _attach_jobs(conn, invoice_b)
+    expected = MESSAGES["BR-D14"].format(
+        invoices=f"#{invoice_b} {SERIE}-{NUMERO}, #{invoice_a} {SERIE}-{NUMERO}"
+    )
+    assert result.invoice_id is None
+    assert linked is None
+    assert replies == [(expected, "BR-D14")]
+    assert attach_a == 0
+    assert attach_b == 0
+
+
+async def test_upload_quote_of_an_unknown_message_links_the_only_open_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: an unknown quote falls back to the sender's only stuck invoice."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+
+    result, upload = await _send_upload(db_pool, profile_id, f"wamid-{uuid4().hex}")
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        outbox = await _outbox(conn, profile_id)
+        attach_jobs = await _attach_jobs(conn, invoice_id)
+    assert result.invoice_id == invoice_id
+    assert linked == invoice_id
+    assert outbox == []
+    assert attach_jobs == 1
