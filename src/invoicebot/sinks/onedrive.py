@@ -54,6 +54,14 @@ class GraphError(Exception):
         super().__init__(f"Microsoft Graph request failed with status {status}")
 
 
+class FolderMissing(GraphError):
+    """The item to move or its new parent does not exist (R-7.11)."""
+
+
+class FolderExists(GraphError):
+    """An entry with the target name already exists under the new parent (R-7.11)."""
+
+
 class GraphTransient(Exception):
     """A Graph failure the queue retries (429 or 5xx; R-7.3)."""
 
@@ -286,6 +294,30 @@ class GraphDrive:
             raise_graph_error(response, self._account)
             return
         await self._upload_in_session(encoded, data, token)
+
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Move and rename the item at ``path`` to ``new_parent/new_name`` (R-7.11).
+
+        A 404 means the item or the new parent is missing; a 409 means the target
+        name is already taken.
+        """
+        _validate_segment(new_name)
+        encoded_path = _encode_path(path)
+        # Graph takes the parent reference in the same percent-encoded form as the
+        # address URL path, e.g. "/drive/root:/Reembolsos/2026".
+        encoded_parent = _encode_path(new_parent)
+        token = await self._tokens.token()
+        response = await self._client.patch(
+            f"{GRAPH_BASE_URL}/me/drive/root:{encoded_path}",
+            json={"name": new_name, "parentReference": {"path": f"/drive/root:{encoded_parent}"}},
+            headers=auth_headers(token),
+            timeout=self._timeout_s,
+        )
+        if response.status_code == 404:
+            raise FolderMissing(404)
+        if response.status_code == 409:
+            raise FolderExists(409)
+        raise_graph_error(response, self._account)
 
     async def _create_folder(self, parent: str, name: str, *, retry_missing_parent: bool) -> None:
         _validate_segment(name)

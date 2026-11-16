@@ -73,6 +73,15 @@ class Drive(Protocol):
         """Write ``data`` to the file at ``path``, replacing what was there."""
         ...
 
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Move and rename the item at ``path`` to ``new_parent/new_name`` (R-7.11).
+
+        Raises:
+            FolderMissing: the item at ``path`` or ``new_parent`` does not exist.
+            FolderExists: an entry with ``new_name`` already exists under ``new_parent``.
+        """
+        ...
+
 
 class TokenSource(Protocol):
     """A bearer token for one account, fetched when needed (D84)."""

@@ -24,6 +24,7 @@ class FakeDrive:
         self.listings: list[str] = []
         self.created: list[tuple[str, str]] = []
         self.uploads: dict[str, bytes] = {}
+        self.moves: list[tuple[str, str, str]] = []
 
     async def list_names(self, path: str) -> list[str]:
         """Return the entries of a folder; a path that does not exist has none."""
@@ -38,6 +39,10 @@ class FakeDrive:
     async def upload(self, path: str, data: bytes) -> None:
         """Keep the file's bytes at its absolute path."""
         self.uploads[path] = data
+
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Record the move; the fake does not change its folders."""
+        self.moves.append((path, new_parent, new_name))
 
 
 def _sink() -> OneDriveFolderSink:

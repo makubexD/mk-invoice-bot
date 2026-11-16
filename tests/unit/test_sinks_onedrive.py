@@ -15,6 +15,8 @@ from invoicebot.sinks.onedrive import (
     MAX_LIST_PAGES,
     NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
+    FolderExists,
+    FolderMissing,
     GraphDrive,
     GraphError,
     GraphTransient,
@@ -449,3 +451,43 @@ async def test_a_400_maps_to_graph_error() -> None:
 
     assert raised.value.status == 400
     assert "child" not in str(raised.value)
+
+
+async def test_move_patches_the_item_with_the_new_name_and_parent() -> None:
+    """R-7.11: a move PATCHes the encoded item URL with the new name and parent reference."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "synthetic"})
+
+    async with _make_drive(handler) as drive:
+        await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
+
+    assert len(requests) == 1
+    assert requests[0].method == "PATCH"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/Reembolsos/Pendientes/F001-123.pdf"
+    assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
+    assert json.loads(requests[0].content) == {
+        "name": "F001-123_Sent.pdf",
+        "parentReference": {"path": "/drive/root:/Reembolsos/2026"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(404, FolderMissing), (409, FolderExists), (503, GraphTransient)],
+)
+async def test_move_maps_a_failed_status_to_its_error(
+    status: int, error: type[GraphError | GraphTransient]
+) -> None:
+    """R-7.11: a 404 is FolderMissing, a 409 FolderExists and a 5xx GraphTransient."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(error, match=f"status {status}") as raised:
+            await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
+
+    assert raised.value.status == status
