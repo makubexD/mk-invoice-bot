@@ -240,3 +240,13 @@ def test_parse_receipt_refuses_a_non_ascii_hmac_as_a_value_error() -> None:
 
     with pytest.raises(ValueError, match="hmac does not verify"):
         parse_receipt(data, RECEIPT_KEY)
+
+
+@pytest.mark.parametrize("kind", ["sent", "error"])
+def test_parse_receipt_accepts_the_shared_receipt_vectors(kind: str) -> None:
+    """R-7.14: the receipts the laptop agent's tests sign verify with the same key here."""
+    receipt = VECTORS["receipts"][kind]
+
+    parsed = parse_receipt(json.dumps(receipt).encode(), VECTORS["key"].encode())
+
+    assert parsed.job_id == receipt["job_id"]

@@ -31,5 +31,17 @@
         "hr@example.com"
       ]
     }
-  ]
+  ],
+  "receipts": {
+    "sent": {
+      "job_id": "0123456789abcdef0123456789abcdef",
+      "sent_at": "2026-11-16T12:34:56.7890000Z",
+      "hmac": "4c69e76a0ffb86b1c2ffa98d10805a63520a75da50348e53426afbce75e1f43d"
+    },
+    "error": {
+      "job_id": "fedcba9876543210fedcba9876543210",
+      "error": "COMException: outlook refused to send",
+      "hmac": "45b2aec59cc3b8888126b5323931555c7bcf8584cd4478c0b97726818bd92965"
+    }
+  }
 }

@@ -2,8 +2,9 @@ BeforeAll {
     $script:Here = $PSScriptRoot
     . (Join-Path -Path $script:Here -ChildPath '..' '..' 'scripts' 'laptop_agent.ps1')
 
-    $script:Vectors = Get-Content -LiteralPath (Join-Path -Path $script:Here -ChildPath 'vectors.json') -Raw |
-        ConvertFrom-Json
+    $script:Vectors = ConvertFrom-JobJson -Text (
+        Get-Content -LiteralPath (Join-Path -Path $script:Here -ChildPath 'vectors.json') -Raw
+    )
     $script:Allowlist = @('hr@example.com')
 
     function script:New-InvoiceFolder {
@@ -50,6 +51,28 @@ BeforeAll {
         }
         $signed['hmac'] = $hmac
         return [pscustomobject] $signed
+    }
+
+    function script:Get-ReceiptSignature {
+        <#
+        .SYNOPSIS
+            Recompute a receipt's HMAC over its canonical JSON, without the signing helpers.
+        #>
+        param(
+            [System.Collections.IDictionary] $Fields,
+            [string] $Key
+        )
+        $canonical = ConvertTo-CanonicalJson -Value ([pscustomobject] $Fields)
+        $algorithm = [System.Security.Cryptography.HMACSHA256]::new(
+            [System.Text.Encoding]::UTF8.GetBytes($Key)
+        )
+        try {
+            $digest = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+        }
+        finally {
+            $algorithm.Dispose()
+        }
+        return [System.Convert]::ToHexString($digest).ToLowerInvariant()
     }
 
     function script:New-FakeOutlook {
@@ -354,6 +377,50 @@ Describe 'Test-JobFile' {
     }
 }
 
+Describe 'Write-JobReceipt' {
+    It 'R-7.14 a sent receipt has exactly job_id, sent_at and a verifiable hmac' {
+        $receipts = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        $vector = $script:Vectors.receipts.sent
+
+        Write-JobReceipt -ReceiptsFolder $receipts -JobId $vector.job_id -SentAt $vector.sent_at `
+            -Key $script:Vectors.key
+
+        $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath (
+                Join-Path -Path $receipts -ChildPath ($vector.job_id + '.json')) -Raw)
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,hmac'
+        $receipt.job_id | Should -Be $vector.job_id
+        $receipt.sent_at | Should -Be $vector.sent_at
+        $receipt.hmac | Should -Match '^[0-9a-f]{64}$'
+        $receipt.hmac | Should -Be (Get-ReceiptSignature -Key $script:Vectors.key -Fields ([ordered] @{
+                    job_id  = $vector.job_id
+                    sent_at = $vector.sent_at
+                }))
+        # Python's `_signature` produced this vector: the same bytes, same key.
+        $receipt.hmac | Should -Be $vector.hmac
+    }
+
+    It 'R-7.14 an error receipt has exactly job_id, error and a verifiable hmac' {
+        $receipts = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        $vector = $script:Vectors.receipts.error
+
+        Write-JobReceipt -ReceiptsFolder $receipts -JobId $vector.job_id -ErrorText $vector.error `
+            -Key $script:Vectors.key
+
+        $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath (
+                Join-Path -Path $receipts -ChildPath ($vector.job_id + '.json')) -Raw)
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,hmac'
+        $receipt.job_id | Should -Be $vector.job_id
+        $receipt.error | Should -Be $vector.error
+        $receipt.hmac | Should -Match '^[0-9a-f]{64}$'
+        $receipt.hmac | Should -Be (Get-ReceiptSignature -Key $script:Vectors.key -Fields ([ordered] @{
+                    job_id = $vector.job_id
+                    error  = $vector.error
+                }))
+        # Python's `_signature` produced this vector: the same bytes, same key.
+        $receipt.hmac | Should -Be $vector.hmac
+    }
+}
+
 Describe 'Send-Job' {
     It 'R-7.14 sends a valid job once with three attachments and writes a sent receipt' {
         $attachments = @('Formato de reembolsos.xlsx', 'F001-123.pdf', 'F001-123-2.pdf')
@@ -361,7 +428,7 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
@@ -381,7 +448,7 @@ Describe 'Send-Job' {
             -ChildPath ($fixture.Job.job_id + '.json')
         Test-Path -LiteralPath $receiptPath -PathType Leaf | Should -BeTrue
         $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath $receiptPath -Raw)
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at'
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,sent_at,hmac'
         $receipt.job_id | Should -Be $fixture.Job.job_id
         { [DateTimeOffset]::Parse($receipt.sent_at) } | Should -Not -Throw
         $receipt.sent_at | Should -Match 'Z$'
@@ -394,10 +461,10 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
@@ -414,14 +481,14 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook -ThrowOnSend
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $receiptPath = Join-Path -Path (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') `
             -ChildPath ($fixture.Job.job_id + '.json')
         Test-Path -LiteralPath $receiptPath -PathType Leaf | Should -BeTrue
         $receipt = Get-Content -LiteralPath $receiptPath -Raw | ConvertFrom-Json
-        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error'
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,hmac'
         $receipt.job_id | Should -Be $fixture.Job.job_id
         $receipt.error | Should -BeOfType [string]
         $receipt.error.Length | Should -BeLessOrEqual 500
@@ -436,7 +503,7 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile -DryRun
 
         $outlook.CreateItemCalls.Count | Should -Be 0
@@ -452,7 +519,7 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $log = Get-Content -LiteralPath $fixture.LogFile -Raw
@@ -483,7 +550,7 @@ Describe 'Send-Job' {
 
         $outlook = New-FakeOutlook
         Send-Job -Job $verified -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.SentItems.Count | Should -Be 1
@@ -502,7 +569,7 @@ Describe 'Send-Job' {
         Copy-Item -LiteralPath $fixture.JobFile -Destination $given
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $given -Outbox $fixture.Outbox `
+            -StateFile $fixture.StateFile -Path $given -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         Test-Path -LiteralPath $given | Should -BeFalse

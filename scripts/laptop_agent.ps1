@@ -183,6 +183,42 @@ function ConvertFrom-JobJson {
     return ConvertFrom-Json @parameters
 }
 
+function Get-FieldsSignature {
+    <#
+    .SYNOPSIS
+        Return the lowercase hex HMAC-SHA256 of a payload's fields under `-Key`.
+    .DESCRIPTION
+        Signs every field except `hmac`, over the canonical JSON of the rest.
+        Jobs and receipts are signed the same way (R-7.14).
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Fields,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Key
+    )
+
+    $signed = [ordered] @{}
+    foreach ($property in $Fields.PSObject.Properties) {
+        if ($property.Name -ne 'hmac') {
+            $signed[$property.Name] = $property.Value
+        }
+    }
+    $canonical = ConvertTo-CanonicalJson -Value $signed
+    $algorithm = [System.Security.Cryptography.HMACSHA256]::new(
+        [System.Text.Encoding]::UTF8.GetBytes($Key)
+    )
+    try {
+        $digest = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
+    }
+    finally {
+        $algorithm.Dispose()
+    }
+    return [System.Convert]::ToHexString($digest).ToLowerInvariant()
+}
+
 function Get-JobSignature {
     <#
     .SYNOPSIS
@@ -199,23 +235,7 @@ function Get-JobSignature {
         [string] $Key
     )
 
-    $fields = [ordered] @{}
-    foreach ($property in $Job.PSObject.Properties) {
-        if ($property.Name -ne 'hmac') {
-            $fields[$property.Name] = $property.Value
-        }
-    }
-    $canonical = ConvertTo-CanonicalJson -Value $fields
-    $algorithm = [System.Security.Cryptography.HMACSHA256]::new(
-        [System.Text.Encoding]::UTF8.GetBytes($Key)
-    )
-    try {
-        $digest = $algorithm.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($canonical))
-    }
-    finally {
-        $algorithm.Dispose()
-    }
-    return [System.Convert]::ToHexString($digest).ToLowerInvariant()
+    return Get-FieldsSignature -Fields $Job -Key $Key
 }
 
 function Test-SignatureMatch {
@@ -522,8 +542,11 @@ function Write-JobReceipt {
     .SYNOPSIS
         Write `_outbox/receipts/<job id>.json` atomically (R-7.14).
     .DESCRIPTION
-        The receipt has exactly `job_id` and `sent_at`, or `job_id` and
-        `error`, so it parses with the bot's `parse_receipt`.
+        The receipt has exactly `job_id`, `sent_at` and `hmac`, or `job_id`,
+        `error` and `hmac`, so it parses with the bot's `parse_receipt`. The
+        HMAC signs the other fields the way `Get-FieldsSignature` signs a job.
+    .PARAMETER Key
+        The shared secret; only the bot and the laptop agent hold it.
     #>
     [CmdletBinding()]
     param(
@@ -534,7 +557,10 @@ function Write-JobReceipt {
         [AllowNull()]
         [string] $SentAt,
         [AllowNull()]
-        [string] $ErrorText
+        [string] $ErrorText,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Key
     )
 
     if (-not (Test-Path -LiteralPath $ReceiptsFolder -PathType Container)) {
@@ -546,6 +572,7 @@ function Write-JobReceipt {
     else {
         $payload = [ordered] @{ job_id = $JobId; error = [string] $ErrorText }
     }
+    $payload['hmac'] = Get-FieldsSignature -Fields ([pscustomobject] $payload) -Key $Key
     $json = ConvertTo-Json -InputObject $payload -Compress
     $tempName = '{0}.{1}.tmp' -f $JobId, [guid]::NewGuid().ToString('N')
     $tempPath = Join-Path -Path $ReceiptsFolder -ChildPath $tempName
@@ -578,6 +605,8 @@ function Send-Job {
         The local `sent-jobs.txt`, one sent job id per line.
     .PARAMETER Outbox
         The `_outbox/` folder: `receipts/` live there.
+    .PARAMETER Key
+        The shared secret the receipt is signed with (R-7.14).
     .PARAMETER LogFile
         The log to append to; defaults to `<script folder>/agent.log`.
     .PARAMETER DryRun
@@ -598,6 +627,9 @@ function Send-Job {
         [string] $StateFile,
         [Parameter(Mandatory)]
         [string] $Outbox,
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string] $Key,
         [string] $LogFile = '',
         [switch] $DryRun
     )
@@ -618,7 +650,7 @@ function Send-Job {
 
     if (Test-JobIdInState -StateFile $StateFile -JobId $jobId) {
         Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId `
-            -SentAt ([DateTime]::UtcNow.ToString('o'))
+            -SentAt ([DateTime]::UtcNow.ToString('o')) -Key $Key
         Write-AgentLog -LogFile $LogFile -Message (
             'job {0}: already sent, receipt rewritten ({1} attachments)' -f $jobId, $attachments.Count
         )
@@ -656,7 +688,7 @@ function Send-Job {
         if ($errorText.Length -gt $script:MaxErrorLength) {
             $errorText = $errorText.Substring(0, $script:MaxErrorLength)
         }
-        Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId -ErrorText $errorText
+        Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId -ErrorText $errorText -Key $Key
         Write-AgentLog -LogFile $LogFile -Message (
             'job {0}: error ({1}), {2} attachments' -f
                 $jobId, $sendError.Exception.GetType().Name, $attachments.Count
@@ -664,7 +696,7 @@ function Send-Job {
     }
     else {
         Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId `
-            -SentAt ([DateTime]::UtcNow.ToString('o'))
+            -SentAt ([DateTime]::UtcNow.ToString('o')) -Key $Key
         Write-AgentLog -LogFile $LogFile -Message (
             'job {0}: sent ({1} attachments)' -f $jobId, $attachments.Count
         )
@@ -1048,7 +1080,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
         foreach ($validJob in $validJobs) {
             Send-Job -Job $validJob.Job -Path $validJob.Path -Folder $validJob.Folder -Outlook $outlook `
-                -StateFile $stateFile -Outbox $outbox -LogFile $agentLog -DryRun:$DryRun
+                -StateFile $stateFile -Outbox $outbox -Key $agentKey -LogFile $agentLog -DryRun:$DryRun
         }
     }
 
