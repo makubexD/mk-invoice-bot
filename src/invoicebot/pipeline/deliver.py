@@ -179,6 +179,7 @@ class _Delivery:
     head: InvoiceHead
     flow_name: str
     folder: str
+    folder_path: str
     seq: int
     mail: OutgoingMail
 
@@ -371,6 +372,7 @@ async def _prepare(context: _Context, invoice: _Invoice, sinks: _Sinks, prepared
         head=invoice.head,
         flow_name=invoice.flow_name,
         folder=folder.folder,
+        folder_path=folder.path,
         seq=folder.seq,
         mail=mail,
     )
@@ -387,7 +389,7 @@ def _mode(modes: Mapping[str, MailMode], mailer: MailerSink) -> tuple[str, MailM
 
 async def _assisted(context: _Context, delivery: _Delivery, _prepared: _Values, mode: MailMode) -> None:
     """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1)."""
-    eml_path = await mode.deliver(delivery.invoice_id, delivery.mail)
+    eml_path = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     if eml_path is None:
         raise RuntimeError("an assisted mail mode returned no .eml path")
     eml = Path(eml_path)
@@ -442,7 +444,7 @@ async def _automatic(
         await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
 
     try:
-        await mode.deliver(delivery.invoice_id, delivery.mail)
+        await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     except GraphError:
         await _send_failed(context, delivery, prepared, batch_id)
         return

@@ -9,20 +9,25 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from collections.abc import Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Protocol
 
 from invoicebot.config.models import Config, MailerSink
-from invoicebot.sinks.base import Attachment, OutgoingMail
+from invoicebot.sinks.base import Attachment, Drive, OutgoingMail
 from invoicebot.sinks.eml import build_eml
 from invoicebot.sinks.expr import render
+from invoicebot.sinks.laptop_job import LaptopJob, job_document
 
 logger = logging.getLogger(__name__)
 
 #: Directory under the data directory that holds the assisted modes' drafts.
 MAIL_DIRECTORY = "mail"
+
+#: Directory under the OneDrive root that holds the laptop agent's jobs and receipts (R-7.14).
+OUTBOX_DIRECTORY = "_outbox"
 
 #: How a mail mode completes, which picks the handler that files it (D108).
 #: ``accepted`` when the provider takes the mail, ``receipt`` when a later receipt
@@ -82,11 +87,17 @@ class MailMode(Protocol):
     completion: Completion
     done_rule: str
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, folder_path: str) -> str | None:
         """Deliver ``mail`` for ``invoice_id``.
 
+        Args:
+            invoice_id: the invoice the mail belongs to.
+            mail: the rendered mail to deliver.
+            folder_path: the invoice's folder, absolute from the drive root.
+
         Returns:
-            The ``.eml`` path for an assisted mode, ``None`` when the mode sent it.
+            The ``.eml`` path for an assisted mode, the job id for a receipt mode,
+            ``None`` when the mode sent it.
         """
         ...
 
@@ -100,7 +111,7 @@ class DryRun:
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> str | None:
         """Write ``build_eml(mail)`` to ``<data_dir>/mail/<invoice_id>.eml`` (D69).
 
         An existing file is replaced, so an overridden mail rewrites it.
@@ -124,7 +135,7 @@ class GraphSend:
     def __init__(self, mailer: Mailer) -> None:
         self._mailer = mailer
 
-    async def deliver(self, _invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, _invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Send ``mail`` through the injected mailer, once per call (D89)."""
         await self._mailer.send(mail)
 
@@ -144,9 +155,51 @@ class InboxRule:
         self._mailer = mailer
         self._owner_address = owner_address
 
-    async def deliver(self, _invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, _invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Send ``mail`` to the owner's work address through the injected mailer (R-7.7, D108)."""
         await self._mailer.send(replace(mail, to=(self._owner_address,), cc=()))
+
+
+class LaptopOutlook:
+    """The ``laptop_outlook`` mode: write a signed job for the laptop agent (R-7.14, D108, D111).
+
+    The job goes to ``<root>/_outbox/`` on the personal OneDrive, where the agent
+    sends the mail through Outlook classic and writes a receipt back (D108). Its
+    HMAC keeps every other program from making the laptop send.
+    """
+
+    completion: Completion = "receipt"
+    done_rule: str = "BR-D10"
+
+    def __init__(self, drive: Drive, root: str, key: bytes) -> None:
+        self._drive = drive
+        self._root = root
+        self._key = key
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, folder_path: str) -> str:
+        """Upload the signed job for ``mail`` and return its id (R-7.14, D111).
+
+        The job carries ``folder_path`` relative to the drive root, and its
+        attachments are named inside that folder, so the agent never reads outside it.
+
+        Returns:
+            The job id the receipt reports back.
+        """
+        job_id = uuid.uuid4().hex
+        job = LaptopJob(
+            job_id=job_id,
+            invoice_id=invoice_id,
+            folder=folder_path.lstrip("/"),
+            to=mail.to,
+            subject=mail.subject,
+            body=mail.body,
+            attachments=tuple(attachment.name for attachment in mail.attachments),
+        )
+        await self._drive.upload(
+            f"{self._root}/{OUTBOX_DIRECTORY}/{job_id}.json", job_document(job, self._key)
+        )
+        logger.info("laptop job written", extra={"invoice_id": invoice_id, "job_id": job_id})
+        return job_id
 
 
 def mail_modes(
@@ -154,19 +207,23 @@ def mail_modes(
     dry_run: DryRun,
     graph: GraphSend,
     bot_mailer: Mailer,
+    laptop: LaptopOutlook | None,
 ) -> Mapping[str, MailMode]:
     """Return the configured modes, closing real sending when it is off (R-7.7, D89).
 
-    With ``mail.send_enabled`` false, ``graph`` and ``inbox_rule`` map to the dry
-    run, so no mode can send real mail outside production. ``inbox_rule`` is
-    available only when ``mail.owner_work_address`` is set, and it sends through
-    ``bot_mailer``, the bot mailbox's mailer (D108).
+    With ``mail.send_enabled`` false, ``graph``, ``inbox_rule`` and
+    ``laptop_outlook`` map to the dry run, so no mode can send real mail outside
+    production. ``inbox_rule`` is available only when ``mail.owner_work_address``
+    is set, and it sends through ``bot_mailer``, the bot mailbox's mailer (D108).
+    ``laptop_outlook`` is available only when ``laptop`` is given (R-7.14).
     """
     active_graph: MailMode = graph if cfg.mail.send_enabled else dry_run
     modes: dict[str, MailMode] = {"dry_run": dry_run, "graph": active_graph}
     owner_address = cfg.mail.owner_work_address
     if owner_address is not None:
         modes["inbox_rule"] = InboxRule(bot_mailer, owner_address) if cfg.mail.send_enabled else dry_run
+    if laptop is not None:
+        modes["laptop_outlook"] = laptop if cfg.mail.send_enabled else dry_run
     return modes
 
 

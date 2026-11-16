@@ -127,7 +127,7 @@ class CrashingMode:
     completion = "tap"
     done_rule = "BR-D08"
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> str | None:
         """Raise before writing any draft."""
         raise RuntimeError("synthetic crash before the mail step")
 
@@ -141,7 +141,7 @@ class FakeGraphMode:
     def __init__(self) -> None:
         self.calls: list[tuple[int, OutgoingMail]] = []
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Record the send; an automatic mode sends once per call (D89)."""
         self.calls.append((invoice_id, mail))
 
@@ -161,7 +161,7 @@ class RaisingMode:
     def __init__(self, error: Exception) -> None:
         self._error = error
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Raise the installed error instead of sending."""
         raise self._error
 
@@ -176,7 +176,7 @@ class ObservingGraphMode:
         self._pool = pool
         self.seen_state: str | None = None
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Read the batch's state; it must be ``sending`` before the send (D89)."""
         async with self._pool.connection() as conn:
             self.seen_state = await get_batch_state(conn, invoice_id)
@@ -199,7 +199,7 @@ class CancellingGraphMode:
     def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
         self._pool = pool
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail) -> None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Cancel the invoice during the send."""
         async with self._pool.connection() as conn, conn.transaction():
             await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-E05")

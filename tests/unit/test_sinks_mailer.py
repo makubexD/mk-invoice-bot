@@ -16,7 +16,8 @@ import pytest
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
 from invoicebot.sinks.base import Attachment, OutgoingMail
-from invoicebot.sinks.mailer import DryRun, GraphSend, InboxRule, build_mail, mail_modes
+from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
+from invoicebot.sinks.mailer import DryRun, GraphSend, InboxRule, LaptopOutlook, build_mail, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
@@ -41,6 +42,8 @@ SINK = MailerSink(
     body="Hola, adjunto los documentos.",
     attach=["excel_template", "pdf", "xml"],
 )
+
+FOLDER = "/Reembolsos/2026-11/001 - Synthetic"
 
 MAIL = OutgoingMail(
     to=("ops@example.com",),
@@ -111,7 +114,7 @@ async def test_dry_run_writes_parseable_eml(tmp_path: Path) -> None:
     """R-7.7, D69: the assisted mode writes an .eml the owner can open and send."""
     mode = DryRun(tmp_path)
 
-    path = await mode.deliver(7, MAIL)
+    path = await mode.deliver(7, MAIL, FOLDER)
 
     assert mode.completion == "tap"
     assert path == str(tmp_path / "mail" / "7.eml")
@@ -128,8 +131,8 @@ async def test_dry_run_writes_parseable_eml(tmp_path: Path) -> None:
 async def test_dry_run_second_call_replaces_the_eml(tmp_path: Path) -> None:
     """D69: a rewritten mail replaces the earlier draft instead of adding a file."""
     mode = DryRun(tmp_path)
-    first = await mode.deliver(7, MAIL)
-    second = await mode.deliver(7, replace(MAIL, subject="Support release 06/11/2026"))
+    first = await mode.deliver(7, MAIL, FOLDER)
+    second = await mode.deliver(7, replace(MAIL, subject="Support release 06/11/2026"), FOLDER)
 
     assert first == second
     assert _read_eml(second)["Subject"] == "Support release 06/11/2026"
@@ -141,7 +144,7 @@ def test_mail_modes_close_sending_when_disabled(tmp_path: Path) -> None:
     dry_run = DryRun(tmp_path)
     graph = GraphSend(FakeMailer())
 
-    modes = mail_modes(_config(send_enabled=False), dry_run, graph, FakeMailer())
+    modes = mail_modes(_config(send_enabled=False), dry_run, graph, FakeMailer(), None)
 
     assert modes["dry_run"] is dry_run
     assert modes["graph"] is dry_run
@@ -154,8 +157,8 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
     dry_run = DryRun(tmp_path)
     graph = GraphSend(mailer)
 
-    modes = mail_modes(_config(send_enabled=True), dry_run, graph, FakeMailer())
-    result = await modes["graph"].deliver(7, MAIL)
+    modes = mail_modes(_config(send_enabled=True), dry_run, graph, FakeMailer(), None)
+    result = await modes["graph"].deliver(7, MAIL, FOLDER)
 
     assert modes["graph"] is graph
     assert modes["graph"].completion == "accepted"
@@ -165,7 +168,9 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
 
 def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
     """R-7.8, D108: each built mode says how it completes and which rule reports it."""
-    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
+    modes = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+    )
 
     assert (modes["dry_run"].completion, modes["dry_run"].done_rule) == ("tap", "BR-D08")
     assert (modes["graph"].completion, modes["graph"].done_rule) == ("accepted", "BR-D10")
@@ -182,7 +187,7 @@ async def test_inbox_rule_sends_only_to_the_owner_address() -> None:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         mailer = GraphMailer(http, FakeTokens(), 5.0, account="bot")
         mode = InboxRule(mailer, "owner@example.com")
-        await mode.deliver(7, MAIL)
+        await mode.deliver(7, MAIL, FOLDER)
 
     assert len(requests) == 1
     assert requests[0].url.path.endswith("/me/sendMail")
@@ -193,7 +198,9 @@ async def test_inbox_rule_sends_only_to_the_owner_address() -> None:
 
 def test_inbox_rule_reports_accepted_and_br_d13(tmp_path: Path) -> None:
     """R-7.7, D108: the inbox_rule mode completes when Graph accepts it, under BR-D13."""
-    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
+    modes = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+    )
 
     assert (modes["inbox_rule"].completion, modes["inbox_rule"].done_rule) == ("accepted", "BR-D13")
 
@@ -202,7 +209,7 @@ def test_inbox_rule_closes_to_the_dry_run_when_sending_is_disabled(tmp_path: Pat
     """R-7.7, D89: with send_enabled false the inbox_rule entry is the dry run."""
     dry_run = DryRun(tmp_path)
 
-    modes = mail_modes(_config(send_enabled=False), dry_run, GraphSend(FakeMailer()), FakeMailer())
+    modes = mail_modes(_config(send_enabled=False), dry_run, GraphSend(FakeMailer()), FakeMailer(), None)
 
     assert modes["inbox_rule"] is dry_run
 
@@ -212,6 +219,96 @@ def test_inbox_rule_is_absent_without_the_owner_address(tmp_path: Path) -> None:
     cfg = _config(send_enabled=True)
     cfg = cfg.model_copy(update={"mail": cfg.mail.model_copy(update={"owner_work_address": None})})
 
-    modes = mail_modes(cfg, DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
+    modes = mail_modes(cfg, DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None)
 
     assert "inbox_rule" not in modes
+
+
+class FakeDrive:
+    """A drive that records every upload at its absolute path."""
+
+    def __init__(self) -> None:
+        self.uploads: dict[str, bytes] = {}
+
+    async def list_names(self, path: str) -> list[str]:
+        """Return nothing: the laptop mode only uploads."""
+        return []
+
+    async def create_folder(self, parent: str, name: str) -> None:
+        """Accept the creation; the laptop mode only uploads."""
+
+    async def upload(self, path: str, data: bytes) -> None:
+        """Keep the file's bytes at its absolute path."""
+        self.uploads[path] = data
+
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Accept the move; the laptop mode only uploads."""
+
+
+LAPTOP_KEY = b"synthetic-laptop-key"
+LAPTOP_ROOT = "/Personal"
+
+
+def test_laptop_outlook_reports_receipt_and_br_d10() -> None:
+    """R-7.14, D108: the laptop mode completes on a receipt and reports under BR-D10."""
+    mode = LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY)
+
+    assert (mode.completion, mode.done_rule) == ("receipt", "BR-D10")
+
+
+async def test_laptop_outlook_writes_one_signed_job() -> None:
+    """R-7.14, D111: deliver uploads one job whose HMAC verifies and whose folder is the invoice's."""
+    drive = FakeDrive()
+    mode = LaptopOutlook(drive, LAPTOP_ROOT, LAPTOP_KEY)
+
+    job_id = await mode.deliver(7, MAIL, FOLDER)
+
+    assert len(job_id) == 32
+    assert all(char in "0123456789abcdef" for char in job_id)
+    assert list(drive.uploads) == [f"{LAPTOP_ROOT}/_outbox/{job_id}.json"]
+    payload = json.loads(drive.uploads[f"{LAPTOP_ROOT}/_outbox/{job_id}.json"])
+    assert payload["folder"] == "Reembolsos/2026-11/001 - Synthetic"
+    assert payload["attachments"] == ["invoice.xlsx", "invoice.pdf", "invoice.xml"]
+    job = LaptopJob(
+        job_id=payload["job_id"],
+        invoice_id=payload["invoice_id"],
+        folder=payload["folder"],
+        to=tuple(payload["to"]),
+        subject=payload["subject"],
+        body=payload["body"],
+        attachments=tuple(payload["attachments"]),
+    )
+    assert payload["hmac"] == job_hmac(job, LAPTOP_KEY)
+
+
+def test_mail_modes_add_laptop_outlook_only_when_given(tmp_path: Path) -> None:
+    """R-7.14: laptop_outlook exists only when app.py built the mode."""
+    without = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+    )
+    with_laptop = mail_modes(
+        _config(send_enabled=True),
+        DryRun(tmp_path),
+        GraphSend(FakeMailer()),
+        FakeMailer(),
+        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY),
+    )
+
+    assert "laptop_outlook" not in without
+    assert with_laptop["laptop_outlook"] is not with_laptop["dry_run"]
+    assert with_laptop["laptop_outlook"].completion == "receipt"
+
+
+def test_mail_modes_map_laptop_outlook_to_the_dry_run_when_disabled(tmp_path: Path) -> None:
+    """R-7.14, R-7.7: with send_enabled false the laptop_outlook entry is the dry run."""
+    dry_run = DryRun(tmp_path)
+
+    modes = mail_modes(
+        _config(send_enabled=False),
+        dry_run,
+        GraphSend(FakeMailer()),
+        FakeMailer(),
+        LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY),
+    )
+
+    assert modes["laptop_outlook"] is dry_run

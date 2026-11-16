@@ -285,7 +285,7 @@ def _deliver_handlers(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
     bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
-    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer)
+    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, None)
     return (
         make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
         make_folder_status_handler(pool, cfg, drive),
