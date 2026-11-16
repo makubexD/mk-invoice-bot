@@ -26,6 +26,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_YES,
     HELP_PAGADO,
     MESSAGES,
+    PAYMENT_IDS_NOT_PENDING,
     PAYMENT_LINE,
     PAYMENT_SET_LINE,
     state_desc,
@@ -364,7 +365,7 @@ async def test_command_amount_without_a_matching_set_lists_pending_as_br_p03(
 async def test_command_ids_naming_a_non_candidate_answers_br_p03(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.12: the #id form with an id that is not a candidate answers BR-P03."""
+    """BR-P03: the #id form naming a non-candidate lists what is pending and shows no amount."""
     profile_id = _unique("profile")
     flow = _flow()
     older = datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
@@ -381,8 +382,9 @@ async def test_command_ids_naming_a_non_candidate_answers_br_p03(
             PAYMENT_LINE.format(id=second, fecha="01/11", monto="40.00"),
         ]
     )
-    text = MESSAGES["BR-P03"].format(monto="60.00", fecha="15/11", invoice_lines=lines)
+    text = PAYMENT_IDS_NOT_PENDING.format(fecha="15/11", invoice_lines=lines)
     assert replies == [(text, "BR-P03", [])]
+    assert "S/ 60.00" not in text.split("\n", 1)[0]
     assert proposals == []
 
 

@@ -35,6 +35,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_YES,
     HELP_PAGADO,
     MESSAGES,
+    PAYMENT_IDS_NOT_PENDING,
     PAYMENT_LINE,
     PAYMENT_SET_LINE,
 )
@@ -238,11 +239,14 @@ async def _answer_ids(
     """Propose the named candidates and their sum, or list what is pending (R-7.12)."""
     by_id = {candidate.invoice_id: candidate for candidate in found}
     named = [by_id[invoice_id] for invoice_id in parsed.invoice_ids if invoice_id in by_id]
-    amount = _cents_amount(sum(candidate.claimed_cents for candidate in named))
     if len(named) != len(parsed.invoice_ids):
-        text = _pending_text(parsed.paid_on, amount, found)
+        # Only part of the set is known, so its sum would be a wrong amount (BR-P03).
+        text = PAYMENT_IDS_NOT_PENDING.format(
+            fecha=_day_month(parsed.paid_on), invoice_lines=_pending_lines(found)
+        )
         await _reply(conn, msg, _RULE_NO_MATCH, text)
         return
+    amount = _cents_amount(sum(candidate.claimed_cents for candidate in named))
     proposal_id = await add_proposal(
         conn, msg.profile_id, flow.flow_id, parsed.paid_on, amount, [parsed.invoice_ids]
     )
@@ -266,12 +270,16 @@ def _pending_text(
     found: Sequence[Candidate],
 ) -> str:
     """Return BR-P03's text listing every candidate invoice (R-7.12)."""
-    lines = "\n".join(_pending_line(candidate) for candidate in found)
     return MESSAGES[_RULE_NO_MATCH].format(
         monto=_money(amount),
         fecha=_day_month(paid_on),
-        invoice_lines=lines,
+        invoice_lines=_pending_lines(found),
     )
+
+
+def _pending_lines(found: Sequence[Candidate]) -> str:
+    """Return BR-P03's pending list, one line per candidate invoice (R-7.12)."""
+    return "\n".join(_pending_line(candidate) for candidate in found)
 
 
 def _pending_line(candidate: Candidate) -> str:

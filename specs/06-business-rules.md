@@ -123,6 +123,8 @@ BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sen
 | BR-P03 | `/pagado`: no set adds up, or the listed invoices don't sum to the amount | No change | `Ninguna combinación de facturas enviadas suma S/ {monto}. Pendientes de pago:` + `{invoice_lines}` + `Indícalas así: /pagado {fecha} #12 #14` |
 | BR-P04 | `/pagado` confirmed | The payment is stored; folder jobs are queued | `✅ Pago registrado: {n} carpetas marcadas como pagadas.` |
 
+**BR-P03 for the `#id` form** (`rules/messages_es.py` `PAYMENT_IDS_NOT_PENDING`): when a named invoice is not a candidate, the reply has no amount, since only part of the set is known: `Alguna de esas facturas no está pendiente de pago. Pendientes de pago:` + `{invoice_lines}` + `Indícalas así: /pagado {fecha} #12 #14`.
+
 ### System and session (S)
 | ID | Condition | Result | Chat message |
 |---|---|---|---|

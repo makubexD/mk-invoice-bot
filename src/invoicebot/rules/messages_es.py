@@ -453,6 +453,12 @@ PAYMENT_SET_LINE = "Opción {n}: {fecha_min}…, {count} facturas: {ids}"
 BUTTON_OPTION = "Opción {n}"
 #: One invoice line of BR-P03's pending list (R-7.12, BR-P03).
 PAYMENT_LINE = "#{id} · {fecha} · S/ {monto}"
+#: BR-P03 for the ``#id`` form when a named invoice is not pending: the list, no amount (R-7.12).
+PAYMENT_IDS_NOT_PENDING = (
+    "Alguna de esas facturas no está pendiente de pago. Pendientes de pago:\n"
+    "{invoice_lines}\n"
+    "Indícalas así: /pagado {fecha} #12 #14"
+)
 #: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_NONE = "No tienes comprobantes pendientes."
