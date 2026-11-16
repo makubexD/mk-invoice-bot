@@ -478,13 +478,17 @@ Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py tests/unit/tes
 
 ## Step 45: [Por la laptop] follows the flow's modes `[worker]`
 
-Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_actions.py`.
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/pipeline/intake.py`, `src/invoicebot/api/webhook.py`, `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_actions.py`, `tests/integration/test_pipeline_deliver.py`, `tests/integration/test_pipeline_laptop.py`.
 
 - D109: [Por la laptop] is shown only when the flow lists `laptop_outlook`. Today it is shown only when the invoice has a `mail_jobs` row, so an `inbox_rule`-first flow never offers it. Fix: `send_not_confirmed` and its callers get the set of flow ids whose mailer sink lists `laptop_outlook` (computed once in `app.py` from the config and passed in as a frozenset; no config lookup inside the pipeline), and the button is shown when the invoice's flow is in it.
+- `send_not_confirmed` has three callers (the [No llegó] press, the laptop resend in `deliver.py`, and the receipt sweep), so the set is threaded in three parts, each committed green (expand, then contract):
+  - **45a, the press path** (`actions.py`, `intake.py`, `webhook.py`, `app.py`, `test_pipeline_actions.py`): `app.py` gets `_laptop_flow_ids(cfg) -> frozenset[str]` (reusing `_lists_laptop`) and puts it on the webhook deps next to `admin_profiles`; `handle_inbound(..., laptop_flows=frozenset())` (keyword with the same empty default as `admins`) passes it to `handle_press`, and every `Action` takes it as a fifth argument (`_laptop_flows` where unused). `send_not_confirmed(conn, invoice_id, laptop_flows: frozenset[str] | None = None)`: a set shows the button when `load_flow` is in it; `None` keeps the `mail_jobs` rule until 45c.
+  - **45b, the deliver path** (`deliver.py`, `app.py`, `test_pipeline_deliver.py`): `make_deliver_handler` and `make_resend_handler` take `laptop_flows`, held on `_Context`, and pass it to `send_not_confirmed`.
+  - **45c, the sweep and the contract** (`laptop.py`, `app.py`, `actions.py`, `test_pipeline_laptop.py`): `poll_receipts` and `check_overdue` take `laptop_flows` and pass it down; `send_not_confirmed`'s parameter loses its `None` default and the `has_mail_job` rule goes.
 - Update the tests that lock in the `mail_jobs` rule.
 - Tests: R-7.8 an `inbox_rule` invoice whose flow lists `[inbox_rule, laptop_outlook]` gets [Por la laptop] after [No llegó]; R-7.8 a flow without `laptop_outlook` does not.
 
-Test: `uv run pytest -q tests/integration/test_pipeline_actions.py`.
+Test: `uv run pytest -q tests/integration/test_pipeline_actions.py tests/integration/test_pipeline_deliver.py tests/integration/test_pipeline_laptop.py tests/unit/test_app.py`.
 
 ## Step 46: No second laptop job while one is waiting `[worker]`
 
