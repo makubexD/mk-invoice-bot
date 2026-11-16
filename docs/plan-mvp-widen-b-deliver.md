@@ -208,13 +208,14 @@ Test: `uv run pytest -q tests/unit/test_payment_match.py -k parse`.
 
 ## Step 19: The `/pagado` command `[worker]`
 
-Files: `src/invoicebot/pipeline/payments.py` (new), `src/invoicebot/pipeline/commands.py`, `tests/integration/test_payments.py` (new).
+Files: `src/invoicebot/config/models.py`, `tests/unit/test_config_models.py`, `src/invoicebot/pipeline/payments.py` (new), `src/invoicebot/pipeline/commands.py`, `tests/integration/test_payments.py` (new). Sent to the worker as two sub-steps (the config flag, then the command) and committed once.
 
-- `async def pagado(conn, msg, arg, ctx)`, registered as `"pagado"` in `COMMANDS` with its help line. A bad argument answers the help line for `/pagado`. The flow is the sender's flow B with `reimbursement.track_payments: true`; a profile without one gets BR-S07 (or the existing "not for you" reply; check `commands.py`).
-- Amount form: candidates (step 17) → `match_sets`. One set → BR-P01 with [Sí] [No]. Several → BR-P02 with one button per set (D107 label from spec 06, step 1) plus [No]. None → BR-P03 with `{invoice_lines}` of the candidates (`#id serie-numero S/ claimed`, the format of `/pendientes`). The `#id` form: every id is a candidate and the ids sum to the amount → BR-P01; otherwise → BR-P03. BR-P01 and BR-P02 store a proposal first, and their buttons carry `p<proposal_id>:pay:<index>` and `p<proposal_id>:pay_no`.
-- Tests with the fake channel: R-7.12 BR-P01 for one set, with the buttons' ids; R-7.12 BR-P02 lists 2 sets, oldest first; R-7.12 BR-P03 lists the pending invoices; R-7.12 the `#id` form with a wrong sum → BR-P03; R-7.12 an invoice from another profile is never a candidate.
+- `Reimbursement` gets `track_payments: bool = False` (spec 03 §flow B). Test: R-7.12 a flow with `reimbursement: {cap: 50, track_payments: true}` loads; the default is false.
+- `async def pagado(conn, msg, arg, ctx)`, registered as `"pagado"` in `COMMANDS` with its help line. A bad argument answers the help line for `/pagado`. No profile-to-flow mapping exists, so the flow is the first configured flow whose `reimbursement.track_payments` is true; with none, `/pagado` answers its help line. Candidates are always the sender's own (`profile_id`).
+- Amount form: candidates (step 17) → `match_sets`. One set → BR-P01 with [Sí] [No]. Several → BR-P02 with one button per set (D107 label from spec 06, step 1) plus [No]. None → BR-P03 with `{invoice_lines}` of the candidates (`#id serie-numero S/ claimed`, the format of `/pendientes`). The `#id` form carries no amount (R-7.12, step 18): when every id is a candidate, the amount is the sum of their claimed amounts → BR-P01; when any id is not a candidate → BR-P03 with that sum as `{monto}`. BR-P01 and BR-P02 store a proposal first, and their buttons carry `p<proposal_id>:pay:<index>` and `p<proposal_id>:pay_no`.
+- Tests with the fake channel: R-7.12 BR-P01 for one set, with the buttons' ids; R-7.12 BR-P02 lists 2 sets, oldest first; R-7.12 BR-P03 lists the pending invoices; R-7.12 the `#id` form naming an id that is not a candidate → BR-P03; R-7.12 the `#id` form naming candidates → BR-P01 with their summed amount; R-7.12 an invoice from another profile is never a candidate; R-7.12 with no flow tracking payments `/pagado` answers its help line.
 
-Test: `uv run pytest -q tests/integration/test_payments.py -k command`.
+Test: `uv run pytest -q tests/unit/test_config_models.py tests/integration/test_payments.py -k "command or track_payments"`.
 
 ## Step 20: Confirming a payment `[worker]`
 
