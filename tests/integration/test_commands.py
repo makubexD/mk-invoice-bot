@@ -29,7 +29,7 @@ from invoicebot.pipeline.commands import (
     parse_command,
     resolve_target,
 )
-from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.rules.messages_es import (
@@ -1004,6 +1004,22 @@ async def test_portal_proposes_the_link_and_asks_the_owner(
 
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
     assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
+
+
+@pytest.mark.usefixtures("clean_teach_tables")
+async def test_portal_message_through_intake_stores_a_proposed_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: /portal through handle_inbound stores a proposed taught_links row."""
+    setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver())
+    roles = IntakeRoles(teach=setup)
+    msg = _portal_message(f"/portal {ISSUER_RUC_TEXT} {GOOD_URL}")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE, roles=roles)
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
 
 
 @pytest.mark.usefixtures("clean_teach_tables")

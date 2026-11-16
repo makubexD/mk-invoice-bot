@@ -20,6 +20,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.flow_b import merge_flow_data
@@ -62,13 +63,16 @@ class IntakeRoles:
     """The config-derived roles intake hands on: who is an admin and which flows are special.
 
     ``admins`` holds the profile ids a command may reach another profile's invoice for,
-    ``payment_flow`` is the flow whose payments a command may record (R-7.12), and
-    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109).
+    ``payment_flow`` is the flow whose payments a command may record (R-7.12),
+    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109), and
+    ``teach`` is the profiles and resolver a /portal or BR-F02 answer teaches with,
+    None when ``gaps.teach_via_chat`` is off (R-11.4).
     """
 
     admins: frozenset[str] = frozenset()
     payment_flow: PaymentFlow | None = None
     laptop_flows: frozenset[str] = frozenset()
+    teach: TeachSetup | None = None
 
 
 #: No admins, no payment flow and no laptop flows: what a caller without config passes.
@@ -167,7 +171,12 @@ async def _store_with_overrides(
         return IntakeResult(status="stored", invoice_id=await _link_upload(conn, msg))
     command = parse_command(msg.text)
     if command is not None:
-        context = CommandContext(admins=roles.admins, timezone=timezone, payment_flow=roles.payment_flow)
+        context = CommandContext(
+            admins=roles.admins,
+            timezone=timezone,
+            payment_flow=roles.payment_flow,
+            teach=roles.teach,
+        )
         await handle_command(conn, msg, command[0], command[1], context=context)
         return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)

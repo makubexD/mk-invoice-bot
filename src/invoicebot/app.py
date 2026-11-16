@@ -67,6 +67,7 @@ from invoicebot.pipeline.outgoing import queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
@@ -276,7 +277,15 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
         payment_flow=_payment_flow(cfg),
+        teach=_teach_setup(cfg),
     )
+
+
+def _teach_setup(cfg: Config) -> TeachSetup | None:
+    """Return the teaching setup, or None when chat teaching is off (R-11.4, BR-F02)."""
+    if not cfg.gaps.teach_via_chat:
+        return None
+    return TeachSetup(profiles=cfg.profiles, resolver=SystemResolver())
 
 
 def _payment_flow(cfg: Config) -> PaymentFlow | None:

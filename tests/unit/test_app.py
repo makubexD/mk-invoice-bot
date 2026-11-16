@@ -19,6 +19,7 @@ from invoicebot.app import (
     _github_transports,
     _laptop_root_and_key,
     _payment_flow,
+    _teach_setup,
 )
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
@@ -96,6 +97,24 @@ def test_payment_flow_with_no_tracking_flow_is_none(tmp_path: Path) -> None:
     cfg = _config(tmp_path, track_payments=False)
 
     assert _payment_flow(cfg) is None
+
+
+def test_teach_setup_with_chat_teaching_off_is_none() -> None:
+    """R-11.4: with gaps.teach_via_chat false there is no teaching setup."""
+    cfg = load_config(EXAMPLE)
+    off = cfg.model_copy(update={"gaps": cfg.gaps.model_copy(update={"teach_via_chat": False})})
+
+    assert _teach_setup(off) is None
+
+
+def test_teach_setup_with_chat_teaching_on_carries_the_config_profiles() -> None:
+    """R-11.4: with gaps.teach_via_chat true the setup carries the config profiles."""
+    cfg = load_config(EXAMPLE)
+
+    setup = _teach_setup(cfg)
+
+    assert setup is not None
+    assert setup.profiles == cfg.profiles
 
 
 def test_laptop_mode_without_the_agent_key_raises_secret_missing(tmp_path: Path) -> None:
