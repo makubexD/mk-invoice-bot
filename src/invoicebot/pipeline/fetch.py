@@ -52,8 +52,10 @@ from invoicebot.rules.messages_es import (
     KIND_SUBJECT,
     MESSAGES,
 )
+from invoicebot.store import taught_links
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
+from invoicebot.store.gaps import GapRow
 from invoicebot.store.invoices import (
     FileRecord,
     InvoiceHead,
@@ -76,6 +78,8 @@ MANUAL_STATE = "MANUAL_REQUIRED"
 PORTAL_FETCHER = "portal_registry"
 #: The gap kind raised when no fetcher knows the issuer's portal (BR-F02, spec 06 §3).
 PORTAL_MISSING = "PORTAL_MISSING"
+#: The rule id of the question asking the sender for an unknown issuer's portal (BR-F02).
+RULE_ASK_PORTAL = "BR-F02"
 #: The first-wait text per fetcher; every other fetcher says the portal line (D100).
 _WAITING_TEXTS: Mapping[str, str] = {EMAIL_INBOX_FETCHER: FETCH_WAITING_MAIL}
 #: How one fetcher's retry delays are chosen from its flow and invoice (D65, D98).
@@ -304,23 +308,44 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
-        gap_line = await _raise_portal_gap(conn, inputs, reading)
-        text = manual_message(reading, inputs.flow, inputs.attempts, inputs.directory, gap_line=gap_line)
+        gap = await _raise_portal_gap(conn, inputs, reading)
+        text = manual_message(
+            reading, inputs.flow, inputs.attempts, inputs.directory, gap_line=_gap_line(gap)
+        )
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
         )
         await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
+        await _ask_for_portal(conn, inputs, gap, reading)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 
 
-async def _raise_portal_gap(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> str:
-    """Raise PORTAL_MISSING for an unknown portal and return BR-F07's gap line (BR-F02, R-11.2)."""
+async def _raise_portal_gap(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> GapRow | None:
+    """Raise PORTAL_MISSING for an unknown portal and return its gap, or None (BR-F02, R-11.2)."""
     ruc_emisor = reading.value("ruc_emisor")
     if ruc_emisor is None or not _saw_no_portal(inputs.attempts) or reading.document_url is not None:
-        return ""
+        return None
     ctx = GapContext(profiles=inputs.cfg.profiles, gaps_cfg=inputs.cfg.gaps)
-    gap = await raise_gap(conn, ctx, _portal_sighting(inputs, reading, ruc_emisor))
-    return "" if gap.state == "ignored" else GAP_LINE_PORTAL
+    return await raise_gap(conn, ctx, _portal_sighting(inputs, reading, ruc_emisor))
+
+
+def _gap_line(gap: GapRow | None) -> str:
+    """Return BR-F07's portal line when ``gap`` was raised and is not ignored (R-11.3)."""
+    return "" if gap is None or gap.state == "ignored" else GAP_LINE_PORTAL
+
+
+async def _ask_for_portal(
+    conn: AsyncConnection[Any], inputs: _Inputs, gap: GapRow | None, reading: Reading
+) -> None:
+    """Ask the sender for the issuer's portal once, when BR-F02 is due (BR-F02)."""
+    if gap is None or not gap.raised_now or not inputs.cfg.gaps.teach_via_chat:
+        return
+    ruc_emisor = reading.value("ruc_emisor")
+    if ruc_emisor is None or await taught_links.exists(conn, int(ruc_emisor)):
+        return
+    razon_social = reading.value("razon_social") or "este emisor"
+    text = MESSAGES[RULE_ASK_PORTAL].format(razon_social=razon_social, ruc_emisor=ruc_emisor)
+    await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_ASK_PORTAL, text)
 
 
 def _saw_no_portal(attempts: Sequence[Attempt]) -> bool:

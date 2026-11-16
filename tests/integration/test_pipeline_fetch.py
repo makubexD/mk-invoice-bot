@@ -34,7 +34,7 @@ from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL, GAP_LINE_PORTAL
+from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL, GAP_LINE_PORTAL, MESSAGES
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
@@ -260,12 +260,13 @@ def _handler(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     fetcher: Fetcher,
     data_dir: Path,
+    cfg: Config | None = None,
 ) -> Handler:
     """Build the fetch handler with the one-fetcher registry and the portal schedule."""
     directory = _directory()
     return make_fetch_handler(
         pool,
-        _config(),
+        cfg or _config(),
         directory,
         {FLOW: {"portal_registry": fetcher}},
         data_dir,
@@ -279,9 +280,10 @@ async def _run(
     invoice_id: int,
     data_dir: Path,
     job_id: int = 1,
+    cfg: Config | None = None,
 ) -> None:
     """Run the fetch handler once with the given job id."""
-    await _handler(pool, fetcher, data_dir)(_job(invoice_id, job_id))
+    await _handler(pool, fetcher, data_dir, cfg)(_job(invoice_id, job_id))
 
 
 async def _invoice(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None, str | None]:
@@ -369,6 +371,7 @@ async def _clean_gap_state(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -
     async with db_pool.connection() as conn:
         await conn.execute("DELETE FROM invoice_gaps")
         await conn.execute("DELETE FROM gaps")
+        await conn.execute("DELETE FROM taught_links")
     yield
 
 
@@ -845,7 +848,8 @@ async def test_no_portal_exhaustion_raises_one_linked_gap_and_the_gap_line(
     assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
     assert gaps == [(f"portal_missing:{STORE_RUC}", "PORTAL_MISSING")]
     assert links == [f"portal_missing:{STORE_RUC}"]
-    assert len(outbox) == 1
+    # BR-F02 asks this sender for the portal after BR-F07's message.
+    assert len(outbox) == 2
     text, rule_id = outbox[0]
     assert rule_id == "BR-F07"
     assert text.endswith(GAP_LINE_PORTAL)
@@ -1058,3 +1062,81 @@ async def test_reading_document_url_reaches_the_fetcher(
     await _run(db_pool, fetcher, invoice_id, tmp_path)
 
     assert fetcher.invoices[0].document_url == "https://example.test/comprobante"
+
+
+async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F02: the first exhausted invoice of an unknown issuer gets BR-F07 then the portal question."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07", "BR-F02"]
+    ask_text, _rule_id = outbox[1]
+    assert ask_text == MESSAGES["BR-F02"].format(razon_social="este emisor", ruc_emisor=STORE_RUC)
+
+
+async def test_teach_second_no_portal_exhaustion_of_the_issuer_queues_f07_only(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F02: a second exhausted invoice of the same issuer gets BR-F07 only."""
+    first_profile = f"fetch-{uuid4().hex}"
+    second_profile = f"fetch-{uuid4().hex}"
+    first_id = await _fetching_invoice(db_pool, first_profile)
+    second_id = await _fetching_invoice(db_pool, second_profile)
+    for invoice_id in (first_id, second_id):
+        await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), first_id, tmp_path)
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), second_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        first_outbox = await _outbox(conn, first_profile)
+        second_outbox = await _outbox(conn, second_profile)
+    assert [rule_id for _text, rule_id in first_outbox] == ["BR-F07", "BR-F02"]
+    assert [rule_id for _text, rule_id in second_outbox] == ["BR-F07"]
+
+
+async def test_teach_via_chat_off_queues_f07_only(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F02: with gaps.teach_via_chat false the exhausted invoice gets BR-F07 only."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+    cfg = _config()
+    off = cfg.model_copy(update={"gaps": cfg.gaps.model_copy(update={"teach_via_chat": False})})
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path, cfg=off)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+
+
+async def test_teach_existing_taught_link_queues_f07_only(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F02: an issuer whose taught link is already stored gets BR-F07 only."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
+            VALUES (%s, %s, %s, 'proposed')
+            """,
+            (int(STORE_RUC), "https://portal.example.pe/consulta", profile_id),
+        )
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
