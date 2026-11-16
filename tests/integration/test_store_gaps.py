@@ -31,6 +31,7 @@ OLD_FP = "portal_missing:20000000003"
 RECENT_FP = "portal_missing:20000000004"
 DUE_FP = "portal_missing:20000000005"
 IGNORED_FP = "portal_missing:20000000006"
+IGNORED_OLD_FP = "portal_missing:20000000007"
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -126,6 +127,27 @@ async def test_unreported_overdue_returns_only_gaps_raised_over_24_hours_ago(
         await conn.execute(
             "UPDATE gaps SET raised_at = now() - interval '1 hour' WHERE fingerprint = %s",
             (RECENT_FP,),
+        )
+        overdue = await unreported_overdue(conn)
+
+    assert [gap.fingerprint for gap in overdue] == [OLD_FP]
+
+
+async def test_unreported_overdue_skips_an_ignored_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.11: unreported_overdue skips an ignored gap raised 25 h ago without issue."""
+    async with db_pool.connection() as conn:
+        await upsert_gap(conn, PORTAL_MISSING, OLD_FP, SUBJECT, None)
+        await upsert_gap(conn, PORTAL_MISSING, IGNORED_OLD_FP, SUBJECT, None)
+        await conn.execute(
+            "UPDATE gaps SET raised_at = now() - interval '25 hours' WHERE fingerprint = %s",
+            (OLD_FP,),
+        )
+        await conn.execute(
+            "UPDATE gaps SET raised_at = now() - interval '25 hours', state = 'ignored'"
+            " WHERE fingerprint = %s",
+            (IGNORED_OLD_FP,),
         )
         overdue = await unreported_overdue(conn)
 

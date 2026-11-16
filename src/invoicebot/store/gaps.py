@@ -64,22 +64,23 @@ async def upsert_gap(
     cur = await conn.execute(
         """
         WITH previous AS (
-            SELECT fingerprint, raised_at FROM gaps WHERE fingerprint = %s
+            SELECT fingerprint, raised_at FROM gaps WHERE fingerprint = %(fingerprint)s
         ),
         upserted AS (
             INSERT INTO gaps AS g
                 (fingerprint, kind, subject, state, count, first_seen, last_seen, raised_at)
-            VALUES (%s, %s, %s, 'open', 1, now(), now(), CASE WHEN 1 >= %s::int THEN now() END)
+            VALUES (%(fingerprint)s, %(kind)s, %(subject)s, 'open', 1, now(), now(),
+                    CASE WHEN 1 >= %(threshold)s::int THEN now() END)
             ON CONFLICT (fingerprint) DO UPDATE
             SET count = CASE
-                    WHEN %s::int IS NOT NULL
-                     AND g.last_seen < now() - make_interval(days => %s::int)
+                    WHEN %(window_days)s::int IS NOT NULL
+                     AND g.last_seen < now() - make_interval(days => %(window_days)s::int)
                     THEN 1
                     ELSE g.count + 1
                 END,
                 first_seen = CASE
-                    WHEN %s::int IS NOT NULL
-                     AND g.last_seen < now() - make_interval(days => %s::int)
+                    WHEN %(window_days)s::int IS NOT NULL
+                     AND g.last_seen < now() - make_interval(days => %(window_days)s::int)
                     THEN now()
                     ELSE g.first_seen
                 END,
@@ -87,11 +88,11 @@ async def upsert_gap(
                 raised_at = CASE
                     WHEN g.raised_at IS NULL
                      AND (CASE
-                              WHEN %s::int IS NOT NULL
-                               AND g.last_seen < now() - make_interval(days => %s::int)
+                              WHEN %(window_days)s::int IS NOT NULL
+                               AND g.last_seen < now() - make_interval(days => %(window_days)s::int)
                               THEN 1
                               ELSE g.count + 1
-                          END) >= %s::int
+                          END) >= %(threshold)s::int
                     THEN now()
                     ELSE g.raised_at
                 END
@@ -104,20 +105,13 @@ async def upsert_gap(
         FROM upserted AS u
         LEFT JOIN previous AS p ON p.fingerprint = u.fingerprint
         """,
-        (
-            fingerprint,
-            fingerprint,
-            kind.kind,
-            subject,
-            kind.threshold,
-            kind.window_days,
-            kind.window_days,
-            kind.window_days,
-            kind.window_days,
-            kind.window_days,
-            kind.window_days,
-            kind.threshold,
-        ),
+        {
+            "fingerprint": fingerprint,
+            "kind": kind.kind,
+            "subject": subject,
+            "threshold": kind.threshold,
+            "window_days": kind.window_days,
+        },
     )
     row = await cur.fetchone()
     if row is None:
@@ -212,7 +206,7 @@ async def alert_due(conn: AsyncConnection[Any], realert_days: int, kinds: Sequen
 
 
 async def unreported_overdue(conn: AsyncConnection[Any]) -> list[GapRow]:
-    """Return raised gaps with no issue and no alert more than 24 h after the raise (R-11.11).
+    """Return raised, non-ignored gaps with no issue and no alert more than 24 h after the raise (R-11.11).
 
     Does not commit.
     """
@@ -222,6 +216,7 @@ async def unreported_overdue(conn: AsyncConnection[Any]) -> list[GapRow]:
                raised_at, last_alert_at, issue_url, hint_url
         FROM gaps
         WHERE raised_at IS NOT NULL
+          AND state <> 'ignored'
           AND raised_at < now() - interval '24 hours'
           AND issue_url IS NULL
           AND last_alert_at IS NULL
