@@ -146,6 +146,12 @@ class FakeGraphMode:
         self.calls.append((invoice_id, mail))
 
 
+class FakeInboxRuleMode(FakeGraphMode):
+    """An automatic mode whose done rule is BR-D13: Graph accepted the inbox_rule send (R-7.8)."""
+
+    done_rule = "BR-D13"
+
+
 class RaisingMode:
     """An automatic mode whose send raises the error the test installed (BR-D01, R-7.3, BR-D03)."""
 
@@ -620,6 +626,34 @@ async def test_graph_sends_once_and_closes_as_done(
     assert outbox == [(MESSAGES["BR-D10"].format(folder=folder), "BR-D10", [])]
     assert not photo.exists()
     assert photo_path is None
+
+
+async def test_inbox_rule_send_closes_as_done_and_offers_no_llego(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.8: an accepted BR-D13 send makes the batch sent, the invoice DONE, one job and [No llegó]."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="inbox_rule")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeInboxRuleMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="inbox_rule")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    folder = f"{FOLDER_PREFIX}{flow_data['seq']}_{COMERCIO}"
+    text, rule_id, buttons = outbox[0]
+    assert [call[0] for call in mode.calls] == [invoice_id]
+    assert invoice == ("DONE", "BR-D13")
+    assert batch_state == "sent"
+    assert jobs == ["folder_status"]
+    assert text == MESSAGES["BR-D13"].format(folder=folder)
+    assert rule_id == "BR-D13"
+    assert buttons == [{"id": button_id(invoice_id, "not_arrived"), "title": "No llegó"}]
 
 
 async def test_a_sent_graph_delivery_leaves_one_folder_status_job(

@@ -45,13 +45,13 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
-from invoicebot.pipeline.actions import SENT_ACTION
+from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_SENT, MESSAGES, modes_desc
+from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, MESSAGES, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
@@ -100,6 +100,8 @@ FAILED_BATCH_STATE = "failed"
 DONE_STATE = "DONE"
 #: BR-D03: the rule that reports a mail that could not be sent.
 RULE_SEND_FAILED = "BR-D03"
+#: BR-D13: the rule that accepts the ``inbox_rule`` send and offers [No llegó] (R-7.8).
+RULE_INBOX = "BR-D13"
 #: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
 RULE_SEND_FAILED_ADMIN = "BR-D03_admin"
 #: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
@@ -463,12 +465,19 @@ async def _automatic(
             delivery.invoice_id,
             mode.done_rule,
             MESSAGES[mode.done_rule].format(folder=delivery.folder),
-            [],
+            _done_buttons(delivery.invoice_id, mode.done_rule),
         )
         photos = await take_photo_paths(conn, delivery.invoice_id)
 
     for path in photos:
         await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
+    """Return BR-D13's [No llegó] button, or none for any other done rule (R-7.8)."""
+    if done_rule != RULE_INBOX:
+        return []
+    return [Button(id=button_id(invoice_id, NOT_ARRIVED_ACTION), title=BUTTON_NOT_ARRIVED)]
 
 
 type _CompletionHandler = Callable[[_Context, _Delivery, _Values, MailMode], Awaitable[None]]

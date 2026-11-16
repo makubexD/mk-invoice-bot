@@ -66,6 +66,8 @@ from invoicebot.store.invoices import (
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
+#: BR-D13's [No llegó] action (R-7.8); not in ACTIONS until its handler exists.
+NOT_ARRIVED_ACTION = "not_arrived"
 
 CONFIRMING_STATE = "CONFIRMING"
 ROUTING_STATE = "ROUTING"

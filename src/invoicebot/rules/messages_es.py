@@ -334,6 +334,8 @@ def docs_desc(kinds: Sequence[str]) -> str:
 MAIL_MODE_DESC: dict[str, str] = {"dry_run": "borrador .eml"}
 #: The [Ya lo envié] button's label (R-8.1).
 BUTTON_SENT = "Ya lo envié"
+#: BR-D13's [No llegó] button (R-7.8).
+BUTTON_NOT_ARRIVED = "No llegó"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
