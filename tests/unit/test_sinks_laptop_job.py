@@ -25,6 +25,7 @@ def _job(vector: dict[str, Any]) -> LaptopJob:
     return LaptopJob(
         job_id=vector["job_id"],
         invoice_id=vector["invoice_id"],
+        folder=vector["folder"],
         to=tuple(vector["to"]),
         subject=vector["subject"],
         body=vector["body"],
@@ -51,6 +52,22 @@ def test_attachment_outside_invoice_folder_raises(name: str) -> None:
 
     with pytest.raises(ValueError, match="invalid attachment"):
         job_document(job, KEY)
+
+
+@pytest.mark.parametrize("folder", ["../x", "a//b", "/a", "C:x", "a/../b", ""])
+def test_folder_outside_invoice_root_raises(folder: str) -> None:
+    """R-7.14, D111: a folder that is not a relative path of plain names is refused."""
+    job = replace(_job(JOBS[0]), folder=folder)
+
+    with pytest.raises(ValueError, match="invalid folder"):
+        job_document(job, KEY)
+
+
+def test_nested_folder_is_accepted_and_documented() -> None:
+    """R-7.14, D111: a nested folder is accepted and appears in the job document."""
+    job = _job(JOBS[0])
+
+    assert json.loads(job_document(job, KEY))["folder"] == "Reembolsos/2026-11/F001-123"
 
 
 def test_bad_job_id_raises() -> None:

@@ -7,7 +7,8 @@
         "F001-123.pdf"
       ],
       "body": "Hola, adjunto el reembolso año 2026.",
-      "hmac": "772066253a58597a943ddce4f75a2dd7f7fcaf4f92dcd74b791112557cfe75eb",
+      "folder": "Reembolsos/2026-11/F001-123",
+      "hmac": "9aba7878ed08ea53945366b2dcd2c76cd85d2bb299ee50ced008ce1c8ff0c098",
       "invoice_id": 1,
       "job_id": "0123456789abcdef0123456789abcdef",
       "subject": "Support release 0001",
@@ -21,7 +22,8 @@
         "F001-124.pdf"
       ],
       "body": "Hola, adjunto los documentos.",
-      "hmac": "3e031f3698af18d906de9c55daff93a2d28fa00b39ff62c54a263aa6ad74536d",
+      "folder": "Reembolsos/2026-11/F001-124",
+      "hmac": "1952176defbef49754a11903b41f19ee53b78ed6b79c3a24029b3fa73e2c662b",
       "invoice_id": 2,
       "job_id": "fedcba9876543210fedcba9876543210",
       "subject": "Support release 0002",

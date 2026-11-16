@@ -1,9 +1,10 @@
-"""The ``laptop_outlook`` job and receipt file formats (R-7.14, D61).
+"""The ``laptop_outlook`` job and receipt file formats (R-7.14, D61, D111).
 
 A job is the JSON the bot drops in the personal OneDrive ``_outbox/``: the mail
-to send plus an HMAC over every other field, so only the bot can make the
-laptop send. A receipt is the JSON the agent writes back into
-``_outbox/receipts/``: the sent time, or the error.
+to send, the invoice's folder relative to the OneDrive root, and an HMAC over
+every other field, so only the bot can make the laptop send. A receipt is the
+JSON the agent writes back into ``_outbox/receipts/``: the sent time, or the
+error.
 """
 
 from __future__ import annotations
@@ -31,16 +32,19 @@ _ERROR_KEYS = frozenset({"job_id", "error"})
 _PATH_CHARS = ("/", "\\", ":", "\x00")
 
 
-#: One mail the laptop agent sends through Outlook classic (R-7.14).
+#: One mail the laptop agent sends through Outlook classic (R-7.14, D111).
 #:
-#: ``attachments`` are plain file names inside the invoice's folder; the agent
-#: refuses a job whose HMAC does not verify or whose attachments leave it.
+#: ``folder`` is the invoice's folder relative to the OneDrive root, each
+#: ``/``-separated segment a plain name. ``attachments`` are plain file names
+#: inside that folder; the agent refuses a job whose HMAC does not verify or
+#: whose folder or attachments leave the root.
 @dataclass(frozen=True)
 class LaptopJob:
-    """One mail handed to the laptop agent: its id, invoice and content."""
+    """One mail handed to the laptop agent: its id, invoice, folder and content."""
 
     job_id: str
     invoice_id: int
+    folder: str
     to: tuple[str, ...]
     subject: str
     body: str
@@ -67,7 +71,7 @@ def job_hmac(job: LaptopJob, key: bytes) -> str:
         The 64-character lowercase hex digest.
 
     Raises:
-        ValueError: the job id or an attachment is not valid.
+        ValueError: the job id, folder or an attachment is not valid.
     """
     return _signature(_job_fields(job), key)
 
@@ -83,7 +87,7 @@ def job_document(job: LaptopJob, key: bytes) -> bytes:
         Canonical UTF-8 JSON, with lists in place of the job's tuples.
 
     Raises:
-        ValueError: the job id or an attachment is not valid.
+        ValueError: the job id, folder or an attachment is not valid.
     """
     fields = _job_fields(job)
     return _canonical({**fields, "hmac": _signature(fields, key)})
@@ -127,20 +131,32 @@ def parse_receipt(data: bytes) -> Receipt:
 
 
 def _job_fields(job: LaptopJob) -> dict[str, object]:
-    """Return the job's signed fields, refusing an invalid id or attachment."""
+    """Return the job's signed fields, refusing an invalid id, folder or attachment."""
     if JOB_ID_PATTERN.fullmatch(job.job_id) is None:
         raise ValueError(f"invalid job id {job.job_id!r}")
+    if not _is_plain_folder(job.folder):
+        raise ValueError(f"invalid folder {job.folder!r}")
     for name in job.attachments:
         if not _is_plain_file_name(name):
             raise ValueError(f"invalid attachment {name!r}")
     return {
         "job_id": job.job_id,
         "invoice_id": job.invoice_id,
+        "folder": job.folder,
         "to": list(job.to),
         "subject": job.subject,
         "body": job.body,
         "attachments": list(job.attachments),
     }
+
+
+def _is_plain_folder(folder: str) -> bool:
+    """Return whether ``folder`` is a relative path of plain names (D111)."""
+    return (
+        bool(folder)
+        and not folder.startswith("/")
+        and all(_is_plain_file_name(segment) for segment in folder.split("/"))
+    )
 
 
 def _is_plain_file_name(name: str) -> bool:
