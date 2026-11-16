@@ -22,7 +22,7 @@ from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.outgoing import queue_admin_alert
 from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import KIND_DESC, MESSAGES
+from invoicebot.rules.messages_es import GAP_DIGEST_LINE, KIND_DESC, MESSAGES
 from invoicebot.store.db import Pool
 from invoicebot.store.gaps import (
     GapRow,
@@ -30,11 +30,15 @@ from invoicebot.store.gaps import (
     get_gap,
     mark_alerted,
     mark_reported,
+    unreported_overdue,
     upsert_gap,
 )
 
 #: The message key and rule id of one gap's owner alert (spec 06 §3).
 RULE_GAP_ADMIN = "GAP_admin"
+
+#: The message key and rule id of the daily digest of the digest kinds (spec 06 §3).
+RULE_GAP_DIGEST = "GAP_DIGEST_admin"
 
 
 @dataclass(frozen=True)
@@ -102,6 +106,41 @@ async def issue_opened(
             _gap_admin_text(gap.kind, gap.subject, issue_url),
         )
         await mark_alerted(conn, [gap_fingerprint])
+
+
+async def daily_digest(pool: Pool, profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:
+    """Send the digest and the overdue-gap alerts in one transaction (R-11.8, R-11.11).
+
+    The digest lists every due gap of ``gaps.digest_kinds``, then stamps their
+    alert time. A non-digest gap raised over a day ago that has neither a link
+    nor an alert is alerted on its own, without a link.
+    """
+    async with pool.connection() as conn, conn.transaction():
+        await _queue_digest(conn, profiles, gaps_cfg)
+        await _queue_overdue(conn, profiles, gaps_cfg)
+
+
+async def _queue_digest(conn: AsyncConnection[Any], profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:
+    """Queue one digest per admin listing every due digest gap, then stamp them (R-11.8)."""
+    due = await alert_due(conn, gaps_cfg.realert_days, gaps_cfg.digest_kinds)
+    if not due:
+        return
+    lines = "\n".join(
+        GAP_DIGEST_LINE.format(kind_desc=KIND_DESC[gap.kind], subject=gap.subject) for gap in due
+    )
+    text = MESSAGES[RULE_GAP_DIGEST].format(gap_lines=lines)
+    await queue_admin_alert(conn, profiles, RULE_GAP_DIGEST, text)
+    await mark_alerted(conn, [gap.fingerprint for gap in due])
+
+
+async def _queue_overdue(conn: AsyncConnection[Any], profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:
+    """Queue an alert for each overdue non-digest gap that was never alerted (R-11.11)."""
+    overdue = [gap for gap in await unreported_overdue(conn) if gap.kind not in gaps_cfg.digest_kinds]
+    if not overdue:
+        return
+    for gap in overdue:
+        await queue_admin_alert(conn, profiles, RULE_GAP_ADMIN, _gap_admin_text(gap.kind, gap.subject, None))
+    await mark_alerted(conn, [gap.fingerprint for gap in overdue])
 
 
 async def writes_today(pool: Pool, tz: str) -> int:

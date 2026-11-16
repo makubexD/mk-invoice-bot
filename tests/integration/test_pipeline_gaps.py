@@ -14,7 +14,14 @@ from invoicebot.config.models import Profile
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.github.issue_text import IssueFields
-from invoicebot.pipeline.gaps import GapContext, GapSighting, issue_opened, raise_gap, writes_today
+from invoicebot.pipeline.gaps import (
+    GapContext,
+    GapSighting,
+    daily_digest,
+    issue_opened,
+    raise_gap,
+    writes_today,
+)
 from invoicebot.store.gaps import upsert_gap
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -97,6 +104,29 @@ async def _outbox_rows(conn: AsyncConnection[Any], channel: str) -> list[tuple[s
     return [(str(row[0]), row[1]) for row in await cur.fetchall()]
 
 
+async def _rule_rows(conn: AsyncConnection[Any], rule_id: str) -> list[tuple[str, str]]:
+    """Return the recipient and text of one rule's outbox rows."""
+    cur = await conn.execute(
+        """SELECT "to", payload_json->>'text' FROM outbox
+           WHERE payload_json->>'rule_id' = %s ORDER BY "to" """,
+        (rule_id,),
+    )
+    return [(str(row[0]), str(row[1])) for row in await cur.fetchall()]
+
+
+async def _insert_raised_gap(
+    conn: AsyncConnection[Any], kind: str, gap_fingerprint: str, subject: str
+) -> None:
+    """Insert an already-raised gap for the digest tests."""
+    await conn.execute(
+        """
+        INSERT INTO gaps (fingerprint, kind, subject, state, raised_at)
+        VALUES (%s, %s, %s, 'open', now())
+        """,
+        (gap_fingerprint, kind, subject),
+    )
+
+
 async def test_raising_twice_queues_one_github_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -144,6 +174,58 @@ async def test_digest_only_parser_miss_queues_no_alert(
 
     assert second.raised_now is True
     assert count_row == (0,)
+
+
+async def test_daily_digest_lists_each_due_gap_once_per_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.8: two PARSER_MISS and one UNROUTED_BUYER gap make one three-line digest per admin, once."""
+    ctx = _context(github_enabled=False)
+    async with db_pool.connection() as conn:
+        await _insert_raised_gap(conn, "PARSER_MISS", "parser_miss:issuer-a", "Emisor A")
+        await _insert_raised_gap(conn, "PARSER_MISS", "parser_miss:issuer-b", "Emisor B")
+        await _insert_raised_gap(conn, "UNROUTED_BUYER", "unrouted:buyer-a", "Comprador A")
+
+    await daily_digest(db_pool, ctx.profiles, ctx.gaps_cfg)
+    async with db_pool.connection() as conn:
+        first = await _rule_rows(conn, "GAP_DIGEST_admin")
+    await daily_digest(db_pool, ctx.profiles, ctx.gaps_cfg)
+    async with db_pool.connection() as conn:
+        second = await _rule_rows(conn, "GAP_DIGEST_admin")
+
+    assert [recipient for recipient, _ in first] == ["segundo", "yo"]
+    assert all(text.count("•") == 3 for _, text in first)
+    assert second == first
+
+
+async def test_daily_digest_alerts_an_overdue_gap_without_a_link_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.11: a PORTAL_MISSING gap raised 25 h ago alerts each admin once, without a link."""
+    ctx = _context(github_enabled=False)
+    async with db_pool.connection() as conn:
+        await _insert_raised_gap(conn, "PORTAL_MISSING", GAP_FINGERPRINT, SUBJECT)
+        await conn.execute(
+            "UPDATE gaps SET raised_at = now() - interval '25 hours' WHERE fingerprint = %s",
+            (GAP_FINGERPRINT,),
+        )
+
+    await daily_digest(db_pool, ctx.profiles, ctx.gaps_cfg)
+    async with db_pool.connection() as conn:
+        first = await _rule_rows(conn, "GAP_admin")
+        cur = await conn.execute(
+            "SELECT last_alert_at IS NOT NULL FROM gaps WHERE fingerprint = %s",
+            (GAP_FINGERPRINT,),
+        )
+        alerted = await cur.fetchone()
+    await daily_digest(db_pool, ctx.profiles, ctx.gaps_cfg)
+    async with db_pool.connection() as conn:
+        second = await _rule_rows(conn, "GAP_admin")
+
+    assert [recipient for recipient, _ in first] == ["segundo", "yo"]
+    assert all("Issue:" not in text for _, text in first)
+    assert alerted == (True,)
+    assert second == first
 
 
 async def test_issue_opened_reports_and_alerts_with_the_link(
