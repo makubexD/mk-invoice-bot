@@ -44,6 +44,12 @@ def _test_database_url() -> str:
     return os.environ.get("TEST_DATABASE_URL", DEFAULT_TEST_DATABASE_URL)
 
 
+@pytest.fixture
+def test_database_url() -> str:
+    """Return the URL of the test database this session resets and migrates."""
+    return _test_database_url()
+
+
 def _maintenance_dsn(url: str) -> tuple[str, str]:
     """Split a test URL into the maintenance-server DSN and the database name."""
     params = conninfo.conninfo_to_dict(url)
