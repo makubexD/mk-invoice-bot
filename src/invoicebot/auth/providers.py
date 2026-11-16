@@ -24,6 +24,8 @@ MAIL_READ_SCOPE = "Mail.Read"
 MAIL_SEND_SCOPE = "Mail.Send"
 #: The mailer mode and inbox provider that talk to Graph (R-7.6, R-6.5).
 GRAPH_MODE = "graph"
+#: The mailer mode that sends through the bot's mailbox for the owner's rule (R-7.7, D108).
+INBOX_RULE_MODE = "inbox_rule"
 #: OneDrive storage targets name their account with this prefix (R-7.1, D98).
 ONEDRIVE_TARGET_PREFIX = "onedrive_"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
@@ -64,13 +66,21 @@ def _files_accounts(cfg: Config) -> set[str]:
 
 
 def _mailer_accounts(cfg: Config) -> set[str]:
-    """Return the accounts a Graph mailer sends from across every flow (R-7.6)."""
-    return {
-        sink.account
-        for flow in cfg.flows.values()
-        for sink in flow.sinks
-        if isinstance(sink, MailerSink) and GRAPH_MODE in sink.modes
-    }
+    """Return the accounts a Graph mailer sends from across every flow (R-7.6, R-7.7).
+
+    The ``inbox_rule`` mode sends through the bot's own mailbox, so that account
+    needs ``Mail.Send`` too (D108).
+    """
+    accounts: set[str] = set()
+    for flow in cfg.flows.values():
+        for sink in flow.sinks:
+            if not isinstance(sink, MailerSink):
+                continue
+            if GRAPH_MODE in sink.modes:
+                accounts.add(sink.account)
+            if INBOX_RULE_MODE in sink.modes:
+                accounts.add(sink.inbox_rule_account)
+    return accounts
 
 
 def _inbox_accounts(cfg: Config) -> set[str]:

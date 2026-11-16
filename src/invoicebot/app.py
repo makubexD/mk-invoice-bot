@@ -80,6 +80,8 @@ WHATSAPP_SECRETS = frozenset(
 )
 #: The Microsoft account flow B files through (R-7.1); config pins it to ``personal``.
 MICROSOFT_ACCOUNT = "personal"
+#: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
+BOT_ACCOUNT = "bot"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
@@ -281,7 +283,9 @@ def _deliver_handlers(
     provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
     drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
-    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer))
+    bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
+    bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
+    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer)
     return (
         make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
         make_folder_status_handler(pool, cfg, drive),

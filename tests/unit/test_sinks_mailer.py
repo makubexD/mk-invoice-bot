@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import email
 import email.policy
+import json
 from dataclasses import replace
 from datetime import date
 from email.message import Message
 from pathlib import Path
 
+import httpx
 import pytest
 
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
 from invoicebot.sinks.base import Attachment, OutgoingMail
-from invoicebot.sinks.mailer import DryRun, GraphSend, build_mail, mail_modes
+from invoicebot.sinks.mailer import DryRun, GraphSend, InboxRule, build_mail, mail_modes
+from invoicebot.sinks.mailer_graph import GraphMailer
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 
@@ -56,6 +59,13 @@ class FakeMailer:
 
     async def send(self, mail: OutgoingMail) -> None:
         self.sent.append(mail)
+
+
+class FakeTokens:
+    """A TokenSource that always hands out the same synthetic token."""
+
+    async def token(self) -> str:
+        return "synthetic-bearer-value"
 
 
 def _parse(data: bytes) -> Message:
@@ -131,7 +141,7 @@ def test_mail_modes_close_sending_when_disabled(tmp_path: Path) -> None:
     dry_run = DryRun(tmp_path)
     graph = GraphSend(FakeMailer())
 
-    modes = mail_modes(_config(send_enabled=False), dry_run, graph)
+    modes = mail_modes(_config(send_enabled=False), dry_run, graph, FakeMailer())
 
     assert modes["dry_run"] is dry_run
     assert modes["graph"] is dry_run
@@ -144,7 +154,7 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
     dry_run = DryRun(tmp_path)
     graph = GraphSend(mailer)
 
-    modes = mail_modes(_config(send_enabled=True), dry_run, graph)
+    modes = mail_modes(_config(send_enabled=True), dry_run, graph, FakeMailer())
     result = await modes["graph"].deliver(7, MAIL)
 
     assert modes["graph"] is graph
@@ -155,7 +165,53 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
 
 def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
     """R-7.8, D108: each built mode says how it completes and which rule reports it."""
-    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()))
+    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
 
     assert (modes["dry_run"].completion, modes["dry_run"].done_rule) == ("tap", "BR-D08")
     assert (modes["graph"].completion, modes["graph"].done_rule) == ("accepted", "BR-D10")
+
+
+async def test_inbox_rule_sends_only_to_the_owner_address() -> None:
+    """R-7.7, D108: the Graph request replaces the sink's HR recipients with the owner's address."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(202)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        mailer = GraphMailer(http, FakeTokens(), 5.0, account="bot")
+        mode = InboxRule(mailer, "owner@example.com")
+        await mode.deliver(7, MAIL)
+
+    assert len(requests) == 1
+    assert requests[0].url.path.endswith("/me/sendMail")
+    message = json.loads(requests[0].content)["message"]
+    assert message["toRecipients"] == [{"emailAddress": {"address": "owner@example.com"}}]
+    assert message["ccRecipients"] == []
+
+
+def test_inbox_rule_reports_accepted_and_br_d13(tmp_path: Path) -> None:
+    """R-7.7, D108: the inbox_rule mode completes when Graph accepts it, under BR-D13."""
+    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
+
+    assert (modes["inbox_rule"].completion, modes["inbox_rule"].done_rule) == ("accepted", "BR-D13")
+
+
+def test_inbox_rule_closes_to_the_dry_run_when_sending_is_disabled(tmp_path: Path) -> None:
+    """R-7.7, D89: with send_enabled false the inbox_rule entry is the dry run."""
+    dry_run = DryRun(tmp_path)
+
+    modes = mail_modes(_config(send_enabled=False), dry_run, GraphSend(FakeMailer()), FakeMailer())
+
+    assert modes["inbox_rule"] is dry_run
+
+
+def test_inbox_rule_is_absent_without_the_owner_address(tmp_path: Path) -> None:
+    """R-7.7: without mail.owner_work_address there is no inbox_rule mode."""
+    cfg = _config(send_enabled=True)
+    cfg = cfg.model_copy(update={"mail": cfg.mail.model_copy(update={"owner_work_address": None})})
+
+    modes = mail_modes(cfg, DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer())
+
+    assert "inbox_rule" not in modes

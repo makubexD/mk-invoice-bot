@@ -203,6 +203,25 @@ async def test_scopes_for_bot_reads_the_inbox_only() -> None:
     assert scopes_for(cfg, "bot") == ("offline_access", "Mail.Read")
 
 
+async def test_scopes_for_bot_sends_mail_when_a_flow_lists_inbox_rule() -> None:
+    """R-7.7, D108: a flow listing inbox_rule gives the bot account Mail.Send."""
+    cfg = load_config(EXAMPLE_CONFIG)
+    name, flow = next(
+        (name, flow)
+        for name, flow in cfg.flows.items()
+        if any(isinstance(sink, MailerSink) for sink in flow.sinks)
+    )
+    sinks = [
+        sink.model_copy(update={"modes": [*sink.modes, "inbox_rule"]})
+        if isinstance(sink, MailerSink)
+        else sink
+        for sink in flow.sinks
+    ]
+    listed = cfg.model_copy(update={"flows": {**cfg.flows, name: flow.model_copy(update={"sinks": sinks})}})
+
+    assert "Mail.Send" in scopes_for(listed, "bot")
+
+
 async def test_auth_microsoft_unknown_account_exits_two_and_resumes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,

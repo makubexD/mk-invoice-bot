@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal, Protocol
 
@@ -128,15 +129,45 @@ class GraphSend:
         await self._mailer.send(mail)
 
 
-def mail_modes(cfg: Config, dry_run: DryRun, graph: GraphSend) -> Mapping[str, MailMode]:
+class InboxRule:
+    """The ``inbox_rule`` mode: hand the mail to the owner's Outlook rule (R-7.7, D108).
+
+    The bot's mailbox sends the mail to the owner's work address only; the
+    Outlook rule then forwards it. Recipients are replaced, never added to, so
+    the sink's HR addresses never reach Graph in this mode.
+    """
+
+    completion: Completion = "accepted"
+    done_rule: str = "BR-D13"
+
+    def __init__(self, mailer: Mailer, owner_address: str) -> None:
+        self._mailer = mailer
+        self._owner_address = owner_address
+
+    async def deliver(self, _invoice_id: int, mail: OutgoingMail) -> None:
+        """Send ``mail`` to the owner's work address through the injected mailer (R-7.7, D108)."""
+        await self._mailer.send(replace(mail, to=(self._owner_address,), cc=()))
+
+
+def mail_modes(
+    cfg: Config,
+    dry_run: DryRun,
+    graph: GraphSend,
+    bot_mailer: Mailer,
+) -> Mapping[str, MailMode]:
     """Return the configured modes, closing real sending when it is off (R-7.7, D89).
 
-    With ``mail.send_enabled`` false, ``graph`` maps to the dry run, so no mode
-    can send real mail outside production.
+    With ``mail.send_enabled`` false, ``graph`` and ``inbox_rule`` map to the dry
+    run, so no mode can send real mail outside production. ``inbox_rule`` is
+    available only when ``mail.owner_work_address`` is set, and it sends through
+    ``bot_mailer``, the bot mailbox's mailer (D108).
     """
-    if not cfg.mail.send_enabled:
-        return {"dry_run": dry_run, "graph": dry_run}
-    return {"dry_run": dry_run, "graph": graph}
+    active_graph: MailMode = graph if cfg.mail.send_enabled else dry_run
+    modes: dict[str, MailMode] = {"dry_run": dry_run, "graph": active_graph}
+    owner_address = cfg.mail.owner_work_address
+    if owner_address is not None:
+        modes["inbox_rule"] = InboxRule(bot_mailer, owner_address) if cfg.mail.send_enabled else dry_run
+    return modes
 
 
 def _write_eml(path: Path, data: bytes) -> None:
