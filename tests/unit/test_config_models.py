@@ -145,6 +145,34 @@ def test_zero_reimbursement_cap_fails(tmp_path: Path) -> None:
         load_config(path)
 
 
+def test_reimbursement_track_payments_true_loads(tmp_path: Path) -> None:
+    """R-7.12: a flow opts into /pagado payment tracking with track_payments."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["reimbursement"] = {"cap": 50, "track_payments": True}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).flows["work_microsoft"].reimbursement.track_payments is True
+
+
+def test_reimbursement_track_payments_defaults_false(tmp_path: Path) -> None:
+    """R-7.12: a reimbursement without track_payments does not track payments."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["reimbursement"] = {"cap": 50}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).flows["work_microsoft"].reimbursement.track_payments is False
+
+
+def test_reimbursement_track_payments_unknown_key_fails(tmp_path: Path) -> None:
+    """R-7.12: reimbursement settings are a closed set, so an unknown key fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["reimbursement"]["track_payment"] = True
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="track_payment"):
+        load_config(path)
+
+
 def test_unknown_key_fails_naming_path(tmp_path: Path) -> None:
     """R-9.6: an unknown key anywhere is rejected and the error names its dotted path."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

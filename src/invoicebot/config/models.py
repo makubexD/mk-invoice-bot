@@ -325,11 +325,14 @@ type Sink = Annotated[
 
 
 class Reimbursement(BaseModel):
-    """A flow's reimbursement settings; ``cap`` drives BR-D06 (R-7.13)."""
+    """A flow's reimbursement settings; ``cap`` drives BR-D06 (R-7.13) and
+    ``track_payments`` turns on ``/pagado`` payment tracking (R-7.12)."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     cap: Decimal = Field(gt=0)
+    #: R-7.12: turns on /pagado payment tracking for the flow.
+    track_payments: bool = False
 
 
 class FlowInbox(BaseModel):
