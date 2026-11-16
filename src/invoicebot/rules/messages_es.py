@@ -161,6 +161,9 @@ MESSAGES: dict[str, str] = {
     "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
 }
 
+#: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
+GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
+
 #: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
 GAP_DIGEST_LINE = "• {kind_desc} — {subject}"
 

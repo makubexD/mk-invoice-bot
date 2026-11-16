@@ -44,7 +44,11 @@ SUNAT_FETCHER = "sunat_sol"
 
 
 def manual_message(
-    reading: Reading, flow: Flow, attempts: Sequence[Attempt], directory: StoreDirectory
+    reading: Reading,
+    flow: Flow,
+    attempts: Sequence[Attempt],
+    directory: StoreDirectory,
+    gap_line: str = "",
 ) -> str:
     """Return BR-F07's message for an invoice no fetcher could complete (BR-F07)."""
     store = _store_for(reading, directory)
@@ -52,13 +56,16 @@ def manual_message(
     fetcher_lines = _fetcher_lines(attempts, store, portal)
     if SUNAT_FETCHER not in flow.fetchers:
         fetcher_lines = "\n".join(line for line in (fetcher_lines, MESSAGES["BR-F01"]) if line)
-    return MESSAGES[RULE_EXHAUSTED].format(
-        serie=reading.value("serie") or "",
-        numero=reading.value("numero") or "",
-        fetcher_lines=fetcher_lines,
-        manual_docs_desc=docs_desc(flow.required_docs),
-        # shortcut: gaps land in widen-b-deliver (docs/plan-mvp-widen-b-deliver.md).
-        gap_line="",
+    return (
+        MESSAGES[RULE_EXHAUSTED]
+        .format(
+            serie=reading.value("serie") or "",
+            numero=reading.value("numero") or "",
+            fetcher_lines=fetcher_lines,
+            manual_docs_desc=docs_desc(flow.required_docs),
+            gap_line=gap_line,
+        )
+        .rstrip()
     )
 
 

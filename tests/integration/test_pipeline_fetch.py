@@ -12,6 +12,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
@@ -33,7 +34,7 @@ from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL
+from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL, GAP_LINE_PORTAL
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
@@ -360,6 +361,30 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
         (profile_id,),
     )
     return [(str(text), rule_id) for text, rule_id in await cur.fetchall()]
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _clean_gap_state(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> AsyncIterator[None]:
+    """Start each test from empty gaps and invoice links, so one test's raise cannot leak."""
+    async with db_pool.connection() as conn:
+        await conn.execute("DELETE FROM invoice_gaps")
+        await conn.execute("DELETE FROM gaps")
+    yield
+
+
+async def _gaps(conn: AsyncConnection[Any]) -> list[tuple[str, str]]:
+    """Return each gap's fingerprint and kind."""
+    cur = await conn.execute("SELECT fingerprint, kind FROM gaps ORDER BY fingerprint")
+    return [(str(fingerprint), str(kind)) for fingerprint, kind in await cur.fetchall()]
+
+
+async def _gap_links(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the fingerprints of the gaps linked to ``invoice_id``."""
+    cur = await conn.execute(
+        "SELECT fingerprint FROM invoice_gaps WHERE invoice_id = %s ORDER BY fingerprint",
+        (invoice_id,),
+    )
+    return [str(row[0]) for row in await cur.fetchall()]
 
 
 async def _seed_attempts(
@@ -800,6 +825,78 @@ async def test_xml_mismatch_ends_manual_required_with_its_line(
     assert attempts == [("portal_registry", PORTAL_KEY, False, "xml_mismatch")]
     assert len(outbox) == 1
     assert "• Portal del comercio: el XML no coincide" in outbox[0][0]
+
+
+async def test_no_portal_exhaustion_raises_one_linked_gap_and_the_gap_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F02: an exhausted chain with no_portal makes one linked gap and ends BR-F07 with its line."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        gaps = await _gaps(conn)
+        links = await _gap_links(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
+    assert gaps == [(f"portal_missing:{STORE_RUC}", "PORTAL_MISSING")]
+    assert links == [f"portal_missing:{STORE_RUC}"]
+    assert len(outbox) == 1
+    text, rule_id = outbox[0]
+    assert rule_id == "BR-F07"
+    assert text.endswith(GAP_LINE_PORTAL)
+
+
+async def test_not_found_exhaustion_raises_no_gap_and_leaves_no_trailing_space(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-11.3: an exhausted chain with only not_found raises no gap and ends BR-F07 at "lo completo."."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "not_found", 1)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        gaps = await _gaps(conn)
+        links = await _gap_links(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
+    assert gaps == []
+    assert links == []
+    assert len(outbox) == 1
+    text, rule_id = outbox[0]
+    assert rule_id == "BR-F07"
+    assert text.endswith("lo completo.")
+
+
+async def test_two_invoices_of_one_issuer_share_one_gap_with_two_links(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-11.2: two exhausted invoices of one issuer make one gap linked to both."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_ids = [await _fetching_invoice(db_pool, profile_id) for _ in range(2)]
+
+    for invoice_id in invoice_ids:
+        await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+        await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        links = [await _gap_links(conn, invoice_id) for invoice_id in invoice_ids]
+        cur = await conn.execute(
+            "SELECT count FROM gaps WHERE fingerprint = %s",
+            (f"portal_missing:{STORE_RUC}",),
+        )
+        row = await cur.fetchone()
+    assert gaps == [(f"portal_missing:{STORE_RUC}", "PORTAL_MISSING")]
+    assert links == [[f"portal_missing:{STORE_RUC}"], [f"portal_missing:{STORE_RUC}"]]
+    assert row == (2,)
 
 
 async def test_invoice_outside_fetching_docs_is_left_alone(

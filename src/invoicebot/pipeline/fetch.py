@@ -34,7 +34,10 @@ from invoicebot.config.models import (
 from invoicebot.extract.fields import Reading
 from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.chain import WAIT_REASONS, Attempt, Exhausted, Run, Wait, decide, retry_delay
+from invoicebot.gaps.kinds import fingerprint
+from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUG, RULE_AUTH_ADMIN
+from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import RULE_EXHAUSTED, manual_message
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
@@ -42,7 +45,13 @@ from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL, MESSAGES
+from invoicebot.rules.messages_es import (
+    FETCH_WAITING,
+    FETCH_WAITING_MAIL,
+    GAP_LINE_PORTAL,
+    KIND_SUBJECT,
+    MESSAGES,
+)
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.invoices import (
@@ -65,6 +74,8 @@ DELIVERING_STATE = "DELIVERING"
 MANUAL_STATE = "MANUAL_REQUIRED"
 #: The fetcher whose retry schedule comes from the store's portal (D65).
 PORTAL_FETCHER = "portal_registry"
+#: The gap kind raised when no fetcher knows the issuer's portal (BR-F02, spec 06 §3).
+PORTAL_MISSING = "PORTAL_MISSING"
 #: The first-wait text per fetcher; every other fetcher says the portal line (D100).
 _WAITING_TEXTS: Mapping[str, str] = {EMAIL_INBOX_FETCHER: FETCH_WAITING_MAIL}
 #: How one fetcher's retry delays are chosen from its flow and invoice (D65, D98).
@@ -290,15 +301,52 @@ async def _alert_sign_in(conn: AsyncConnection[Any], inputs: _Inputs) -> None:
 
 async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     """Move the invoice to MANUAL_REQUIRED with BR-F07's message (BR-F07)."""
-    text = manual_message(reading, inputs.flow, inputs.attempts, inputs.directory)
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
+        gap_line = await _raise_portal_gap(conn, inputs, reading)
+        text = manual_message(reading, inputs.flow, inputs.attempts, inputs.directory, gap_line=gap_line)
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
         )
         await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
+
+
+async def _raise_portal_gap(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> str:
+    """Raise PORTAL_MISSING for an unknown portal and return BR-F07's gap line (BR-F02, R-11.2)."""
+    ruc_emisor = reading.value("ruc_emisor")
+    if ruc_emisor is None or not _saw_no_portal(inputs.attempts) or reading.document_url is not None:
+        return ""
+    ctx = GapContext(profiles=inputs.cfg.profiles, gaps_cfg=inputs.cfg.gaps)
+    gap = await raise_gap(conn, ctx, _portal_sighting(inputs, reading, ruc_emisor))
+    return "" if gap.state == "ignored" else GAP_LINE_PORTAL
+
+
+def _saw_no_portal(attempts: Sequence[Attempt]) -> bool:
+    """Return True when a fetcher reported that it found no portal (BR-F02)."""
+    return any(attempt.reason is FetchReason.NO_PORTAL for attempt in attempts)
+
+
+def _portal_sighting(inputs: _Inputs, reading: Reading, ruc_emisor: str) -> GapSighting:
+    """Build one PORTAL_MISSING sighting from the reading and the attempts (BR-F02, R-11.12)."""
+    razon_social = reading.value("razon_social")
+    return GapSighting(
+        kind=PORTAL_MISSING,
+        parts=(ruc_emisor,),
+        subject=KIND_SUBJECT[PORTAL_MISSING].format(ruc_emisor=ruc_emisor),
+        invoice_id=inputs.job.invoice_id,
+        fields=IssueFields(
+            kind=PORTAL_MISSING,
+            fingerprint=fingerprint(PORTAL_MISSING, ruc_emisor),
+            ruc_emisor=int(ruc_emisor),
+            razon_social=razon_social,
+            tipo=reading.value("tipo"),
+            reasons=tuple(attempt.reason for attempt in inputs.attempts),
+            portal_key=None,
+            hint_url=None,
+        ),
+    )
 
 
 async def _notify(
