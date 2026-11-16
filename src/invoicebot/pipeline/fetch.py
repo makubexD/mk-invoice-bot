@@ -39,7 +39,13 @@ from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUG, RULE_AUTH_ADMIN
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
-from invoicebot.pipeline.manual_message import RULE_EXHAUSTED, manual_message
+from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
+from invoicebot.pipeline.manual_message import (
+    RULE_EXHAUSTED,
+    TECHNICAL_REASONS,
+    manual_message,
+    portal_for,
+)
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
@@ -55,8 +61,8 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.store import taught_links
 from invoicebot.store.db import Pool
-from invoicebot.store.fetch_attempts import list_attempts, record_attempt
-from invoicebot.store.gaps import GapRow
+from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
+from invoicebot.store.gaps import GapRow, get_gap
 from invoicebot.store.invoices import (
     FileRecord,
     InvoiceHead,
@@ -75,10 +81,12 @@ FETCHING_STATE = "FETCHING_DOCS"
 DELIVERING_STATE = "DELIVERING"
 #: Where an invoice goes when no fetcher can get its documents (BR-F07).
 MANUAL_STATE = "MANUAL_REQUIRED"
-#: The fetcher whose retry schedule comes from the store's portal (D65).
-PORTAL_FETCHER = "portal_registry"
 #: The gap kind raised when no fetcher knows the issuer's portal (BR-F02, spec 06 §3).
 PORTAL_MISSING = "PORTAL_MISSING"
+#: The gap kind raised when the portal fails technically too many times in a row (BR-F03).
+PORTAL_BROKEN = "PORTAL_BROKEN"
+#: The gap states in which the issuer's portal is still known to be broken (BR-F03).
+_BROKEN_GAP_STATES = frozenset({"open", "reported"})
 #: The rule id of the question asking the sender for an unknown issuer's portal (BR-F02).
 RULE_ASK_PORTAL = "BR-F02"
 #: The first-wait text per fetcher; every other fetcher says the portal line (D100).
@@ -165,7 +173,7 @@ def make_fetch_handler(
         # A Wait means the latest try ended with a wait reason and retries remain; this job is the
         # retry, since its run_after already held the delay (D65), so the fetcher runs now.
         if isinstance(decision, Run | Wait):
-            outcome = await _run(inputs, decision.fetcher, registry, schedule_for, data_dir)
+            outcome = await _run(inputs, reading, decision.fetcher, registry, schedule_for, data_dir)
         elif isinstance(decision, Exhausted):
             outcome = await _exhausted(inputs, reading)
         else:
@@ -190,6 +198,7 @@ def make_fetch_handler(
 
 async def _run(
     inputs: _Inputs,
+    reading: Reading,
     fetcher: str,
     registry: Mapping[str, Fetcher],
     schedule_for: Callable[[str], Sequence[timedelta]],
@@ -224,6 +233,7 @@ async def _run(
             await record_attempt(
                 conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
             )
+            await _raise_broken_gap(conn, inputs, reading, result)
             await _record_result(conn, inputs, fetcher, result, delay)
             committed = True
     except BaseException:
@@ -244,6 +254,39 @@ async def _is_current(conn: AsyncConnection[Any], job: Job) -> bool:
         return False
     head = await load_invoice_head(conn, job.invoice_id)
     return head is not None and head.state == FETCHING_STATE
+
+
+async def _raise_broken_gap(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, result: FetchResult
+) -> None:
+    """Raise PORTAL_BROKEN after the portal's newest attempts all failed technically (BR-F03)."""
+    if result.portal_key is None or result.reason not in TECHNICAL_REASONS:
+        return
+    if not await technical_streak(conn, result.portal_key, inputs.cfg.gaps.broken_after):
+        return
+    ctx = GapContext(profiles=inputs.cfg.profiles, gaps_cfg=inputs.cfg.gaps)
+    await raise_gap(conn, ctx, _broken_sighting(inputs, reading, result.portal_key, result.reason))
+
+
+def _broken_sighting(inputs: _Inputs, reading: Reading, portal_key: str, reason: FetchReason) -> GapSighting:
+    """Build one PORTAL_BROKEN sighting from the result and the reading (BR-F03, R-11.12)."""
+    ruc_emisor = reading.value("ruc_emisor")
+    return GapSighting(
+        kind=PORTAL_BROKEN,
+        parts=(portal_key,),
+        subject=KIND_SUBJECT[PORTAL_BROKEN].format(portal_key=portal_key),
+        invoice_id=inputs.job.invoice_id,
+        fields=IssueFields(
+            kind=PORTAL_BROKEN,
+            fingerprint=fingerprint(PORTAL_BROKEN, portal_key),
+            ruc_emisor=None if ruc_emisor is None else int(ruc_emisor),
+            razon_social=reading.value("razon_social"),
+            tipo=reading.value("tipo"),
+            reasons=(reason,),
+            portal_key=portal_key,
+            hint_url=None,
+        ),
+    )
 
 
 async def _record_result(
@@ -311,7 +354,12 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
         gap = await _raise_portal_gap(conn, inputs, reading)
         text = manual_message(
-            reading, inputs.flow, inputs.attempts, inputs.directory, gap_line=_gap_line(gap)
+            reading,
+            inputs.flow,
+            inputs.attempts,
+            inputs.directory,
+            gap_line=_gap_line(gap),
+            portal_broken=await _portal_is_broken(conn, inputs, reading),
         )
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
@@ -319,6 +367,18 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
         await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
         await _ask_for_portal(conn, inputs, gap, reading)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
+
+
+async def _portal_is_broken(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> bool:
+    """Return True when the issuer's portal has an open or reported PORTAL_BROKEN gap (BR-F03)."""
+    ruc_emisor = reading.value("ruc_emisor")
+    if ruc_emisor is None:
+        return False
+    portal = portal_for(ruc_emisor, inputs.directory)
+    if portal is None:
+        return False
+    gap = await get_gap(conn, fingerprint(PORTAL_BROKEN, portal.key))
+    return gap is not None and gap.state in _BROKEN_GAP_STATES
 
 
 async def _raise_portal_gap(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> GapRow | None:

@@ -34,7 +34,14 @@ from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import FETCH_WAITING, FETCH_WAITING_MAIL, GAP_LINE_PORTAL, MESSAGES
+from invoicebot.rules.messages_es import (
+    FETCH_TECHNICAL_LINE,
+    FETCH_WAITING,
+    FETCH_WAITING_MAIL,
+    GAP_LINE_PORTAL,
+    MESSAGES,
+    fetcher_desc,
+)
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
@@ -1140,3 +1147,94 @@ async def test_teach_existing_taught_link_queues_f07_only(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def _clean_fetch_attempts(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> AsyncIterator[None]:
+    """Start and end a BR-F03 test with no fetch attempts, so its portal streak is its own."""
+
+    async def clear() -> None:
+        async with db_pool.connection() as conn:
+            await conn.execute("DELETE FROM fetch_attempts")
+
+    await clear()
+    yield
+    await clear()
+
+
+async def _technical_failures(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    profile_id: str,
+    count: int,
+) -> list[int]:
+    """Create ``count`` invoices of ``profile_id`` and run one technical fetch for each."""
+    invoice_ids = []
+    for _ in range(count):
+        invoice_id = await _fetching_invoice(db_pool, profile_id)
+        await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_id, tmp_path)
+        invoice_ids.append(invoice_id)
+    return invoice_ids
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_broken_three_technical_failures_raise_one_portal_broken_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """BR-F03: three technical failures in a row on one portal raise one PORTAL_BROKEN gap."""
+    profile_id = f"fetch-{uuid4().hex}"
+
+    invoice_ids = await _technical_failures(db_pool, tmp_path, profile_id, 3)
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        links = await _gap_links(conn, invoice_ids[-1])
+    assert gaps == [(f"portal_broken:{PORTAL_KEY}", "PORTAL_BROKEN")]
+    assert links == [f"portal_broken:{PORTAL_KEY}"]
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_broken_sequence_with_a_not_found_raises_no_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """BR-F03: technical, not_found, technical, technical with broken_after 3 raises no gap."""
+    profile_id = f"fetch-{uuid4().hex}"
+    reasons = (
+        FetchReason.TECHNICAL,
+        FetchReason.NOT_FOUND,
+        FetchReason.TECHNICAL,
+        FetchReason.TECHNICAL,
+    )
+
+    for reason in reasons:
+        invoice_id = await _fetching_invoice(db_pool, profile_id)
+        await _run(db_pool, FakeFetcher(reason), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+    assert gaps == []
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_broken_third_invoices_br_f07_names_the_broken_portal(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """BR-F03: the third invoice's BR-F07 bullet is BR-F03's line, not the technical one."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_ids = await _technical_failures(db_pool, tmp_path, profile_id, 3)
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_ids[-1])
+
+    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_ids[-1], tmp_path, next_job_id)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+    text = outbox[0][0]
+    assert MESSAGES["BR-F03"].format(portal=PORTAL_KEY) in text
+    assert FETCH_TECHNICAL_LINE.format(fetcher=fetcher_desc(PORTAL_FETCHER)) not in text

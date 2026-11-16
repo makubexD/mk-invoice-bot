@@ -32,6 +32,9 @@ from invoicebot.rules.messages_es import (
 #: BR-F07: the rule that reports an invoice nobody could fetch.
 RULE_EXHAUSTED = "BR-F07"
 
+#: The fetcher whose retry schedule comes from the store's portal (D65); BR-F03 names it.
+PORTAL_FETCHER = "portal_registry"
+
 #: The BR-F message of a fetcher's chain-final reason (spec 06 §1, BR-F07).
 _REASON_RULES: dict[FetchReason, str] = {
     FetchReason.XML_MISMATCH: "BR-F06",
@@ -49,11 +52,16 @@ def manual_message(
     attempts: Sequence[Attempt],
     directory: StoreDirectory,
     gap_line: str = "",
+    portal_broken: bool = False,
 ) -> str:
-    """Return BR-F07's message for an invoice no fetcher could complete (BR-F07)."""
+    """Return BR-F07's message for an invoice no fetcher could complete (BR-F07).
+
+    With ``portal_broken``, the portal fetcher's technical failure bullet is
+    BR-F03's line instead of the plain technical one (BR-F03).
+    """
     store = _store_for(reading, directory)
     portal = portal_for(reading.value("ruc_emisor") or "", directory)
-    fetcher_lines = _fetcher_lines(attempts, store, portal)
+    fetcher_lines = _fetcher_lines(attempts, store, portal, portal_broken)
     if SUNAT_FETCHER not in flow.fetchers:
         fetcher_lines = "\n".join(line for line in (fetcher_lines, MESSAGES["BR-F01"]) if line)
     return (
@@ -74,10 +82,15 @@ def _store_for(reading: Reading, directory: StoreDirectory) -> Store | None:
     return directory.stores.get(reading.value("ruc_emisor") or "")
 
 
-def _fetcher_lines(attempts: Sequence[Attempt], store: Store | None, portal: Portal | None) -> str:
+def _fetcher_lines(
+    attempts: Sequence[Attempt],
+    store: Store | None,
+    portal: Portal | None,
+    portal_broken: bool,
+) -> str:
     """Return one BR-F07 bullet per fetcher in first-attempt order, from its last reason (BR-F07)."""
     last: dict[str, FetchReason] = {attempt.fetcher: attempt.reason for attempt in attempts}
-    lines = (_reason_line(fetcher, reason, store, portal) for fetcher, reason in last.items())
+    lines = (_reason_line(fetcher, reason, store, portal, portal_broken) for fetcher, reason in last.items())
     return "\n".join(line for line in lines if line)
 
 
@@ -87,11 +100,22 @@ _FIXED_LINES: dict[FetchReason, str] = {
     FetchReason.AUTH_REQUIRED: FETCH_AUTH_LINE,
 }
 
+#: The reasons BR-F03 counts as a portal failure (spec 06 §3).
+TECHNICAL_REASONS = frozenset({FetchReason.TECHNICAL, FetchReason.TIMEOUT})
 
-def _reason_line(fetcher: str, reason: FetchReason, store: Store | None, portal: Portal | None) -> str:
-    """Return the BR-F07 bullet for one fetcher's final reason (BR-F07)."""
+
+def _reason_line(
+    fetcher: str,
+    reason: FetchReason,
+    store: Store | None,
+    portal: Portal | None,
+    portal_broken: bool,
+) -> str:
+    """Return the BR-F07 bullet for one fetcher's final reason (BR-F07, BR-F03)."""
     if reason is FetchReason.NO_URL:
         return ""
+    if portal_broken and fetcher == PORTAL_FETCHER and reason in TECHNICAL_REASONS:
+        return MESSAGES["BR-F03"].format(portal=_portal_desc(store, portal))
     if reason in (FetchReason.PORTAL_INACTIVE, FetchReason.CAPTCHA_UNSOLVABLE):
         return _portal_line(reason, store, portal)
     if reason is FetchReason.NO_WEBSITE:
@@ -107,7 +131,7 @@ def _portal_line(reason: FetchReason, store: Store | None, portal: Portal | None
 
 def _fetcher_line(fetcher: str, reason: FetchReason) -> str:
     """Return a BR-F07 bullet that names the fetcher or its rule (BR-F07)."""
-    if reason in (FetchReason.TECHNICAL, FetchReason.TIMEOUT):
+    if reason in TECHNICAL_REASONS:
         return FETCH_TECHNICAL_LINE.format(fetcher=fetcher_desc(fetcher))
     fixed = _FIXED_LINES.get(reason)
     if fixed is not None:
