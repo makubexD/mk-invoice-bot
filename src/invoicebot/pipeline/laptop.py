@@ -17,6 +17,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from invoicebot.pipeline.actions import send_not_confirmed
 from invoicebot.pipeline.deliver import DONE_STATE, PREPARED_BATCH_STATE, SENT_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
@@ -33,7 +34,7 @@ from invoicebot.store.flow_b import (
     set_batch_state,
     take_photo_paths,
 )
-from invoicebot.store.invoices import load_flow, load_invoice_head, load_reading, set_state
+from invoicebot.store.invoices import load_flow, load_invoice_head, set_state
 from invoicebot.store.mail_jobs import get_mail_job, set_receipt_at, set_receipt_error
 
 logger = logging.getLogger(__name__)
@@ -42,8 +43,6 @@ logger = logging.getLogger(__name__)
 RECEIPT_MAX_BYTES = MAX_RECEIPT_BYTES
 #: BR-D10: the mail was sent and the invoice is filed (spec 06).
 RULE_DONE = "BR-D10"
-#: BR-D11: the mail's delivery is not confirmed, so the sender is asked (spec 06).
-RULE_NOT_CONFIRMED = "BR-D11"
 
 
 async def poll_receipts(pool: Pool, drive: Drive, root: str) -> None:
@@ -121,21 +120,7 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> lis
 async def _not_confirmed(conn: AsyncConnection[Any], invoice_id: int, job_id: str, error: str) -> None:
     """Record an error receipt and ask the sender how the mail went out (BR-D11)."""
     await set_receipt_error(conn, job_id, error)
-    reading = await load_reading(conn, invoice_id)
-    if reading is None:
-        raise RuntimeError(f"invoice {invoice_id} has no reading")
-    text = MESSAGES[RULE_NOT_CONFIRMED].format(
-        serie=reading.value("serie"),
-        numero=reading.value("numero"),
-    )
-    await queue_message(
-        conn,
-        await _sender(conn, invoice_id),
-        text,
-        invoice_id=invoice_id,
-        rule_id=RULE_NOT_CONFIRMED,
-        buttons=[],
-    )
+    await send_not_confirmed(conn, invoice_id)
 
 
 async def _sender(conn: AsyncConnection[Any], invoice_id: int) -> Addressee:

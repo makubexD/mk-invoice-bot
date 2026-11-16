@@ -26,7 +26,8 @@ from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import ButtonPress, InboundMessage
+from invoicebot.channels.base import Button, ButtonPress, InboundMessage
+from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
@@ -45,7 +46,14 @@ from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
-from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES
+from invoicebot.rules.messages_es import (
+    BUTTON_ARRIVED,
+    BUTTON_SELF_SEND,
+    BUTTON_VIA_LAPTOP,
+    CANCELLED_BY_USER,
+    EDIT_PROMPT,
+    MESSAGES,
+)
 from invoicebot.states import CANCELLABLE, EDITABLE
 from invoicebot.store.flow_b import (
     get_batch_state,
@@ -60,14 +68,21 @@ from invoicebot.store.invoices import (
     get_state_rule,
     load_flow,
     load_invoice_head,
+    load_reading,
     mark_editing,
     set_state,
 )
+from invoicebot.store.mail_jobs import has_mail_job
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
-#: BR-D13's [No llegó] action (R-7.8); not in ACTIONS until its handler exists.
+#: BR-D13's [No llegó] action (R-7.8).
 NOT_ARRIVED_ACTION = "not_arrived"
+#: BR-D11's [Ya llegó] action (R-7.8).
+ARRIVED_ACTION = "arrived"
+#: BR-D11's two resend choices; step 31 adds their handlers (D109).
+VIA_LAPTOP_ACTION = "via_laptop"
+SELF_SEND_ACTION = "self_send"
 
 CONFIRMING_STATE = "CONFIRMING"
 ROUTING_STATE = "ROUTING"
@@ -76,6 +91,10 @@ CANCELLED_STATE = "CANCELLED"
 DONE_STATE = "DONE"
 
 RULE_SENT = "BR-D08"
+#: BR-D10: the invoice is filed and its mail was sent (spec 06).
+RULE_DONE = "BR-D10"
+#: BR-D11: the mail's delivery is not confirmed, so the sender is asked (spec 06).
+RULE_NOT_CONFIRMED = "BR-D11"
 
 PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"
 SENT_BATCH_STATE = "sent"
@@ -90,6 +109,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     CANCEL_ACTION: CANCELLABLE,
     EDIT_ACTION: EDITABLE,
     SENT_ACTION: frozenset({BATCHED_STATE}),
+    NOT_ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
+    ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
 }
 
 #: The rule each question action answers; a parked invoice resumes only for its own (D94).
@@ -258,6 +279,38 @@ async def _sent(
     return tuple(await take_photo_paths(conn, invoice_id))
 
 
+async def _not_arrived(
+    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+) -> tuple[Path, ...]:
+    """Ask the invoice's sender how the mail went out (R-7.8, BR-D11)."""
+    await send_not_confirmed(conn, invoice_id)
+    return ()
+
+
+async def _arrived(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+) -> tuple[Path, ...]:
+    """File the invoice DONE with BR-D10 and answer the press (R-7.8, BR-D11, D109).
+
+    A ``prepared`` batch becomes ``sent`` and queues its ``folder_status`` job in the
+    press's transaction, and its photo files are returned for deletion (R-9.7); a batch
+    already sent only gets BR-D10's text.
+    """
+    photos: tuple[Path, ...] = ()
+    if await get_batch_state(conn, invoice_id) == PREPARED_BATCH_STATE:
+        flow_id = await load_flow(conn, invoice_id)
+        if flow_id is None:
+            raise RuntimeError(f"invoice {invoice_id} has no flow")
+        batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
+        await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
+        await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
+        await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_DONE)
+        photos = tuple(await take_photo_paths(conn, invoice_id))
+    folder = (await load_flow_data(conn, invoice_id))["folder"]
+    await _reply(conn, msg, invoice_id, RULE_DONE, MESSAGES[RULE_DONE].format(folder=folder))
+    return photos
+
+
 async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rule_id: str) -> bool:
     """Return whether the invoice still waits on rule_id's question (BR-S02).
 
@@ -293,6 +346,36 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     if state is None:
         raise RuntimeError(f"invoice {invoice_id} does not exist")
     return state
+
+
+async def send_not_confirmed(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Queue BR-D11 with D109's buttons for the invoice's sender (R-7.8, BR-D11, D109).
+
+    The one BR-D11 sender: [No llegó], an error receipt and an overdue receipt all
+    call it. [Por la laptop] is offered only when the invoice has a ``mail_jobs`` row,
+    the database's answer to whether the flow listed ``laptop_outlook``.
+    """
+    head = await load_invoice_head(conn, invoice_id)
+    reading = await load_reading(conn, invoice_id)
+    if head is None or reading is None:
+        raise RuntimeError(f"invoice {invoice_id} cannot be asked about its mail")
+    buttons: list[Button] = []
+    if await has_mail_job(conn, invoice_id):
+        buttons.append(Button(id=button_id(invoice_id, VIA_LAPTOP_ACTION), title=BUTTON_VIA_LAPTOP))
+    buttons.append(Button(id=button_id(invoice_id, SELF_SEND_ACTION), title=BUTTON_SELF_SEND))
+    buttons.append(Button(id=button_id(invoice_id, ARRIVED_ACTION), title=BUTTON_ARRIVED))
+    text = MESSAGES[RULE_NOT_CONFIRMED].format(
+        serie=reading.value("serie"),
+        numero=reading.value("numero"),
+    )
+    await queue_message(
+        conn,
+        Addressee(head.origin_channel, head.profile_id),
+        text,
+        invoice_id=invoice_id,
+        rule_id=RULE_NOT_CONFIRMED,
+        buttons=buttons,
+    )
 
 
 async def send_stale(conn: AsyncConnection[Any], msg: InboundMessage, invoice_id: int) -> None:
@@ -336,4 +419,6 @@ ACTIONS: Mapping[str, Action] = {
     CANCEL_ACTION: _cancel,
     EDIT_ACTION: _edit,
     SENT_ACTION: _sent,
+    NOT_ARRIVED_ACTION: _not_arrived,
+    ARRIVED_ACTION: _arrived,
 }

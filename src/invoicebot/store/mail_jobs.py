@@ -45,6 +45,16 @@ async def get_mail_job(conn: AsyncConnection[Any], job_id: str) -> MailJobState 
     return MailJobState(invoice_id=int(row[0]), has_receipt=bool(row[1]))
 
 
+async def has_mail_job(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Return whether invoice_id went through a laptop job; does not commit (R-7.14)."""
+    cur = await conn.execute(
+        "SELECT EXISTS (SELECT 1 FROM mail_jobs WHERE invoice_id = %s)",
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    return bool(row[0]) if row is not None else False
+
+
 async def set_receipt_at(conn: AsyncConnection[Any], job_id: str) -> None:
     """Stamp the job's receipt time from the database clock; does not commit (R-7.14)."""
     await conn.execute("UPDATE mail_jobs SET receipt_at = now() WHERE job_id = %s", (job_id,))

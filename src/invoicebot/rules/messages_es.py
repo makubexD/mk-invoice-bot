@@ -336,6 +336,10 @@ MAIL_MODE_DESC: dict[str, str] = {"dry_run": "borrador .eml"}
 BUTTON_SENT = "Ya lo envié"
 #: BR-D13's [No llegó] button (R-7.8).
 BUTTON_NOT_ARRIVED = "No llegó"
+#: BR-D11's three buttons (R-7.8, D109).
+BUTTON_VIA_LAPTOP = "Por la laptop"
+BUTTON_SELF_SEND = "Lo envío yo"
+BUTTON_ARRIVED = "Ya llegó"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"

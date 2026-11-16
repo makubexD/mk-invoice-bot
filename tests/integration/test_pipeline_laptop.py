@@ -17,9 +17,16 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.actions import ARRIVED_ACTION, SELF_SEND_ACTION, VIA_LAPTOP_ACTION
 from invoicebot.pipeline.laptop import RECEIPT_MAX_BYTES, poll_receipts
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import (
+    BUTTON_ARRIVED,
+    BUTTON_SELF_SEND,
+    BUTTON_VIA_LAPTOP,
+    MESSAGES,
+)
 from invoicebot.sinks.onedrive import FileTooLarge
 from invoicebot.store.flow_b import get_batch_state, merge_flow_data, open_batch, set_batch_state
 from invoicebot.store.invoices import (
@@ -261,7 +268,15 @@ async def test_an_error_receipt_sends_br_d11_and_leaves_the_batch_prepared(
     assert batch_state == "prepared"
     assert jobs == []
     assert outbox == [
-        (MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO), "BR-D11", []),
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, VIA_LAPTOP_ACTION), "title": BUTTON_VIA_LAPTOP},
+                {"id": button_id(invoice_id, SELF_SEND_ACTION), "title": BUTTON_SELF_SEND},
+                {"id": button_id(invoice_id, ARRIVED_ACTION), "title": BUTTON_ARRIVED},
+            ],
+        ),
     ]
     assert receipt_at is None
     assert receipt_error == ERROR_TEXT
