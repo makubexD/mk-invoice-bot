@@ -69,6 +69,11 @@ class GitHubApp:
             return cached
         return await self._fetch_token()
 
+    def invalidate(self) -> None:
+        """Drop the cached token, so the next :meth:`token` exchange fetches a new one (R-11.10)."""
+        self._token = None
+        self._expires_at = None
+
     def _cached_token(self) -> str | None:
         if self._token is None or self._expires_at is None:
             return None

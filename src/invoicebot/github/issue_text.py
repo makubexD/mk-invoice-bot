@@ -60,8 +60,21 @@ def render_issue(gap: IssueFields) -> tuple[str, str]:
     url = _safe_url(gap.hint_url)
     if url:
         sections.append(f"```\n{url}\n```")
-    sections.append(f"<!-- gap:{_marker(gap.fingerprint)} -->")
+    sections.append(issue_marker(gap.fingerprint))
     return title, "\n\n".join(sections)
+
+
+def issue_marker(fingerprint: str) -> str:
+    """Return the hidden marker that identifies the issue for ``fingerprint`` (R-11.12, D117)."""
+    return f"<!-- gap:{_marker(fingerprint)} -->"
+
+
+def render_hint_comment(hint_url: str) -> str | None:
+    """Render a taught portal link as a code-fenced comment, or None when it fails R-11.12."""
+    url = _safe_url(hint_url)
+    if not url:
+        return None
+    return f"```\n{url}\n```"
 
 
 def _subject(gap: IssueFields) -> str:

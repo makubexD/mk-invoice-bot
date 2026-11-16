@@ -76,6 +76,26 @@ async def test_token_is_fetched_once_and_reused(private_key_pem: str) -> None:
     assert claims["exp"] - claims["iat"] == 600
 
 
+async def test_token_is_fetched_again_after_invalidate(private_key_pem: str) -> None:
+    """R-11.10: after invalidate the next token() fetches a new token instead of the cache."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json=_token_body(f"token-{len(requests)}", expires_in=timedelta(hours=1)),
+        )
+
+    async with _make_app(handler, private_key_pem) as app:
+        first = await app.token()
+        app.invalidate()
+        second = await app.token()
+
+    assert (first, second) == ("token-1", "token-2")
+    assert len(requests) == 2
+
+
 async def test_token_four_minutes_from_expiry_is_refreshed(private_key_pem: str) -> None:
     """R-11.10: a token inside the five-minute margin is fetched again."""
     requests: list[httpx.Request] = []

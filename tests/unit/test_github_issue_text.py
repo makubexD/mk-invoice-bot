@@ -1,7 +1,9 @@
 """Snapshot and safety tests for the gap issue text (S8.11, R-11.12)."""
 
+import pytest
+
 from invoicebot.fetchers.base import FetchReason
-from invoicebot.github.issue_text import IssueFields, render_issue
+from invoicebot.github.issue_text import IssueFields, render_hint_comment, render_issue
 
 
 def _portal_missing(*, ruc_emisor: int = 20100000001, hint_url: str | None = None) -> IssueFields:
@@ -205,3 +207,18 @@ def test_marker_is_the_last_line() -> None:
     _, body = render_issue(_portal_missing(hint_url="https://portal.example.pe/consulta"))
 
     assert body.splitlines()[-1] == "<!-- gap:portal_missing:20100000001 -->"
+
+
+@pytest.mark.parametrize(
+    ("hint_url", "expected"),
+    [
+        (
+            "https://user:pass@portal.example.pe/x?token=1#top",
+            "```\nhttps://portal.example.pe/x\n```",
+        ),
+        ("javascript:alert(1)", None),
+    ],
+)
+def test_hint_comment_renders_only_an_approved_url(hint_url: str, expected: str | None) -> None:
+    """R-11.12: a taught link is reduced and fenced, and a link that fails the rule is dropped."""
+    assert render_hint_comment(hint_url) == expected
