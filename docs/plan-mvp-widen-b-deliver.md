@@ -319,11 +319,11 @@ Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py`.
 
 ## Step 30: [No llegó], [Ya llegó] and the BR-D11 menu `[worker]`
 
-Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/laptop.py`, `tests/integration/test_pipeline_actions.py`.
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/store/mail_jobs.py`, `tests/integration/test_pipeline_actions.py`.
 
-- `async def send_not_confirmed(conn, invoice_id)` in `actions.py` is the one BR-D11 sender (steps 29 and 33): BR-D11's text with the buttons of D109: `via_laptop` ([Por la laptop], only when the invoice's flow lists `laptop_outlook`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Button titles go in `messages_es.py` next to `BUTTON_NOT_ARRIVED`. `pipeline/laptop.py`'s error-receipt path calls it in place of its own BR-D11 text.
+- `async def send_not_confirmed(conn, invoice_id)` in `actions.py` is the one BR-D11 sender (steps 29 and 33): BR-D11's text with the buttons of D109: `via_laptop` ([Por la laptop], only when the invoice has a `mail_jobs` row, i.e. it went through `laptop_outlook`: actions see no config, so this is the database's answer; add the lookup to `store/mail_jobs.py`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Button titles go in `messages_es.py` next to `BUTTON_NOT_ARRIVED`. `pipeline/laptop.py`'s error-receipt path calls it in place of its own BR-D11 text.
 - `NOT_ARRIVED_ACTION` (valid in `DONE` and `BATCHED`) answers with `send_not_confirmed`. `ARRIVED_ACTION` (valid in `DONE` and `BATCHED`): a `prepared` batch becomes `sent`, the invoice `DONE` with BR-D10 and a `folder_status` job, in the press's transaction; a `sent` batch only gets BR-D10's text. Both press actions touch only the database. `VIA_LAPTOP_ACTION` and `SELF_SEND_ACTION` constants are defined here; step 31 handles them.
-- Tests: R-7.8 [No llegó] on BR-D13 → BR-D11 with three buttons when `laptop_outlook` is listed, two when not; R-7.8 [Ya llegó] on a `prepared` laptop batch completes it with BR-D10 and one `folder_status` job; R-7.8 [Ya llegó] on a `sent` batch changes no state and sends BR-D10's text.
+- Tests: R-7.8 [No llegó] on BR-D13 → BR-D11 with three buttons when the invoice has a `mail_jobs` row, two when not; R-7.8 [Ya llegó] on a `prepared` laptop batch completes it with BR-D10 and one `folder_status` job; R-7.8 [Ya llegó] on a `sent` batch changes no state and sends BR-D10's text.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "not_arrived or arrived" && uv run pytest -q tests/integration/test_pipeline_laptop.py`.
 
