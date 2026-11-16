@@ -298,13 +298,14 @@ Test: `uv run pytest -q tests/unit/test_sinks_laptop_job.py`.
 
 ## Step 28: The `laptop_outlook` mode hands the email to the laptop `[worker]`
 
-Files: `src/invoicebot/sinks/mailer.py`, `src/invoicebot/pipeline/deliver.py`, `tests/integration/test_pipeline_deliver.py`.
+Run as four sub-steps, each reviewed before the next (D111: the job names its folder).
 
-- `LaptopOutlook(drive, root, key)`: `completion="receipt"`, `done_rule="BR-D10"`. `deliver(invoice_id, mail)` writes `{root}/_outbox/<job_id>.json` (job id `uuid4().hex`, built by step 27's `job_document`) with `drive.upload` and returns the job id. The attachments are the invoice folder's file names. The secret `laptop_agent_key` comes from the age store through a scoped `Secrets` view. `mail_modes` adds the mode when a flow lists it, and a missing secret is a startup error (`app.py` builds it: the step's one extra file).
-- `deliver.py`: `completion="receipt"` maps to a new `_handed_off` path. The batch becomes `prepared`, a `mail_jobs` row is stored, the invoice is `BATCHED`, and nothing is sent to the sender yet.
-- Tests with a fake `Drive`: R-7.14 a `laptop_outlook` delivery writes one job file whose HMAC verifies with the test key, leaves the batch `prepared` and one `mail_jobs` row, and sends no message; R-7.14 a missing `laptop_agent_key` with `laptop_outlook` listed fails at startup.
+- **28a** (`src/invoicebot/sinks/laptop_job.py`, `tests/unit/test_sinks_laptop_job.py`, `tests/laptop/vectors.json`): `LaptopJob` gets `folder: str` after `invoice_id`, signed with the rest. Each `/`-separated segment is a plain name (the attachment check), with no leading `/` and no empty segment; else `ValueError`. Regenerate the vectors. Tests: R-7.14 `../x`, `a//b`, `/a`, `C:x` as a folder raise; the vectors verify.
+- **28b** (`src/invoicebot/store/mail_jobs.py` new, `tests/integration/test_store_mail_jobs.py` new): `add_mail_job(conn, job_id, invoice_id)` inserts the row and does not commit. Test: R-7.14 the row is stored with `created_at` from the database clock.
+- **28c** (`src/invoicebot/sinks/mailer.py`, `src/invoicebot/pipeline/deliver.py` call sites only, `tests/unit/test_sinks_mailer.py`, the fake modes in `tests/integration/test_pipeline_deliver.py`): `MailMode.deliver(invoice_id, mail, folder)`; every mode takes `folder`, only the new one uses it. `LaptopOutlook(drive, root, key)`: `completion="receipt"`, `done_rule="BR-D10"`; `deliver` writes `{root}/_outbox/<job_id>.json` (job id `uuid4().hex`, `job_document` with the folder and the attachments' file names) with `drive.upload` and returns the job id. `mail_modes` takes a `laptop: LaptopOutlook | None` and adds `laptop_outlook` when it is given (the dry run when `send_enabled` is false). Tests with a fake `Drive`: R-7.14 one job file whose HMAC verifies with the test key and whose folder is the invoice's.
+- **28d** (`src/invoicebot/pipeline/deliver.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_deliver.py`): `completion="receipt"` maps to `_handed_off`: the batch becomes `prepared`, `add_mail_job` stores the returned job id, the invoice is `BATCHED`, and nothing is sent to the sender. `app.py` builds `LaptopOutlook` when a flow lists `laptop_outlook`, with the personal OneDrive drive, that flow's `onedrive_folder` root and the age-store secret `laptop_agent_key` through a scoped `Secrets` view; a missing secret is a startup error. Tests: R-7.14 a `laptop_outlook` delivery writes one job, leaves the batch `prepared` and one `mail_jobs` row, and sends no message; R-7.14 a missing `laptop_agent_key` with `laptop_outlook` listed fails at startup.
 
-Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py -k laptop`.
+Test: `uv run pytest -q tests/unit/test_sinks_laptop_job.py tests/unit/test_sinks_mailer.py tests/integration/test_store_mail_jobs.py tests/integration/test_pipeline_deliver.py -k "laptop or mail_job"`.
 
 ## Step 29: The receipt poller `[worker]`
 
