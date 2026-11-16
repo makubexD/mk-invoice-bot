@@ -46,12 +46,13 @@ from invoicebot.net.http import GuardedTransport
 from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
+from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler, Worker
@@ -195,9 +196,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
             ),
         }
-        deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
-        if deliver_handler is not None:
+        deliver_handlers = _deliver_handlers(settings, cfg, directory, http, pool)
+        if deliver_handlers is not None:
+            deliver_handler, folder_status_handler = deliver_handlers
             handlers[DELIVER_STEP] = deliver_handler
+            handlers[FOLDER_STATUS_STEP] = folder_status_handler
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
@@ -249,17 +252,18 @@ def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
     return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
 
 
-def _deliver_handler(
+def _deliver_handlers(
     settings: Settings,
     cfg: Config,
     directory: StoreDirectory,
     http: httpx.AsyncClient,
     pool: Pool,
-) -> Handler | None:
-    """Build flow B's deliver handler, or None when no flow files to OneDrive (R-7.1).
+) -> tuple[Handler, Handler] | None:
+    """Build flow B's deliver and folder_status handlers, or None without a OneDrive sink (R-7.1, R-7.11).
 
     The provider only reads the age identity here; nothing signs in or calls Graph until
-    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9).
+    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Both handlers
+    share one drive, so the folder the delivery filed is the one folder_status moves.
     """
     if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
         return None
@@ -267,7 +271,10 @@ def _deliver_handler(
     drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer))
-    return make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir)
+    return (
+        make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+        make_folder_status_handler(pool, cfg, drive),
+    )
 
 
 def _fetch_registries(

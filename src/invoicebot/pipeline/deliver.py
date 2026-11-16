@@ -48,7 +48,8 @@ from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.actions import SENT_ACTION
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
-from invoicebot.queue.jobs import Job
+from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
+from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import BUTTON_SENT, MESSAGES, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
@@ -356,7 +357,11 @@ async def _prepare(context: _Context, invoice: _Invoice, sinks: _Sinks, prepared
         ),
     )
     async with context.pool.connection() as conn, conn.transaction():
-        await merge_flow_data(conn, invoice.job.invoice_id, {"folder": folder.folder, "seq": folder.seq})
+        await merge_flow_data(
+            conn,
+            invoice.job.invoice_id,
+            {"folder": folder.folder, "seq": folder.seq, "folder_path": folder.path},
+        )
     excel = await asyncio.to_thread(build_excel, sinks.excel, prepared.values, prepared.overrides)
     await context.drive.upload(f"{folder.path}/{sinks.excel.output}", excel)
     mail = build_mail(
@@ -428,6 +433,8 @@ async def _automatic(
     again: the batch fails and BR-D03 asks the owner to reprocess it (D89). A transient Graph
     error during the send propagates and leaves the batch ``sending``, so the retry treats it
     as a crashed send: the batch fails, BR-D03 reports it, and the mail is never resent (D89).
+    A batch the send set ``sent`` also enqueues the ``folder_status`` job (R-7.11), in the
+    same transaction as that state change.
     Before the send (filing, Excel upload) a transient error is simply retried.
     """
     async with context.pool.connection() as conn, conn.transaction():
@@ -451,6 +458,7 @@ async def _automatic(
 
     async with context.pool.connection() as conn, conn.transaction():
         await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
+        await enqueue(conn, delivery.invoice_id, FOLDER_STATUS_STEP)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=RULE_SENT)

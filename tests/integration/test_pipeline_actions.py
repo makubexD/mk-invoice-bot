@@ -654,6 +654,23 @@ async def test_sent_closes_a_prepared_batch_and_deletes_the_photo(
     assert not photo.exists()
 
 
+async def test_sent_enqueues_one_folder_status_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-7.11: [Ya lo envié] leaves exactly one folder_status job for the invoice."""
+    profile_id = _profile()
+    invoice_id, _ = await _batched_invoice(db_pool, profile_id, tmp_path)
+    msg = _press(invoice_id, "sent", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert result.status == "stored"
+    assert jobs == ["folder_status"]
+
+
 async def test_a_second_sent_press_is_stale_and_changes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
@@ -678,7 +695,7 @@ async def test_a_second_sent_press_is_stale_and_changes_nothing(
     assert result.status == "stored"
     assert invoice == (DONE, RULE_SENT)
     assert batch_state == "sent"
-    assert jobs == []
+    assert jobs == ["folder_status"]
     assert texts == [
         (RULE_SENT, MESSAGES[RULE_SENT]),
         ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),

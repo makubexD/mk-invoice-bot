@@ -21,7 +21,15 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Brand, Config, ExcelTemplateSink, MailerSink, Store, StoreDirectory
+from invoicebot.config.models import (
+    Brand,
+    Config,
+    ExcelTemplateSink,
+    MailerSink,
+    OneDriveFolderSink,
+    Store,
+    StoreDirectory,
+)
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.queue.jobs import Job
@@ -391,6 +399,12 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     return str(row[0]), row[1]
 
 
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the steps of the invoice's queued jobs, in insertion order."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
+
+
 async def _eml_files(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     cur = await conn.execute(
         "SELECT local_path FROM files WHERE invoice_id = %s AND kind = 'eml' ORDER BY id",
@@ -601,6 +615,56 @@ async def test_graph_sends_once_and_closes_as_done(
     assert outbox == [(MESSAGES["BR-D10"].format(folder=folder), "BR-D10", [])]
     assert not photo.exists()
     assert photo_path is None
+
+
+async def test_a_sent_graph_delivery_leaves_one_folder_status_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.11: a mail Graph accepts leaves exactly one folder_status job."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        jobs = await _jobs(conn, invoice_id)
+    assert [call[0] for call in mode.calls] == [invoice_id]
+    assert jobs == ["folder_status"]
+
+
+async def test_a_failed_send_leaves_no_folder_status_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.11: a final send failure leaves no folder_status job."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="graph"), profile_id, [])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(GraphError(400)), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        jobs = await _jobs(conn, invoice_id)
+    assert jobs == []
+
+
+async def test_a_delivered_invoice_records_its_folder_path(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.11: delivery stores the folder's absolute path next to its name and seq."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    assert flow_data["folder_path"] == f"{root}/{flow_data['folder']}"
 
 
 async def test_a_cancelled_invoice_still_marks_the_batch_sent(

@@ -42,6 +42,7 @@ from invoicebot.pipeline.questions import (
     YES_ACTION,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
+from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import CANCELLED_BY_USER, EDIT_PROMPT, MESSAGES
@@ -237,10 +238,11 @@ async def _edit(
 async def _sent(
     conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
 ) -> tuple[Path, ...]:
-    """Close the invoice's prepared batch as sent and clear its photos (R-7.8, BR-D08).
+    """Close the invoice's prepared batch as sent and clear its photos (R-7.8, R-7.11, BR-D08).
 
     A BATCHED invoice whose batch is not ``prepared`` (a failed send, for example) gets
-    BR-S02 and changes nothing.
+    BR-S02 and changes nothing. A sent batch enqueues the ``folder_status`` job in the same
+    transaction.
     """
     flow_id = await load_flow(conn, invoice_id)
     if flow_id is None or await get_batch_state(conn, invoice_id) != PREPARED_BATCH_STATE:
@@ -248,6 +250,7 @@ async def _sent(
         return ()
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
+    await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
     await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_SENT)
     await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
     return tuple(await take_photo_paths(conn, invoice_id))
