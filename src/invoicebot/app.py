@@ -30,6 +30,7 @@ from invoicebot.config.models import (
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
+    MailerSink,
     OneDriveFolderSink,
     StoreDirectory,
     WhatsAppChannel,
@@ -60,7 +61,8 @@ from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
-from invoicebot.sinks.mailer import DryRun, GraphSend, mail_modes
+from invoicebot.sinks.base import Drive
+from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
@@ -82,6 +84,10 @@ WHATSAPP_SECRETS = frozenset(
 MICROSOFT_ACCOUNT = "personal"
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
 BOT_ACCOUNT = "bot"
+#: The adapter and mail mode that hands the mail to the laptop agent (R-7.14, D108).
+LAPTOP_ADAPTER = "laptop_outlook"
+#: The age-store secret the laptop job's HMAC is keyed with (R-7.14).
+LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause before a background task that died is started again.
@@ -199,7 +205,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
             ),
         }
-        deliver_handlers = _deliver_handlers(settings, cfg, directory, http, pool)
+        deliver_handlers = _deliver_handlers(settings, cfg, directory, http, pool, store)
         if deliver_handlers is not None:
             deliver_handler, folder_status_handler = deliver_handlers
             handlers[DELIVER_STEP] = deliver_handler
@@ -271,12 +277,15 @@ def _deliver_handlers(
     directory: StoreDirectory,
     http: httpx.AsyncClient,
     pool: Pool,
+    store: SecretStore,
 ) -> tuple[Handler, Handler] | None:
     """Build flow B's deliver and folder_status handlers, or None without a OneDrive sink (R-7.1, R-7.11).
 
     The provider only reads the age identity here; nothing signs in or calls Graph until
     the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Both handlers
-    share one drive, so the folder the delivery filed is the one folder_status moves.
+    share one drive, so the folder the delivery filed is the one folder_status moves. A
+    flow that lists ``laptop_outlook`` needs its agent key, so a missing one stops startup
+    (R-7.14).
     """
     if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
         return None
@@ -285,11 +294,41 @@ def _deliver_handlers(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
     bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
-    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, None)
+    laptop = _laptop_mode(cfg, store, drive)
+    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
     return (
         make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
         make_folder_status_handler(pool, cfg, drive),
     )
+
+
+def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook | None:
+    """Build the laptop mode when a flow lists it, or None when none does (R-7.14, D108).
+
+    The first flow that lists ``laptop_outlook`` names the personal OneDrive root that
+    holds the agent's ``_outbox``; the config validator guarantees it has a folder sink.
+    The HMAC key comes from the age store, so a missing secret raises at startup (R-9.9).
+    """
+    for flow in cfg.flows.values():
+        if not _lists_laptop(flow):
+            continue
+        root = _laptop_root(flow)
+        key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+        return LaptopOutlook(drive, root, key)
+    return None
+
+
+def _lists_laptop(flow: Flow) -> bool:
+    """Return whether the flow's mailer sink lists the laptop mode (R-7.14)."""
+    return any(isinstance(sink, MailerSink) and LAPTOP_ADAPTER in sink.modes for sink in flow.sinks)
+
+
+def _laptop_root(flow: Flow) -> str:
+    """Return the root of the flow's OneDrive folder sink, which holds ``_outbox`` (R-7.14)."""
+    for sink in flow.sinks:
+        if isinstance(sink, OneDriveFolderSink):
+            return sink.root
+    raise RuntimeError("a flow listing laptop_outlook needs a onedrive_folder sink")
 
 
 def _fetch_registries(

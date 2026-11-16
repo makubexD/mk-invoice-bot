@@ -14,6 +14,8 @@ and a final Graph error fails the batch and leaves the invoice ``BATCHED`` with 
 transient Graph error during an automatic send propagates and leaves the batch ``sending``, so
 the retry treats it as a crashed send: the batch fails, BR-D03 reports it, and the mail is
 never resent (D89). Before the send (filing, Excel upload) a transient error is simply retried.
+A receipt mode follows the same sending-first order, then leaves the batch ``prepared`` with
+its laptop job id recorded and no message to the sender (R-7.14, D108).
 """
 
 from __future__ import annotations
@@ -79,6 +81,7 @@ from invoicebot.store.invoices import (
     load_reading,
     set_state,
 )
+from invoicebot.store.mail_jobs import add_mail_job
 
 logger = logging.getLogger(__name__)
 
@@ -475,6 +478,46 @@ async def _automatic(
         await asyncio.to_thread(path.unlink, missing_ok=True)
 
 
+async def _handed_off(
+    context: _Context,
+    delivery: _Delivery,
+    prepared: _Values,
+    mode: MailMode,
+) -> None:
+    """Write the laptop job and leave the batch ``prepared`` until its receipt (R-7.14, D108).
+
+    The batch is committed as ``sending`` before the job file is written, so a retry after a
+    crash finds it ``sending``, fails it and never writes a second job the laptop would send
+    twice (D89). One transaction then records the batch ``prepared``, stores the job id in
+    ``mail_jobs`` and moves the invoice to ``BATCHED``; no message is queued, because the
+    receipt completes the batch later (R-7.14). The photo stays until the mail is sent.
+    """
+    async with context.pool.connection() as conn, conn.transaction():
+        if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
+            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
+            return
+        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
+        await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
+
+    try:
+        job_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
+    except AuthRequired:
+        # The token is fetched before the upload, so no job was written: free the batch so the
+        # delivery resumed after re-auth writes it instead of treating it as crashed.
+        async with context.pool.connection() as conn, conn.transaction():
+            await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+        raise
+    if job_id is None:
+        raise RuntimeError("a receipt mail mode returned no job id")
+
+    async with context.pool.connection() as conn, conn.transaction():
+        await set_batch_state(conn, batch_id, PREPARED_BATCH_STATE)
+        await add_mail_job(conn, job_id, delivery.invoice_id)
+        if not await _still_delivering(conn, delivery.invoice_id):
+            return
+        await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
+
+
 def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
     """Return BR-D13's [No llegó] button, or none for any other done rule (R-7.8)."""
     if done_rule != RULE_INBOX:
@@ -485,10 +528,9 @@ def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
 type _CompletionHandler = Callable[[_Context, _Delivery, _Values, MailMode], Awaitable[None]]
 
 #: The handler each completion uses (D108).
-# shortcut: ``receipt`` gets its handler in step 28; no mode reports it yet, so its missing
-# key is a programming error and a ``KeyError`` is acceptable.
 _COMPLETIONS: Mapping[Completion, _CompletionHandler] = {
     "accepted": _automatic,
+    "receipt": _handed_off,
     "tap": _assisted,
 }
 

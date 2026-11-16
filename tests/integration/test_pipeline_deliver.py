@@ -9,6 +9,7 @@ real.
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -36,7 +37,8 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.sinks.base import OutgoingMail
-from invoicebot.sinks.mailer import DryRun
+from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
+from invoicebot.sinks.mailer import DryRun, LaptopOutlook
 from invoicebot.sinks.onedrive import GraphError, GraphTransient
 from invoicebot.store.flow_b import (
     get_batch_state,
@@ -416,6 +418,15 @@ async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     return [str(step) for (step,) in await cur.fetchall()]
 
 
+async def _mail_jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the job ids of the invoice's laptop mail jobs (R-7.14)."""
+    cur = await conn.execute(
+        "SELECT job_id FROM mail_jobs WHERE invoice_id = %s ORDER BY job_id",
+        (invoice_id,),
+    )
+    return [str(job_id) for (job_id,) in await cur.fetchall()]
+
+
 async def _eml_files(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     cur = await conn.execute(
         "SELECT local_path FROM files WHERE invoice_id = %s AND kind = 'eml' ORDER BY id",
@@ -626,6 +637,48 @@ async def test_graph_sends_once_and_closes_as_done(
     assert outbox == [(MESSAGES["BR-D10"].format(folder=folder), "BR-D10", [])]
     assert not photo.exists()
     assert photo_path is None
+
+
+async def test_laptop_outlook_writes_one_signed_job_and_batches(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.14: a laptop delivery writes one signed job, prepares the batch and sends no message."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FakeDrive()
+    key = b"test-key"
+
+    await _handler(
+        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, key), mode_name="laptop_outlook"
+    )(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    job_paths = [path for path in drive.uploads if path.startswith(f"{root}/_outbox/")]
+    assert len(job_paths) == 1
+    document = json.loads(drive.uploads[job_paths[0]])
+    job = LaptopJob(
+        job_id=document["job_id"],
+        invoice_id=document["invoice_id"],
+        folder=document["folder"],
+        to=tuple(document["to"]),
+        subject=document["subject"],
+        body=document["body"],
+        attachments=tuple(document["attachments"]),
+    )
+    assert job_paths == [f"{root}/_outbox/{job.job_id}.json"]
+    assert job_hmac(job, key) == document["hmac"]
+    assert job.folder == flow_data["folder_path"].lstrip("/")
+    assert invoice == ("BATCHED", "BR-D07")
+    assert batch_state == "prepared"
+    assert jobs == [job.job_id]
+    assert outbox == []
 
 
 async def test_inbox_rule_send_closes_as_done_and_offers_no_llego(
