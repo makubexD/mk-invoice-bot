@@ -1172,6 +1172,33 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     assert outbox == []
 
 
+async def test_resend_laptop_after_a_folder_rename_keeps_one_folder(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D109: a resend after folder_status renamed the folder keeps one folder and its folder_path."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    base = f"{FOLDER_PREFIX}1_{COMERCIO}"
+    renamed = f"{root}/{base}_Sent"
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, flow_data={"folder_path": renamed})
+    drive = FakeDrive()
+    handlers = _resend_handlers(
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+    assert flow_data["folder_path"] == renamed
+    assert drive.created == [(root, f"{base}_Sent")]
+    assert f"{renamed}/PERSONA DE EJEMPLO.pdf" in drive.uploads
+    assert f"{renamed}/PERSONA DE EJEMPLO.xml" in drive.uploads
+    assert f"{renamed}/.invoicebot.json" in drive.uploads
+    assert f"{root}/{base}/PERSONA DE EJEMPLO.pdf" not in drive.uploads
+
+
 async def test_resend_laptop_with_a_resending_marker_asks_again(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
