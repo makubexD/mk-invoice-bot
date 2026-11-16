@@ -18,7 +18,7 @@ from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_com
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
-from invoicebot.pipeline.payments import handle_payment_press
+from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
@@ -103,7 +103,7 @@ async def handle_inbound(
             return IntakeResult(status="duplicate", invoice_id=None)
         await touch_window(conn, msg.channel, msg.profile_id, msg.received_at)
         if msg.button_id is not None:
-            if msg.button_id.startswith("p"):
+            if msg.button_id.startswith(PAYMENT_BUTTON_PREFIX):
                 await handle_payment_press(conn, msg)
                 return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg, roles.laptop_flows)

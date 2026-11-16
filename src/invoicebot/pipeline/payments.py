@@ -66,8 +66,10 @@ _RULE_NO_MATCH = "BR-P03"
 _RULE_PAID = "BR-P04"
 #: How long a payment proposal stays confirmable, on the database clock (R-7.12).
 PROPOSAL_MAX_AGE_HOURS = 24
+#: The prefix of every payment proposal button id, so intake can route a press (R-7.12).
+PAYMENT_BUTTON_PREFIX = "p"
 #: A proposal button's id: ``p<proposal>:pay:<set>`` or ``p<proposal>:pay_no`` (R-7.12).
-_PRESS_PATTERN = r"p([0-9]{1,9}):(?:pay:([0-9])|pay_no)"
+_PRESS_PATTERN = rf"{re.escape(PAYMENT_BUTTON_PREFIX)}([0-9]{{1,9}}):(?:pay:([0-9])|pay_no)"
 
 
 async def pagado(
@@ -287,8 +289,8 @@ def _pending_line(candidate: Candidate, timezone: str) -> str:
 def _yes_buttons(proposal_id: int) -> list[Button]:
     """Return BR-P01's [Sí] and [No] buttons for a proposal (R-7.12)."""
     return [
-        Button(id=f"p{proposal_id}:pay:0", title=BUTTON_YES),
-        Button(id=f"p{proposal_id}:pay_no", title=BUTTON_NO),
+        Button(id=f"{PAYMENT_BUTTON_PREFIX}{proposal_id}:pay:0", title=BUTTON_YES),
+        Button(id=f"{PAYMENT_BUTTON_PREFIX}{proposal_id}:pay_no", title=BUTTON_NO),
     ]
 
 
@@ -307,10 +309,13 @@ def _br_p02_text(
 def _set_buttons(proposal_id: int, sets: Sequence[tuple[int, ...]]) -> list[Button]:
     """Return BR-P02's one button per set plus [No], oldest set first (R-7.12, D107)."""
     buttons = [
-        Button(id=f"p{proposal_id}:pay:{index}", title=BUTTON_OPTION.format(n=index + 1))
+        Button(
+            id=f"{PAYMENT_BUTTON_PREFIX}{proposal_id}:pay:{index}",
+            title=BUTTON_OPTION.format(n=index + 1),
+        )
         for index in range(len(sets))
     ]
-    buttons.append(Button(id=f"p{proposal_id}:pay_no", title=BUTTON_NO))
+    buttons.append(Button(id=f"{PAYMENT_BUTTON_PREFIX}{proposal_id}:pay_no", title=BUTTON_NO))
     return buttons
 
 

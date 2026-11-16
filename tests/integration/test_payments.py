@@ -19,6 +19,7 @@ from invoicebot.channels.whatsapp.payloads import buttons_payload
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command
 from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.rules.messages_es import (
     BUTTON_NO,
@@ -311,6 +312,28 @@ async def test_br_p02_outbox_buttons_build_a_valid_whatsapp_payload(
         profile_id, body, [Button(id=button["id"], title=button["title"]) for button in buttons]
     )
     assert len(payload["interactive"]["action"]["buttons"]) == len(buttons)
+
+
+async def test_br_p02_buttons_all_start_with_the_payment_prefix(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: every button payments builds starts with the prefix intake routes presses on."""
+    profile_id = _unique("profile")
+    flow = _flow()
+    older = datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
+    newer = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    async with db_pool.connection() as conn:
+        await _invoice(conn, profile_id, flow.flow_id, "60.00", created_at=older)
+        await _invoice(conn, profile_id, flow.flow_id, "40.00", created_at=older)
+        await _invoice(conn, profile_id, flow.flow_id, "70.00", created_at=newer)
+        await _invoice(conn, profile_id, flow.flow_id, "30.00", created_at=newer)
+        await _run(conn, profile_id, "15/11 100.00", flow)
+        replies = await _replies(conn, profile_id)
+
+    _body, rule_id, buttons = replies[0]
+    assert rule_id == "BR-P02"
+    assert buttons
+    assert all(button["id"].startswith(PAYMENT_BUTTON_PREFIX) for button in buttons)
 
 
 async def test_command_amount_without_a_matching_set_lists_pending_as_br_p03(
