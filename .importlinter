@@ -20,6 +20,7 @@ source_modules =
     invoicebot.auth
     invoicebot.gaps
     invoicebot.github
+    invoicebot.ops
 forbidden_modules =
     invoicebot.api
     invoicebot.events

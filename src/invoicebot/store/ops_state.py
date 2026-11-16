@@ -5,7 +5,7 @@ racing for the same alert produce one send. Every function takes the caller's
 connection and never commits: the caller owns the transaction.
 """
 
-from datetime import datetime, timedelta
+from datetime import datetime, time, timedelta
 from typing import Any, cast
 
 from psycopg import AsyncConnection
@@ -28,6 +28,28 @@ async def claim(conn: AsyncConnection[Any], key: str, every: timedelta) -> bool:
         RETURNING key
         """,
         (key, every),
+    )
+    return await cur.fetchone() is not None
+
+
+async def claim_daily(conn: AsyncConnection[Any], key: str, timezone: str, at: time) -> bool:
+    """Claim ``key`` for today when its local time has passed ``at`` (R-9.11, D114).
+
+    Returns True when the local time in ``timezone`` is at or past ``at`` and the
+    key was not claimed on today's local date; the claim is stamped with ``now()``.
+    The check and the stamp are one statement on the database clock. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        INSERT INTO ops_state AS s (key, last_at)
+        SELECT %s, now()
+        WHERE (now() AT TIME ZONE %s)::time >= %s
+        ON CONFLICT (key) DO UPDATE
+        SET last_at = now()
+        WHERE (s.last_at AT TIME ZONE %s)::date < (now() AT TIME ZONE %s)::date
+        RETURNING key
+        """,
+        (key, timezone, at, timezone, timezone),
     )
     return await cur.fetchone() is not None
 
