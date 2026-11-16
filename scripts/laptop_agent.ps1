@@ -5,7 +5,9 @@
 .DESCRIPTION
     Reads the job files the bot writes to the personal OneDrive `_outbox/`,
     refuses any that fail the checks (size, HMAC, recipients, attachments),
-    sends the rest through Outlook classic and writes a receipt for each.
+    sends the rest through Outlook classic and writes a receipt for each. It
+    also mirrors the personal invoice folders into the work OneDrive, matching
+    them by the manifest's invoice id (R-7.3, R-7.14).
 
     The functions are dot-sourceable so the Pester tests can call them without
     starting Outlook. The main block runs only when the script is invoked.
@@ -25,7 +27,7 @@
     starting with `#` are ignored.
 
 .PARAMETER DryRun
-    Log what would be sent and change nothing (step 35).
+    Log what would be sent or copied and change nothing (steps 35, 36).
 #>
 [CmdletBinding()]
 param(
@@ -44,6 +46,9 @@ $script:JobIdPattern = '^[0-9a-f]{32}$'
 
 #: The longest error text a receipt carries (matches `MAX_ERROR_LENGTH`).
 $script:MaxErrorLength = 500
+
+#: The manifest the bot writes into every invoice folder (R-7.2).
+$script:ManifestName = '.invoicebot.json'
 
 function ConvertTo-CanonicalString {
     <#
@@ -632,6 +637,334 @@ function Send-Job {
     Remove-Item -LiteralPath $jobFile -Force -ErrorAction SilentlyContinue
 }
 
+function Join-RootPath {
+    <#
+    .SYNOPSIS
+        Join a root and a relative folder path that uses `/` separators.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root,
+        [Parameter(Mandatory)]
+        [string] $Relative
+    )
+
+    $path = $Root
+    foreach ($segment in $Relative.Split('/')) {
+        $path = Join-Path -Path $path -ChildPath $segment
+    }
+    return $path
+}
+
+function Get-RelativeFolderPath {
+    <#
+    .SYNOPSIS
+        Return a path relative to the root, with `/` separators.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root,
+        [Parameter(Mandatory)]
+        [string] $Path
+    )
+
+    return [System.IO.Path]::GetRelativePath($Root, $Path).Replace('\', '/')
+}
+
+function Test-SameRelativePath {
+    <#
+    .SYNOPSIS
+        Compare two relative folder paths the way Windows compares paths.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [string] $Left,
+        [AllowNull()]
+        [string] $Right
+    )
+
+    return [string]::Equals($Left, $Right, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-IntegerId {
+    <#
+    .SYNOPSIS
+        Return whether a parsed JSON value is an integer, as the manifest requires.
+    #>
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        $Value
+    )
+
+    if ($null -eq $Value -or $Value -is [bool]) {
+        return $false
+    }
+    return $Value -is [int] -or $Value -is [long] -or $Value -is [int16] -or $Value -is [byte]
+}
+
+function Get-InvoiceFolderCandidates {
+    <#
+    .SYNOPSIS
+        Return the folders that may be invoice folders: the root's children and
+        the children of its year folders (a name of four digits), no deeper.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root
+    )
+
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
+        return
+    }
+    foreach ($child in @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue)) {
+        # `_outbox/` and OneDrive's own `_` folders are never invoice folders.
+        if ($child.Name.StartsWith('_')) {
+            continue
+        }
+        if ($child.Name -match '^\d{4}$') {
+            foreach ($grandchild in @(Get-ChildItem -LiteralPath $child.FullName -Directory -Force -ErrorAction SilentlyContinue)) {
+                $grandchild
+            }
+        }
+        else {
+            $child
+        }
+    }
+}
+
+function Read-InvoiceManifest {
+    <#
+    .SYNOPSIS
+        Return the invoice id in a folder's `.invoicebot.json`, or `$null`.
+    .DESCRIPTION
+        A folder without a manifest is left alone silently. A manifest that is
+        too large, unreadable or without an integer `invoice_id` is logged and
+        skipped. The 64 KiB cap is the one job files use.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Folder,
+        [Parameter(Mandatory)]
+        [string] $Relative,
+        [string] $LogFile = ''
+    )
+
+    $manifestPath = Join-Path -Path $Folder -ChildPath $script:ManifestName
+    # `-Force` so a dotfile is found on hosts that map it to a hidden item.
+    $manifestFile = Get-Item -LiteralPath $manifestPath -Force -ErrorAction SilentlyContinue
+    if ($null -eq $manifestFile -or $manifestFile.PSIsContainer) {
+        return
+    }
+    if ($manifestFile.Length -ge $script:MaxJobBytes) {
+        Write-AgentLog -LogFile $LogFile -Message (
+            'folder {0}: manifest is too large, skipped' -f $Relative
+        )
+        return
+    }
+    try {
+        $text = [System.IO.File]::ReadAllText($manifestFile.FullName, [System.Text.Encoding]::UTF8)
+        $manifest = ConvertFrom-JobJson -Text $text
+    }
+    catch {
+        Write-AgentLog -LogFile $LogFile -Message (
+            'folder {0}: manifest is not valid JSON, skipped' -f $Relative
+        )
+        return
+    }
+    if ($null -eq $manifest -or $manifest -isnot [System.Management.Automation.PSCustomObject]) {
+        Write-AgentLog -LogFile $LogFile -Message (
+            'folder {0}: manifest is not a JSON object, skipped' -f $Relative
+        )
+        return
+    }
+    $property = $manifest.PSObject.Properties['invoice_id']
+    if ($null -eq $property -or -not (Test-IntegerId -Value $property.Value)) {
+        Write-AgentLog -LogFile $LogFile -Message (
+            'folder {0}: manifest invoice_id is not an integer, skipped' -f $Relative
+        )
+        return
+    }
+    return [long] $property.Value
+}
+
+function Get-InvoiceFolderIndex {
+    <#
+    .SYNOPSIS
+        Index a tree as invoice id -> folder path relative to the root.
+    .DESCRIPTION
+        Two folders with the same id make that id ambiguous, so it is logged and
+        skipped instead of guessing which copy is current.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $Root,
+        [string] $LogFile = ''
+    )
+
+    $index = @{}
+    $skipped = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::Ordinal)
+    foreach ($folder in @(Get-InvoiceFolderCandidates -Root $Root)) {
+        $relative = Get-RelativeFolderPath -Root $Root -Path $folder.FullName
+        $invoiceId = Read-InvoiceManifest -Folder $folder.FullName -Relative $relative -LogFile $LogFile
+        if ($null -eq $invoiceId) {
+            continue
+        }
+        $key = [string] $invoiceId
+        if ($skipped.Contains($key)) {
+            Write-AgentLog -LogFile $LogFile -Message (
+                'invoice {0}: another folder {1}, id skipped' -f $key, $relative
+            )
+            continue
+        }
+        if ($index.ContainsKey($key)) {
+            [void] $skipped.Add($key)
+            $index.Remove($key)
+            Write-AgentLog -LogFile $LogFile -Message (
+                'invoice {0}: folder {1} duplicates another, id skipped' -f $key, $relative
+            )
+            continue
+        }
+        $index[$key] = $relative
+    }
+    return $index
+}
+
+function Sync-Folders {
+    <#
+    .SYNOPSIS
+        Mirror the personal invoice folders into the work root by manifest id (R-7.3, R-7.14).
+    .DESCRIPTION
+        A folder missing on the work side is copied whole with its relative path.
+        A folder whose relative path differs is moved to match the personal
+        side, unless the target already exists: nothing is ever overwritten or
+        deleted. Then every personal file missing on the work side, or with a
+        different SHA-256 hash, is copied over. Folders without a manifest are
+        left alone.
+    .PARAMETER PersonalRoot
+        The personal OneDrive root, the source of the mirror.
+    .PARAMETER WorkRoot
+        The work OneDrive root, the target of the mirror.
+    .PARAMETER LogFile
+        The log to append to; defaults to `$WorkRoot/agent.log`.
+    .PARAMETER DryRun
+        Log the planned copies and moves and touch nothing.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string] $PersonalRoot,
+        [Parameter(Mandatory)]
+        [string] $WorkRoot,
+        [string] $LogFile = '',
+        [switch] $DryRun
+    )
+
+    if ([string]::IsNullOrEmpty($LogFile)) {
+        $LogFile = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
+    }
+    $personalIndex = Get-InvoiceFolderIndex -Root $PersonalRoot -LogFile $LogFile
+    $workIndex = Get-InvoiceFolderIndex -Root $WorkRoot -LogFile $LogFile
+
+    foreach ($invoiceId in @($personalIndex.Keys)) {
+        $personalRelative = [string] $personalIndex[$invoiceId]
+        $personalPath = Join-RootPath -Root $PersonalRoot -Relative $personalRelative
+        $workPath = $null
+        $workRelative = $null
+        if ($workIndex.ContainsKey($invoiceId)) {
+            $workRelative = [string] $workIndex[$invoiceId]
+            $workPath = Join-RootPath -Root $WorkRoot -Relative $workRelative
+        }
+
+        if ($null -eq $workPath) {
+            $targetPath = Join-RootPath -Root $WorkRoot -Relative $personalRelative
+            if (Test-Path -LiteralPath $targetPath) {
+                Write-AgentLog -LogFile $LogFile -Message (
+                    'invoice {0}: work path {1} already exists, skipped' -f $invoiceId, $personalRelative
+                )
+                continue
+            }
+            if ($DryRun) {
+                Write-AgentLog -LogFile $LogFile -Message (
+                    'would copy folder {0} (invoice {1})' -f $personalRelative, $invoiceId
+                )
+                continue
+            }
+            $targetParent = Split-Path -Path $targetPath -Parent
+            if (-not (Test-Path -LiteralPath $targetParent -PathType Container)) {
+                New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+            }
+            Copy-Item -LiteralPath $personalPath -Destination $targetPath -Recurse
+            Write-AgentLog -LogFile $LogFile -Message (
+                'copied folder {0} (invoice {1})' -f $personalRelative, $invoiceId
+            )
+            continue
+        }
+
+        if (-not (Test-SameRelativePath -Left $workRelative -Right $personalRelative)) {
+            $targetPath = Join-RootPath -Root $WorkRoot -Relative $personalRelative
+            if (Test-Path -LiteralPath $targetPath) {
+                Write-AgentLog -LogFile $LogFile -Message (
+                    'invoice {0}: work path {1} already exists, skipped' -f $invoiceId, $personalRelative
+                )
+                continue
+            }
+            if ($DryRun) {
+                Write-AgentLog -LogFile $LogFile -Message (
+                    'would move folder {0} to {1} (invoice {2})' -f
+                        $workRelative, $personalRelative, $invoiceId
+                )
+                continue
+            }
+            $targetParent = Split-Path -Path $targetPath -Parent
+            if (-not (Test-Path -LiteralPath $targetParent -PathType Container)) {
+                New-Item -ItemType Directory -Path $targetParent -Force | Out-Null
+            }
+            Move-Item -LiteralPath $workPath -Destination $targetPath
+            Write-AgentLog -LogFile $LogFile -Message (
+                'moved folder {0} to {1} (invoice {2})' -f $workRelative, $personalRelative, $invoiceId
+            )
+            $workPath = $targetPath
+        }
+
+        $copiedFiles = 0
+        foreach ($file in @(Get-ChildItem -LiteralPath $personalPath -File -Recurse -Force)) {
+            $fileRelative = Get-RelativeFolderPath -Root $personalPath -Path $file.FullName
+            $destination = Join-RootPath -Root $workPath -Relative $fileRelative
+            $needsCopy = $true
+            if (Test-Path -LiteralPath $destination -PathType Leaf) {
+                $sourceHash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
+                $destinationHash = (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+                $needsCopy = $sourceHash -ne $destinationHash
+            }
+            if (-not $needsCopy) {
+                continue
+            }
+            if (-not $DryRun) {
+                $destinationParent = Split-Path -Path $destination -Parent
+                if (-not (Test-Path -LiteralPath $destinationParent -PathType Container)) {
+                    New-Item -ItemType Directory -Path $destinationParent -Force | Out-Null
+                }
+                Copy-Item -LiteralPath $file.FullName -Destination $destination -Force
+            }
+            $copiedFiles++
+        }
+        if ($copiedFiles -gt 0) {
+            $verb = if ($DryRun) { 'would copy' } else { 'copied' }
+            Write-AgentLog -LogFile $LogFile -Message (
+                '{0} {1} file(s) in {2} (invoice {3})' -f
+                    $verb, $copiedFiles, $personalRelative, $invoiceId
+            )
+        }
+    }
+}
+
 if ($MyInvocation.InvocationName -ne '.') {
     foreach ($parameterName in @('OneDriveRoot', 'WorkRoot', 'KeyFile', 'AllowlistFile')) {
         if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $parameterName -ValueOnly))) {
@@ -681,9 +1014,9 @@ if ($MyInvocation.InvocationName -ne '.') {
         }
     }
 
+    $agentLog = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
     if ($validJobs.Count -gt 0) {
         $stateFile = Join-Path -Path $PSScriptRoot -ChildPath 'sent-jobs.txt'
-        $agentLog = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
         $outlook = $null
         if (-not $DryRun) {
             $outlook = New-Object -ComObject Outlook.Application
@@ -693,4 +1026,6 @@ if ($MyInvocation.InvocationName -ne '.') {
                 -StateFile $stateFile -Outbox $outbox -LogFile $agentLog -DryRun:$DryRun
         }
     }
+
+    Sync-Folders -PersonalRoot $OneDriveRoot -WorkRoot $WorkRoot -LogFile $agentLog -DryRun:$DryRun
 }

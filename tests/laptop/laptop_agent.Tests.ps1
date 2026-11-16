@@ -89,6 +89,59 @@ BeforeAll {
         return $outlook
     }
 
+    function script:New-SyncRoot {
+        $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        return $root
+    }
+
+    function script:Set-InvoiceManifest {
+        param(
+            [string] $Folder,
+            $InvoiceId
+        )
+        $json = ConvertTo-Json -InputObject ([ordered] @{
+                invoice_id = $InvoiceId
+                version    = 1
+            }) -Compress
+        [System.IO.File]::WriteAllText(
+            (Join-Path -Path $Folder -ChildPath '.invoicebot.json'),
+            $json,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+    }
+
+    function script:New-SyncFolder {
+        param(
+            [string] $Root,
+            [string] $RelativeFolder,
+            $InvoiceId,
+            [string[]] $Files = @()
+        )
+        $folder = New-InvoiceFolder -Root $Root -RelativeFolder $RelativeFolder -Files $Files
+        if ($null -ne $InvoiceId) {
+            Set-InvoiceManifest -Folder $folder -InvoiceId $InvoiceId
+        }
+        return $folder
+    }
+
+    function script:Get-TreeSnapshot {
+        param([string] $Root)
+        $lines = foreach ($file in @(Get-ChildItem -LiteralPath $Root -File -Recurse -Force | Sort-Object FullName)) {
+            $relative = [System.IO.Path]::GetRelativePath($Root, $file.FullName)
+            '{0}|{1}|{2}' -f $relative,
+                (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash,
+                $file.LastWriteTimeUtc.Ticks
+        }
+        return @($lines)
+    }
+
+    function script:Get-ManifestInvoiceId {
+        param([string] $Folder)
+        $text = Get-Content -LiteralPath (Join-Path -Path $Folder -ChildPath '.invoicebot.json') -Raw -Force
+        return (ConvertFrom-JobJson -Text $text).invoice_id
+    }
+
     function script:New-SendFixture {
         param(
             [string[]] $Attachments = @('F001-123.pdf'),
@@ -317,5 +370,132 @@ Describe 'Send-Job' {
         $log | Should -Not -Match 'cuerpo secreto 4242'
         $log | Should -Match $fixture.Job.job_id
         $log | Should -Match 'sent'
+    }
+}
+
+Describe 'Sync-Folders' {
+    It 'R-7.3 copies a new personal folder into the work root' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('Formato de reembolsos.xlsx', 'LaLena.pdf', 'LaLena.xml') | Out-Null
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+
+        $copied = Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena'
+        Test-Path -LiteralPath $copied -PathType Container | Should -BeTrue
+        Get-ManifestInvoiceId -Folder $copied | Should -Be 1
+        foreach ($name in @('Formato de reembolsos.xlsx', 'LaLena.pdf', 'LaLena.xml')) {
+            Test-Path -LiteralPath (Join-Path -Path $copied -ChildPath $name) -PathType Leaf |
+                Should -BeTrue
+        }
+        Get-Content -LiteralPath $log -Raw |
+            Should -Match 'copied folder 2026-7-Support_1_LaLena \(invoice 1\)'
+    }
+
+    It 'R-7.11 a personal rename to _Sent renames the work folder' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_1_LaLena_Sent' -InvoiceId 1 `
+            -Files @('LaLena.pdf', 'LaLena.xml') | Out-Null
+        New-SyncFolder -Root $work -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf') | Out-Null
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+
+        $renamed = Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena_Sent'
+        Test-Path -LiteralPath $renamed -PathType Container | Should -BeTrue
+        Test-Path -LiteralPath (Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena') |
+            Should -BeFalse
+        Test-Path -LiteralPath (Join-Path -Path $renamed -ChildPath 'LaLena.xml') -PathType Leaf |
+            Should -BeTrue
+        Get-Content -LiteralPath $log -Raw | Should -Match (
+            'moved folder 2026-7-Support_1_LaLena to 2026-7-Support_1_LaLena_Sent \(invoice 1\)'
+        )
+    }
+
+    It 'R-7.11 a move into the year folder moves the work copy' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026/2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf') | Out-Null
+        New-SyncFolder -Root $work -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf') | Out-Null
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+
+        $moved = Join-Path -Path (Join-Path -Path $work -ChildPath '2026') `
+            -ChildPath '2026-7-Support_1_LaLena'
+        Test-Path -LiteralPath $moved -PathType Container | Should -BeTrue
+        Get-ManifestInvoiceId -Folder $moved | Should -Be 1
+        Test-Path -LiteralPath (Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena') |
+            Should -BeFalse
+        Get-Content -LiteralPath $log -Raw | Should -Match (
+            'moved folder 2026-7-Support_1_LaLena to 2026/2026-7-Support_1_LaLena \(invoice 1\)'
+        )
+    }
+
+    It 'R-7.3 leaves a hand-made work folder without a manifest untouched' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf') | Out-Null
+        $manual = New-SyncFolder -Root $work -RelativeFolder 'mi-carpeta' -InvoiceId $null `
+            -Files @('foto.jpg')
+        [System.IO.File]::WriteAllText((Join-Path -Path $manual -ChildPath 'foto.jpg'), 'manual')
+        $before = @(Get-TreeSnapshot -Root $work | Where-Object { $_ -like 'mi-carpeta*' })
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+
+        Test-Path -LiteralPath $manual -PathType Container | Should -BeTrue
+        Get-Content -LiteralPath (Join-Path -Path $manual -ChildPath 'foto.jpg') -Raw |
+            Should -Be 'manual'
+        $after = @(Get-TreeSnapshot -Root $work | Where-Object { $_ -like 'mi-carpeta*' })
+        Compare-Object -ReferenceObject $before -DifferenceObject $after | Should -BeNullOrEmpty
+        Test-Path -LiteralPath (Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena') `
+            -PathType Container | Should -BeTrue
+    }
+
+    It 'R-7.3 a second run changes nothing' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf', 'LaLena.xml', '.invoicebot.json') | Out-Null
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+        $firstTree = @(Get-TreeSnapshot -Root $work)
+        $firstLog = Get-Content -LiteralPath $log -Raw
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+        $secondTree = @(Get-TreeSnapshot -Root $work)
+        $secondLog = Get-Content -LiteralPath $log -Raw
+
+        Compare-Object -ReferenceObject $firstTree -DifferenceObject $secondTree | Should -BeNullOrEmpty
+        $secondLog | Should -Be $firstLog
+    }
+
+    It 'R-7.3 logs and skips a manifest whose invoice_id is not an integer' {
+        $personal = New-SyncRoot
+        $work = New-SyncRoot
+        $log = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N') + '.log')
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_2_Malo' -InvoiceId 'abc' `
+            -Files @('Malo.pdf') | Out-Null
+        New-SyncFolder -Root $personal -RelativeFolder '2026-7-Support_1_LaLena' -InvoiceId 1 `
+            -Files @('LaLena.pdf') | Out-Null
+
+        Sync-Folders -PersonalRoot $personal -WorkRoot $work -LogFile $log
+
+        Test-Path -LiteralPath (Join-Path -Path $work -ChildPath '2026-7-Support_2_Malo') |
+            Should -BeFalse
+        Test-Path -LiteralPath (Join-Path -Path $work -ChildPath '2026-7-Support_1_LaLena') `
+            -PathType Container | Should -BeTrue
+        Get-Content -LiteralPath $log -Raw | Should -Match (
+            'folder 2026-7-Support_2_Malo: manifest invoice_id is not an integer, skipped'
+        )
     }
 }
