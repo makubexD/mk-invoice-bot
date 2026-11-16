@@ -529,3 +529,76 @@ async def test_move_maps_a_failed_status_to_its_error(
             await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
 
     assert raised.value.status == status
+
+
+async def test_delete_sends_a_delete_to_the_encoded_item_url() -> None:
+    """R-7.14: a 204 deletes the item with a DELETE on its encoded path."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        await drive.delete("/root/_outbox/receipts/a b.json")
+
+    assert len(requests) == 1
+    assert requests[0].method == "DELETE"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/root/_outbox/receipts/a%20b.json"
+    assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
+
+
+async def test_delete_of_a_missing_item_returns_without_error() -> None:
+    """R-7.14: a 404 means the item is already gone and is not an error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with _make_drive(handler) as drive:
+        await drive.delete("/root/_outbox/receipts/gone.json")
+
+
+async def test_delete_maps_a_server_error_to_graph_transient() -> None:
+    """R-7.14: a 500 on delete is retried as a transient failure."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphTransient) as raised:
+            await drive.delete("/root/_outbox/receipts/a.json")
+
+    assert raised.value.status == 500
+    assert len(requests) == 1
+
+
+async def test_delete_refuses_a_dotdot_segment_before_any_request() -> None:
+    """R-7.14: a path with a .. segment is refused before the drive is contacted."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="invalid drive path segment"):
+            await drive.delete("/root/_outbox/../a.json")
+
+    assert requests == []
+
+
+async def test_delete_refuses_the_drive_root_before_any_request() -> None:
+    """R-7.14: the drive root is never deleted, and no request is sent."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="drive root"):
+            await drive.delete("/")
+
+    assert requests == []

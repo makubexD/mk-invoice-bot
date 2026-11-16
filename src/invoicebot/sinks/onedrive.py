@@ -354,6 +354,25 @@ class GraphDrive:
             raise FolderExists(409)
         raise_graph_error(response, self._account)
 
+    async def delete(self, path: str) -> None:
+        """Delete the item at ``path`` (R-7.14).
+
+        A 404 means the item is already gone and is success; other failures raise
+        as the other methods do. The drive root is never deleted.
+        """
+        if path == "/":
+            raise ValueError("the drive root cannot be deleted")
+        encoded = _encode_path(path)
+        token = await self._tokens.token()
+        response = await self._client.delete(
+            f"{GRAPH_BASE_URL}/me/drive/root:{encoded}",
+            headers=auth_headers(token),
+            timeout=self._timeout_s,
+        )
+        if response.status_code == 404:
+            return
+        raise_graph_error(response, self._account)
+
     async def _create_folder(self, parent: str, name: str, *, retry_missing_parent: bool) -> None:
         _validate_segment(name)
         children_url = _children_url(parent)

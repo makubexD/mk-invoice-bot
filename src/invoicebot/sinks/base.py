@@ -94,6 +94,14 @@ class Drive(Protocol):
         """
         ...
 
+    async def delete(self, path: str) -> None:
+        """Delete the item at ``path``; an item already gone is accepted (R-7.14).
+
+        Raises:
+            GraphError: the item could not be deleted.
+        """
+        ...
+
 
 class TokenSource(Protocol):
     """A bearer token for one account, fetched when needed (D84)."""
