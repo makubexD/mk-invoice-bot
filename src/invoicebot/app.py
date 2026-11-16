@@ -258,6 +258,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
         admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
+        laptop_flows=_laptop_flow_ids(cfg),
         timezone=cfg.owner.timezone,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
@@ -354,6 +355,11 @@ def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook
         return None
     root, key = found
     return LaptopOutlook(drive, root, key)
+
+
+def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
+    """Return the names of the flows whose mailer sink lists ``laptop_outlook`` (D109)."""
+    return frozenset(name for name, flow in cfg.flows.items() if _lists_laptop(flow))
 
 
 def _lists_laptop(flow: Flow) -> bool:

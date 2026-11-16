@@ -26,7 +26,7 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.parse import parse_webhook
 from invoicebot.channels.whatsapp.signature import verify_handshake, verify_signature
 from invoicebot.pipeline.commands import PaymentFlow
-from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
 
@@ -44,6 +44,8 @@ class WebhookDeps:
     index: ProfileIndex
     owner_profile: str
     admin_profiles: frozenset[str]
+    #: The flow ids whose mailer lists ``laptop_outlook`` (D109).
+    laptop_flows: frozenset[str]
     #: The owner's timezone, for the dates commands print (S11.4).
     timezone: str
     app_secret: str
@@ -152,8 +154,11 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
                     msg,
                     max_queued_per_sender=deps.max_queued_per_sender,
                     timezone=deps.timezone,
-                    admins=deps.admin_profiles,
-                    payment_flow=deps.payment_flow,
+                    roles=IntakeRoles(
+                        admins=deps.admin_profiles,
+                        payment_flow=deps.payment_flow,
+                        laptop_flows=deps.laptop_flows,
+                    ),
                 )
         except psycopg.errors.DataError as exc:
             logger.error(

@@ -127,7 +127,10 @@ ASKED_RULES: Mapping[str, str] = {
 #: An action applied to its invoice in the caller's transaction; the resolved press carries
 #: the choice and its menu. It returns the photo files whose rows it cleared, for the
 #: caller to delete after commit (R-9.7).
-type Action = Callable[[AsyncConnection[Any], int, InboundMessage, ButtonPress], Awaitable[tuple[Path, ...]]]
+type Action = Callable[
+    [AsyncConnection[Any], int, InboundMessage, ButtonPress, frozenset[str]],
+    Awaitable[tuple[Path, ...]],
+]
 
 
 @dataclass(frozen=True)
@@ -138,24 +141,31 @@ class PressResult:
     photo_paths: tuple[Path, ...] = ()
 
 
-async def handle_press(conn: AsyncConnection[Any], msg: InboundMessage) -> PressResult:
+async def handle_press(
+    conn: AsyncConnection[Any], msg: InboundMessage, laptop_flows: frozenset[str]
+) -> PressResult:
     """Apply one button press in the caller's transaction (R-3.5, R-7.8, R-7.13).
 
     A press that does not resolve changes nothing and returns no invoice; a stale one has
     already been answered with BR-S02 by :func:`resolve_reply`. The returned photo paths
     are the files whose rows the action cleared: the caller deletes them after committing.
+    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109).
     """
     resolved = await resolve_reply(conn, msg, VALID_STATES, ASKED_RULES)
     if resolved is None:
         return PressResult(invoice_id=None)
     # Any press ends a pending [Editar] on its invoice; [Editar] itself pins it again (D90).
     await clear_editing(conn, resolved.invoice_id)
-    photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved)
+    photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved, laptop_flows)
     return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 
 
 async def _pick(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Store the flow the sender picked from BR-R03's menu and re-run routing (BR-R03).
 
@@ -173,7 +183,11 @@ async def _pick(
 
 
 async def _yes(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the buyer is right, so routing skips BR-R04 (BR-R04)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
@@ -183,7 +197,11 @@ async def _yes(
 
 
 async def _change(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the buyer is wrong, so routing asks BR-R03 again (BR-R04)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
@@ -193,7 +211,11 @@ async def _change(
 
 
 async def _brand(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Store the comercio the sender picked from BR-R09's menu and re-run routing (BR-R09).
 
@@ -211,7 +233,11 @@ async def _brand(
 
 
 async def _continue(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the sender accepted BR-D06's cap and re-run routing (BR-D06)."""
     if not await _still_asks(conn, invoice_id, msg, RULE_CAP):
@@ -237,7 +263,11 @@ async def cancel_invoice(
 
 
 async def _cancel(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Cancel the invoice from any CANCELLABLE state (R-3.4, BR-D06, D95, D96).
 
@@ -252,7 +282,11 @@ async def _cancel(
 
 
 async def _edit(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90)."""
     await mark_editing(conn, msg.profile_id, invoice_id)
@@ -261,7 +295,11 @@ async def _edit(
 
 
 async def _sent(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Close the invoice's prepared batch as sent and clear its photos (R-7.8, R-7.11, BR-D08).
 
@@ -282,15 +320,23 @@ async def _sent(
 
 
 async def _not_arrived(
-    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    _msg: InboundMessage,
+    _press: ButtonPress,
+    laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Ask the invoice's sender how the mail went out (R-7.8, BR-D11)."""
-    await send_not_confirmed(conn, invoice_id)
+    await send_not_confirmed(conn, invoice_id, laptop_flows)
     return ()
 
 
 async def _arrived(
-    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """File the invoice DONE with BR-D10 and answer the press (R-7.8, BR-D11, D109).
 
@@ -314,7 +360,11 @@ async def _arrived(
 
 
 async def _via_laptop(
-    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    _msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Enqueue the laptop resend; its job sends and answers (R-7.14, D109).
 
@@ -326,7 +376,11 @@ async def _via_laptop(
 
 
 async def _self_send(
-    conn: AsyncConnection[Any], invoice_id: int, _msg: InboundMessage, _press: ButtonPress
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    _msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Enqueue the .eml resend; its job rewrites the file and answers (R-7.8).
 
@@ -373,19 +427,27 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     return state
 
 
-async def send_not_confirmed(conn: AsyncConnection[Any], invoice_id: int) -> None:
+async def send_not_confirmed(
+    conn: AsyncConnection[Any], invoice_id: int, laptop_flows: frozenset[str] | None = None
+) -> None:
     """Queue BR-D11 with D109's buttons for the invoice's sender (R-7.8, BR-D11, D109).
 
     The one BR-D11 sender: [No llegó], an error receipt and an overdue receipt all
-    call it. [Por la laptop] is offered only when the invoice has a ``mail_jobs`` row,
-    the database's answer to whether the flow listed ``laptop_outlook``.
+    call it. [Por la laptop] is offered only when the invoice's flow lists
+    ``laptop_outlook``, named by ``laptop_flows``. A ``None`` set keeps the older
+    ``mail_jobs`` rule for callers not yet threaded with the set (D109).
     """
     head = await load_invoice_head(conn, invoice_id)
     reading = await load_reading(conn, invoice_id)
     if head is None or reading is None:
         raise RuntimeError(f"invoice {invoice_id} cannot be asked about its mail")
     buttons: list[Button] = []
-    if await has_mail_job(conn, invoice_id):
+    if laptop_flows is None:
+        # shortcut: 45c removes this rule once every caller passes the flow set (D109).
+        offers_laptop = await has_mail_job(conn, invoice_id)
+    else:
+        offers_laptop = await load_flow(conn, invoice_id) in laptop_flows
+    if offers_laptop:
         buttons.append(Button(id=button_id(invoice_id, VIA_LAPTOP_ACTION), title=BUTTON_VIA_LAPTOP))
     buttons.append(Button(id=button_id(invoice_id, SELF_SEND_ACTION), title=BUTTON_SELF_SEND))
     buttons.append(Button(id=button_id(invoice_id, ARRIVED_ACTION), title=BUTTON_ARRIVED))

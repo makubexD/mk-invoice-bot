@@ -82,6 +82,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         index=ProfileIndex({sender.profile_id: profile}),
         owner_profile=sender.profile_id,
         admin_profiles=frozenset(),
+        laptop_flows=frozenset(),
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,

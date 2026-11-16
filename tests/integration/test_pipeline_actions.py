@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
     BUTTON_SELF_SEND,
@@ -49,6 +49,8 @@ MAX_QUEUED = 10
 #: The owner timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
 FLOW = "work_microsoft"
+#: A flow whose modes are [inbox_rule, laptop_outlook] (D109).
+LAPTOP_FLOW = "inbox_rule_laptop"
 CONFIRMING = "CONFIRMING"
 ROUTING = "ROUTING"
 PENDING_USER = "PENDING_USER"
@@ -193,12 +195,13 @@ async def _done_invoice(
     *,
     batch_state: str | None = None,
     with_mail_job: bool = False,
+    flow: str = FLOW,
 ) -> int:
     """Create a DONE BR-D13 invoice with a reading and folder, optionally a batch and mail job."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await save_reading(conn, invoice_id, _reading())
-        await set_flow(conn, invoice_id, FLOW)
+        await set_flow(conn, invoice_id, flow)
         await set_state(conn, invoice_id, DONE, rule_id=RULE_INBOX)
         await merge_flow_data(conn, invoice_id, {"folder": FOLDER})
         if batch_state is not None:
@@ -839,16 +842,22 @@ async def test_a_redelivered_press_acts_once(
     assert not photo.exists()
 
 
-async def test_not_arrived_sends_br_d11_with_three_buttons(
+async def test_not_arrived_with_a_laptop_flow_sends_br_d11_with_three_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8: [No llegó] on BR-D13 with a mail job sends BR-D11 with D109's three buttons."""
+    """R-7.8: [No llegó] on a flow listing laptop_outlook offers [Por la laptop] without a mail job."""
     profile_id = _profile()
-    invoice_id = await _done_invoice(db_pool, profile_id, with_mail_job=True)
+    invoice_id = await _done_invoice(db_pool, profile_id, flow=LAPTOP_FLOW)
     msg = _press(invoice_id, "not_arrived", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=IntakeRoles(laptop_flows=frozenset({LAPTOP_FLOW})),
+        )
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         messages = await _messages(conn, profile_id)
@@ -870,16 +879,22 @@ async def test_not_arrived_sends_br_d11_with_three_buttons(
     ]
 
 
-async def test_not_arrived_without_a_mail_job_sends_two_buttons(
+async def test_not_arrived_without_a_laptop_flow_sends_two_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8: [No llegó] on BR-D13 without a mail job sends BR-D11 without [Por la laptop]."""
+    """R-7.8: [No llegó] on a flow without laptop_outlook sends no [Por la laptop], even with a mail job."""
     profile_id = _profile()
-    invoice_id = await _done_invoice(db_pool, profile_id)
+    invoice_id = await _done_invoice(db_pool, profile_id, with_mail_job=True)
     msg = _press(invoice_id, "not_arrived", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=IntakeRoles(laptop_flows=frozenset({"another_flow"})),
+        )
         invoice = await _invoice_row(conn, invoice_id)
         messages = await _messages(conn, profile_id)
 
