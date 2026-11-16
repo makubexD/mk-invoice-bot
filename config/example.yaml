@@ -172,7 +172,14 @@ flows:
         defaults: { motivo: "Support release", descripcion: "Cena en {comercio}" }
       - kind: mailer
         trigger: per_invoice
-        modes: [graph]                  # MVP. Later: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
+        # Modes in order; the first automatic one sends, the others only when the sender asks (BR-D11).
+        # How each completes (D108):
+        #   graph          - Graph accepts the mail from `account`            -> sent, BR-D10
+        #   inbox_rule     - Graph accepts the bot mailbox's mail to the owner's
+        #                    work address; the Outlook rule forwards it (D67)  -> sent, BR-D13
+        #   laptop_outlook - the laptop agent's receipt for the job file      -> sent, BR-D10
+        #   dry_run        - the sender taps [Ya lo envié] on the .eml          -> sent, BR-D08
+        modes: [graph]
         account: personal
         inbox_rule_account: bot         # inbox_rule sends through the bot mailbox (R-7.7)
         to: ["me@example.com"]          # MVP: the owner's test inbox (D68)

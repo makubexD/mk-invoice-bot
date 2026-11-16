@@ -426,3 +426,15 @@ Files: `specs/02-requirements.md`, `specs/03-design.md`, `config/example.yaml`, 
 - This plan, a section "Deferred: live check", run after M3 and S0.11: `inbox_rule` through the bot mailbox to the owner's work address, and the rule forwarding to the test inbox; the laptop agent with `-DryRun`, then one real job; `/pagado` on two real sent claims, with the folders renamed and moved in OneDrive and the laptop's work copy following; `import_claims.py --dry-run` on the owner's current folders.
 
 Test: none (text only); `uv run pytest -q tests/unit/test_rules_parity.py` and `uv run python scripts/check_config.py config/example.yaml` (use the script's real arguments).
+
+## Deferred: live check
+
+Run after the M3 live run (`docs/plan-mvp-file-b.md` § "Deferred: live run (M3)") and S0.11; the roadmap tracks it. Not a step of this plan, so the phase finishes without it. Real addresses and folder names stay in the host's private config, never in the repo.
+
+- **`inbox_rule`**: the bot mailbox signed in (`scripts/auth_microsoft.py --account bot`), `mail.owner_work_address` set, `mail.send_enabled: true` and `modes: [inbox_rule]` for this run only. One invoice: the owner's work inbox gets `Support release dd/mm/yyyy` from the bot mailbox with three attachments (not in Junk); the chat gets BR-D13; the Outlook rule (runbook) forwards it to the test inbox standing in for HR; [No llegó] gives BR-D11.
+- **Laptop agent**: the scheduled task's script run once by hand with `-DryRun` against a real job (`modes: [laptop_outlook]`): it validates the job and logs the would-be send, writes no receipt and sends nothing. Then one real job, with the test inbox as the only allowlisted address: the mail arrives without `RV:`, the receipt lands in `_outbox/receipts/`, the job file is gone, and the chat gets BR-D10. A second job left with the laptop off gives BR-D12 once after `mail.agent_stale_after`.
+- **`/pagado`** on two real sent claims: the bot confirms the match, both folders in the personal OneDrive are renamed with `_PAID_…` and moved as R-7.11 says, and after the agent's next run the laptop's work copy shows the same names and places.
+- **Go-live import**: `scripts/import_claims.py --profile <id> --dry-run <folder>…` on a copy of the owner's current claim folders; each line reads as expected (sent and unpaid claims "would register", the rest skipped with a reason), and the folders' files and times are unchanged. The real run waits for the owner's go.
+- Record the result in `specs/04-tasks.md` (M4) and set `send_enabled` back to `false`.
+
+Test: the checks above, by hand.
