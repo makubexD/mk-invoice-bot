@@ -165,6 +165,7 @@ BeforeAll {
         Write-JobJson -Path $jobFile -Job $job
         return [pscustomobject] @{
             Job       = $job
+            Root      = $root
             Folder    = $folder
             Outbox    = $outbox
             JobFile   = $jobFile
@@ -182,8 +183,10 @@ Describe 'Test-JobFile' {
             $path = Join-Path -Path $root -ChildPath ($job.job_id + '.json')
             Write-JobJson -Path $path -Job $job
 
-            Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist $script:Allowlist -Folder $folder |
-                Should -BeTrue
+            $verified = Test-JobFile -Path $path -Key $script:Vectors.key `
+                -Allowlist $script:Allowlist -Root $root
+            $verified | Should -Not -BeNullOrEmpty
+            $verified.job_id | Should -Be $job.job_id
         }
     }
 
@@ -196,8 +199,10 @@ Describe 'Test-JobFile' {
         Write-JobJson -Path $path -Job $job
 
         $warnings = @()
-        Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist $script:Allowlist -Folder $folder `
-            -WarningAction SilentlyContinue -WarningVariable warnings | Should -BeFalse
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $root `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'hmac does not verify'
     }
 
@@ -209,8 +214,10 @@ Describe 'Test-JobFile' {
         Write-JobJson -Path $path -Job $job
 
         $warnings = @()
-        Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist @('other@example.com') -Folder $folder `
-            -WarningAction SilentlyContinue -WarningVariable warnings | Should -BeFalse
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist @('other@example.com') -Root $root `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'recipient is not allowlisted'
     }
 
@@ -232,8 +239,10 @@ Describe 'Test-JobFile' {
             Write-JobJson -Path $path -Job $job
 
             $warnings = @()
-            Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist $script:Allowlist -Folder $folder `
-                -WarningAction SilentlyContinue -WarningVariable warnings | Should -BeFalse
+            $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+                -Allowlist $script:Allowlist -Root $root `
+                -WarningAction SilentlyContinue -WarningVariable warnings
+            $refused | Should -BeNullOrEmpty
             [string] $warnings[0] | Should -Match 'attachment is not a plain file name'
         }
     }
@@ -254,8 +263,10 @@ Describe 'Test-JobFile' {
         Write-JobJson -Path $path -Job $job
 
         $warnings = @()
-        Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist $script:Allowlist -Folder $folder `
-            -WarningAction SilentlyContinue -WarningVariable warnings | Should -BeFalse
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $root `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'attachment is not in the invoice folder'
     }
 
@@ -265,9 +276,81 @@ Describe 'Test-JobFile' {
         [System.IO.File]::WriteAllText($path, $content + ('x' * (70 * 1024)))
 
         $warnings = @()
-        Test-JobFile -Path $path -Key $script:Vectors.key -Allowlist $script:Allowlist -Folder $TestDrive `
-            -WarningAction SilentlyContinue -WarningVariable warnings | Should -BeFalse
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $TestDrive `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
         [string] $warnings[0] | Should -Match 'job file is too large'
+    }
+
+    It 'R-7.14 refuses a job id with uppercase hex or a trailing newline' {
+        # The trailing-newline id is written to a name Windows can hold; the id
+        # check runs before the file-name check, so it is the one that refuses.
+        foreach ($case in @(
+                @{ Id = '0123456789ABCDEF0123456789ABCDEF'; Name = '0123456789ABCDEF0123456789ABCDEF.json' },
+                @{ Id = '0123456789abcdef0123456789abcdef' + "`n"; Name = '0123456789abcdef0123456789abcdef.json' }
+            )) {
+            $job = New-SignedJob -Fields ([ordered] @{
+                    job_id      = $case.Id
+                    invoice_id  = 1
+                    folder      = 'Reembolsos/2026-11/F001-123'
+                    to          = @('hr@example.com')
+                    subject     = 'Support release 0001'
+                    body        = 'Hola.'
+                    attachments = @('F001-123.pdf')
+                })
+            $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+            New-InvoiceFolder -Root $root -RelativeFolder $job.folder -Files @($job.attachments) | Out-Null
+            $path = Join-Path -Path $root -ChildPath $case.Name
+            Write-JobJson -Path $path -Job $job
+
+            $warnings = @()
+            $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+                -Allowlist $script:Allowlist -Root $root `
+                -WarningAction SilentlyContinue -WarningVariable warnings
+            $refused | Should -BeNullOrEmpty
+            [string] $warnings[0] | Should -Match 'job id is invalid'
+        }
+    }
+
+    It 'R-7.14 refuses a job file named differently from the job id' {
+        foreach ($name in @('job.json', ($script:Vectors.jobs[0].job_id.ToUpperInvariant() + '.json'))) {
+            $job = $script:Vectors.jobs[0]
+            $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+            New-InvoiceFolder -Root $root -RelativeFolder $job.folder -Files @($job.attachments) | Out-Null
+            $path = Join-Path -Path $root -ChildPath $name
+            Write-JobJson -Path $path -Job $job
+
+            $warnings = @()
+            $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+                -Allowlist $script:Allowlist -Root $root `
+                -WarningAction SilentlyContinue -WarningVariable warnings
+            $refused | Should -BeNullOrEmpty
+            [string] $warnings[0] | Should -Match 'job file name does not match job id'
+        }
+    }
+
+    It 'R-7.14 refuses a folder with a .. segment' {
+        $job = New-SignedJob -Fields ([ordered] @{
+                job_id      = '0123456789abcdef0123456789abcdef'
+                invoice_id  = 1
+                folder      = 'Reembolsos/../F001-123'
+                to          = @('hr@example.com')
+                subject     = 'Support release 0001'
+                body        = 'Hola.'
+                attachments = @('F001-123.pdf')
+            })
+        $root = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+        $path = Join-Path -Path $root -ChildPath ($job.job_id + '.json')
+        Write-JobJson -Path $path -Job $job
+
+        $warnings = @()
+        $refused = Test-JobFile -Path $path -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $root `
+            -WarningAction SilentlyContinue -WarningVariable warnings
+        $refused | Should -BeNullOrEmpty
+        [string] $warnings[0] | Should -Match 'folder is not a plain relative path'
     }
 }
 
@@ -278,7 +361,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
         $outlook.SentItems.Count | Should -Be 1
@@ -310,9 +394,11 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
         $outlook.SentItems.Count | Should -Be 1
@@ -328,7 +414,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook -ThrowOnSend
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
 
         $receiptPath = Join-Path -Path (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') `
             -ChildPath ($fixture.Job.job_id + '.json')
@@ -349,7 +436,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile -DryRun
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile -DryRun
 
         $outlook.CreateItemCalls.Count | Should -Be 0
         Test-Path -LiteralPath $fixture.JobFile -PathType Leaf | Should -BeTrue
@@ -364,12 +452,80 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Outbox $fixture.Outbox -LogFile $fixture.LogFile
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
 
         $log = Get-Content -LiteralPath $fixture.LogFile -Raw
         $log | Should -Not -Match 'cuerpo secreto 4242'
         $log | Should -Match $fixture.Job.job_id
         $log | Should -Match 'sent'
+    }
+
+    It 'R-7.14 sends the content Test-JobFile verified, not a later file' {
+        $fixture = New-SendFixture
+        $verified = Test-JobFile -Path $fixture.JobFile -Key $script:Vectors.key `
+            -Allowlist $script:Allowlist -Root $fixture.Root
+        $verified | Should -Not -BeNullOrEmpty
+        $verified.attachments.Count | Should -Be 1
+
+        # The file on disk changes after it was verified; already only the
+        # returned object reaches Send-Job.
+        $replacement = New-SignedJob -Fields ([ordered] @{
+                job_id      = $verified.job_id
+                invoice_id  = 1
+                folder      = $verified.folder
+                to          = @('hr@example.com')
+                subject     = 'Otro asunto'
+                body        = 'Otro cuerpo'
+                attachments = @('F001-123.pdf', 'F001-124.pdf')
+            })
+        Write-JobJson -Path $fixture.JobFile -Job $replacement
+
+        $outlook = New-FakeOutlook
+        Send-Job -Job $verified -Folder $fixture.Folder -Outlook $outlook `
+            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
+
+        $outlook.SentItems.Count | Should -Be 1
+        $outlook.SentItems[0].Subject | Should -Be $fixture.Job.subject
+        $outlook.SentItems[0].Body | Should -Be $fixture.Job.body
+        $outlook.SentItems[0].Attachments.Paths.Count | Should -Be 1
+        Get-Content -LiteralPath $fixture.LogFile -Raw | Should -Match 'sent \(1 attachments\)'
+    }
+
+    It 'R-7.14 removes the job file it was given, not one rebuilt from the id' {
+        $fixture = New-SendFixture
+        $outlook = New-FakeOutlook
+        $otherDir = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $otherDir -Force | Out-Null
+        $given = Join-Path -Path $otherDir -ChildPath ($fixture.Job.job_id + '.json')
+        Copy-Item -LiteralPath $fixture.JobFile -Destination $given
+
+        Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
+            -StateFile $fixture.StateFile -Path $given -Outbox $fixture.Outbox `
+            -LogFile $fixture.LogFile
+
+        Test-Path -LiteralPath $given | Should -BeFalse
+        Test-Path -LiteralPath $fixture.JobFile -PathType Leaf | Should -BeTrue
+    }
+}
+
+Describe 'Write-AgentLog' {
+    It 'R-7.14 writes the default log under the script folder' {
+        $scriptPath = Join-Path -Path $script:Here -ChildPath '..' '..' 'scripts' 'laptop_agent.ps1'
+        $copyDir = Join-Path -Path $TestDrive -ChildPath ([guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Path $copyDir -Force | Out-Null
+        $copyPath = Join-Path -Path $copyDir -ChildPath 'laptop_agent.ps1'
+        Copy-Item -LiteralPath $scriptPath -Destination $copyPath
+
+        & {
+            . $copyPath
+            Write-AgentLog -Message 'default log path check'
+        }
+
+        $defaultLog = Join-Path -Path $copyDir -ChildPath 'agent.log'
+        Test-Path -LiteralPath $defaultLog -PathType Leaf | Should -BeTrue
+        Get-Content -LiteralPath $defaultLog -Raw | Should -Match 'default log path check'
     }
 }
 

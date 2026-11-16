@@ -42,7 +42,7 @@ param(
 $script:MaxJobBytes = 65536
 
 #: A job id is 32 lowercase hex characters, the form of `uuid4().hex`.
-$script:JobIdPattern = '^[0-9a-f]{32}$'
+$script:JobIdPattern = '^[0-9a-f]{32}\z'
 
 #: The longest error text a receipt carries (matches `MAX_ERROR_LENGTH`).
 $script:MaxErrorLength = 500
@@ -296,20 +296,24 @@ function Write-JobRefusal {
 function Test-JobFile {
     <#
     .SYNOPSIS
-        Return $true only for a job file the agent may act on (R-7.14).
+        Return the verified job object for a job file the agent may act on, or
+        `$null` (R-7.14).
     .DESCRIPTION
-        The file must be under 64 KiB and valid JSON, its HMAC must match, every
-        recipient must be on the allowlist, and every attachment must be a plain
-        file name inside the invoice folder. A refusal logs the job id and the
-        reason only.
+        The file's bytes are read once and the parsed, checked object is
+        returned, so the agent sends exactly what it verified. The file must be
+        under 64 KiB and valid JSON, its name must be `<job_id>.json`, its
+        HMAC must match, every recipient must be on the allowlist, `folder`
+        must be a plain relative path, and every attachment must be a plain
+        file name inside that folder. A refusal logs the job id and the reason
+        only.
     .PARAMETER Path
         The job file in `_outbox/`.
     .PARAMETER Key
         The shared key text; its UTF-8 bytes sign the job.
     .PARAMETER Allowlist
         The allowed recipient addresses.
-    .PARAMETER Folder
-        The invoice folder, already joined to the OneDrive root (D111).
+    .PARAMETER Root
+        The personal OneDrive root the job's `folder` is relative to (D111).
     #>
     [CmdletBinding()]
     param(
@@ -320,32 +324,42 @@ function Test-JobFile {
         [string] $Key,
         [AllowNull()]
         [string[]] $Allowlist,
-        [AllowNull()]
-        [AllowEmptyString()]
-        [string] $Folder
+        [Parameter(Mandatory)]
+        [string] $Root
     )
 
     $file = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
     if ($null -eq $file -or $file.PSIsContainer) {
         Write-JobRefusal -JobId '' -Reason 'job file is missing'
-        return $false
+        return $null
     }
+    # Refuse an oversized file before reading it; the byte count is checked again below.
     if ($file.Length -ge $script:MaxJobBytes) {
         Write-JobRefusal -JobId '' -Reason 'job file is too large'
-        return $false
+        return $null
+    }
+    try {
+        $bytes = [System.IO.File]::ReadAllBytes($file.FullName)
+    }
+    catch {
+        Write-JobRefusal -JobId '' -Reason 'job file is missing'
+        return $null
+    }
+    if ($bytes.Length -ge $script:MaxJobBytes) {
+        Write-JobRefusal -JobId '' -Reason 'job file is too large'
+        return $null
     }
 
     try {
-        $text = [System.IO.File]::ReadAllText($file.FullName, [System.Text.Encoding]::UTF8)
-        $job = ConvertFrom-JobJson -Text $text
+        $job = ConvertFrom-JobJson -Text ([System.Text.Encoding]::UTF8.GetString($bytes))
     }
     catch {
         Write-JobRefusal -JobId '' -Reason 'job file is not valid JSON'
-        return $false
+        return $null
     }
     if ($null -eq $job -or $job -isnot [System.Management.Automation.PSCustomObject]) {
         Write-JobRefusal -JobId '' -Reason 'job file is not a JSON object'
-        return $false
+        return $null
     }
 
     $jobId = $null
@@ -353,69 +367,87 @@ function Test-JobFile {
     if ($null -ne $idProperty) {
         $jobId = [string] $idProperty.Value
     }
-    if ($jobId -notmatch $script:JobIdPattern) {
+    if ($jobId -cnotmatch $script:JobIdPattern) {
         Write-JobRefusal -JobId $jobId -Reason 'job id is invalid'
-        return $false
+        return $null
+    }
+    if (-not [string]::Equals($file.Name, $jobId + '.json', [System.StringComparison]::Ordinal)) {
+        Write-JobRefusal -JobId $jobId -Reason 'job file name does not match job id'
+        return $null
     }
 
     $hmacProperty = $job.PSObject.Properties['hmac']
     if ($null -eq $hmacProperty -or $hmacProperty.Value -isnot [string]) {
         Write-JobRefusal -JobId $jobId -Reason 'hmac is missing'
-        return $false
+        return $null
     }
     try {
         $actual = Get-JobSignature -Job $job -Key $Key
     }
     catch {
         Write-JobRefusal -JobId $jobId -Reason 'job fields cannot be signed'
-        return $false
+        return $null
     }
     if (-not (Test-SignatureMatch -Expected $hmacProperty.Value -Actual $actual)) {
         Write-JobRefusal -JobId $jobId -Reason 'hmac does not verify'
-        return $false
+        return $null
     }
 
     $recipients = @($job.to)
     if ($recipients.Count -eq 0) {
         Write-JobRefusal -JobId $jobId -Reason 'job has no recipient'
-        return $false
+        return $null
     }
     foreach ($recipient in $recipients) {
         if ($recipient -isnot [string] -or -not (@($Allowlist) -contains $recipient)) {
             Write-JobRefusal -JobId $jobId -Reason 'recipient is not allowlisted'
-            return $false
+            return $null
         }
     }
 
-    $folderItem = $null
-    if (-not [string]::IsNullOrEmpty($Folder)) {
-        $folderItem = Get-Item -LiteralPath $Folder -ErrorAction SilentlyContinue
+    $folderProperty = $job.PSObject.Properties['folder']
+    $relativeFolder = $null
+    if ($null -ne $folderProperty -and $folderProperty.Value -is [string]) {
+        $relativeFolder = $folderProperty.Value
     }
+    if ([string]::IsNullOrEmpty($relativeFolder)) {
+        Write-JobRefusal -JobId $jobId -Reason 'folder is not a plain relative path'
+        return $null
+    }
+    foreach ($segment in $relativeFolder.Split('/')) {
+        if (-not (Test-PlainFileName -Name $segment)) {
+            Write-JobRefusal -JobId $jobId -Reason 'folder is not a plain relative path'
+            return $null
+        }
+    }
+
+    $folderItem = Get-Item -LiteralPath (Join-RootPath -Root $Root -Relative $relativeFolder) `
+        -ErrorAction SilentlyContinue
     if ($null -eq $folderItem -or -not $folderItem.PSIsContainer) {
         Write-JobRefusal -JobId $jobId -Reason 'invoice folder is missing'
-        return $false
+        return $null
     }
     $folderPath = [System.IO.Path]::GetFullPath($folderItem.FullName)
 
     foreach ($attachment in @($job.attachments)) {
         if ($attachment -isnot [string] -or -not (Test-PlainFileName -Name $attachment)) {
             Write-JobRefusal -JobId $jobId -Reason 'attachment is not a plain file name'
-            return $false
+            return $null
         }
         $candidate = Join-Path -Path $folderPath -ChildPath $attachment
         $resolved = Get-Item -LiteralPath $candidate -ErrorAction SilentlyContinue
         if ($null -eq $resolved -or $resolved.PSIsContainer) {
             Write-JobRefusal -JobId $jobId -Reason 'attachment is not in the invoice folder'
-            return $false
+            return $null
         }
         $parent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetDirectoryName($resolved.FullName))
         if (-not [string]::Equals($parent, $folderPath, [System.StringComparison]::OrdinalIgnoreCase)) {
             Write-JobRefusal -JobId $jobId -Reason 'attachment is not in the invoice folder'
-            return $false
+            return $null
         }
     }
 
-    return $true
+    return $job
 }
 
 function Write-AgentLog {
@@ -435,7 +467,7 @@ function Write-AgentLog {
     )
 
     if ([string]::IsNullOrEmpty($LogFile)) {
-        $LogFile = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
+        $LogFile = Join-Path -Path $PSScriptRoot -ChildPath 'agent.log'
     }
     $line = '{0} {1}{2}' -f [DateTime]::UtcNow.ToString('o'), $Message, [Environment]::NewLine
     [System.IO.File]::AppendAllText($LogFile, $line, [System.Text.UTF8Encoding]::new($false))
@@ -529,11 +561,14 @@ function Send-Job {
         A job id already in the state file is never sent again: the receipt is
         rewritten. Otherwise the id is appended to the state file before
         `Send()`, so a crash cannot send twice; if the send throws, the id is
-        removed again and an error receipt is written. The job file is deleted
-        after its receipt, whatever the outcome: an error is final and the bot
-        asks the sender what to do (BR-D11).
+        removed again and an error receipt is written. The job file that
+        `Test-JobFile` read is deleted after its receipt, whatever the outcome:
+        an error is final and the bot asks the sender what to do (BR-D11).
     .PARAMETER Job
-        The parsed job object from `_outbox/<job id>.json`.
+        The parsed, verified job object `Test-JobFile` returned.
+    .PARAMETER Path
+        The job file that object was read from; it is deleted after the
+        receipt.
     .PARAMETER Folder
         The invoice folder the attachments are read from, already joined to
         the OneDrive root (D111).
@@ -542,9 +577,9 @@ function Send-Job {
     .PARAMETER StateFile
         The local `sent-jobs.txt`, one sent job id per line.
     .PARAMETER Outbox
-        The `_outbox/` folder: the job file and `receipts/` live there.
+        The `_outbox/` folder: `receipts/` live there.
     .PARAMETER LogFile
-        The log to append to; defaults to `$WorkRoot/agent.log`.
+        The log to append to; defaults to `<script folder>/agent.log`.
     .PARAMETER DryRun
         Log what would be sent and touch no file except the log.
     #>
@@ -552,6 +587,8 @@ function Send-Job {
     param(
         [Parameter(Mandatory)]
         $Job,
+        [Parameter(Mandatory)]
+        [string] $Path,
         [Parameter(Mandatory)]
         [AllowEmptyString()]
         [string] $Folder,
@@ -568,9 +605,8 @@ function Send-Job {
     $jobId = [string] $Job.job_id
     $attachments = @($Job.attachments)
     if ([string]::IsNullOrEmpty($LogFile)) {
-        $LogFile = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
+        $LogFile = Join-Path -Path $PSScriptRoot -ChildPath 'agent.log'
     }
-    $jobFile = Join-Path -Path $Outbox -ChildPath ($jobId + '.json')
     $receiptsFolder = Join-Path -Path $Outbox -ChildPath 'receipts'
 
     if ($DryRun) {
@@ -586,7 +622,7 @@ function Send-Job {
         Write-AgentLog -LogFile $LogFile -Message (
             'job {0}: already sent, receipt rewritten ({1} attachments)' -f $jobId, $attachments.Count
         )
-        Remove-Item -LiteralPath $jobFile -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
         return
     }
 
@@ -634,7 +670,7 @@ function Send-Job {
         )
     }
 
-    Remove-Item -LiteralPath $jobFile -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
 }
 
 function Join-RootPath {
@@ -852,7 +888,7 @@ function Sync-Folders {
     .PARAMETER WorkRoot
         The work OneDrive root, the target of the mirror.
     .PARAMETER LogFile
-        The log to append to; defaults to `$WorkRoot/agent.log`.
+        The log to append to; defaults to `<script folder>/agent.log`.
     .PARAMETER DryRun
         Log the planned copies and moves and touch nothing.
     #>
@@ -867,7 +903,7 @@ function Sync-Folders {
     )
 
     if ([string]::IsNullOrEmpty($LogFile)) {
-        $LogFile = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
+        $LogFile = Join-Path -Path $PSScriptRoot -ChildPath 'agent.log'
     }
     $personalIndex = Get-InvoiceFolderIndex -Root $PersonalRoot -LogFile $LogFile
     $workIndex = Get-InvoiceFolderIndex -Root $WorkRoot -LogFile $LogFile
@@ -990,31 +1026,20 @@ if ($MyInvocation.InvocationName -ne '.') {
     $outbox = Join-Path -Path $OneDriveRoot -ChildPath '_outbox'
     $validJobs = [System.Collections.Generic.List[object]]::new()
     foreach ($jobFile in @(Get-ChildItem -LiteralPath $outbox -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-        $folder = ''
-        $job = $null
-        try {
-            # Read the folder only from a file under the cap; Test-JobFile refuses the rest.
-            if ($jobFile.Length -ge $script:MaxJobBytes) {
-                throw 'job file is too large'
-            }
-            $job = ConvertFrom-JobJson -Text ([System.IO.File]::ReadAllText($jobFile.FullName, [System.Text.Encoding]::UTF8))
-            $folderProperty = $job.PSObject.Properties['folder']
-            if ($null -ne $folderProperty -and $folderProperty.Value -is [string]) {
-                $folder = Join-Path -Path $OneDriveRoot -ChildPath $folderProperty.Value
-            }
-        }
-        catch {
-            $folder = ''
-            $job = $null
-        }
-        $isValid = Test-JobFile -Path $jobFile.FullName -Key $agentKey -Allowlist $agentAllowlist -Folder $folder
-        if ($isValid) {
+        $job = Test-JobFile -Path $jobFile.FullName -Key $agentKey -Allowlist $agentAllowlist `
+            -Root $OneDriveRoot
+        if ($null -ne $job) {
             Write-Verbose ("job {0} is valid" -f $jobFile.BaseName)
-            $validJobs.Add([pscustomobject] @{ Job = $job; Folder = $folder })
+            $folder = Join-RootPath -Root $OneDriveRoot -Relative $job.folder
+            $validJobs.Add([pscustomobject] @{
+                    Job    = $job
+                    Folder = $folder
+                    Path   = $jobFile.FullName
+                })
         }
     }
 
-    $agentLog = Join-Path -Path $WorkRoot -ChildPath 'agent.log'
+    $agentLog = Join-Path -Path $PSScriptRoot -ChildPath 'agent.log'
     if ($validJobs.Count -gt 0) {
         $stateFile = Join-Path -Path $PSScriptRoot -ChildPath 'sent-jobs.txt'
         $outlook = $null
@@ -1022,7 +1047,7 @@ if ($MyInvocation.InvocationName -ne '.') {
             $outlook = New-Object -ComObject Outlook.Application
         }
         foreach ($validJob in $validJobs) {
-            Send-Job -Job $validJob.Job -Folder $validJob.Folder -Outlook $outlook `
+            Send-Job -Job $validJob.Job -Path $validJob.Path -Folder $validJob.Folder -Outlook $outlook `
                 -StateFile $stateFile -Outbox $outbox -LogFile $agentLog -DryRun:$DryRun
         }
     }

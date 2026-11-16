@@ -235,7 +235,7 @@ $trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (Ne
 Register-ScheduledTask -TaskName 'InvoiceBotLaptopAgent' -Action $action -Trigger $trigger -RunLevel Limited
 ```
 
-The log is `$WorkRoot/agent.log`: it appends every run, including the reason a
+The log is `agent.log` beside the script (`C:\invoicebot\agent.log`; it holds folder names, so it stays off OneDrive): it appends every run, including the reason a
 job was refused. `sent-jobs.txt` sits beside the script
 (`C:\invoicebot\sent-jobs.txt`, one sent job id per line); an id is written
 before Outlook sends, so a crash cannot send a job twice. Receipts go to the
