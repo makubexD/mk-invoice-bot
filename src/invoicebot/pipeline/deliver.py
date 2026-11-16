@@ -338,11 +338,19 @@ async def _resend_laptop(
     sender how long it has waited instead (R-7.7). Otherwise the marker is committed
     before the upload, so a retry after a crash takes that same path, and one
     transaction stores the ``mail_jobs`` row and clears the marker. The receipt
-    answers; nothing is sent.
+    answers; nothing is sent. A laptop mode that is missing or does not complete by
+    receipt (the dry run when sending is off) writes nothing and answers BR-D11 as a
+    flow without a laptop mode does (R-7.10, R-7.14).
 
     shortcut: a crash after the upload and before ``add_mail_job`` leaves an orphan
     job file whose receipt is ignored, because its job id is unknown.
     """
+    mode = context.modes.get(LAPTOP_OUTLOOK_MODE)
+    if mode is None or mode.completion != "receipt":
+        # No laptop flows: re-offering [Por la laptop] here would loop the sender.
+        async with context.pool.connection() as conn, conn.transaction():
+            await send_not_confirmed(conn, invoice.job.invoice_id, frozenset())
+        return
     if invoice.flow_data.get(RESENDING_KEY) is True:
         async with context.pool.connection() as conn, conn.transaction():
             await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: False})
@@ -365,7 +373,6 @@ async def _resend_laptop(
             )
             return
         await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: True})
-    mode = _named_mode(context.modes, LAPTOP_OUTLOOK_MODE)
     try:
         job_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     except AuthRequired:

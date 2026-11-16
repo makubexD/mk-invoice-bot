@@ -164,11 +164,11 @@ class FakeInboxRuleMode(FakeGraphMode):
 class RaisingMode:
     """An automatic mode whose send raises the error the test installed (BR-D01, R-7.3, BR-D03)."""
 
-    completion = "accepted"
     done_rule = "BR-D10"
 
-    def __init__(self, error: Exception) -> None:
+    def __init__(self, error: Exception, completion: str = "accepted") -> None:
         self._error = error
+        self.completion = completion
 
     async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Raise the installed error instead of sending."""
@@ -1260,6 +1260,45 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     assert outbox == []
 
 
+async def test_resend_laptop_with_a_dry_run_mode_writes_nothing_and_asks_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.10: with sending off, [Por la laptop] writes no job and asks BR-D11 again."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    assert cfg.mail.send_enabled is False
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    handlers = _resend_handlers(
+        db_pool,
+        cfg,
+        FakeDrive(),
+        tmp_path,
+        {"laptop_outlook": DryRun(tmp_path)},
+        laptop_flows=frozenset({FLOW}),
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    eml = tmp_path / "mail" / f"{invoice_id}.eml"
+    async with db_pool.connection() as conn:
+        jobs = await _mail_jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert jobs == []
+    assert not eml.is_file()
+    assert "resending" not in flow_data
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, "self_send"), "title": "Lo envío yo"},
+                {"id": button_id(invoice_id, "arrived"), "title": "Ya llegó"},
+            ],
+        )
+    ]
+
+
 async def test_resend_laptop_after_a_folder_rename_keeps_one_folder(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -1341,7 +1380,11 @@ async def test_resend_laptop_after_a_sign_in_failure_clears_the_marker(
     cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
     invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
     handlers = _resend_handlers(
-        db_pool, cfg, FakeDrive(), tmp_path, {"laptop_outlook": RaisingMode(AuthRequired("personal"))}
+        db_pool,
+        cfg,
+        FakeDrive(),
+        tmp_path,
+        {"laptop_outlook": RaisingMode(AuthRequired("personal"), completion="receipt")},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
