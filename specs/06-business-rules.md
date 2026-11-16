@@ -185,7 +185,7 @@ Only typed **public or technical** data (R-11.12):
 - the portal URL, reduced to `https://host/path`, in a code fence, and only once the owner approved it.
 
 **Never:**
-- buyer RUC or DNI, serie or número, totals, phone numbers, photos;
+- buyer RUC or DNI, serie or número, totals, phone numbers, photos (one exception: an `UNROUTED_BUYER` issue names its buyer RUC in the title and marker, D120);
 - counts, dates or anything else that reveals spending habits (they stay in the bot's database);
 - raw OCR text, LLM text, or any text the user typed.
 
