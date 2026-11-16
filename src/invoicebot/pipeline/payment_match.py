@@ -1,34 +1,18 @@
 """Which sent invoices a reimbursement amount covers (R-7.12, D107).
 
 :func:`match_sets` enumerates the sets of candidates whose claimed amounts add up to
-the target, up to ``limit`` sets, oldest invoices first. :func:`claimed_cents` gives an
-invoice's claimed amount in cents, capped by R-7.13. The module is pure: it reads no
-clock and performs no I/O.
+the target, up to ``limit`` sets, oldest invoices first. The candidate and its claimed
+amount (R-7.13) live in :mod:`invoicebot.store.payments`, which owns their definition;
+they are re-exported here. The module is pure: it reads no clock and performs no I/O.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
-from datetime import datetime
-from decimal import ROUND_HALF_UP, Decimal
 
-_CENT = Decimal("0.01")
+from invoicebot.store.payments import Candidate, claimed_cents
 
-
-@dataclass(frozen=True)
-class Candidate:
-    """A sent, unpaid invoice the matcher may include in a payment (R-7.12)."""
-
-    invoice_id: int
-    created_at: datetime
-    claimed_cents: int
-
-
-def claimed_cents(total: Decimal, cap: Decimal | None) -> int:
-    """Return ``min(total, cap)`` in whole cents, half up; ``None`` means no cap (R-7.13)."""
-    capped = total if cap is None else min(total, cap)
-    return int(capped.quantize(_CENT, rounding=ROUND_HALF_UP) * 100)
+__all__ = ["Candidate", "claimed_cents", "match_sets"]
 
 
 def match_sets(candidates: Sequence[Candidate], target_cents: int, limit: int = 3) -> list[tuple[int, ...]]:
