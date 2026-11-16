@@ -29,7 +29,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.pipeline.extract import ROUTE_STEP
-from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
+from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
     BRAND_ACTION,
     CANCEL_ACTION,
@@ -45,6 +45,7 @@ from invoicebot.pipeline.questions import (
 from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import enqueue
+from invoicebot.queue.outbox import last_rule
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
@@ -361,15 +362,21 @@ async def _arrived(
 async def _via_laptop(
     conn: AsyncConnection[Any],
     invoice_id: int,
-    _msg: InboundMessage,
+    msg: InboundMessage,
     _press: ButtonPress,
-    _laptop_flows: frozenset[str],
+    laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Enqueue the laptop resend; its job sends and answers (R-7.14, D109).
 
     The press runs in intake's transaction, so no file, drive or mail call may happen
-    here: the job does that work after the commit.
+    here: the job does that work after the commit. A flow that offers no laptop_outlook,
+    or a press from an older question (the mail already went out), is stale: BR-S02 and
+    no job.
     """
+    offers_laptop = await load_flow(conn, invoice_id) in laptop_flows
+    if not offers_laptop or not await _asks_not_confirmed(conn, invoice_id):
+        await send_stale(conn, msg, invoice_id)
+        return ()
     await enqueue(conn, invoice_id, RESEND_LAPTOP_STEP)
     return ()
 
@@ -377,16 +384,25 @@ async def _via_laptop(
 async def _self_send(
     conn: AsyncConnection[Any],
     invoice_id: int,
-    _msg: InboundMessage,
+    msg: InboundMessage,
     _press: ButtonPress,
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
-    """Enqueue the .eml resend; its job rewrites the file and answers (R-7.8).
+    """Enqueue the .eml resend; its job rewrites the file and answers (R-7.8, BR-S02).
 
-    Like [Por la laptop], the press only enqueues so all I/O happens after the commit.
+    Like [Por la laptop], the press only enqueues so all I/O happens after the commit;
+    a press from an older question than BR-D11 is stale: BR-S02 and no job.
     """
+    if not await _asks_not_confirmed(conn, invoice_id):
+        await send_stale(conn, msg, invoice_id)
+        return ()
     await enqueue(conn, invoice_id, RESEND_EML_STEP)
     return ()
+
+
+async def _asks_not_confirmed(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Return whether BR-D11 is the invoice's last question (BR-S02, D109)."""
+    return await last_rule(conn, invoice_id, RULE_STALE_BUTTON) == RULE_NOT_CONFIRMED
 
 
 async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rule_id: str) -> bool:

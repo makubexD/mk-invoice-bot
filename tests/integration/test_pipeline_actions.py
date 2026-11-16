@@ -15,6 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.actions import send_not_confirmed
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
@@ -980,24 +981,109 @@ async def test_arrived_on_a_sent_batch_only_answers_br_d10(
 async def test_via_laptop_enqueues_one_resend_job_and_changes_no_state(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.14: [Por la laptop] enqueues one resend_laptop job and changes no invoice or batch state."""
+    """D109: [Por la laptop] while BR-D11 is the last question enqueues the resend (R-7.14)."""
     profile_id = _profile()
     invoice_id = await _done_invoice(db_pool, profile_id, batch_state="sent")
+    laptop_flows = frozenset({FLOW})
+    async with db_pool.connection() as conn, conn.transaction():
+        await send_not_confirmed(conn, invoice_id, laptop_flows)
     msg = _press(invoice_id, "via_laptop", profile_id)
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=IntakeRoles(laptop_flows=laptop_flows),
+        )
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
-        messages = await _messages(conn, profile_id)
+        texts = await _texts(conn, profile_id)
 
     assert result.status == "stored"
     assert result.invoice_id == invoice_id
     assert invoice == (DONE, RULE_INBOX)
     assert batch_state == "sent"
     assert jobs == ["resend_laptop"]
-    assert messages == []
+    assert texts == [
+        (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
+    ]
+
+
+async def test_via_laptop_on_a_flow_without_laptop_outlook_answers_br_s02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D109: [Por la laptop] on a flow without laptop_outlook answers BR-S02 and enqueues nothing."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id, batch_state="sent")
+    laptop_flows = frozenset({"another_flow"})
+    async with db_pool.connection() as conn, conn.transaction():
+        await send_not_confirmed(conn, invoice_id, laptop_flows)
+    msg = _press(invoice_id, "via_laptop", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=IntakeRoles(laptop_flows=laptop_flows),
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (DONE, RULE_INBOX)
+    assert jobs == []
+    assert texts == [
+        (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
+    ]
+
+
+async def test_via_laptop_after_br_d10_answers_br_s02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: [Por la laptop] after the invoice got BR-D10 answers BR-S02 and enqueues nothing."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id, batch_state="sent")
+    laptop_flows = frozenset({FLOW})
+    async with db_pool.connection() as conn, conn.transaction():
+        await send_not_confirmed(conn, invoice_id, laptop_flows)
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "arrived", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+        )
+    msg = _press(invoice_id, "via_laptop", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+            roles=IntakeRoles(laptop_flows=laptop_flows),
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (DONE, RULE_INBOX)
+    assert jobs == []
+    assert texts == [
+        (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
+        (RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER)),
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
+    ]
 
 
 async def test_self_send_enqueues_one_resend_job_and_changes_no_state(
@@ -1006,6 +1092,8 @@ async def test_self_send_enqueues_one_resend_job_and_changes_no_state(
     """R-7.8: [Lo envío yo] enqueues one resend_eml job and changes no invoice or batch state."""
     profile_id = _profile()
     invoice_id = await _prepared_laptop_invoice(db_pool, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await send_not_confirmed(conn, invoice_id, frozenset())
     msg = _press(invoice_id, "self_send", profile_id)
 
     async with db_pool.connection() as conn:
@@ -1013,11 +1101,47 @@ async def test_self_send_enqueues_one_resend_job_and_changes_no_state(
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
-        messages = await _messages(conn, profile_id)
+        texts = await _texts(conn, profile_id)
 
     assert result.status == "stored"
     assert result.invoice_id == invoice_id
     assert invoice == (BATCHED, RULE_BATCHED)
     assert batch_state == "prepared"
     assert jobs == ["resend_eml"]
-    assert messages == []
+    assert texts == [
+        (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
+    ]
+
+
+async def test_self_send_after_br_d10_answers_br_s02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: [Lo envío yo] after BR-D10 answers BR-S02."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await send_not_confirmed(conn, invoice_id, frozenset())
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "arrived", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            timezone=TIMEZONE,
+        )
+    msg = _press(invoice_id, "self_send", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (DONE, RULE_INBOX)
+    assert jobs == []
+    assert texts == [
+        (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
+        (RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER)),
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
+    ]

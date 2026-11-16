@@ -110,6 +110,31 @@ async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -
     return str(row[0])
 
 
+async def last_rule(conn: AsyncConnection[Any], invoice_id: int, ignore: str) -> str | None:
+    """Return the newest rule id stored for invoice_id, skipping ``ignore`` (BR-S02).
+
+    BR-S02 answers a stale press, so it is not the question the invoice waits on:
+    callers pass it as ``ignore`` to find the last real question. A row without a
+    rule id, and an invoice with no such row, give None. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'rule_id'
+        FROM outbox
+        WHERE invoice_id = %(invoice_id)s
+          AND payload_json->>'rule_id' IS NOT NULL
+          AND payload_json->>'rule_id' <> %(ignore)s
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"invoice_id": invoice_id, "ignore": ignore},
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None:
+        return None
+    return str(row[0])
+
+
 async def requeue_last(
     conn: AsyncConnection[Any],
     invoice_id: int,

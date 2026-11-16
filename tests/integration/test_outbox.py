@@ -7,7 +7,7 @@ from psycopg import AsyncConnection
 from psycopg.errors import ForeignKeyViolation
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, add
+from invoicebot.queue.outbox import OutboxRow, OutboxSender, PermanentSendError, add, last_rule
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -478,3 +478,49 @@ async def test_add_with_an_unknown_invoice_is_rejected(
         cur = await conn.execute("SELECT count(*) FROM outbox")
         row = await cur.fetchone()
     assert row == (0,)
+
+
+async def test_last_rule_returns_the_newest_rule_stored(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: last_rule returns the newest rule id stored for the invoice."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        invoice_id = await _insert_invoice(conn)
+        await add(conn, "whatsapp", "+51900000011", {"rule_id": "BR-D11"}, invoice_id=invoice_id)
+        await add(conn, "whatsapp", "+51900000011", {"rule_id": "BR-D10"}, invoice_id=invoice_id)
+
+    async with db_pool.connection() as conn:
+        rule = await last_rule(conn, invoice_id, "BR-S02")
+
+    assert rule == "BR-D10"
+
+
+async def test_last_rule_skips_the_ignored_rule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: last_rule skips BR-S02 so the invoice's last real question wins."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        invoice_id = await _insert_invoice(conn)
+        await add(conn, "whatsapp", "+51900000012", {"rule_id": "BR-D11"}, invoice_id=invoice_id)
+        await add(conn, "whatsapp", "+51900000012", {"rule_id": "BR-S02"}, invoice_id=invoice_id)
+
+    async with db_pool.connection() as conn:
+        rule = await last_rule(conn, invoice_id, "BR-S02")
+
+    assert rule == "BR-D11"
+
+
+async def test_last_rule_without_a_stored_rule_returns_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: an invoice with no stored rule id has no last rule."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        invoice_id = await _insert_invoice(conn)
+
+    async with db_pool.connection() as conn:
+        rule = await last_rule(conn, invoice_id, "BR-S02")
+
+    assert rule is None
