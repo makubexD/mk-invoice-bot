@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Register the owner's existing sent, unpaid claim folders (R-7.16, S11.17, D110).
 
-Usage: ``import_claims.py --profile <id> [--dry-run] <folder>…``. The folders are a
-local copy of the reimbursement tree (the synced OneDrive on the laptop, or a copy on
-the host), so no Graph sign-in is needed. It reads each folder's name and its XML,
-registers the claims as DONE flow B invoices and never writes to those folders.
-``--dry-run`` prints what it would register.
+Usage: ``import_claims.py --profile <id> [--dry-run] <folder>…``. Each folder given is
+the local copy of the flow's ``onedrive_folder`` sink root (the synced OneDrive on the
+laptop, or a copy on the host), so no Graph sign-in is needed. It reads each folder's
+name and its XML, registers the claims as DONE flow B invoices and never writes to those
+folders. ``--dry-run`` prints what it would register.
 """
 
 from __future__ import annotations
@@ -22,6 +22,7 @@ from invoicebot.importer import (
     ImportEntry,
     ImportReport,
     Skipped,
+    folder_sink_root,
     import_flow,
     read_claims,
     register_claims,
@@ -40,7 +41,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     settings = Settings()
     try:
-        flow_id = import_flow(load_config(settings.config_path), args.profile)
+        cfg = load_config(settings.config_path)
+        flow_id = import_flow(cfg, args.profile)
+        drive_root = folder_sink_root(cfg, flow_id)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -50,7 +53,9 @@ def main(argv: list[str] | None = None) -> int:
 
     readings = read_claims(args.folders)
     claims = [reading.result for reading in readings if isinstance(reading.result, Claim)]
-    report = asyncio.run(_register(settings.database_url, args.profile, flow_id, claims, args.dry_run))
+    report = asyncio.run(
+        _register(settings.database_url, args.profile, flow_id, drive_root, claims, args.dry_run)
+    )
     entries = {entry.claim.folder_path: entry for entry in report.entries}
     for reading in readings:
         if isinstance(reading.result, Skipped):
@@ -73,6 +78,7 @@ async def _register(
     database_url: str,
     profile_id: str,
     flow_id: str,
+    drive_root: str,
     claims: list[Claim],
     dry_run: bool,
 ) -> ImportReport:
@@ -81,7 +87,9 @@ async def _register(
     await pool.open(wait=True)
     try:
         async with pool.connection() as conn:
-            return await register_claims(conn, profile_id, flow_id, claims, dry_run=dry_run)
+            return await register_claims(
+                conn, profile_id, flow_id, claims, drive_root=drive_root, dry_run=dry_run
+            )
     finally:
         await pool.close()
 

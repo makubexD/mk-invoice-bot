@@ -16,7 +16,9 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
+from invoicebot.config.models import OneDriveFolderSink, SinkFiles
 from invoicebot.importer import Claim, ImportReport, read_claims, register_claims
+from invoicebot.pipeline.folder_status import _Inputs, _plan
 from invoicebot.states import DONE
 from invoicebot.store.flow_b import claim_seq
 from invoicebot.store.invoices import create_invoice, set_flow
@@ -30,6 +32,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 CHANNEL: ChannelName = "whatsapp"
 YEAR = 2026
 MONTH = 7
+#: The flow's OneDrive sink root the import files every claim under.
+DRIVE_ROOT = "/Reembolsos"
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
 
@@ -58,11 +62,36 @@ async def _register(
     flow_id: str,
     claims: list[Claim],
     *,
+    drive_root: str = DRIVE_ROOT,
     dry_run: bool = False,
 ) -> ImportReport:
     """Run the import inside a transaction the test owns."""
     async with db_pool.connection() as conn, conn.transaction():
-        return await register_claims(conn, profile_id, flow_id, claims, dry_run=dry_run)
+        return await register_claims(
+            conn, profile_id, flow_id, claims, drive_root=drive_root, dry_run=dry_run
+        )
+
+
+async def _stored_flow_data(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str
+) -> dict[str, Any]:
+    """Return the single invoice's flow data the test's profile holds."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT flow_data_json FROM invoices WHERE profile_id = %s", (profile_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
+def _sink() -> OneDriveFolderSink:
+    """Return the flow's folder sink rooted where the import files its claims."""
+    return OneDriveFolderSink(
+        kind="onedrive_folder",
+        targets=["onedrive_personal"],
+        root=DRIVE_ROOT,
+        folder="{profile.legal_name}",
+        files=SinkFiles(pdf="{profile.legal_name}.pdf", xml="{profile.legal_name}.xml"),
+    )
 
 
 def _two_claims(root: Path) -> list[Claim]:
@@ -116,6 +145,45 @@ async def test_register_claims_files_sent_claims_done_with_their_seq(
         assert row[4] == int(SYNTHETIC_RUC)
         assert row[5] == Decimal("49.90")
         assert row[6]["fields"]["total"]["value"] == "49.90"
+
+
+async def test_register_claims_stores_the_drive_path_under_the_sink_root(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.16: a claim under ``<copy>/2026`` is stored at ``<root>/2026``, year folder included."""
+    profile_id = _unique("profile")
+    flow_id = _unique("flow")
+    copy_root = tmp_path / "copy"
+    _claim_folder(copy_root / str(YEAR), "2026-07-Support_3_X_Sent", "17105")
+
+    await _register(db_pool, profile_id, flow_id, _claims(copy_root), drive_root=DRIVE_ROOT)
+
+    flow_data = await _stored_flow_data(db_pool, profile_id)
+    assert flow_data["folder_path"] == f"{DRIVE_ROOT}/{YEAR}/2026-07-Support_3_X_Sent"
+
+
+async def test_folder_status_plan_starts_from_the_stored_drive_path(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.11: the folder_status planner starts from the path the import stored."""
+    profile_id = _unique("profile")
+    flow_id = _unique("flow")
+    copy_root = tmp_path / "copy"
+    _claim_folder(copy_root / str(YEAR), "2026-07-Support_3_X_Sent", "17106")
+    await _register(db_pool, profile_id, flow_id, _claims(copy_root), drive_root=DRIVE_ROOT)
+    flow_data = await _stored_flow_data(db_pool, profile_id)
+    inputs = _Inputs(
+        flow_name=flow_id,
+        flow_data=flow_data,
+        batch_state="sent",
+        paid_on=None,
+        payment_total=None,
+    )
+
+    plan = _plan(inputs, _sink())
+
+    assert plan.current == flow_data["folder_path"]
+    assert plan.current == f"{DRIVE_ROOT}/{YEAR}/2026-07-Support_3_X_Sent"
 
 
 async def test_register_claims_second_run_registers_nothing(

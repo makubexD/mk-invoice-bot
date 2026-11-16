@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -99,6 +99,8 @@ class Claim:
     folder: ClaimFolder
     #: Where the claim was read from, not part of the claim's data, so not compared.
     folder_path: Path | None = field(default=None, compare=False)
+    #: The claim folder's path under the copy root, as POSIX, not compared either.
+    relative_path: str | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True)
@@ -231,8 +233,19 @@ def claim_folders(roots: Iterable[Path]) -> Iterator[Path]:
 
 
 def read_claims(roots: Iterable[Path]) -> list[ClaimReading]:
-    """Read every claim folder under the roots, in walk order (R-7.16)."""
-    return [ClaimReading(path, read_claim(path)) for path in claim_folders(roots)]
+    """Read every claim folder under the roots, in walk order (R-7.16).
+
+    A claim also knows its folder's POSIX path under the root it was walked from, which is
+    the one the flow's OneDrive folder sink shares.
+    """
+    readings: list[ClaimReading] = []
+    for root in roots:
+        for path in claim_folders([root]):
+            result = read_claim(path)
+            if isinstance(result, Claim):
+                result = replace(result, relative_path=path.relative_to(root).as_posix())
+            readings.append(ClaimReading(path, result))
+    return readings
 
 
 def import_flow(cfg: Config, profile_id: str) -> str:
@@ -260,12 +273,28 @@ def import_flow(cfg: Config, profile_id: str) -> str:
     return folder_flows[0]
 
 
+def folder_sink_root(cfg: Config, flow_id: str) -> str:
+    """Return the root of the flow's OneDrive folder sink (R-7.16).
+
+    Raises:
+        ValueError: the flow is unknown or has no ``onedrive_folder`` sink.
+    """
+    flow = cfg.flows.get(flow_id)
+    if flow is None:
+        raise ValueError(f"unknown flow {flow_id!r}")
+    for sink in flow.sinks:
+        if isinstance(sink, OneDriveFolderSink):
+            return sink.root
+    raise ValueError(f"flow {flow_id!r} has no OneDrive folder sink")
+
+
 async def register_claims(
     conn: AsyncConnection[Any],
     profile_id: str,
     flow_id: str,
     claims: Iterable[Claim],
     *,
+    drive_root: str,
     dry_run: bool = False,
 ) -> ImportReport:
     """Register each claim as a DONE flow B invoice with a sent batch (R-7.16, D110).
@@ -287,7 +316,7 @@ async def register_claims(
             if dry_run:
                 entries.append(ImportEntry(claim, "would_register"))
                 continue
-            invoice_id = await _insert_claim(conn, profile_id, flow_id, claim, key, reading)
+            invoice_id = await _insert_claim(conn, profile_id, flow_id, claim, reading, drive_root)
         entries.append(ImportEntry(claim, "registered", invoice_id))
     return ImportReport(tuple(entries))
 
@@ -312,10 +341,11 @@ async def _insert_claim(
     profile_id: str,
     flow_id: str,
     claim: Claim,
-    key: str,
     reading: Reading,
+    drive_root: str,
 ) -> int:
     """Insert one claim as a DONE invoice with a sent batch and return its id (R-7.16)."""
+    key = _natural_key(profile_id, reading)
     invoice_id = await create_invoice(conn, profile_id, IMPORT_ORIGIN_CHANNEL)
     duplicate = await claim_natural_key(conn, invoice_id, key)
     if duplicate is not None:
@@ -328,7 +358,7 @@ async def _insert_claim(
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await set_flow(conn, invoice_id, flow_id)
-    await merge_flow_data(conn, invoice_id, _flow_data(claim))
+    await merge_flow_data(conn, invoice_id, _flow_data(claim, drive_root))
     await set_state(conn, invoice_id, DONE)
     return invoice_id
 
@@ -353,13 +383,15 @@ def _claim_reading(claim: Claim) -> Reading:
     )
 
 
-def _flow_data(claim: Claim) -> dict[str, Any]:
-    """Return D110's flow data for an imported claim (R-7.16)."""
+def _flow_data(claim: Claim, drive_root: str) -> dict[str, Any]:
+    """Return D110's flow data for an imported claim, filed under the sink's root (R-7.16)."""
     if claim.folder_path is None:
         raise ValueError("an imported claim needs the folder it was read from")
+    if claim.relative_path is None:
+        raise ValueError("an imported claim needs its path under the copy root")
     return {
         "folder": claim.folder_path.name.removesuffix(SENT_FOLDER_SUFFIX),
-        "folder_path": str(claim.folder_path),
+        "folder_path": f"{drive_root}/{claim.relative_path}",
         "seq": claim.folder.seq,
         "year": claim.folder.year,
         "month": claim.folder.month,
