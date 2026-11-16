@@ -18,6 +18,7 @@ from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_com
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
+from invoicebot.pipeline.payments import handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
@@ -69,7 +70,8 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), a non-photo is ``stored`` (a pdf/xml upload is linked to
+    ``stored`` (R-3.5), except a payment proposal press, which is answered as stored
+    without an invoice (R-7.12), a non-photo is ``stored`` (a pdf/xml upload is linked to
     the stuck invoice it belongs to, R-1.5) and a text-only message may also
     run a command (R-10.1), apply its edits (D97) and store its overrides (D70). A photo
     becomes an invoice, with its caption's overrides, a ``download_media`` job and a
@@ -85,6 +87,9 @@ async def handle_inbound(
             return IntakeResult(status="duplicate", invoice_id=None)
         await touch_window(conn, msg.channel, msg.profile_id, msg.received_at)
         if msg.button_id is not None:
+            if msg.button_id.startswith("p"):
+                await handle_payment_press(conn, msg)
+                return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg)
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
             return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)

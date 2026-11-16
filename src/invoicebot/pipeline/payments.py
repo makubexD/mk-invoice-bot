@@ -9,6 +9,7 @@ caller's transaction.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
@@ -18,7 +19,7 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
-from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.payment_match import (
     Candidate,
     PagadoAmount,
@@ -26,6 +27,8 @@ from invoicebot.pipeline.payment_match import (
     match_sets,
     parse_pagado,
 )
+from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     BUTTON_NO,
     BUTTON_YES,
@@ -34,7 +37,20 @@ from invoicebot.rules.messages_es import (
     PAYMENT_LINE,
     PAYMENT_SET_LABEL,
 )
-from invoicebot.store.payments import add_proposal, candidates
+from invoicebot.states import DONE
+from invoicebot.store.payments import (
+    CONFIRMED,
+    EXPIRED,
+    PENDING,
+    REJECTED,
+    AlreadyPaid,
+    Proposal,
+    add_proposal,
+    candidates,
+    close_proposal,
+    get_proposal,
+    record_payment,
+)
 
 if TYPE_CHECKING:
     from invoicebot.pipeline.commands import CommandContext, PaymentFlow
@@ -45,6 +61,12 @@ _RULE_PAY = "BR-P01"
 _RULE_CHOOSE = "BR-P02"
 #: BR-P03: no set adds up to the amount, so the sender lists the invoices.
 _RULE_NO_MATCH = "BR-P03"
+#: BR-P04: the payment was recorded and its invoices were marked as paid.
+_RULE_PAID = "BR-P04"
+#: How long a payment proposal stays confirmable, on the database clock (R-7.12).
+PROPOSAL_MAX_AGE_HOURS = 24
+#: A proposal button's id: ``p<proposal>:pay:<set>`` or ``p<proposal>:pay_no`` (R-7.12).
+_PRESS_PATTERN = r"p([0-9]{1,9}):(?:pay:([0-9])|pay_no)"
 
 
 async def pagado(
@@ -67,6 +89,109 @@ async def pagado(
         await _answer_amount(conn, msg, flow, parsed, found, context.timezone)
     else:
         await _answer_ids(conn, msg, flow, parsed, found, context.timezone)
+
+
+def _parse_press(button_id: str) -> tuple[int, int | None] | None:
+    """Parse a proposal button id into its proposal and set index, or None (R-7.12).
+
+    ``p<id>:pay_no`` returns a ``None`` set index; a malformed id returns ``None``.
+    """
+    match = re.fullmatch(_PRESS_PATTERN, button_id)
+    if match is None:
+        return None
+    set_index = match.group(2)
+    return int(match.group(1)), None if set_index is None else int(set_index)
+
+
+async def handle_payment_press(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
+    """Confirm or reject the payment a proposal button names (R-7.12).
+
+    A malformed id, a missing proposal or another profile's proposal changes nothing
+    and answers nothing, so one profile's invoice ids never reach another. A stale
+    proposal answers BR-S02; a pending one older than :data:`PROPOSAL_MAX_AGE_HOURS`
+    is also closed as expired. [No] closes it as rejected. [Sí] records the payment
+    and one ``folder_status`` job per invoice, closes it as confirmed and answers
+    BR-P04, all in the caller's transaction; an invoice paid in the meantime rolls
+    the savepoint back, answers BR-S02 and leaves the proposal pending.
+    """
+    parsed = None if msg.button_id is None else _parse_press(msg.button_id)
+    if parsed is None:
+        return
+    proposal_id, set_index = parsed
+    proposal = await get_proposal(conn, proposal_id)
+    if proposal is None or proposal.profile_id != msg.profile_id:
+        return
+    if proposal.state != PENDING:
+        await _answer_stale(conn, msg, proposal)
+        return
+    if not await _is_fresh(conn, proposal.created_at):
+        await close_proposal(conn, proposal.id, EXPIRED)
+        await _answer_stale(conn, msg, proposal)
+        return
+    if set_index is None:
+        await close_proposal(conn, proposal_id, REJECTED)
+        return
+    if set_index >= len(proposal.sets):
+        await _answer_stale(conn, msg, proposal)
+        return
+    await _confirm(conn, msg, proposal, proposal.sets[set_index])
+
+
+async def _is_fresh(conn: AsyncConnection[Any], created_at: datetime) -> bool:
+    """Return whether a proposal is under :data:`PROPOSAL_MAX_AGE_HOURS` old (R-7.12)."""
+    cur = await conn.execute(
+        "SELECT %s > now() - make_interval(hours => %s)",
+        (created_at, PROPOSAL_MAX_AGE_HOURS),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT now() - make_interval yielded no row")
+    return bool(row[0])
+
+
+async def _confirm(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    proposal: Proposal,
+    invoice_ids: Sequence[int],
+) -> None:
+    """Record one set's payment with its jobs and close the proposal (R-7.12)."""
+    try:
+        async with conn.transaction():
+            await record_payment(
+                conn,
+                proposal.flow_id,
+                proposal.profile_id,
+                proposal.paid_on,
+                proposal.amount,
+                invoice_ids,
+            )
+            for invoice_id in invoice_ids:
+                await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
+            await close_proposal(conn, proposal.id, CONFIRMED)
+    except AlreadyPaid:
+        await _answer_stale(conn, msg, proposal)
+        return
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        MESSAGES[_RULE_PAID].format(n=len(invoice_ids)),
+        rule_id=_RULE_PAID,
+    )
+
+
+async def _answer_stale(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    proposal: Proposal,
+) -> None:
+    """Queue BR-S02 naming the proposal's first invoice (R-7.12)."""
+    await queue_stale(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        invoice_id=proposal.sets[0][0],
+        state=DONE,
+    )
 
 
 async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
