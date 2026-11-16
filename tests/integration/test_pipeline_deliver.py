@@ -124,7 +124,8 @@ class FakeDrive:
 class CrashingMode:
     """An assisted mode that fails after the folder is filed, standing in for a crash."""
 
-    automatic = False
+    completion = "tap"
+    done_rule = "BR-D08"
 
     async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
         """Raise before writing any draft."""
@@ -134,7 +135,8 @@ class CrashingMode:
 class FakeGraphMode:
     """An automatic mode that records each send instead of reaching Graph (D89)."""
 
-    automatic = True
+    completion = "accepted"
+    done_rule = "BR-D10"
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, OutgoingMail]] = []
@@ -147,7 +149,8 @@ class FakeGraphMode:
 class RaisingMode:
     """An automatic mode whose send raises the error the test installed (BR-D01, R-7.3, BR-D03)."""
 
-    automatic = True
+    completion = "accepted"
+    done_rule = "BR-D10"
 
     def __init__(self, error: Exception) -> None:
         self._error = error
@@ -160,7 +163,8 @@ class RaisingMode:
 class ObservingGraphMode:
     """An automatic mode that records the batch state it sees just before sending (D89)."""
 
-    automatic = True
+    completion = "accepted"
+    done_rule = "BR-D10"
 
     def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
         self._pool = pool
@@ -183,7 +187,8 @@ class AuthRequiredDrive(FakeDrive):
 class CancellingGraphMode:
     """An automatic mode that moves the invoice out of DELIVERING while it sends (R-7.5)."""
 
-    automatic = True
+    completion = "accepted"
+    done_rule = "BR-D10"
 
     def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
         self._pool = pool

@@ -103,7 +103,7 @@ async def test_dry_run_writes_parseable_eml(tmp_path: Path) -> None:
 
     path = await mode.deliver(7, MAIL)
 
-    assert mode.automatic is False
+    assert mode.completion == "tap"
     assert path == str(tmp_path / "mail" / "7.eml")
     message = _read_eml(path)
     assert message["Subject"] == "Support release 05/11/2026"
@@ -135,7 +135,7 @@ def test_mail_modes_close_sending_when_disabled(tmp_path: Path) -> None:
 
     assert modes["dry_run"] is dry_run
     assert modes["graph"] is dry_run
-    assert modes["graph"].automatic is False
+    assert modes["graph"].completion == "tap"
 
 
 async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -> None:
@@ -148,6 +148,14 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
     result = await modes["graph"].deliver(7, MAIL)
 
     assert modes["graph"] is graph
-    assert modes["graph"].automatic is True
+    assert modes["graph"].completion == "accepted"
     assert result is None
     assert mailer.sent == [MAIL]
+
+
+def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
+    """R-7.8, D108: each built mode says how it completes and which rule reports it."""
+    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()))
+
+    assert (modes["dry_run"].completion, modes["dry_run"].done_rule) == ("tap", "BR-D08")
+    assert (modes["graph"].completion, modes["graph"].done_rule) == ("accepted", "BR-D10")

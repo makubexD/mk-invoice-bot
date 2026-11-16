@@ -22,7 +22,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -56,7 +56,7 @@ from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMa
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
 from invoicebot.sinks.folders import comercio_for
-from invoicebot.sinks.mailer import MailMode, build_mail
+from invoicebot.sinks.mailer import Completion, MailMode, build_mail
 from invoicebot.sinks.onedrive import GraphError
 from invoicebot.sinks.onedrive_folder import file_folder
 from invoicebot.store.db import Pool
@@ -102,8 +102,6 @@ DONE_STATE = "DONE"
 RULE_SEND_FAILED = "BR-D03"
 #: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
 RULE_SEND_FAILED_ADMIN = "BR-D03_admin"
-#: BR-D10: the rule that reports a filed and mailed invoice (R-7.7).
-RULE_SENT = "BR-D10"
 #: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
 RULE_AUTH = "BR-D01"
 #: BR-D01's admin-only alert, with the script the admin runs (BR-D01).
@@ -216,10 +214,7 @@ def make_deliver_handler(
         try:
             delivery = await _prepare(context, invoice, sinks, prepared)
             mode_name, mode = _mode(context.modes, sinks.mailer)
-            if mode.automatic:
-                await _automatic(context, delivery, prepared, mode)
-            else:
-                await _assisted(context, delivery, mode)
+            await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
         except AuthRequired as required:
             await _pending_auth(context, invoice, required.account)
             return
@@ -388,7 +383,7 @@ def _mode(modes: Mapping[str, MailMode], mailer: MailerSink) -> tuple[str, MailM
     return name, mode
 
 
-async def _assisted(context: _Context, delivery: _Delivery, mode: MailMode) -> None:
+async def _assisted(context: _Context, delivery: _Delivery, _prepared: _Values, mode: MailMode) -> None:
     """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1)."""
     eml_path = await mode.deliver(delivery.invoice_id, delivery.mail)
     if eml_path is None:
@@ -461,19 +456,30 @@ async def _automatic(
         await enqueue(conn, delivery.invoice_id, FOLDER_STATUS_STEP)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
-        await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=RULE_SENT)
+        await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=mode.done_rule)
         await _notify(
             conn,
             delivery.head,
             delivery.invoice_id,
-            RULE_SENT,
-            MESSAGES[RULE_SENT].format(folder=delivery.folder),
+            mode.done_rule,
+            MESSAGES[mode.done_rule].format(folder=delivery.folder),
             [],
         )
         photos = await take_photo_paths(conn, delivery.invoice_id)
 
     for path in photos:
         await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+type _CompletionHandler = Callable[[_Context, _Delivery, _Values, MailMode], Awaitable[None]]
+
+#: The handler each completion uses (D108).
+# shortcut: ``receipt`` gets its handler in step 28; no mode reports it yet, so its missing
+# key is a programming error and a ``KeyError`` is acceptable.
+_COMPLETIONS: Mapping[Completion, _CompletionHandler] = {
+    "accepted": _automatic,
+    "tap": _assisted,
+}
 
 
 async def _crashed_send(

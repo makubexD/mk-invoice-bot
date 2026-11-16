@@ -11,7 +11,7 @@ import asyncio
 import logging
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from invoicebot.config.models import Config, MailerSink
 from invoicebot.sinks.base import Attachment, OutgoingMail
@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 
 #: Directory under the data directory that holds the assisted modes' drafts.
 MAIL_DIRECTORY = "mail"
+
+#: How a mail mode completes, which picks the handler that files it (D108).
+#: ``accepted`` when the provider takes the mail, ``receipt`` when a later receipt
+#: confirms it, and ``tap`` when the owner sends the draft by hand.
+type Completion = Literal["accepted", "receipt", "tap"]
 
 
 def build_mail(
@@ -65,13 +70,16 @@ class Mailer(Protocol):
 
 
 class MailMode(Protocol):
-    """One way of delivering an invoice email (R-7.7, D89).
+    """One way of delivering an invoice email (R-7.7, D89, D108).
 
-    An automatic mode sends exactly once per call; the caller commits the batch
-    as ``sending`` before the call, so a retry never sends it again (D89).
+    ``completion`` says how the mode completes and picks its delivery handler;
+    ``done_rule`` is the rule that reports the completed invoice. An accepted
+    mode sends exactly once per call; the caller commits the batch as
+    ``sending`` before the call, so a retry never sends it again (D89).
     """
 
-    automatic: bool
+    completion: Completion
+    done_rule: str
 
     async def deliver(self, invoice_id: int, mail: OutgoingMail) -> str | None:
         """Deliver ``mail`` for ``invoice_id``.
@@ -83,9 +91,10 @@ class MailMode(Protocol):
 
 
 class DryRun:
-    """The assisted mode: write the ``.eml`` the owner sends (R-7.7, D69)."""
+    """The assisted mode: write the ``.eml`` the owner sends (R-7.7, D69, D108)."""
 
-    automatic = False
+    completion: Completion = "tap"
+    done_rule: str = "BR-D08"
 
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
@@ -106,9 +115,10 @@ class DryRun:
 
 
 class GraphSend:
-    """The automatic mode: hand the mail to Graph, which sends it once (R-7.6, D89)."""
+    """The automatic mode: hand the mail to Graph, which sends it once (R-7.6, D89, D108)."""
 
-    automatic = True
+    completion: Completion = "accepted"
+    done_rule: str = "BR-D10"
 
     def __init__(self, mailer: Mailer) -> None:
         self._mailer = mailer
