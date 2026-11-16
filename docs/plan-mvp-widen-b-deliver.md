@@ -427,6 +427,115 @@ Files: `specs/02-requirements.md`, `specs/03-design.md`, `config/example.yaml`, 
 
 Test: none (text only); `uv run pytest -q tests/unit/test_rules_parity.py` and `uv run python scripts/check_config.py config/example.yaml` (use the script's real arguments).
 
+## Review fixes (finish review, 2026-11-16)
+
+Steps 41 to 50 fix the finish review's findings (`py-code-reviewer`, `py-security-auditor`, main session). The full suite passed before them (1546). The lower findings go to the roadmap's carry-over list.
+
+## Step 41: The laptop agent sends only the job it verified `[worker]`
+
+Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
+
+- Today the main loop parses each job file, `Test-JobFile` reads and checks it again, and `Send-Job` sends the first, unchecked copy. A file swapped between the two reads is sent unchecked (R-7.14). Fix: read each file's bytes once. `Test-JobFile` returns the parsed, verified job object (or `$null`) instead of `$true`/`$false`, and the main loop builds the folder from that object and passes only it to `Send-Job`.
+- `Test-JobFile` also checks each `/`-separated segment of `folder` with `Test-PlainFileName`, and refuses a file whose name is not exactly `<job_id>.json`.
+- The job id match is case-sensitive and anchored at the true end: `-cnotmatch '^[0-9a-f]{32}\z'`.
+- `Send-Job` deletes the file it read (pass its full path in), not a path rebuilt from `job_id`.
+- `agent.log` moves from the work OneDrive to `$PSScriptRoot` (it holds folder names).
+- Tests (Pester): R-7.14 a job whose file changes after it is read is sent with the verified content only (or refused); R-7.14 `job_id` with uppercase hex or a trailing newline is refused; R-7.14 a file named other than `<job_id>.json` is refused; R-7.14 a `folder` segment `..` is refused; R-7.14 `Send-Job` removes the file it was given; R-7.14 the log is written under the script's folder.
+
+Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"` (as CI runs it).
+
+## Step 42: `Drive.delete` `[worker]`
+
+Files: `src/invoicebot/sinks/base.py`, `src/invoicebot/sinks/onedrive.py`, `tests/unit/test_sinks_onedrive.py`.
+
+- Add `async def delete(self, path: str) -> None` to the `Drive` port and to the OneDrive drive: `DELETE` on the item by path, with the same path validation, quoting, timeout and auth as `move`. A 404 is success (already gone); other errors raise as the other methods do.
+- Tests with `httpx.MockTransport`: R-7.14 a 204 deletes; R-7.14 a 404 returns without error; R-7.14 a 500 raises; R-7.14 a path segment `..` is refused before any request.
+
+Test: `uv run pytest -q tests/unit/test_sinks_onedrive.py`.
+
+## Step 43: Receipts are signed `[worker]`
+
+Files: `src/invoicebot/sinks/laptop_job.py`, `scripts/laptop_agent.ps1`, `tests/unit/test_sinks_laptop_job.py`, `tests/laptop/laptop_agent.Tests.ps1`.
+
+- A forged `sent` receipt would file the invoice DONE and delete its photos. The agent now adds `hmac` to each receipt: hex HMAC-SHA256 over the canonical JSON of the receipt's other fields, with the same key and the same canonical form as jobs (`_canonical`). Receipt keys become `{job_id, sent_at, hmac}` or `{job_id, error, hmac}`.
+- `parse_receipt(data, key)` checks the HMAC with `hmac.compare_digest` and raises `ValueError` on a mismatch. Its error messages name the field, never its value (no `!r` of receipt content).
+- Callers of `parse_receipt` (`pipeline/laptop.py`) get the key passed in; wiring it from `app.py` is step 44.
+- Tests: R-7.14 a receipt signed with the key parses; R-7.14 a receipt with a wrong or missing `hmac` is refused; R-7.14 a refused receipt's message holds no field value; Pester: R-7.14 `Write-JobReceipt` output verifies with the key, for a sent and an error receipt.
+
+Test: `uv run pytest -q tests/unit/test_sinks_laptop_job.py` and the Pester command of step 41.
+
+## Step 44: The receipt sweep survives a bad receipt and deletes what it applied `[worker]`
+
+Files: `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_laptop.py`.
+
+- `poll_receipts(pool, drive, root, key)`: the key comes from `app.py` (the same `laptop_agent_key` secret the mode signs with). Each file is handled inside its own `try`; any `Exception` other than cancellation is logged with `logger.exception` (file name only) and the sweep goes on, so `check_overdue` always runs.
+- A receipt for a known job without a receipt is always stamped (`set_receipt_at` or `set_receipt_error`). If the batch is `prepared`, today's behaviour stays. If it is already `sent` (an `inbox_rule` batch resent by the laptop, or a late receipt after [Ya llegó]), a sent receipt queues BR-D10 to the sender and nothing else changes; an error receipt sends BR-D11 as today.
+- After the transaction commits, the receipt file is deleted with `Drive.delete`. An unknown job's receipt, or one already applied, is deleted too; a receipt that fails its HMAC or does not parse is left in place and logged.
+- `app.py` uses `_laptop_mode` in production instead of repeating its logic inline (it is only used by tests today).
+- Tests: R-7.14 a receipt whose job's invoice has no flow is logged and the next receipt is still applied; R-7.14 an applied receipt is deleted; R-7.14 a forged receipt is not applied and not deleted; R-7.8 a sent receipt on a `sent` batch stamps the job and queues BR-D10; R-7.14 `check_overdue` runs after a sweep with a failing receipt.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py tests/unit/test_app.py`.
+
+## Step 45: [Por la laptop] follows the flow's modes `[worker]`
+
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_actions.py`.
+
+- D109: [Por la laptop] is shown only when the flow lists `laptop_outlook`. Today it is shown only when the invoice has a `mail_jobs` row, so an `inbox_rule`-first flow never offers it. Fix: `send_not_confirmed` and its callers get the set of flow ids whose mailer sink lists `laptop_outlook` (computed once in `app.py` from the config and passed in as a frozenset; no config lookup inside the pipeline), and the button is shown when the invoice's flow is in it.
+- Update the tests that lock in the `mail_jobs` rule.
+- Tests: R-7.8 an `inbox_rule` invoice whose flow lists `[inbox_rule, laptop_outlook]` gets [Por la laptop] after [No llegó]; R-7.8 a flow without `laptop_outlook` does not.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_actions.py`.
+
+## Step 46: No second laptop job while one is waiting `[worker]`
+
+Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/store/mail_jobs.py`, `tests/integration/test_pipeline_deliver.py`.
+
+- R-7.7: HR never gets a claim twice. A [Por la laptop] resend while the invoice has a laptop job without a receipt would let the agent send both when the laptop wakes. Fix: `_resend_laptop` checks for such a job (new store function, in the same transaction as the marker) and, if one exists, writes no job and queues BR-D12 to the sender instead.
+- Also in `deliver.py`: when `_handed_off` gets a `GraphError` on the job upload, handle it like `_automatic` does (`_send_failed`), so a clean 4xx does not leave the batch `sending` and report a crashed send (BR-D03).
+- Tests: R-7.7 a resend while a job has no receipt writes no file and queues BR-D12; R-7.7 a resend after an error receipt writes a new job; R-7.14 a 4xx on the job upload reports a failed send, not a crash.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py`.
+
+## Step 47: BR-P02 buttons fit WhatsApp `[worker]`
+
+Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/payments.py`, `specs/06-business-rules.md` (the BR-P02 row), `tests/integration/test_payments.py`.
+
+- A set label (`{fecha_min}…: {n} facturas, #12 #14`) is always over WhatsApp's 20-character button title, so every BR-P02 fails at send. New form: the body lists the sets and the buttons are short.
+  - BR-P02 text: `Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}`.
+  - One line per set: `Opción {n}: {fecha_min}…, {count} facturas: {ids}` (ids as today, `#12 #14`).
+  - Buttons: `Opción 1` … `Opción 3`, then [No]. Button ids unchanged (D107).
+- Spec 06's BR-P02 row says the same; `tests/unit/test_rules_parity.py` must pass.
+- Tests: R-7.12 a payment with two matching sets queues BR-P02 whose body lists both sets and whose buttons are `Opción 1`, `Opción 2`, `No`; R-7.12 the outbox row's buttons build a valid WhatsApp payload (`buttons_payload` raises nothing).
+
+Test: `uv run pytest -q tests/integration/test_payments.py tests/unit/test_rules_parity.py`.
+
+## Step 48: The import stores the Drive path `[worker]`
+
+Files: `src/invoicebot/importer.py`, `scripts/import_claims.py`, `tests/integration/test_import_claims.py`.
+
+- Today `flow_data_json.folder_path` is the local disk path, and `folder_status` uses it as a Drive path, so `/pagado` on an imported claim never renames it. Fix: each folder given to the script is the local copy of the flow's `onedrive_folder` sink root; store `folder_path` as `{sink.root}/{the claim folder's path relative to that folder, with /}` (so a year folder stays in it). `import_flow` (or a sibling) also returns the sink's root.
+- Tests: R-7.16 a claim in `<copy>/2026/2026-07-Support_3_X_Sent` is stored with `folder_path` `{root}/2026/2026-07-Support_3_X_Sent`; R-7.11 `folder_status`'s plan for that invoice starts from that path (call its planner or run the job against a fake drive).
+
+Test: `uv run pytest -q tests/integration/test_import_claims.py`.
+
+## Step 49: One home for the payment button prefix `[worker:low]`
+
+Files: `src/invoicebot/pipeline/intake.py`, `src/invoicebot/pipeline/payments.py`, `tests/integration/test_payments.py`.
+
+- `intake.py` routes presses starting with the bare `"p"`; `payments.py` builds `p{id}:…`. Make one constant `PAYMENT_BUTTON_PREFIX = "p"` in `payments.py`, used by both.
+- Test: R-7.12 a button id built by payments starts with the prefix intake routes on.
+
+Test: `uv run pytest -q tests/integration/test_payments.py`.
+
+## Step 50: Record the review in the specs `[inline: spec text]`
+
+Files: `specs/03-design.md`, `specs/05-open-questions.md`.
+
+- §16: receipts carry `hmac`; the bot deletes a receipt once applied; the agent's log lives beside the script.
+- D107: the BR-P02 label lives in the body, buttons `Opción N`. D109: no second laptop job while one waits (BR-D12).
+
+Test: `uv run pytest -q tests/unit/test_rules_parity.py`.
+
 ## Deferred: live check
 
 Run after the M3 live run (`docs/plan-mvp-file-b.md` § "Deferred: live run (M3)") and S0.11; the roadmap tracks it. Not a step of this plan, so the phase finishes without it. Real addresses and folder names stay in the host's private config, never in the repo.
