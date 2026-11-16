@@ -56,16 +56,17 @@ RULE_DONE = "BR-D10"
 RULE_STALE = "BR-D12"
 
 
-async def poll_receipts(pool: Pool, drive: Drive, root: str) -> None:
-    """Apply every receipt under ``{root}/_outbox/receipts`` (R-7.14).
+async def poll_receipts(pool: Pool, drive: Drive, root: str, key: bytes) -> None:
+    """Apply every signed receipt under ``{root}/_outbox/receipts`` (R-7.14).
 
     Each receipt file is downloaded with a :data:`RECEIPT_MAX_BYTES` cap and
     handled in its own transaction. A file that is too large or does not parse
-    is logged and skipped, so one bad receipt never blocks the others.
+    or whose HMAC does not verify under ``key`` is logged and skipped, so one
+    bad receipt never blocks the others.
     """
     folder = f"{root}/_outbox/receipts"
     for name in await drive.list_names(folder):
-        await _apply_file(pool, drive, f"{folder}/{name}", name)
+        await _apply_file(pool, drive, f"{folder}/{name}", name, key)
 
 
 async def check_overdue(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
@@ -115,9 +116,9 @@ async def _notify_overdue(pool: Pool, job: OpenMailJob) -> None:
             await send_not_confirmed(conn, job.invoice_id)
 
 
-async def _apply_file(pool: Pool, drive: Drive, path: str, name: str) -> None:
+async def _apply_file(pool: Pool, drive: Drive, path: str, name: str, key: bytes) -> None:
     """Read one receipt and apply it; the photo files it frees are deleted after the commit."""
-    receipt = await _read(drive, path, name)
+    receipt = await _read(drive, path, name, key)
     if receipt is None:
         return
     async with pool.connection() as conn, conn.transaction():
@@ -126,10 +127,10 @@ async def _apply_file(pool: Pool, drive: Drive, path: str, name: str) -> None:
         await asyncio.to_thread(photo.unlink, missing_ok=True)
 
 
-async def _read(drive: Drive, path: str, name: str) -> Receipt | None:
-    """Download and parse one receipt, or log why it was skipped (R-7.14)."""
+async def _read(drive: Drive, path: str, name: str, key: bytes) -> Receipt | None:
+    """Download, verify and parse one receipt, or log why it was skipped (R-7.14)."""
     try:
-        return parse_receipt(await drive.download(path, RECEIPT_MAX_BYTES))
+        return parse_receipt(await drive.download(path, RECEIPT_MAX_BYTES), key)
     except (FileTooLarge, ValueError) as err:
         logger.warning("receipt %s skipped: %s", name, err)
         return None

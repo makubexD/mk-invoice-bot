@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -18,6 +20,19 @@ JOBS: list[dict[str, Any]] = VECTORS["jobs"]
 
 JOB_ID = "0123456789abcdef0123456789abcdef"
 JOB_ID_BYTES = JOB_ID.encode("ascii")
+RECEIPT_KEY = b"test-receipt-key"
+OTHER_KEY = b"another-key"
+
+
+def _receipt_signature(fields: dict[str, object], key: bytes) -> str:
+    """Return the hex HMAC-SHA256 of a receipt's canonical fields."""
+    text = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hmac.new(key, text.encode("ascii"), hashlib.sha256).hexdigest()
+
+
+def _signed_receipt(fields: dict[str, object], key: bytes = RECEIPT_KEY) -> bytes:
+    """Return the receipt file the laptop agent writes for ``fields``."""
+    return json.dumps({**fields, "hmac": _receipt_signature(fields, key)}).encode()
 
 
 def _job(vector: dict[str, Any]) -> LaptopJob:
@@ -78,9 +93,11 @@ def test_bad_job_id_raises() -> None:
         job_document(job, KEY)
 
 
-def test_parse_receipt_accepts_sent() -> None:
-    """R-7.14: a receipt with sent_at parses to its job id and time."""
-    receipt = parse_receipt(b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00"}')
+def test_parse_receipt_accepts_signed_sent() -> None:
+    """R-7.14: a sent receipt signed with the key parses to its job id and time."""
+    data = _signed_receipt({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00"})
+
+    receipt = parse_receipt(data, RECEIPT_KEY)
 
     assert receipt == Receipt(
         job_id=JOB_ID,
@@ -89,37 +106,121 @@ def test_parse_receipt_accepts_sent() -> None:
     )
 
 
-def test_parse_receipt_accepts_error() -> None:
-    """R-7.14: a receipt with error parses to its job id and text."""
-    receipt = parse_receipt(b'{"job_id": "' + JOB_ID_BYTES + b'", "error": "Outlook did not start"}')
+def test_parse_receipt_accepts_signed_error() -> None:
+    """R-7.14: an error receipt signed with the key parses to its job id and text."""
+    data = _signed_receipt({"job_id": JOB_ID, "error": "Outlook did not start"})
+
+    receipt = parse_receipt(data, RECEIPT_KEY)
 
     assert receipt == Receipt(job_id=JOB_ID, sent_at=None, error="Outlook did not start")
 
 
+def test_parse_receipt_refuses_a_wrong_hmac() -> None:
+    """R-7.14: a receipt signed with another key is refused."""
+    data = _signed_receipt({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00"}, OTHER_KEY)
+
+    with pytest.raises(ValueError, match="hmac"):
+        parse_receipt(data, RECEIPT_KEY)
+
+
+def test_parse_receipt_refuses_a_tampered_field() -> None:
+    """R-7.14: changing a signed field without re-signing is refused."""
+    fields: dict[str, object] = {"job_id": JOB_ID, "error": "first"}
+    signed = json.loads(_signed_receipt(fields))
+    signed["error"] = "second"
+
+    with pytest.raises(ValueError, match="hmac"):
+        parse_receipt(json.dumps(signed).encode(), RECEIPT_KEY)
+
+
+@pytest.mark.parametrize(
+    ("data", "match"),
+    [
+        pytest.param(
+            b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00"}',
+            "unexpected keys",
+            id="missing",
+        ),
+        pytest.param(
+            b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00", "hmac": 3}',
+            "hmac is not a string",
+            id="not-a-string",
+        ),
+    ],
+)
+def test_parse_receipt_refuses_an_unsigned_receipt(data: bytes, match: str) -> None:
+    """R-7.14: a receipt with a missing or non-string hmac is refused."""
+    with pytest.raises(ValueError, match=match):
+        parse_receipt(data, RECEIPT_KEY)
+
+
+DISTINCTIVE_JOB_ID = "cafebabecafebabecafebabecafebabe"
+DISTINCTIVE_ERROR = "DISTINCTIVE-ERROR-VALUE-9f3a"
+DISTINCTIVE_TIME = "DISTINCTIVE-SENT-AT-VALUE-7c1d"
+DISTINCTIVE_BAD_ID = "DISTINCTIVE-JOB-ID-VALUE-4b2e"
+
+
+REFUSED_VALUES = [
+    pytest.param(
+        _signed_receipt({"job_id": DISTINCTIVE_BAD_ID, "error": DISTINCTIVE_ERROR}),
+        "invalid job id",
+        DISTINCTIVE_BAD_ID,
+        id="bad-job-id",
+    ),
+    pytest.param(
+        _signed_receipt({"job_id": DISTINCTIVE_JOB_ID, "error": DISTINCTIVE_ERROR * 20}),
+        "invalid error",
+        DISTINCTIVE_ERROR,
+        id="oversized-error",
+    ),
+    pytest.param(
+        _signed_receipt({"job_id": DISTINCTIVE_JOB_ID, "sent_at": DISTINCTIVE_TIME}),
+        "sent_at",
+        DISTINCTIVE_TIME,
+        id="bad-sent-at",
+    ),
+    pytest.param(
+        _signed_receipt({"job_id": DISTINCTIVE_JOB_ID, "error": DISTINCTIVE_ERROR}, OTHER_KEY),
+        "hmac",
+        DISTINCTIVE_ERROR,
+        id="wrong-hmac",
+    ),
+]
+
+
+@pytest.mark.parametrize(("data", "match", "value"), REFUSED_VALUES)
+def test_refused_receipt_message_holds_no_field_value(data: bytes, match: str, value: str) -> None:
+    """R-7.14: a refused receipt names the field, never its value."""
+    with pytest.raises(ValueError, match=match) as caught:
+        parse_receipt(data, RECEIPT_KEY)
+
+    assert value not in str(caught.value)
+
+
 REFUSALS = [
     pytest.param(
-        b'{"job_id": "not-a-job-id", "error": "x"}',
+        _signed_receipt({"job_id": "not-a-job-id", "error": "x"}),
         "invalid job id",
         id="bad-job-id",
     ),
     pytest.param(
-        json.dumps({"job_id": JOB_ID, "error": "x" * 501}).encode(),
+        _signed_receipt({"job_id": JOB_ID, "error": "x" * 501}),
         "invalid error",
         id="oversized-error",
     ),
     pytest.param(b"x" * 4096, "too large", id="oversized-file"),
     pytest.param(
-        b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00", "extra": 1}',
+        _signed_receipt({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00", "extra": 1}),
         "unexpected keys",
         id="extra-key",
     ),
     pytest.param(
-        b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00", "error": "x"}',
+        _signed_receipt({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00", "error": "x"}),
         "unexpected keys",
         id="sent-at-and-error",
     ),
     pytest.param(
-        b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00"}',
+        _signed_receipt({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00"}),
         "no timezone",
         id="naive-sent-at",
     ),
@@ -130,4 +231,12 @@ REFUSALS = [
 def test_parse_receipt_refuses_invalid(data: bytes, match: str) -> None:
     """R-7.14: an invalid receipt raises instead of being trusted."""
     with pytest.raises(ValueError, match=match):
-        parse_receipt(data)
+        parse_receipt(data, RECEIPT_KEY)
+
+
+def test_parse_receipt_refuses_a_non_ascii_hmac_as_a_value_error() -> None:
+    """R-7.14: a non-ASCII hmac is refused with ValueError, so the sweep skips it."""
+    data = json.dumps({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00", "hmac": "ñ" * 64}).encode()
+
+    with pytest.raises(ValueError, match="hmac does not verify"):
+        parse_receipt(data, RECEIPT_KEY)

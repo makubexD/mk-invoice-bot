@@ -4,7 +4,8 @@ A job is the JSON the bot drops in the personal OneDrive ``_outbox/``: the mail
 to send, the invoice's folder relative to the OneDrive root, and an HMAC over
 every other field, so only the bot can make the laptop send. A receipt is the
 JSON the agent writes back into ``_outbox/receipts/``: the sent time, or the
-error.
+error, and an HMAC over every other field, so only the laptop can report a
+mail sent (R-7.14).
 """
 
 from __future__ import annotations
@@ -26,8 +27,10 @@ MAX_RECEIPT_BYTES = 4096
 #: The longest error text a receipt carries.
 MAX_ERROR_LENGTH = 500
 
-_SENT_KEYS = frozenset({"job_id", "sent_at"})
-_ERROR_KEYS = frozenset({"job_id", "error"})
+#: The signed key of every receipt; the agent computes it, the bot checks it.
+_RECEIPT_HMAC_KEY = "hmac"
+_SENT_KEYS = frozenset({"job_id", "sent_at", _RECEIPT_HMAC_KEY})
+_ERROR_KEYS = frozenset({"job_id", "error", _RECEIPT_HMAC_KEY})
 #: Characters that would let an attachment name leave the invoice folder on the laptop.
 _PATH_CHARS = ("/", "\\", ":", "\x00")
 
@@ -93,19 +96,21 @@ def job_document(job: LaptopJob, key: bytes) -> bytes:
     return _canonical({**fields, "hmac": _signature(fields, key)})
 
 
-def parse_receipt(data: bytes) -> Receipt:
+def parse_receipt(data: bytes, key: bytes) -> Receipt:
     """Parse one receipt file written by the laptop agent (R-7.14).
 
     Args:
         data: the receipt file's bytes, at most 4 KiB.
+        key: the shared secret; only the bot and the laptop agent hold it.
 
     Returns:
         The receipt, with either ``sent_at`` or ``error`` set.
 
     Raises:
         ValueError: the file is too large, is not UTF-8 JSON, has keys other
-            than ``job_id`` with ``sent_at`` or ``error``, or a field is
-            invalid.
+            than ``job_id`` with ``sent_at`` or ``error`` and ``hmac``, its
+            ``hmac`` is missing, is not a string or does not verify, or a
+            field is invalid. Messages name the field, never its value.
     """
     if len(data) >= MAX_RECEIPT_BYTES:
         raise ValueError(f"receipt is too large: {len(data)} bytes")
@@ -121,10 +126,18 @@ def parse_receipt(data: bytes) -> Receipt:
         raise ValueError("receipt is not a JSON object")
     keys = frozenset(payload)
     if keys not in (_SENT_KEYS, _ERROR_KEYS):
-        raise ValueError(f"receipt has unexpected keys: {sorted(keys)!r}")
+        raise ValueError("receipt has unexpected keys")
+    received_hmac = payload[_RECEIPT_HMAC_KEY]
+    if not isinstance(received_hmac, str):
+        raise ValueError("receipt hmac is not a string")
+    fields = {name: value for name, value in payload.items() if name != _RECEIPT_HMAC_KEY}
+    # Compare bytes: compare_digest raises TypeError on a non-ASCII str.
+    expected_hmac = _signature(fields, key).encode()
+    if not hmac.compare_digest(received_hmac.encode(), expected_hmac):
+        raise ValueError("receipt hmac does not verify")
     job_id = payload["job_id"]
     if not isinstance(job_id, str) or JOB_ID_PATTERN.fullmatch(job_id) is None:
-        raise ValueError(f"invalid job id {job_id!r}")
+        raise ValueError("invalid job id")
     if keys == _SENT_KEYS:
         return Receipt(job_id=job_id, sent_at=_parse_sent_at(payload["sent_at"]), error=None)
     return Receipt(job_id=job_id, sent_at=None, error=_parse_error(payload["error"]))
@@ -179,18 +192,18 @@ def _canonical(fields: Mapping[str, object]) -> bytes:
 def _parse_sent_at(value: object) -> datetime:
     """Return ``value`` as an ISO timestamp with a timezone, or raise."""
     if not isinstance(value, str):
-        raise ValueError(f"sent_at is not a string: {value!r}")
+        raise ValueError("sent_at is not a string")
     try:
         sent_at = datetime.fromisoformat(value)
     except ValueError as err:
-        raise ValueError(f"sent_at is not an ISO timestamp: {value!r}") from err
+        raise ValueError("sent_at is not an ISO timestamp") from err
     if sent_at.tzinfo is None:
-        raise ValueError(f"sent_at has no timezone: {value!r}")
+        raise ValueError("sent_at has no timezone")
     return sent_at
 
 
 def _parse_error(value: object) -> str:
     """Return ``value`` as an error text of at most 500 characters, or raise."""
     if not isinstance(value, str) or len(value) > MAX_ERROR_LENGTH:
-        raise ValueError(f"invalid error {value!r}")
+        raise ValueError("invalid error")
     return value

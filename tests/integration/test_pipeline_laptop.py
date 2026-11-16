@@ -6,6 +6,8 @@ with one stored mail job and writes the receipt the laptop agent would write.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import logging
 from datetime import date
@@ -52,6 +54,7 @@ NUMERO = "15160"
 FECHA = date(2026, 11, 5)
 SENT_AT = "2026-11-16T10:00:00+00:00"
 ERROR_TEXT = "Outlook no está disponible"
+KEY = b"test-receipt-key"
 
 
 class FakeDrive:
@@ -95,14 +98,21 @@ def _reading() -> Reading:
     )
 
 
+def _signed_receipt(fields: dict[str, str]) -> bytes:
+    """Return a receipt file carrying the HMAC the laptop agent writes."""
+    text = json.dumps(fields, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    signature = hmac.new(KEY, text.encode("ascii"), hashlib.sha256).hexdigest()
+    return json.dumps({**fields, "hmac": signature}).encode()
+
+
 def _sent_receipt(job_id: str) -> bytes:
-    """Return the receipt the laptop writes after it sends the job."""
-    return json.dumps({"job_id": job_id, "sent_at": SENT_AT}).encode()
+    """Return the signed receipt the laptop writes after it sends the job."""
+    return _signed_receipt({"job_id": job_id, "sent_at": SENT_AT})
 
 
 def _error_receipt(job_id: str, error: str = ERROR_TEXT) -> bytes:
-    """Return the receipt the laptop writes when Outlook fails."""
-    return json.dumps({"job_id": job_id, "error": error}).encode()
+    """Return the signed receipt the laptop writes when Outlook fails."""
+    return _signed_receipt({"job_id": job_id, "error": error})
 
 
 def _path(name: str) -> str:
@@ -214,7 +224,7 @@ async def test_a_sent_receipt_completes_the_batch_with_br_d10(
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
     photo = await _add_photo(db_pool, invoice_id, tmp_path)
 
-    await poll_receipts(db_pool, _drive(f"{job_id}.json", _sent_receipt(job_id)), ROOT)
+    await poll_receipts(db_pool, _drive(f"{job_id}.json", _sent_receipt(job_id)), ROOT, KEY)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -242,13 +252,13 @@ async def test_the_same_receipt_seen_again_changes_nothing(
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
     drive = _drive(f"{job_id}.json", _sent_receipt(job_id))
 
-    await poll_receipts(db_pool, drive, ROOT)
+    await poll_receipts(db_pool, drive, ROOT, KEY)
     async with db_pool.connection() as conn:
         first_outbox = await _outbox(conn, profile_id)
         first_jobs = await _jobs(conn, invoice_id)
         first_receipt = await _receipt_row(conn, job_id)
 
-    await poll_receipts(db_pool, drive, ROOT)
+    await poll_receipts(db_pool, drive, ROOT, KEY)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -271,7 +281,7 @@ async def test_an_error_receipt_sends_br_d11_and_leaves_the_batch_prepared(
     job_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
 
-    await poll_receipts(db_pool, _drive(f"{job_id}.json", _error_receipt(job_id)), ROOT)
+    await poll_receipts(db_pool, _drive(f"{job_id}.json", _error_receipt(job_id)), ROOT, KEY)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -309,7 +319,7 @@ async def test_a_receipt_over_four_kib_is_skipped_and_logged(
     name = f"{job_id}.json"
 
     with caplog.at_level(logging.WARNING, logger="invoicebot.pipeline.laptop"):
-        await poll_receipts(db_pool, _drive(name, oversized), ROOT)
+        await poll_receipts(db_pool, _drive(name, oversized), ROOT, KEY)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -334,7 +344,7 @@ async def test_a_receipt_for_an_unknown_job_changes_nothing(
     unknown_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
 
-    await poll_receipts(db_pool, _drive(f"{unknown_id}.json", _sent_receipt(unknown_id)), ROOT)
+    await poll_receipts(db_pool, _drive(f"{unknown_id}.json", _sent_receipt(unknown_id)), ROOT, KEY)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)

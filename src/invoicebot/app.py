@@ -318,7 +318,7 @@ def _deliver_handlers(
         root = _laptop_root(laptop_flow)
         key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
         laptop = LaptopOutlook(drive, root, key)
-        laptop_task = partial(_laptop_forever, pool, drive, root, cfg.mail)
+        laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
     return DeliverHandlers(
         deliver=make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
@@ -459,10 +459,10 @@ async def _park_forever(pool: Pool, timeout_h: int) -> None:
         await asyncio.sleep(PARK_SWEEP_S)
 
 
-async def _laptop_forever(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
-    """Apply receipts and alert on overdue jobs every ``LAPTOP_SWEEP_S`` seconds (R-7.8, R-7.14)."""
+async def _laptop_forever(pool: Pool, drive: Drive, root: str, key: bytes, mail: Mail) -> None:
+    """Apply signed receipts and alert on overdue jobs every ``LAPTOP_SWEEP_S`` seconds (R-7.8, R-7.14)."""
     while True:
-        await poll_receipts(pool, drive, root)
+        await poll_receipts(pool, drive, root, key)
         await check_overdue(pool, drive, root, mail)
         await asyncio.sleep(LAPTOP_SWEEP_S)
 
