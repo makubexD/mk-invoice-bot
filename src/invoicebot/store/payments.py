@@ -41,7 +41,7 @@ class Candidate:
     """A sent, unpaid invoice the matcher may include in a payment (R-7.12)."""
 
     invoice_id: int
-    created_at: datetime
+    fecha: date
     claimed_cents: int
 
 
@@ -79,14 +79,15 @@ async def candidates(
     flow_id: str,
     cap: Decimal | None,
 ) -> list[Candidate]:
-    """Return the profile's sent, unpaid invoices of the last 180 days, oldest first (R-7.12).
+    """Return the profile's sent, unpaid invoices of the last 180 days, oldest date first (R-7.12, D107).
 
     Each invoice's claimed amount is its stored total capped by ``cap`` (R-7.13). An
     invoice with no usable total cannot match an amount, so it is skipped. Does not commit.
     """
+    # A row without a read date falls back to its creation day.
     cur = await conn.execute(
         """
-        SELECT i.id, i.created_at, i.fields_json
+        SELECT i.id, COALESCE(i.fecha, i.created_at::date) AS fecha, i.fields_json
         FROM invoices AS i
         JOIN batches AS b ON b.id = i.batch_id
         WHERE i.profile_id = %s
@@ -95,13 +96,13 @@ async def candidates(
           AND b.state = 'sent'
           AND i.payment_id IS NULL
           AND i.created_at > now() - make_interval(days => %s)
-        ORDER BY i.created_at, i.id
+        ORDER BY fecha, i.id
         LIMIT %s
         """,
         (profile_id, flow_id, DONE, CANDIDATE_WINDOW_DAYS, CANDIDATE_LIMIT),
     )
     found: list[Candidate] = []
-    for invoice_id, created_at, fields_json in await cur.fetchall():
+    for invoice_id, fecha, fields_json in await cur.fetchall():
         total = None if fields_json is None else reading_from_json(fields_json).amount("total")
         # An invoice without a stored total claims no amount, so no set can ever need it.
         if total is None:
@@ -109,7 +110,7 @@ async def candidates(
         found.append(
             Candidate(
                 invoice_id=int(invoice_id),
-                created_at=cast(datetime, created_at),
+                fecha=cast(date, fecha),
                 claimed_cents=claimed_cents(total, cap),
             )
         )

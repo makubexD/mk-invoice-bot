@@ -1,7 +1,7 @@
 """Unit tests for the pure payment matcher (R-7.12, R-7.13, D107)."""
 
 import time
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -17,7 +17,7 @@ from invoicebot.pipeline.payment_match import (
 
 
 def _candidate(invoice_id: int, day: int, claimed_cents: int) -> Candidate:
-    return Candidate(invoice_id, datetime(2026, 1, day, tzinfo=UTC), claimed_cents)
+    return Candidate(invoice_id, date(2026, 1, day), claimed_cents)
 
 
 def test_match_sets_returns_one_exact_set() -> None:
@@ -72,7 +72,7 @@ def test_match_sets_returns_empty_for_no_candidates() -> None:
 
 def test_match_sets_prunes_twenty_candidates_quickly() -> None:
     """R-7.12: 20 candidates whose total is below the target finish under 1 s (suffix-sum prune)."""
-    start = datetime(2026, 1, 1, tzinfo=UTC)
+    start = date(2026, 1, 1)
     candidates = [Candidate(index, start + timedelta(days=index), 100) for index in range(20)]
 
     started = time.perf_counter()

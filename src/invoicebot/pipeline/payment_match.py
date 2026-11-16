@@ -101,18 +101,18 @@ def match_sets(candidates: Sequence[Candidate], target_cents: int, limit: int = 
     """Return up to ``limit`` invoice-id sets whose claimed amounts sum to the target (R-7.12, D107).
 
     Candidates are searched oldest first, and each set is a tuple of invoice ids in that
-    order. The result is sorted by the oldest invoice's ``created_at``, then by set size.
+    order. The result is sorted by the oldest invoice's ``fecha``, then by set size.
     """
     if target_cents <= 0 or limit <= 0:
         return []
     eligible = tuple(
         sorted(
             (candidate for candidate in candidates if candidate.claimed_cents > 0),
-            key=lambda candidate: (candidate.created_at, candidate.invoice_id),
+            key=lambda candidate: (candidate.fecha, candidate.invoice_id),
         )
     )
     found = _search(eligible, target_cents, limit)
-    oldest = {candidate.invoice_id: candidate.created_at for candidate in eligible}
+    oldest = {candidate.invoice_id: candidate.fecha for candidate in eligible}
     found.sort(key=lambda ids: (oldest[ids[0]], len(ids)))
     return found
 

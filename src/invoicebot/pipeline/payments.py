@@ -14,7 +14,6 @@ from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, cast
-from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
@@ -89,9 +88,9 @@ async def pagado(
         return
     found = await candidates(conn, msg.profile_id, flow.flow_id, flow.cap)
     if isinstance(parsed, PagadoAmount):
-        await _answer_amount(conn, msg, flow, parsed, found, context.timezone)
+        await _answer_amount(conn, msg, flow, parsed, found)
     else:
-        await _answer_ids(conn, msg, flow, parsed, found, context.timezone)
+        await _answer_ids(conn, msg, flow, parsed, found)
 
 
 def _parse_press(button_id: str) -> tuple[int, int | None] | None:
@@ -212,12 +211,11 @@ async def _answer_amount(
     flow: PaymentFlow,
     parsed: PagadoAmount,
     found: list[Candidate],
-    timezone: str,
 ) -> None:
     """Propose every set adding up to the amount, or list the pending invoices (R-7.12)."""
     sets = match_sets(found, int(parsed.amount * 100))
     if not sets:
-        text = _pending_text(parsed.paid_on, parsed.amount, found, timezone)
+        text = _pending_text(parsed.paid_on, parsed.amount, found)
         await _reply(conn, msg, _RULE_NO_MATCH, text)
         return
     proposal_id = await add_proposal(conn, msg.profile_id, flow.flow_id, parsed.paid_on, parsed.amount, sets)
@@ -225,7 +223,7 @@ async def _answer_amount(
         text = _br_p01_text(parsed.paid_on, parsed.amount, sets[0])
         await _reply(conn, msg, _RULE_PAY, text, _yes_buttons(proposal_id))
         return
-    text = _br_p02_text(parsed.amount, sets, found, timezone)
+    text = _br_p02_text(parsed.amount, sets, found)
     await _reply(conn, msg, _RULE_CHOOSE, text, _set_buttons(proposal_id, sets))
 
 
@@ -235,14 +233,13 @@ async def _answer_ids(
     flow: PaymentFlow,
     parsed: PagadoIds,
     found: list[Candidate],
-    timezone: str,
 ) -> None:
     """Propose the named candidates and their sum, or list what is pending (R-7.12)."""
     by_id = {candidate.invoice_id: candidate for candidate in found}
     named = [by_id[invoice_id] for invoice_id in parsed.invoice_ids if invoice_id in by_id]
     amount = _cents_amount(sum(candidate.claimed_cents for candidate in named))
     if len(named) != len(parsed.invoice_ids):
-        text = _pending_text(parsed.paid_on, amount, found, timezone)
+        text = _pending_text(parsed.paid_on, amount, found)
         await _reply(conn, msg, _RULE_NO_MATCH, text)
         return
     proposal_id = await add_proposal(
@@ -266,10 +263,9 @@ def _pending_text(
     paid_on: date,
     amount: Decimal,
     found: Sequence[Candidate],
-    timezone: str,
 ) -> str:
     """Return BR-P03's text listing every candidate invoice (R-7.12)."""
-    lines = "\n".join(_pending_line(candidate, timezone) for candidate in found)
+    lines = "\n".join(_pending_line(candidate) for candidate in found)
     return MESSAGES[_RULE_NO_MATCH].format(
         monto=_money(amount),
         fecha=_day_month(paid_on),
@@ -277,11 +273,11 @@ def _pending_text(
     )
 
 
-def _pending_line(candidate: Candidate, timezone: str) -> str:
-    """Return one BR-P03 invoice line: its id, date and claimed amount (R-7.12)."""
+def _pending_line(candidate: Candidate) -> str:
+    """Return one BR-P03 invoice line: its id, invoice date and claimed amount (R-7.12)."""
     return PAYMENT_LINE.format(
         id=candidate.invoice_id,
-        fecha=_day_month(_local_date(candidate.created_at, timezone)),
+        fecha=_day_month(candidate.fecha),
         monto=_money(_cents_amount(candidate.claimed_cents)),
     )
 
@@ -298,11 +294,10 @@ def _br_p02_text(
     amount: Decimal,
     sets: Sequence[tuple[int, ...]],
     found: Sequence[Candidate],
-    timezone: str,
 ) -> str:
     """Return BR-P02's text listing every matching set, oldest first (R-7.12, D107)."""
     by_id = {candidate.invoice_id: candidate for candidate in found}
-    set_lines = "\n".join(_set_line(number, ids, by_id, timezone) for number, ids in enumerate(sets, start=1))
+    set_lines = "\n".join(_set_line(number, ids, by_id) for number, ids in enumerate(sets, start=1))
     return MESSAGES[_RULE_CHOOSE].format(monto=_money(amount), set_lines=set_lines)
 
 
@@ -323,21 +318,15 @@ def _set_line(
     number: int,
     ids: Sequence[int],
     by_id: Mapping[int, Candidate],
-    timezone: str,
 ) -> str:
     """Return one BR-P02 set line numbered from 1, dated by its oldest invoice (R-7.12, D107)."""
-    oldest = min(by_id[invoice_id].created_at for invoice_id in ids)
+    oldest = min(by_id[invoice_id].fecha for invoice_id in ids)
     return PAYMENT_SET_LINE.format(
         n=number,
-        fecha_min=_day_month(_local_date(oldest, timezone)),
+        fecha_min=_day_month(oldest),
         count=len(ids),
         ids=_id_list(ids),
     )
-
-
-def _local_date(moment: datetime, timezone: str) -> date:
-    """Return a stored timestamp's date in the owner's timezone (R-7.12)."""
-    return moment.astimezone(ZoneInfo(timezone)).date()
 
 
 def _day_month(value: date) -> str:

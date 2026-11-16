@@ -5,7 +5,7 @@ own profile, so no outbox row, proposal or invoice leaks between them.
 """
 
 from collections.abc import Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import uuid4
@@ -583,3 +583,103 @@ async def test_press_yes_after_25_hours_answers_br_s02_and_expires(
     assert payments == 0
     assert jobs == [[], []]
     assert replies[-1] == (expected, "BR-S02", [])
+
+
+async def _set_fecha(conn: AsyncConnection[Any], invoice_id: int, fecha: date) -> None:
+    """Set the invoice's read date, which the candidate order and the labels use (R-7.12)."""
+    await conn.execute("UPDATE invoices SET fecha = %s WHERE id = %s", (fecha, invoice_id))
+
+
+async def test_candidates_are_listed_by_invoice_date_not_creation(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: an invoice created today with last month's date is listed before one created last week.
+
+    The second invoice was created last week but carries this week's date, so only the
+    invoice date explains the order.
+    """
+    profile_id = _unique("profile")
+    flow = _flow()
+    async with db_pool.connection() as conn:
+        created_today = await _invoice(conn, profile_id, flow.flow_id, "50.00")
+        await _set_fecha(conn, created_today, date(2026, 10, 1))
+        created_last_week = await _invoice(
+            conn,
+            profile_id,
+            flow.flow_id,
+            "40.00",
+            created_at=datetime.now(UTC) - timedelta(days=7),
+        )
+        await _set_fecha(conn, created_last_week, date(2026, 11, 10))
+        await _run(conn, profile_id, "15/11 999.00", flow)
+        replies = await _replies(conn, profile_id)
+
+    text, rule_id, _buttons = replies[0]
+    today_line = PAYMENT_LINE.format(id=created_today, fecha="01/10", monto="50.00")
+    last_week_line = PAYMENT_LINE.format(id=created_last_week, fecha="10/11", monto="40.00")
+    assert rule_id == "BR-P03"
+    assert text.index(today_line) < text.index(last_week_line)
+
+
+async def test_br_p02_set_lines_show_the_invoice_date(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-P02: the set lines show the invoice date, not the date the invoice was created."""
+    profile_id = _unique("profile")
+    flow = _flow()
+    older = datetime(2026, 11, 1, 15, 0, tzinfo=UTC)
+    newer = datetime(2026, 11, 3, 15, 0, tzinfo=UTC)
+    async with db_pool.connection() as conn:
+        old_a = await _invoice(conn, profile_id, flow.flow_id, "60.00", created_at=older)
+        old_b = await _invoice(conn, profile_id, flow.flow_id, "40.00", created_at=older)
+        new_a = await _invoice(conn, profile_id, flow.flow_id, "70.00", created_at=newer)
+        new_b = await _invoice(conn, profile_id, flow.flow_id, "30.00", created_at=newer)
+        for invoice_id in (old_a, old_b):
+            await _set_fecha(conn, invoice_id, date(2026, 9, 5))
+        for invoice_id in (new_a, new_b):
+            await _set_fecha(conn, invoice_id, date(2026, 10, 20))
+        await _run(conn, profile_id, "15/11 100.00", flow)
+        replies = await _replies(conn, profile_id)
+        proposals = await _proposals(conn, profile_id)
+
+    assert len(proposals) == 1
+    proposal_id, _paid_on, amount, sets = proposals[0]
+    assert amount == Decimal("100.00")
+    assert sets == [[old_a, old_b], [new_a, new_b]]
+    old_line = PAYMENT_SET_LINE.format(n=1, fecha_min="05/09", count=2, ids=f"#{old_a} #{old_b}")
+    new_line = PAYMENT_SET_LINE.format(n=2, fecha_min="20/10", count=2, ids=f"#{new_a} #{new_b}")
+    assert replies == [
+        (
+            MESSAGES["BR-P02"].format(monto="100.00", set_lines=f"{old_line}\n{new_line}"),
+            "BR-P02",
+            [
+                _button(f"p{proposal_id}:pay:0", "Opción 1"),
+                _button(f"p{proposal_id}:pay:1", "Opción 2"),
+                _button(f"p{proposal_id}:pay_no", BUTTON_NO),
+            ],
+        )
+    ]
+
+
+async def test_candidate_created_recently_with_an_old_date_is_still_listed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: an invoice created 10 days ago with a 300-day-old date is still a candidate."""
+    profile_id = _unique("profile")
+    flow = _flow()
+    old_date = datetime.now(UTC).date() - timedelta(days=300)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice(
+            conn,
+            profile_id,
+            flow.flow_id,
+            "50.00",
+            created_at=datetime.now(UTC) - timedelta(days=10),
+        )
+        await _set_fecha(conn, invoice_id, old_date)
+        await _run(conn, profile_id, f"15/11 #{invoice_id}", flow)
+        replies = await _replies(conn, profile_id)
+
+    text, rule_id, _buttons = replies[0]
+    assert rule_id == "BR-P01"
+    assert f"#{invoice_id}" in text
