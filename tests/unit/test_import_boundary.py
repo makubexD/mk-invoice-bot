@@ -29,6 +29,14 @@ def test_core_packages_do_not_import_consumer_modules() -> None:
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_pipeline_channel_neutral_contract_is_declared() -> None:
+    """R-1.7: the pipeline-is-channel-neutral contract is declared in `.importlinter`."""
+
+    contracts = (REPO_ROOT / ".importlinter").read_text(encoding="utf-8")
+
+    assert "[importlinter:contract:pipeline-is-channel-neutral]" in contracts
+
+
 def test_forbidden_import_in_scratch_copy_fails(tmp_path: Path) -> None:
     """R-12.7: a core package importing a consumer module breaks the contract."""
 
