@@ -18,9 +18,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.config.models import Mail
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import ARRIVED_ACTION, SELF_SEND_ACTION, VIA_LAPTOP_ACTION
-from invoicebot.pipeline.laptop import RECEIPT_MAX_BYTES, poll_receipts
+from invoicebot.pipeline.laptop import RECEIPT_MAX_BYTES, check_overdue, poll_receipts
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
     BUTTON_SELF_SEND,
@@ -38,7 +39,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
 )
-from invoicebot.store.mail_jobs import add_mail_job
+from invoicebot.store.mail_jobs import add_mail_job, set_receipt_at
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -112,6 +113,20 @@ def _path(name: str) -> str:
 def _drive(name: str, data: bytes) -> FakeDrive:
     """Return a drive holding one receipt file."""
     return FakeDrive({_path(name): data})
+
+
+def _job_file(job_id: str) -> str:
+    """Return the drive path of the job file the bot hands to the laptop agent."""
+    return f"{ROOT}/_outbox/{job_id}.json"
+
+
+async def _age_job(pool: AsyncConnectionPool[AsyncConnection[Any]], job_id: str, hours: int) -> None:
+    """Move the job's creation time back by ``hours`` on the database clock."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE mail_jobs SET created_at = now() - make_interval(hours => %s) WHERE job_id = %s",
+            (hours, job_id),
+        )
 
 
 async def _prepared_invoice(
@@ -332,3 +347,101 @@ async def test_a_receipt_for_an_unknown_job_changes_nothing(
     assert jobs == []
     assert outbox == []
     assert receipt == (None, None)
+
+
+async def test_a_stale_job_in_the_outbox_gets_one_br_d12(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.14: a job 5 h old whose file is still in _outbox gets one BR-D12 naming 5 hours."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 5)
+    drive = FakeDrive({_job_file(job_id): b"{}"})
+
+    await check_overdue(db_pool, drive, ROOT, Mail())
+    await check_overdue(db_pool, drive, ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == [(MESSAGES["BR-D12"].format(serie=SERIE, numero=NUMERO, hours=5), "BR-D12", [])]
+
+
+async def test_an_overdue_job_gets_one_br_d11(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8: a job 25 h old with no receipt gets one BR-D11 and nothing on the next sweep."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 25)
+
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, VIA_LAPTOP_ACTION), "title": BUTTON_VIA_LAPTOP},
+                {"id": button_id(invoice_id, SELF_SEND_ACTION), "title": BUTTON_SELF_SEND},
+                {"id": button_id(invoice_id, ARRIVED_ACTION), "title": BUTTON_ARRIVED},
+            ],
+        ),
+    ]
+
+
+async def test_a_job_with_a_receipt_gets_no_alert(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8: a 25 h job whose receipt arrived gets neither alert."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 25)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_receipt_at(conn, job_id)
+
+    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == []
+
+
+async def test_a_picked_up_job_gets_no_br_d12(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.14: a 5 h job whose file the agent picked up gets no BR-D12."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 5)
+
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == []
+
+
+async def test_a_job_whose_batch_is_sent_gets_neither_alert(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8, R-7.14: a 25 h job whose batch already went out gets neither alert."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 25)
+    async with db_pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "sent")
+
+    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail())
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == []

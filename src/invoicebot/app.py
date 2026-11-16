@@ -11,6 +11,7 @@ import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
 from datetime import timedelta
 from functools import partial
 
@@ -30,6 +31,7 @@ from invoicebot.config.models import (
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
+    Mail,
     MailerSink,
     OneDriveFolderSink,
     StoreDirectory,
@@ -51,6 +53,7 @@ from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
@@ -90,8 +93,21 @@ LAPTOP_ADAPTER = "laptop_outlook"
 LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
+#: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
+LAPTOP_SWEEP_S = 300.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
+
+
+@dataclass(frozen=True)
+class DeliverHandlers:
+    """Flow B's deliver handlers and the laptop sweep sharing one drive (R-7.1, R-7.14)."""
+
+    deliver: Handler
+    folder_status: Handler
+    resends: Mapping[str, Handler]
+    #: None when no flow lists ``laptop_outlook``.
+    laptop: TaskFactory | None
 
 
 async def _no_db_ping() -> bool:
@@ -205,12 +221,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
             ),
         }
-        deliver_handlers = _deliver_handlers(settings, cfg, directory, http, pool, store)
-        if deliver_handlers is not None:
-            deliver_handler, folder_status_handler, resend_handlers = deliver_handlers
-            handlers[DELIVER_STEP] = deliver_handler
-            handlers[FOLDER_STATUS_STEP] = folder_status_handler
-            handlers.update(resend_handlers)
+        deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
+        if deliver is not None:
+            handlers[DELIVER_STEP] = deliver.deliver
+            handlers[FOLDER_STATUS_STEP] = deliver.folder_status
+            handlers.update(deliver.resends)
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
@@ -225,13 +240,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 )
             },
         )
-        async with _background(
-            {
-                "worker": worker.run,
-                "outbox": partial(_send_forever, sender),
-                "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
-            }
-        ):
+        background: dict[str, TaskFactory] = {
+            "worker": worker.run,
+            "outbox": partial(_send_forever, sender),
+            "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
+        }
+        if deliver is not None and deliver.laptop is not None:
+            background["laptop"] = deliver.laptop
+        async with _background(background):
             yield
 
 
@@ -279,14 +295,14 @@ def _deliver_handlers(
     http: httpx.AsyncClient,
     pool: Pool,
     store: SecretStore,
-) -> tuple[Handler, Handler, Mapping[str, Handler]] | None:
-    """Build flow B's deliver, folder_status and resend handlers, or None without OneDrive (R-7.1, D109).
+) -> DeliverHandlers | None:
+    """Build flow B's deliver handlers and laptop sweep, or None without OneDrive (R-7.1, D109).
 
     The provider only reads the age identity here; nothing signs in or calls Graph until
     the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Every handler
-    shares one drive and one mode mapping, so the folder the delivery filed is the one
-    folder_status moves and a resend reuses. A flow that lists ``laptop_outlook`` needs
-    its agent key, so a missing one stops startup (R-7.14).
+    and the laptop sweep share one drive and one mode mapping, so the folder the delivery
+    filed is the one folder_status moves and a resend reuses. A flow that lists
+    ``laptop_outlook`` needs its agent key, so a missing one stops startup (R-7.14).
     """
     if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
         return None
@@ -295,29 +311,41 @@ def _deliver_handlers(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
     bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
-    laptop = _laptop_mode(cfg, store, drive)
+    laptop_flow = _laptop_flow(cfg)
+    laptop: LaptopOutlook | None = None
+    laptop_task: TaskFactory | None = None
+    if laptop_flow is not None:
+        root = _laptop_root(laptop_flow)
+        key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+        laptop = LaptopOutlook(drive, root, key)
+        laptop_task = partial(_laptop_forever, pool, drive, root, cfg.mail)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
-    return (
-        make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
-        make_folder_status_handler(pool, cfg, drive),
-        make_resend_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+    return DeliverHandlers(
+        deliver=make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+        folder_status=make_folder_status_handler(pool, cfg, drive),
+        resends=make_resend_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+        laptop=laptop_task,
     )
+
+
+def _laptop_flow(cfg: Config) -> Flow | None:
+    """Return the first flow that lists ``laptop_outlook``, or None when none does (R-7.14)."""
+    return next((flow for flow in cfg.flows.values() if _lists_laptop(flow)), None)
 
 
 def _laptop_mode(cfg: Config, store: SecretStore, drive: Drive) -> LaptopOutlook | None:
     """Build the laptop mode when a flow lists it, or None when none does (R-7.14, D108).
 
-    The first flow that lists ``laptop_outlook`` names the personal OneDrive root that
-    holds the agent's ``_outbox``; the config validator guarantees it has a folder sink.
-    The HMAC key comes from the age store, so a missing secret raises at startup (R-9.9).
+    The flow that lists ``laptop_outlook`` names the personal OneDrive root that holds
+    the agent's ``_outbox``; the config validator guarantees it has a folder sink. The
+    HMAC key comes from the age store, so a missing secret raises at startup (R-9.9).
     """
-    for flow in cfg.flows.values():
-        if not _lists_laptop(flow):
-            continue
-        root = _laptop_root(flow)
-        key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
-        return LaptopOutlook(drive, root, key)
-    return None
+    flow = _laptop_flow(cfg)
+    if flow is None:
+        return None
+    root = _laptop_root(flow)
+    key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+    return LaptopOutlook(drive, root, key)
 
 
 def _lists_laptop(flow: Flow) -> bool:
@@ -429,6 +457,14 @@ async def _park_forever(pool: Pool, timeout_h: int) -> None:
     while True:
         await park_stale_questions(pool, timeout_h)
         await asyncio.sleep(PARK_SWEEP_S)
+
+
+async def _laptop_forever(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
+    """Apply receipts and alert on overdue jobs every ``LAPTOP_SWEEP_S`` seconds (R-7.8, R-7.14)."""
+    while True:
+        await poll_receipts(pool, drive, root)
+        await check_overdue(pool, drive, root, mail)
+        await asyncio.sleep(LAPTOP_SWEEP_S)
 
 
 @asynccontextmanager

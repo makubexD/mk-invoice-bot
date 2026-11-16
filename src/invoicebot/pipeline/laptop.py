@@ -17,6 +17,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
+from invoicebot.config.models import Mail
 from invoicebot.pipeline.actions import send_not_confirmed
 from invoicebot.pipeline.deliver import DONE_STATE, PREPARED_BATCH_STATE, SENT_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -34,8 +35,16 @@ from invoicebot.store.flow_b import (
     set_batch_state,
     take_photo_paths,
 )
-from invoicebot.store.invoices import load_flow, load_invoice_head, set_state
-from invoicebot.store.mail_jobs import get_mail_job, set_receipt_at, set_receipt_error
+from invoicebot.store.invoices import load_flow, load_invoice_head, load_reading, set_state
+from invoicebot.store.mail_jobs import (
+    OpenMailJob,
+    claim_overdue_alert,
+    claim_stale_alert,
+    get_mail_job,
+    list_open_jobs,
+    set_receipt_at,
+    set_receipt_error,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +52,8 @@ logger = logging.getLogger(__name__)
 RECEIPT_MAX_BYTES = MAX_RECEIPT_BYTES
 #: BR-D10: the mail was sent and the invoice is filed (spec 06).
 RULE_DONE = "BR-D10"
+#: BR-D12: the laptop agent has not picked the job up (spec 06).
+RULE_STALE = "BR-D12"
 
 
 async def poll_receipts(pool: Pool, drive: Drive, root: str) -> None:
@@ -55,6 +66,53 @@ async def poll_receipts(pool: Pool, drive: Drive, root: str) -> None:
     folder = f"{root}/_outbox/receipts"
     for name in await drive.list_names(folder):
         await _apply_file(pool, drive, f"{folder}/{name}", name)
+
+
+async def check_overdue(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
+    """Alert once on stale and overdue laptop jobs (R-7.8, R-7.14, BR-D11, BR-D12).
+
+    A job past ``agent_stale_after`` whose file the agent never picked up gets
+    BR-D12, and one past ``confirm_timeout`` gets BR-D11. Each alert is claimed
+    in its own transaction, so a later sweep sends nothing and one job can get
+    both. Nothing is re-sent.
+    """
+    async with pool.connection() as conn:
+        jobs = await list_open_jobs(conn, mail.agent_stale_after, mail.confirm_timeout)
+    pending = set(await drive.list_names(f"{root}/_outbox"))
+    for job in jobs:
+        if job.is_stale and f"{job.job_id}.json" in pending:
+            await _notify_stale(pool, job)
+        if job.is_overdue:
+            await _notify_overdue(pool, job)
+
+
+async def _notify_stale(pool: Pool, job: OpenMailJob) -> None:
+    """Send BR-D12 once for a job the agent has not picked up (R-7.14)."""
+    async with pool.connection() as conn, conn.transaction():
+        if not await claim_stale_alert(conn, job.job_id):
+            return
+        reading = await load_reading(conn, job.invoice_id)
+        if reading is None:
+            raise RuntimeError(f"invoice {job.invoice_id} cannot be asked about its mail")
+        await queue_message(
+            conn,
+            await _sender(conn, job.invoice_id),
+            MESSAGES[RULE_STALE].format(
+                serie=reading.value("serie"),
+                numero=reading.value("numero"),
+                hours=job.age_hours,
+            ),
+            invoice_id=job.invoice_id,
+            rule_id=RULE_STALE,
+            buttons=[],
+        )
+
+
+async def _notify_overdue(pool: Pool, job: OpenMailJob) -> None:
+    """Send BR-D11 once for a job still without a receipt (R-7.8)."""
+    async with pool.connection() as conn, conn.transaction():
+        if await claim_overdue_alert(conn, job.job_id):
+            await send_not_confirmed(conn, job.invoice_id)
 
 
 async def _apply_file(pool: Pool, drive: Drive, path: str, name: str) -> None:
