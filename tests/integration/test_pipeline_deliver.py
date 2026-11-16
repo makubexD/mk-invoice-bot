@@ -32,11 +32,16 @@ from invoicebot.config.models import (
     StoreDirectory,
 )
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler, make_resend_handler
+from invoicebot.pipeline.deliver import (
+    DELIVER_STEP,
+    DeliverContext,
+    make_deliver_handler,
+    make_resend_handler,
+)
 from invoicebot.pipeline.steps import RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import BUTTON_VIA_LAPTOP, MESSAGES
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
 from invoicebot.sinks.mailer import DryRun, LaptopOutlook
@@ -323,12 +328,15 @@ def _handler(
 ) -> Handler:
     """Build the deliver handler with the given mode, assisted by default."""
     return make_deliver_handler(
-        pool,
-        cfg,
-        _directory(),
-        drive,
-        {mode_name: mode or DryRun(data_dir)},
-        data_dir,
+        DeliverContext(
+            pool,
+            cfg,
+            _directory(),
+            drive,
+            {mode_name: mode or DryRun(data_dir)},
+            data_dir,
+            laptop_flows=frozenset(),
+        )
     )
 
 
@@ -338,9 +346,11 @@ def _resend_handlers(
     drive: FakeDrive,
     data_dir: Path,
     modes: dict[str, Any],
+    laptop_flows: frozenset[str] = frozenset(),
 ) -> dict[str, Handler]:
     """Build the resend handlers with the given mail modes."""
-    return dict(make_resend_handler(pool, cfg, _directory(), drive, modes, data_dir))
+    context = DeliverContext(pool, cfg, _directory(), drive, modes, data_dir, laptop_flows=laptop_flows)
+    return dict(make_resend_handler(context))
 
 
 def _two_brand_handler(
@@ -351,12 +361,15 @@ def _two_brand_handler(
 ) -> Handler:
     """Build the assisted deliver handler against the two-brand store."""
     return make_deliver_handler(
-        pool,
-        cfg,
-        _two_brand_directory(),
-        drive,
-        {"dry_run": DryRun(data_dir)},
-        data_dir,
+        DeliverContext(
+            pool,
+            cfg,
+            _two_brand_directory(),
+            drive,
+            {"dry_run": DryRun(data_dir)},
+            data_dir,
+            laptop_flows=frozenset(),
+        )
     )
 
 
@@ -1151,14 +1164,23 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
 async def test_resend_laptop_with_a_resending_marker_asks_again(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-7.14: a resending marker means the last write died, so BR-D11 asks again and no job is written."""
+    """R-7.8, R-7.14: a resending marker means BR-D11 asks again, offering [Por la laptop].
+
+    The inbox-first flow lists ``laptop_outlook``, so the retry offers the button even
+    though this crashed write left no mail job (D109).
+    """
     profile_id = f"deliver-{uuid4().hex}"
     cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
     invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, flow_data={"resending": True})
     root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")},
+        laptop_flows=frozenset({FLOW}),
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1177,6 +1199,7 @@ async def test_resend_laptop_with_a_resending_marker_asks_again(
             MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
             "BR-D11",
             [
+                {"id": button_id(invoice_id, "via_laptop"), "title": BUTTON_VIA_LAPTOP},
                 {"id": button_id(invoice_id, "self_send"), "title": "Lo envío yo"},
                 {"id": button_id(invoice_id, "arrived"), "title": "Ya llegó"},
             ],

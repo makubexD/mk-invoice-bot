@@ -47,7 +47,12 @@ from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.pipeline.commands import PaymentFlow
-from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler, make_resend_handler
+from invoicebot.pipeline.deliver import (
+    DELIVER_STEP,
+    DeliverContext,
+    make_deliver_handler,
+    make_resend_handler,
+)
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -320,10 +325,13 @@ def _deliver_handlers(
         laptop = LaptopOutlook(drive, root, key)
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
+    context = DeliverContext(
+        pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=_laptop_flow_ids(cfg)
+    )
     return DeliverHandlers(
-        deliver=make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+        deliver=make_deliver_handler(context),
         folder_status=make_folder_status_handler(pool, cfg, drive),
-        resends=make_resend_handler(pool, cfg, directory, drive, modes, settings.data_dir),
+        resends=make_resend_handler(context),
         laptop=laptop_task,
     )
 
