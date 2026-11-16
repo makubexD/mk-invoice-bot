@@ -1,21 +1,26 @@
 """Integration tests for teaching a portal link and BR-S06's owner review (R-10.2, R-11.4)."""
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.channels.base import InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Profile
+from invoicebot.extract.fields import Field, Reading
 from invoicebot.net.guard import Resolver
-from invoicebot.pipeline.outgoing import Addressee
-from invoicebot.pipeline.teach import TeachContext, teach
+from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.teach import TeachContext, TeachSetup, answer, teach
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES
 from invoicebot.store import taught_links
+from invoicebot.store.invoices import create_invoice, save_reading
 from invoicebot.store.taught_links import TaughtLink
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -213,3 +218,144 @@ async def test_store_decide_moves_a_proposed_link_once(
     assert second is None
     assert row is not None
     assert row[0] is approved
+
+
+def _reading(*, ruc_emisor: str | None = str(ISSUER_RUC)) -> Reading:
+    """Return a minimal reading for ISSUER_RUC, or one without an issuer when None."""
+    fields: dict[str, Field] = {"razon_social": Field(RAZON_SOCIAL, "qr", 1.0)}
+    if ruc_emisor is not None:
+        fields["ruc_emisor"] = Field(ruc_emisor, "qr", 1.0)
+    return Reading(fields=fields, document_url=None)
+
+
+async def _invoice_with_reading(conn: AsyncConnection[Any], profile_id: str, reading: Reading) -> int:
+    """Create an invoice for profile_id with ``reading`` and return its id."""
+    invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+    await save_reading(conn, invoice_id, reading)
+    return invoice_id
+
+
+async def _ask_for_portal(conn: AsyncConnection[Any], profile_id: str, invoice_id: int) -> None:
+    """Queue BR-F02 for the invoice's sender, as the fetch pipeline does (BR-F02)."""
+    text = MESSAGES["BR-F02"].format(razon_social=RAZON_SOCIAL, ruc_emisor=ISSUER_RUC)
+    await queue_message(
+        conn, Addressee("whatsapp", profile_id), text, invoice_id=invoice_id, rule_id="BR-F02"
+    )
+
+
+def _message(profile_id: str, text: str) -> InboundMessage:
+    """Build a canonical text message from profile_id."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        text=text,
+        received_at=datetime.now(UTC),
+    )
+
+
+def _setup() -> TeachSetup:
+    """Return a teach setup from the example profiles and a fake resolver."""
+    ctx = _context()
+    return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver)
+
+
+async def test_answer_url_proposes_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL after BR-F02 stores a proposed link and answers BR-S06."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    assert handled is True
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert sender_rows[-1] == (MESSAGES["BR-S06"], "BR-S06", [])
+
+
+async def test_answer_dont_know_stores_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, "no sé"))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    assert handled is True
+    assert link is None
+    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+
+
+async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: any other text after BR-F02 is not handled and answers nothing."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, "serie=F001"))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    assert handled is False
+    assert link is None
+    assert [rule_id for _text, rule_id, _buttons in sender_rows] == ["BR-F02"]
+
+
+async def test_answer_ignores_a_url_when_the_newest_question_is_not_br_f02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL after a different newest question is not taken as a portal."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await queue_message(
+            conn,
+            Addressee("whatsapp", SENDER),
+            "¿Confirmas el flujo?",
+            invoice_id=invoice_id,
+            rule_id="BR-R03",
+        )
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is False
+    assert link is None
+
+
+async def test_answer_ignores_a_url_without_an_issuer_in_the_reading(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL whose invoice reading has no ruc_emisor is not handled."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading(ruc_emisor=None))
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is False
+    assert link is None
+
+
+async def test_answer_with_no_question_does_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4: a URL from a sender with no outbox question is not handled."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is False
+    assert link is None

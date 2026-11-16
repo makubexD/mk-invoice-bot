@@ -45,6 +45,18 @@ def is_dont_know(text: str) -> bool:
     return "".join(without_accents.split()) in DONT_KNOW_FORMS
 
 
+def looks_like_url(text: str) -> bool:
+    """Return whether ``text`` is one token whose scheme is ``https`` (R-11.4).
+
+    Shape only: no DNS, length or host checks. :func:`check_taught_url` performs
+    those later and its refusal repeats BR-F02.
+    """
+    stripped = text.strip()
+    if not stripped or any(char.isspace() for char in stripped):
+        return False
+    return urlsplit(stripped).scheme.lower() == "https"
+
+
 async def check_taught_url(text: str, resolver: Resolver) -> str:
     """Return the cleaned link ``text`` teaches, or raise :class:`TaughtUrlError` (R-11.4).
 

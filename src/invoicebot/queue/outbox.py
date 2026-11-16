@@ -159,6 +159,33 @@ async def last_rule(conn: AsyncConnection[Any], invoice_id: int, ignore: str) ->
     return str(row[0])
 
 
+async def last_question(conn: AsyncConnection[Any], recipient: str, ignore: str) -> tuple[str, int] | None:
+    """Return the recipient's newest question's ``(rule_id, invoice_id)``, skipping ``ignore``.
+
+    A question is an outbox row addressed to ``recipient`` (a profile id) that carries
+    both a rule id and an invoice id (R-11.4). BR-S02 answers a stale press, not the
+    question the invoice waits on, so callers pass it as ``ignore``. A row without one
+    of the two ids, and a recipient with no such row, give None. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT payload_json->>'rule_id', invoice_id
+        FROM outbox
+        WHERE "to" = %(recipient)s
+          AND payload_json->>'rule_id' IS NOT NULL
+          AND payload_json->>'rule_id' <> %(ignore)s
+          AND invoice_id IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        {"recipient": recipient, "ignore": ignore},
+    )
+    row = await cur.fetchone()
+    if row is None or row[0] is None or row[1] is None:
+        return None
+    return str(row[0]), int(row[1])
+
+
 async def requeue_last(
     conn: AsyncConnection[Any],
     invoice_id: int,
