@@ -32,17 +32,23 @@ async def file_folder(sink: OneDriveFolderSink, drive: Drive, ctx: DeliveryConte
     """Create the invoice's folder and upload its PDF, XML and manifest (R-7.1, R-7.2).
 
     A folder saved by an earlier attempt is reused as-is, so a retried delivery
-    uploads again into the same folder and never claims a second number (D88).
-    The sequence number is read from the folders already under the sink root and
-    its year folder, where a paid folder has moved (R-7.11).
+    uploads again into the same folder and never claims a second number (D88). When
+    ``folder_status`` renamed that folder, the saved ``folder_path`` is the path the
+    upload goes into, so a BR-D11 resend keeps the one renamed folder instead of
+    creating a second one (R-7.11, D109). The sequence number is read from the folders
+    already under the sink root and its year folder, where a paid folder has moved
+    (R-7.11).
     """
     if "folder" in ctx.saved:
         folder = str(ctx.saved["folder"])
         seq = int(ctx.saved["seq"])
+        saved_path = ctx.saved.get("folder_path")
+        path = saved_path if isinstance(saved_path, str) and saved_path else f"{sink.root}/{folder}"
     else:
         folder, seq = await _claim_folder(sink, drive, ctx)
-    path = f"{sink.root}/{folder}"
-    await drive.create_folder(sink.root, folder)
+        path = f"{sink.root}/{folder}"
+    parent, name = path.rsplit("/", 1)
+    await drive.create_folder(parent, name)
     await drive.upload(f"{path}/{render(sink.files.pdf, ctx.values)}", ctx.pdf)
     if ctx.xml is not None:
         await drive.upload(f"{path}/{render(sink.files.xml, ctx.values)}", ctx.xml)

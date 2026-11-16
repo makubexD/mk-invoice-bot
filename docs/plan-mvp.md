@@ -2,23 +2,24 @@
 
 Source of truth: `specs/` (constitution, requirements, design, backlog in `specs/04-tasks.md`). Each phase becomes its own step plan, `docs/plan-mvp-<phase>.md`, written when the previous phase finishes. A phase is done when its milestone demo in spec 04 passes.
 
-| #   | Phase (plan file)                  | Backlog                                                                                                                                                         | Milestone  | Needs from the owner first                                                       |
-| --- | ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
-| 1   | `foundation` (done 2026-11-11)     | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                                                                    | part of M1 | Nothing                                                                          |
-| 2   | `whatsapp` (done 2026-11-11)       | E2 (incl. S2.7–S2.9 window and templates)                                                                                                                       | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
-| 3   | `read` (done 2026-11-13)           | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                                              | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
-| 3b  | `ocr` (done 2026-11-13)            | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                                              | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
-| 4   | `fetch` (done 2026-11-13)          | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                                             | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
-| 5   | `file-b` (done 2026-11-14)         | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                                                          | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
-| 6a  | `widen-b-harden` (done 2026-11-14) | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                                                           | part of M4 | Nothing                                                                          |
-| 6b  | `widen-b-talk` (done 2026-11-14)   | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                                                                   | part of M4 | Nothing                                                                          |
-| 6c  | `widen-b-fetch` (done 2026-11-14)  | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
-| 6d  | `widen-b-deliver`                  | S11.11, S11.12, S11.14, S11.15, S11.17; E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2)                                                                     | M4         | S0.10, S0.11; the bot's Outlook.com mailbox; M3 run                              |
-| 7   | `read-more`                        | S3.4, S3.8–S3.10; E6                                                                                                                                            | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
-| 8   | `flow-a`                           | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
-| 9   | `ops`                              | E12, then S12.7 (repo private), then S16.2                                                                                                                      | M7         | VPS chosen (D42)                                                                 |
-| –   | v1.1 `contract`                    | E13, E14                                                                                                                                                        | M8         | —                                                                                |
-| –   | optional `llm-fallback`            | E3b                                                                                                                                                             | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
+| #   | Phase (plan file)                   | Backlog                                                                                                                                                         | Milestone  | Needs from the owner first                                                       |
+| --- | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- | -------------------------------------------------------------------------------- |
+| 1   | `foundation` (done 2026-11-11)      | E1 (S1.1–S1.10, S5.1, S12.2)                                                                                                                                    | part of M1 | Nothing                                                                          |
+| 2   | `whatsapp` (done 2026-11-11)        | E2 (incl. S2.7–S2.9 window and templates)                                                                                                                       | part of M1 | S0.7: Meta app, dedicated number, utility templates submitted                    |
+| 3   | `read` (done 2026-11-13)            | S3.1, S3.2, S3.3, S3.11, S3.12; S7.3, S7.7; S4.1, S4.2; spike S0.2                                                                                              | M1         | ≥ 10 receipt photos sent through WhatsApp (any receipt with a QR)                |
+| 3b  | `ocr` (done 2026-11-13)             | spike S0.3; S3.5, S3.6, S3.7 (D81)                                                                                                                              | M1b        | Tesseract with Spanish on the host; the private samples folder                   |
+| 4   | `fetch` (done 2026-11-13)           | S7.1, S7.6, S10.1, S10.2, S10.5, S10.8, S10.9, S0.9                                                                                                             | M2         | La Leña's portal file completed (`config/portals/facturactiva-la-lena.yaml`)     |
+| 5   | `file-b` (done 2026-11-14)          | S11.1, S11.2, S11.3, S11.4, S11.5, S11.8 (`dry_run`, `graph` personal), S11.13, S11.16                                                                          | M3         | Entra app for the personal account; the Excel template on the host; a test inbox |
+| 6a  | `widen-b-harden` (done 2026-11-14)  | review leftovers (`whatsapp`, `fetch`, `file-b`); D91                                                                                                           | part of M4 | Nothing                                                                          |
+| 6b  | `widen-b-talk` (done 2026-11-14)    | rest of E4 (S4.3–S4.10, commands incl. `/pendientes`), E5 (S5.2, S5.3), BR-R09 brand question                                                                   | part of M4 | Nothing                                                                          |
+| 6c  | `widen-b-fetch` (done 2026-11-14)   | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
+| 6d  | `widen-b-deliver` (done 2026-11-16) | S11.11, S11.12, S11.14, S11.15, S11.17; review leftovers (`widen-b-fetch`) (D105)                                                                               | part of M4 | S0.11; the bot's Outlook.com mailbox; M3 run (all for the live check only)       |
+| 6e  | `widen-b-gaps-ops`                  | E8 (MVP part: S8.1–S8.3); E15 (S12.3, S15.1, S15.2); gap leftovers (`shortcut:` logs, BR-E06, BR-R06, BR-F03) (D105)                                            | M4         | S0.10; an `age` recipient and the backup target                                  |
+| 7   | `read-more`                         | S3.4, S3.8–S3.10; E6                                                                                                                                            | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
+| 8   | `flow-a`                            | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
+| 9   | `ops`                               | E12, then S12.7 (repo private), then S16.2                                                                                                                      | M7         | VPS chosen (D42)                                                                 |
+| –   | v1.1 `contract`                     | E13, E14                                                                                                                                                        | M8         | —                                                                                |
+| –   | optional `llm-fallback`             | E3b                                                                                                                                                             | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
 
 **Why this order (D64):** the first three phases are a thin slice of the work flow for one real store, so the riskiest pieces (the store's site, the Excel, the mail) are proven before anything is widened. PDF input, the padrón and the synthetic generator wait for `read-more`, because a readable QR plus the downloaded XML already give every field the work flow needs. OCR moved forward to phase 3b (D81), because the QR decodes on only half of real photos.
 
@@ -98,7 +99,7 @@ Each item goes into the named phase's plan.
 - ~~The PKCE loopback login and the work-account attempt (S11.1, S0.8) go to `widen-b` with `inbox_rule`: the personal account allows device code.~~ Dropped by D91.
 - The `_Sent` rename goes to `widen-b` with S11.12; `payments` and `payment_id` go there with S11.11.
 - `/pendientes` listing a batch `prepared` for 2 days (S11.4) goes with the commands of `widen-b`.
-- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E15, `widen-b`).
+- The `PORTAL_MISSING` and `TEMPLATE_INVALID` gaps are logged with a `shortcut:` until the gap service (E8, `widen-b-gaps-ops`, D105).
 - **M3 live run (deferred by the owner on 2026-11-14):** the code is merged, the demo is not. Run `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" once the Entra app, the Excel template on the host and a test inbox are ready, before `widen-b` starts.
 
 ## Carried over from the `file-b` review
@@ -128,13 +129,24 @@ Each item goes into the named phase's plan.
 
 Each item goes into the named phase's plan.
 
-- **`widen-b-deliver`:** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
-- **`widen-b-deliver`:** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
-- **`widen-b-deliver`:** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
-- **`widen-b-deliver` (from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
-- **`widen-b-deliver`:** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
+- **`widen-b-deliver` (widen-b-deliver):** per-fetcher retry schedules built in `app.py` instead of `if fetcher == …` in `pipeline/fetch.py` (open/closed).
+- **`widen-b-deliver` (widen-b-deliver):** a channel-keyed media download port instead of `WhatsAppClient` in `pipeline/uploads.py`, plus `ButtonPress` and `MENU_MAX` moved to `channels/base.py` and an import-linter contract `pipeline` → `channels.whatsapp` (DIP).
+- **`widen-b-deliver` (widen-b-deliver):** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
+- **`widen-b-deliver` (widen-b-deliver; from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
+- **`widen-b-deliver` (widen-b-deliver):** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
 - **`ops`:** `SystemResolver`'s deadline abandons the `getaddrinfo` thread without stopping it, so a hung resolver fills the default executor that `asyncio.to_thread` shares. Give DNS its own small executor. Reachable today only through allowlisted hosts.
 - **`ops`:** pin the Docker base image by digest and set `UV_PYTHON_DOWNLOADS=never`; cap the BR-D14 list (e.g. 10 items and "…"); add a webhook test where a real NUL byte makes Postgres refuse the middle message.
+
+## Carried over from the `widen-b-deliver` review
+
+Each item goes into the `widen-b-gaps-ops` plan unless named otherwise.
+
+- **Owner decision:** payment matching windows, orders and dates candidates by `created_at` (D107). An imported claim's `created_at` is the import time, so BR-P02/BR-P03 show the import day, a claim older than 180 days still counts, and "oldest first" follows the walk order. Either match on `fecha_emision` or record it as a known limit.
+- `laptop_agent.ps1` `Test-JobFile` does not check the job's exact key set; jobs and receipts share the key and the signing. Refuse any other key set, or sign a `type` field on both sides.
+- `laptop_agent.ps1` forgets a failed job id, and jobs carry no expiry: a job restored from the OneDrive recycle bin is sent again. Keep the ids of final error receipts, or sign a `created_at` with a maximum age.
+- `payment_match` runs the subset search on the event loop (up to about 2^20 nodes with 20 candidates). Cap the nodes visited or run it in `asyncio.to_thread`.
+- With `mail.send_enabled: false`, `laptop_outlook` maps to `DryRun`, and `_resend_laptop` stores the `.eml` path as a `mail_jobs.job_id`. Refuse a mode whose `completion` is not `receipt` there.
+- BR-P03 for the `#id` form, when some ids are not candidates, prints the sum of only the valid ids as the amount. Show the pending list without it.
 
 ## Known drift between code and specs
 
@@ -149,5 +161,5 @@ The specs run ahead of the code in these places; each has a named story that clo
 ## Notes for later phase plans
 
 - `routing`: S4.5 also owns the reply to `EXTRACT_FAILED` (a better photo or `campo=valor`); today a new photo creates a new invoice.
-- `widen-b`: E8 owns BR-E06 and BR-R06.
+- `widen-b-gaps-ops`: E8 owns BR-E06 and BR-R06 (D105).
 - `file-b`: the R-8.2 failure message is specified in S9.4 (flow A); E11 must cover it for flow B.

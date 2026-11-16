@@ -12,10 +12,9 @@ import asyncio
 import hashlib
 import re
 import shutil
-from dataclasses import dataclass
 from pathlib import Path
 
-from invoicebot.channels.base import AttachmentKind
+from invoicebot.channels.base import AttachmentKind, DownloadedMedia
 from invoicebot.channels.media_limits import ByteCap, MediaRejected, check_image_header, max_bytes_for
 from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient
 from invoicebot.config.models import MediaLimits
@@ -32,14 +31,17 @@ class MediaChecksumMismatch(Exception):
     """The downloaded bytes do not match the SHA-256 media_info reported (R-1.4)."""
 
 
-@dataclass(frozen=True)
-class DownloadedMedia:
-    """A downloaded media file and the bytes that were written (R-1.4)."""
+class WhatsAppMediaSource:
+    """The ``MediaSource`` adapter over the WhatsApp client (R-1.5)."""
 
-    path: Path
-    sha256: str
-    size: int
-    mime: str
+    def __init__(self, client: WhatsAppClient) -> None:
+        self._client = client
+
+    async def download(
+        self, media_ref: str, kind: AttachmentKind, out_dir: Path, limits: MediaLimits
+    ) -> DownloadedMedia:
+        """Download one WhatsApp media item into ``out_dir`` (R-1.4, R-1.11)."""
+        return await download_media(self._client, media_ref, kind, out_dir, limits)
 
 
 async def download_media(

@@ -1,30 +1,31 @@
 """Integration tests for the attach-upload job handler (S7.5, R-1.5, R-5.6, BR-D09, D66, D101).
 
-Postgres is real and ``httpx.MockTransport`` stands in for Meta's media API.
+Postgres is real and a fake ``MediaSource`` serves each channel's uploads.
 """
 
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import hashlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import httpx
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
-from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, DownloadedMedia, InboundMessage
+from invoicebot.channels.whatsapp.client import WhatsAppError
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.intake import IntakeResult, handle_inbound
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.jobs import Job
@@ -49,11 +50,6 @@ FLOW = "work_microsoft"
 STORE_RUC = "20000000001"
 SERIE = "F001"
 NUMERO = "15160"
-GRAPH_HOST = "graph.facebook.com"
-GRAPH_VERSION = "v23.0"
-PHONE_NUMBER_ID = "123456789"
-BEARER = "synthetic-bearer-value"
-MEDIA_URL = "https://mmg.whatsapp.net/v/t62/{}"
 MEGABYTE = 1024 * 1024
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
 XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -130,45 +126,75 @@ def _reading() -> Reading:
     )
 
 
-@contextlib.asynccontextmanager
-async def _make_client(
-    media: dict[str, tuple[str, bytes]],
-    counts: dict[str, int] | None = None,
-    statuses: dict[str, int] | None = None,
-) -> AsyncIterator[WhatsAppClient]:
-    """Serve each media id's info and bytes from a fake Meta, counting requests per id."""
+class _FakeMediaSource:
+    """A channel's media source over the synthetic bodies the test serves (R-1.5)."""
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        media_id = request.url.path.rsplit("/", 1)[-1]
-        if counts is not None:
-            counts[media_id] = counts.get(media_id, 0) + 1
-        if statuses is not None and media_id in statuses:
-            return httpx.Response(statuses[media_id], json={"error": {"code": 100, "message": "missing"}})
-        mime, body = media[media_id]
-        if request.url.host == GRAPH_HOST:
-            return httpx.Response(
-                200,
-                json={"url": MEDIA_URL.format(media_id), "mime_type": mime, "file_size": len(body)},
-            )
-        return httpx.Response(200, content=body)
+    def __init__(
+        self,
+        media: dict[str, tuple[str, bytes]],
+        counts: dict[str, int] | None = None,
+        statuses: dict[str, int] | None = None,
+    ) -> None:
+        self.media = media
+        self.counts = counts
+        self.statuses = statuses
+        self.refs: list[str] = []
 
-    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        yield WhatsAppClient(
-            http,
-            phone_number_id=PHONE_NUMBER_ID,
-            graph_api_version=GRAPH_VERSION,
-            token=BEARER,
+    async def download(
+        self, media_ref: str, kind: AttachmentKind, out_dir: Path, limits: MediaLimits
+    ) -> DownloadedMedia:
+        """Write the synthetic body for ``media_ref`` and return its path, hash and size."""
+        self.refs.append(media_ref)
+        if self.counts is not None:
+            self.counts[media_ref] = self.counts.get(media_ref, 0) + 1
+        if self.statuses is not None and media_ref in self.statuses:
+            raise WhatsAppError(status=self.statuses[media_ref])
+        mime, body = self.media[media_ref]
+        directory = out_dir / media_ref
+        directory.mkdir(parents=True)
+        path = directory / "file"
+        path.write_bytes(body)
+        return DownloadedMedia(
+            path=path,
+            sha256=hashlib.sha256(body).hexdigest(),
+            size=len(body),
+            mime=mime,
         )
+
+
+def _all_exist(paths: Sequence[str]) -> bool:
+    """Return True when every stored path still exists on disk."""
+    return all(Path(path).exists() for path in paths)
+
+
+class _CancellingPool:
+    """A pool whose ``cancel_on``-th connection raises CancelledError after its inner context (R-5.1)."""
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]], cancel_on: int) -> None:
+        self._pool = pool
+        self._cancel_on = cancel_on
+        self.calls = 0
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[AsyncConnection[Any]]:
+        """Yield a real pooled connection; the final one raises once the transaction has exited."""
+        self.calls += 1
+        cancels = self.calls == self._cancel_on
+        async with self._pool.connection() as conn:
+            yield conn
+        if cancels:
+            raise asyncio.CancelledError
 
 
 async def _invoice(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     profile_id: str,
     state: str = "MANUAL_REQUIRED",
+    channel: ChannelName = "whatsapp",
 ) -> int:
     """Create a routed invoice with a stored reading in ``state`` and return its id."""
     async with pool.connection() as conn, conn.transaction():
-        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        invoice_id = await create_invoice(conn, profile_id, channel)
         await save_reading(conn, invoice_id, _reading())
         await set_flow(conn, invoice_id, FLOW)
         rule_id = "BR-F07" if state == "MANUAL_REQUIRED" else None
@@ -191,10 +217,11 @@ async def _link_upload(
     invoice_id: int,
     profile_id: str,
     upload: _Upload,
+    channel: ChannelName = "whatsapp",
 ) -> None:
     """Store one inbound upload and link it to the invoice, as intake does (R-1.5)."""
     msg = InboundMessage(
-        channel="whatsapp",
+        channel=channel,
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
@@ -248,11 +275,12 @@ def _job(invoice_id: int, job_id: int = 1) -> Job:
 
 @dataclass(frozen=True)
 class _RunOptions:
-    """What one handler run overrides: the config and the fake Meta's extras."""
+    """What one handler run overrides: the config, the fake source's extras and its channels."""
 
     cfg: Config | None = None
     counts: dict[str, int] | None = None
     statuses: dict[str, int] | None = None
+    channels: tuple[ChannelName, ...] = ("whatsapp",)
 
 
 async def _run(
@@ -263,11 +291,11 @@ async def _run(
     job_id: int = 1,
     options: _RunOptions | None = None,
 ) -> None:
-    """Run the attach handler once, serving ``media`` from the fake Meta."""
+    """Run the attach handler once, serving ``media`` from the fake sources."""
     opts = options or _RunOptions()
-    async with _make_client(media, opts.counts, opts.statuses) as client:
-        handler = make_attach_handler(pool, opts.cfg or _config(), client, tmp_path, _limits())
-        await handler(_job(invoice_id, job_id))
+    sources = {channel: _FakeMediaSource(media, opts.counts, opts.statuses) for channel in opts.channels}
+    handler = make_attach_handler(pool, opts.cfg or _config(), sources, tmp_path, _limits())
+    await handler(_job(invoice_id, job_id))
 
 
 async def _state(conn: AsyncConnection[Any], invoice_id: int) -> str:
@@ -305,6 +333,73 @@ async def _deliver_jobs(conn: AsyncConnection[Any], invoice_id: int) -> int:
     cur = await conn.execute(
         "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = 'deliver'",
         (invoice_id,),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
+async def _queue_bot_message(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    profile_id: str,
+    channel: ChannelName = "whatsapp",
+) -> str:
+    """Queue a bot message about ``invoice_id`` and return its channel message id (D102)."""
+    channel_message_id = f"wamid-{uuid4().hex}"
+    async with pool.connection() as conn, conn.transaction():
+        outbox_id = await queue_message(
+            conn,
+            Addressee(channel, profile_id),
+            "Synthetic bot message about the invoice.",
+            invoice_id=invoice_id,
+            rule_id="BR-F07",
+        )
+        await conn.execute(
+            "UPDATE outbox SET channel_message_id = %s WHERE id = %s",
+            (channel_message_id, outbox_id),
+        )
+    return channel_message_id
+
+
+async def _send_upload(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    reply_to: str | None,
+    kind: AttachmentKind = "pdf",
+) -> tuple[IntakeResult, InboundMessage]:
+    """Send an upload quoting ``reply_to`` through intake and return its result and message (R-1.5)."""
+    body = PDF_BYTES if kind == "pdf" else XML_BYTES
+    msg = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        attachments=[Attachment(kind=kind, media_ref=f"ref-{uuid4().hex}", mime=MIME[kind], size=len(body))],
+        reply_to_external_id=reply_to,
+        received_at=datetime.now(UTC),
+    )
+    async with pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=10, timezone="America/Lima")
+    return result, msg
+
+
+async def _message_invoice(conn: AsyncConnection[Any], external_id: str) -> int | None:
+    """Return the invoice the stored upload was linked to, if any (R-1.5)."""
+    cur = await conn.execute(
+        "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
+        ("whatsapp", external_id),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return None if row[0] is None else int(row[0])
+
+
+async def _attach_jobs(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    """Return how many attach jobs the invoice has queued (R-1.5)."""
+    cur = await conn.execute(
+        "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = %s",
+        (invoice_id, ATTACH_STEP),
     )
     row = await cur.fetchone()
     assert row is not None
@@ -353,6 +448,39 @@ async def test_pdf_then_xml_in_two_messages_missing_then_delivering(
     assert [kind for kind, _path, _ref in files] == ["pdf", "xml"]
     assert files[1][2] == xml_ref
     assert deliver_jobs == 1
+
+
+async def test_cancel_after_the_commit_keeps_the_stored_upload(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: a cancellation after the commit keeps the upload file its committed row points to."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+    pool = _CancellingPool(db_pool, cancel_on=2)
+    handler = make_attach_handler(
+        pool,
+        _config(),
+        {"whatsapp": _FakeMediaSource({media_ref: (MIME["pdf"], PDF_BYTES)})},
+        tmp_path,
+        _limits(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    assert state == "MANUAL_REQUIRED"
+    assert [kind for kind, _path, _ref in files] == ["pdf"]
+    assert _all_exist([path for _kind, path, _ref in files])
 
 
 async def test_mismatching_xml_replies_br_f06_and_stores_nothing(
@@ -640,8 +768,8 @@ async def test_second_attach_job_does_not_repeat_an_xml_rejection(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     assert outbox == [(UPLOAD_XML_INVALID, "BR-F09")]
-    # One download is two requests (media info, then the bytes); a second job makes none.
-    assert counts[media_ref] == 2
+    # The first job downloads it once; the second job finds the rejection and downloads nothing.
+    assert counts[media_ref] == 1
 
 
 async def test_media_info_404_is_skipped_and_a_valid_pdf_is_stored(
@@ -706,3 +834,129 @@ async def test_media_info_503_fails_the_job_so_the_queue_retries(
     assert state == "MANUAL_REQUIRED"
     assert files == []
     assert outbox == []
+
+
+async def test_upload_is_downloaded_through_its_channel_source(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5: an upload is downloaded through the source registered for its channel."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+    whatsapp = _FakeMediaSource({media_ref: (MIME["pdf"], PDF_BYTES)})
+    telegram = _FakeMediaSource({media_ref: (MIME["pdf"], b"synthetic telegram bytes")})
+
+    handler = make_attach_handler(
+        db_pool,
+        _config(),
+        {"whatsapp": whatsapp, "telegram": telegram},
+        tmp_path,
+        _limits(),
+    )
+    await handler(_job(invoice_id))
+
+    assert whatsapp.refs == [media_ref]
+    assert telegram.refs == []
+
+
+async def test_upload_from_a_channel_with_no_source_fails_the_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, BR-S03: a channel with no media source raises, so the queue retries then parks."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id, channel="telegram")
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+        channel="telegram",
+    )
+
+    with pytest.raises(LookupError, match="telegram"):
+        await _run(db_pool, tmp_path, invoice_id, {media_ref: (MIME["pdf"], PDF_BYTES)})
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert state == "MANUAL_REQUIRED"
+    assert files == []
+    assert outbox == []
+
+
+async def test_upload_quote_of_a_bot_message_links_its_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: an upload quoting invoice A's BR-F07 message links A, not B."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_a = await _invoice(db_pool, profile_id)
+    invoice_b = await _invoice(db_pool, profile_id)
+    quoted_id = await _queue_bot_message(db_pool, invoice_a, profile_id)
+
+    result, upload = await _send_upload(db_pool, profile_id, quoted_id)
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        outbox = await _outbox(conn, profile_id)
+        attach_a = await _attach_jobs(conn, invoice_a)
+        attach_b = await _attach_jobs(conn, invoice_b)
+    assert result.invoice_id == invoice_a
+    assert linked == invoice_a
+    assert outbox == [("Synthetic bot message about the invoice.", "BR-F07")]
+    assert attach_a == 1
+    assert attach_b == 0
+
+
+async def test_upload_quote_of_another_profiles_bot_message_answers_br_d14(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: a bot message about another profile's invoice links nothing and asks."""
+    profile_id = f"uploads-{uuid4().hex}"
+    other_profile = f"uploads-{uuid4().hex}"
+    invoice_a = await _invoice(db_pool, profile_id)
+    invoice_b = await _invoice(db_pool, profile_id)
+    other_invoice = await _invoice(db_pool, other_profile)
+    quoted_id = await _queue_bot_message(db_pool, other_invoice, other_profile)
+
+    result, upload = await _send_upload(db_pool, profile_id, quoted_id)
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        replies = await _outbox(conn, profile_id)
+        attach_a = await _attach_jobs(conn, invoice_a)
+        attach_b = await _attach_jobs(conn, invoice_b)
+    expected = MESSAGES["BR-D14"].format(
+        invoices=f"#{invoice_b} {SERIE}-{NUMERO}, #{invoice_a} {SERIE}-{NUMERO}"
+    )
+    assert result.invoice_id is None
+    assert linked is None
+    assert replies == [(expected, "BR-D14")]
+    assert attach_a == 0
+    assert attach_b == 0
+
+
+async def test_upload_quote_of_an_unknown_message_links_the_only_open_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D102, R-1.5: an unknown quote falls back to the sender's only stuck invoice."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+
+    result, upload = await _send_upload(db_pool, profile_id, f"wamid-{uuid4().hex}")
+
+    async with db_pool.connection() as conn:
+        linked = await _message_invoice(conn, upload.external_id)
+        outbox = await _outbox(conn, profile_id)
+        attach_jobs = await _attach_jobs(conn, invoice_id)
+    assert result.invoice_id == invoice_id
+    assert linked == invoice_id
+    assert outbox == []
+    assert attach_jobs == 1

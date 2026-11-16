@@ -1,9 +1,10 @@
 """The ``email_inbox`` fetcher: find an invoice's files in the flow's mailbox (S11.9, R-5.2).
 
-The mailbox is searched by serie; only recent messages with a matching serie-numero
-attachment are looked at. Each XML download is capped and tried in turn, and the first
-one that matches the invoice wins. The PDF beside that XML is taken too. The fetcher
-never raises for an expected outcome: a missing mail or a sign-in need is a reason code.
+The mailbox is searched for the invoice's exact and zero-padded name, then by serie; only
+recent messages with a matching serie-numero attachment are looked at. Each XML download is
+capped and tried in turn, and the first one that matches the invoice wins. The PDF beside
+that XML is taken too. The fetcher never raises for an expected outcome: a missing mail or
+a sign-in need is a reason code.
 """
 
 from __future__ import annotations
@@ -80,11 +81,13 @@ class EmailInboxFetcher:
 
     async def _fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
         """Search, match and write the files, letting the mailbox's errors escape."""
-        # The serie alone: the stored numero has no leading zeros, and Graph splits words at
-        # the hyphen, so "F001-123" would miss a mail naming F001-00000123.
-        messages = await self._mailbox.search(invoice.serie, SEARCH_TOP)
+        # The stored numero has no leading zeros, so the exact term misses a name padded to
+        # eight digits; the padded term finds it. The serie alone is the broad fallback,
+        # because a serie search only returns the newest SEARCH_TOP mails.
+        searches = [await self._mailbox.search(term, SEARCH_TOP) for term in _search_terms(invoice)]
+        messages = _newest_first(_merge_messages(searches), invoice.fecha)
         pattern = _name_pattern(invoice)
-        match, reason = await self._find_xml(_newest_first(messages, invoice.fecha), invoice, pattern)
+        match, reason = await self._find_xml(messages, invoice, pattern)
         if match is None:
             return _result(reason if reason is not None else FetchReason.NOT_FOUND_YET)
         return await self._ok_result(match, pattern, out_dir)
@@ -167,6 +170,29 @@ class EmailInboxFetcher:
         if data is None or not is_pdf(data):
             return None
         return data
+
+
+def _search_terms(invoice: FetchInvoice) -> tuple[str, ...]:
+    """Return the terms to search, in order and without a repeated one (R-5.2)."""
+    terms = (
+        f"{invoice.serie}-{invoice.numero}",
+        f"{invoice.serie}-{invoice.numero:0>8}",
+        invoice.serie,
+    )
+    return tuple(dict.fromkeys(terms))
+
+
+def _merge_messages(searches: list[list[MailMessage]]) -> list[MailMessage]:
+    """Merge the searches' messages by id, keeping the order each one is first seen (R-5.2)."""
+    seen: set[str] = set()
+    merged: list[MailMessage] = []
+    for messages in searches:
+        for message in messages:
+            if message.id in seen:
+                continue
+            seen.add(message.id)
+            merged.append(message)
+    return merged
 
 
 def _name_pattern(invoice: FetchInvoice) -> re.Pattern[str]:

@@ -54,29 +54,61 @@ async def find_open_invoice_for_attachment(
     """Find the invoice a document from profile_id belongs to (R-1.5, D102).
 
     The quoted invoice wins when it is still open and belongs to the same
-    profile, on any channel. Without a resolved quote, the profile's open
-    invoice matches only when it is the only one: with several open invoices
-    nothing is guessed and ``None`` is returned so the sender can be asked.
+    profile, on any channel. The quote may be of an inbound message or of a bot
+    message stored in the outbox (D102). Without a resolved quote, the profile's
+    open invoice matches only when it is the only one: with several open
+    invoices nothing is guessed and ``None`` is returned so the sender can be
+    asked.
     """
     if reply_to is not None:
         channel, external_id = reply_to
-        cur = await conn.execute(
-            """
-            SELECT i.id
-            FROM messages AS m
-            JOIN invoices AS i ON i.id = m.invoice_id
-            WHERE m.channel = %s
-              AND m.external_id = %s
-              AND i.profile_id = %s
-              AND i.state = ANY(%s)
-            """,
-            (channel, external_id, profile_id, list(OPEN_STATES)),
-        )
-        row = await cur.fetchone()
-        if row is not None:
-            return int(row[0])
+        invoice_id = await _find_open_invoice_for_inbound(conn, profile_id, channel, external_id)
+        if invoice_id is None:
+            invoice_id = await _find_open_invoice_for_outbox(conn, profile_id, channel, external_id)
+        if invoice_id is not None:
+            return invoice_id
     invoices = await list_open_invoices(conn, profile_id)
     return invoices[0][0] if len(invoices) == 1 else None
+
+
+async def _find_open_invoice_for_inbound(
+    conn: AsyncConnection[Any], profile_id: str, channel: ChannelName, external_id: str
+) -> int | None:
+    """Return the open invoice an inbound message was linked to, if any (R-1.5, D102)."""
+    cur = await conn.execute(
+        """
+        SELECT i.id
+        FROM messages AS m
+        JOIN invoices AS i ON i.id = m.invoice_id
+        WHERE m.channel = %s
+          AND m.external_id = %s
+          AND i.profile_id = %s
+          AND i.state = ANY(%s)
+        """,
+        (channel, external_id, profile_id, list(OPEN_STATES)),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
+
+
+async def _find_open_invoice_for_outbox(
+    conn: AsyncConnection[Any], profile_id: str, channel: ChannelName, external_id: str
+) -> int | None:
+    """Return the open invoice a bot message was about, if any (R-1.5, D102)."""
+    cur = await conn.execute(
+        """
+        SELECT i.id
+        FROM outbox AS o
+        JOIN invoices AS i ON i.id = o.invoice_id
+        WHERE o.channel = %s
+          AND o.channel_message_id = %s
+          AND i.profile_id = %s
+          AND i.state = ANY(%s)
+        """,
+        (channel, external_id, profile_id, list(OPEN_STATES)),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
 
 
 async def list_open_invoices(

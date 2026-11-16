@@ -22,8 +22,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Button
-from invoicebot.channels.whatsapp.payloads import MENU_MAX
+from invoicebot.channels.base import MENU_MAX, Button
 from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
@@ -352,13 +351,13 @@ async def _claim(
     two profiles. An incomplete key is not claimed: without all four parts it cannot
     identify an invoice, so the checks run as before.
     """
-    key = _natural_key(profile_id, reading)
+    key = natural_key(profile_id, reading)
     if key is None:
         return None
     return await claim_natural_key(conn, invoice_id, key)
 
 
-def _natural_key(profile_id: str, reading: Reading) -> str | None:
+def natural_key(profile_id: str, reading: Reading) -> str | None:
     """Return ``profile_id|ruc_emisor|tipo|serie|numero``, or None if a part is missing (D93, R-10.1)."""
     parts = tuple(reading.value(name) for name in NATURAL_KEY_FIELDS)
     if any(not part for part in parts):

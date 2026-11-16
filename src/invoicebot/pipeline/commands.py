@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -20,6 +21,7 @@ from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.payments import pagado
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
@@ -29,6 +31,7 @@ from invoicebot.rules.messages_es import (
     HELP_CANCELAR,
     HELP_ESTADO,
     HELP_HEADER,
+    HELP_PAGADO,
     HELP_PENDIENTES,
     HELP_REPROCESAR,
     MESSAGES,
@@ -80,11 +83,20 @@ PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 
 
 @dataclass(frozen=True)
+class PaymentFlow:
+    """The flow whose payments a sender may record (R-7.12): its id and reimbursement cap."""
+
+    flow_id: str
+    cap: Decimal | None
+
+
+@dataclass(frozen=True)
 class CommandContext:
-    """What a command needs beyond its message: the admin profile ids and the owner timezone."""
+    """What a command needs beyond its message: admin ids, the owner timezone and the payment flow."""
 
     admins: frozenset[str]
     timezone: str
+    payment_flow: PaymentFlow | None = None
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.
@@ -347,4 +359,5 @@ COMMANDS: Mapping[str, Command] = {
     "cancelar": Command(_cancelar, HELP_CANCELAR),
     "reprocesar": Command(_reprocesar, HELP_REPROCESAR),
     "pendientes": Command(_pendientes, HELP_PENDIENTES),
+    "pagado": Command(pagado, HELP_PAGADO),
 }

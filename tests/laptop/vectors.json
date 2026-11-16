@@ -1,0 +1,47 @@
+{
+  "key": "test-key",
+  "jobs": [
+    {
+      "attachments": [
+        "Formato de reembolsos.xlsx",
+        "F001-123.pdf"
+      ],
+      "body": "Hola, adjunto el reembolso año 2026.",
+      "folder": "Reembolsos/2026-11/F001-123",
+      "hmac": "9aba7878ed08ea53945366b2dcd2c76cd85d2bb299ee50ced008ce1c8ff0c098",
+      "invoice_id": 1,
+      "job_id": "0123456789abcdef0123456789abcdef",
+      "subject": "Support release 0001",
+      "to": [
+        "hr@example.com"
+      ]
+    },
+    {
+      "attachments": [
+        "Formato de reembolsos.xlsx",
+        "F001-124.pdf"
+      ],
+      "body": "Hola, adjunto los documentos.",
+      "folder": "Reembolsos/2026-11/F001-124",
+      "hmac": "1952176defbef49754a11903b41f19ee53b78ed6b79c3a24029b3fa73e2c662b",
+      "invoice_id": 2,
+      "job_id": "fedcba9876543210fedcba9876543210",
+      "subject": "Support release 0002",
+      "to": [
+        "hr@example.com"
+      ]
+    }
+  ],
+  "receipts": {
+    "sent": {
+      "job_id": "0123456789abcdef0123456789abcdef",
+      "sent_at": "2026-11-16T12:34:56.7890000Z",
+      "hmac": "4c69e76a0ffb86b1c2ffa98d10805a63520a75da50348e53426afbce75e1f43d"
+    },
+    "error": {
+      "job_id": "fedcba9876543210fedcba9876543210",
+      "error": "COMException: outlook refused to send",
+      "hmac": "45b2aec59cc3b8888126b5323931555c7bcf8584cd4478c0b97726818bd92965"
+    }
+  }
+}

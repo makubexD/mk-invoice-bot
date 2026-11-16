@@ -24,6 +24,7 @@ class FakeDrive:
         self.listings: list[str] = []
         self.created: list[tuple[str, str]] = []
         self.uploads: dict[str, bytes] = {}
+        self.moves: list[tuple[str, str, str]] = []
 
     async def list_names(self, path: str) -> list[str]:
         """Return the entries of a folder; a path that does not exist has none."""
@@ -38,6 +39,10 @@ class FakeDrive:
     async def upload(self, path: str, data: bytes) -> None:
         """Keep the file's bytes at its absolute path."""
         self.uploads[path] = data
+
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Record the move; the fake does not change its folders."""
+        self.moves.append((path, new_parent, new_name))
 
 
 def _sink() -> OneDriveFolderSink:
@@ -138,3 +143,29 @@ async def test_a_saved_folder_is_reused_without_listing_or_claiming() -> None:
     assert drive.created == [(ROOT, "2026-11-Support_7_LaLena")]
     assert f"{result.path}/LaLena SAC.pdf" in drive.uploads
     assert f"{result.path}/.invoicebot.json" in drive.uploads
+
+
+async def test_a_saved_folder_path_is_reused_as_the_upload_path() -> None:
+    """R-7.11: a saved folder_path is reused as the upload path."""
+    drive = FakeDrive()
+    ctx, claimed = _ctx(
+        saved={
+            "folder": "2026-11-Support_7_LaLena",
+            "seq": 7,
+            "folder_path": f"{ROOT}/2026-11-Support_7_LaLena_Sent",
+        }
+    )
+
+    result = await file_folder(_sink(), drive, ctx)
+
+    assert result.folder == "2026-11-Support_7_LaLena"
+    assert result.path == f"{ROOT}/2026-11-Support_7_LaLena_Sent"
+    assert result.seq == 7
+    assert claimed == []
+    assert drive.created == [(ROOT, "2026-11-Support_7_LaLena_Sent")]
+    assert (ROOT, "2026-11-Support_7_LaLena") not in drive.created
+    assert set(drive.uploads) == {
+        f"{result.path}/LaLena SAC.pdf",
+        f"{result.path}/LaLena SAC.xml",
+        f"{result.path}/.invoicebot.json",
+    }

@@ -11,6 +11,8 @@ import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import dataclass
+from datetime import timedelta
 from functools import partial
 
 import httpx
@@ -21,18 +23,22 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, scopes_for
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
+from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
+    DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
+    Mail,
+    MailerSink,
     OneDriveFolderSink,
     StoreDirectory,
     WhatsAppChannel,
 )
 from invoicebot.extract.parsing_rules import load_rules
-from invoicebot.fetchers.base import Fetcher
+from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
@@ -40,21 +46,31 @@ from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hos
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
-from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
+from invoicebot.pipeline.commands import PaymentFlow
+from invoicebot.pipeline.deliver import (
+    DELIVER_STEP,
+    DeliverContext,
+    make_deliver_handler,
+    make_resend_handler,
+)
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
-from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
+from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
+from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.laptop import check_overdue, poll_receipts
+from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
-from invoicebot.sinks.mailer import DryRun, GraphSend, mail_modes
+from invoicebot.sinks.base import Drive
+from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
@@ -74,10 +90,29 @@ WHATSAPP_SECRETS = frozenset(
 )
 #: The Microsoft account flow B files through (R-7.1); config pins it to ``personal``.
 MICROSOFT_ACCOUNT = "personal"
+#: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
+BOT_ACCOUNT = "bot"
+#: The adapter and mail mode that hands the mail to the laptop agent (R-7.14, D108).
+LAPTOP_ADAPTER = "laptop_outlook"
+#: The age-store secret the laptop job's HMAC is keyed with (R-7.14).
+LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
+#: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
+LAPTOP_SWEEP_S = 300.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
+
+
+@dataclass(frozen=True)
+class DeliverHandlers:
+    """Flow B's deliver handlers and the laptop sweep sharing one drive (R-7.1, R-7.14)."""
+
+    deliver: Handler
+    folder_status: Handler
+    resends: Mapping[str, Handler]
+    #: None when no flow lists ``laptop_outlook``.
+    laptop: TaskFactory | None
 
 
 async def _no_db_ping() -> bool:
@@ -181,12 +216,21 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 directory,
                 _fetch_registries(settings, cfg, directory, guarded_http, http),
                 settings.data_dir,
+                schedules=_fetch_schedules(directory),
             ),
-            ATTACH_STEP: make_attach_handler(pool, cfg, client, settings.data_dir, cfg.limits.media),
+            ATTACH_STEP: make_attach_handler(
+                pool,
+                cfg,
+                {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)},
+                settings.data_dir,
+                cfg.limits.media,
+            ),
         }
-        deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
-        if deliver_handler is not None:
-            handlers[DELIVER_STEP] = deliver_handler
+        deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
+        if deliver is not None:
+            handlers[DELIVER_STEP] = deliver.deliver
+            handlers[FOLDER_STATUS_STEP] = deliver.folder_status
+            handlers.update(deliver.resends)
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
@@ -201,13 +245,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 )
             },
         )
-        async with _background(
-            {
-                "worker": worker.run,
-                "outbox": partial(_send_forever, sender),
-                "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
-            }
-        ):
+        background: dict[str, TaskFactory] = {
+            "worker": worker.run,
+            "outbox": partial(_send_forever, sender),
+            "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
+        }
+        if deliver is not None and deliver.laptop is not None:
+            background["laptop"] = deliver.laptop
+        async with _background(background):
             yield
 
 
@@ -218,12 +263,23 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
         admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
+        laptop_flows=_laptop_flow_ids(cfg),
         timezone=cfg.owner.timezone,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
+        payment_flow=_payment_flow(cfg),
     )
+
+
+def _payment_flow(cfg: Config) -> PaymentFlow | None:
+    """Return the first flow that tracks payments, or None when no flow opts in (R-7.12)."""
+    for name, flow in cfg.flows.items():
+        reimbursement = flow.reimbursement
+        if reimbursement is not None and reimbursement.track_payments:
+            return PaymentFlow(flow_id=name, cap=reimbursement.cap)
+    return None
 
 
 def _load_secrets(settings: Settings) -> SecretStore:
@@ -238,25 +294,83 @@ def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
     return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
 
 
-def _deliver_handler(
+def _deliver_handlers(
     settings: Settings,
     cfg: Config,
     directory: StoreDirectory,
     http: httpx.AsyncClient,
     pool: Pool,
-) -> Handler | None:
-    """Build flow B's deliver handler, or None when no flow files to OneDrive (R-7.1).
+    store: SecretStore,
+) -> DeliverHandlers | None:
+    """Build flow B's deliver handlers and laptop sweep, or None without OneDrive (R-7.1, D109).
 
     The provider only reads the age identity here; nothing signs in or calls Graph until
-    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9).
+    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Every handler
+    and the laptop sweep share one drive and one mode mapping, so the folder the delivery
+    filed is the one folder_status moves and a resend reuses. A flow that lists
+    ``laptop_outlook`` needs its agent key, so a missing one stops startup (R-7.14).
     """
     if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
         return None
     provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
     drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
-    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer))
-    return make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir)
+    bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
+    bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
+    laptop_flows = _laptop_flow_ids(cfg)
+    found = _laptop_root_and_key(cfg, store)
+    laptop: LaptopOutlook | None = None
+    laptop_task: TaskFactory | None = None
+    if found is not None:
+        root, key = found
+        laptop = LaptopOutlook(drive, root, key)
+        laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
+    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
+    context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)
+    return DeliverHandlers(
+        deliver=make_deliver_handler(context),
+        folder_status=make_folder_status_handler(pool, cfg, drive),
+        resends=make_resend_handler(context),
+        laptop=laptop_task,
+    )
+
+
+def _laptop_flow(cfg: Config) -> Flow | None:
+    """Return the first flow that lists ``laptop_outlook``, or None when none does (R-7.14)."""
+    return next((flow for flow in cfg.flows.values() if _lists_laptop(flow)), None)
+
+
+def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] | None:
+    """Return the laptop flow's OneDrive root and agent key, or None when no flow lists it (R-7.14).
+
+    The flow that lists ``laptop_outlook`` names the personal OneDrive root that holds
+    the agent's ``_outbox``; the config validator guarantees it has a folder sink. The
+    HMAC key comes from the age store, so a missing secret raises at startup (R-9.9).
+    """
+    flow = _laptop_flow(cfg)
+    if flow is None:
+        return None
+    root = _laptop_root(flow)
+    key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+    return root, key
+
+
+def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
+    """Return the names of the flows whose mailer sink lists ``laptop_outlook`` (D109)."""
+    return frozenset(name for name, flow in cfg.flows.items() if _lists_laptop(flow))
+
+
+def _lists_laptop(flow: Flow) -> bool:
+    """Return whether the flow's mailer sink lists the laptop mode (R-7.14)."""
+    return any(isinstance(sink, MailerSink) and LAPTOP_ADAPTER in sink.modes for sink in flow.sinks)
+
+
+def _laptop_root(flow: Flow) -> str:
+    """Return the root of the flow's OneDrive folder sink, which holds ``_outbox`` (R-7.14)."""
+    for sink in flow.sinks:
+        if isinstance(sink, OneDriveFolderSink):
+            return sink.root
+    raise RuntimeError("a flow listing laptop_outlook needs a onedrive_folder sink")
 
 
 def _fetch_registries(
@@ -291,6 +405,20 @@ def _fetcher_builders(
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
         EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, graph_http),
     }
+
+
+def _fetch_schedules(directory: StoreDirectory) -> Mapping[str, Schedule]:
+    """Return each fetcher's retry schedule: its flow's inbox or its store's portal (D65, D98)."""
+
+    def inbox(flow: Flow, _invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        inbox_cfg = flow.email_inbox
+        return DEFAULT_RETRY_SCHEDULE if inbox_cfg is None else inbox_cfg.retry_schedule
+
+    def portal(_flow: Flow, invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        portal_cfg = portal_for(invoice.ruc_emisor, directory)
+        return DEFAULT_RETRY_SCHEDULE if portal_cfg is None else portal_cfg.retry_schedule
+
+    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal}
 
 
 def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:
@@ -341,6 +469,16 @@ async def _park_forever(pool: Pool, timeout_h: int) -> None:
     while True:
         await park_stale_questions(pool, timeout_h)
         await asyncio.sleep(PARK_SWEEP_S)
+
+
+async def _laptop_forever(
+    pool: Pool, drive: Drive, root: str, key: bytes, mail: Mail, laptop_flows: frozenset[str]
+) -> None:
+    """Apply signed receipts and alert on overdue jobs every ``LAPTOP_SWEEP_S`` seconds (R-7.8, R-7.14)."""
+    while True:
+        await poll_receipts(pool, drive, root, key, laptop_flows)
+        await check_overdue(pool, drive, root, mail, laptop_flows)
+        await asyncio.sleep(LAPTOP_SWEEP_S)
 
 
 @asynccontextmanager

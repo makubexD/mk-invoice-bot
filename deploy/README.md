@@ -189,6 +189,78 @@ verify token to the value of `whatsapp_verify_token`, then subscribe to the
 `messages` field. The URL changes every time the tunnel restarts, so update the
 callback each time; quick tunnels are for trials only.
 
+## Laptop agent
+
+The agent sends `laptop_outlook` jobs through Outlook classic on the owner's
+laptop and mirrors invoice folders into the work OneDrive (R-7.14). **Outlook
+classic is required**: the new Outlook for Windows has no COM automation, so the
+agent cannot send (S0.11).
+
+Copy to the laptop, for example into `C:\invoicebot`:
+
+- `scripts/laptop_agent.ps1`;
+- the key file, holding only the `laptop_agent_key` value read from
+  `config/secrets.age` with `scripts/secrets_edit.py`;
+- the allowlist file, one address per line. Its only entry is HR's address,
+  `rrhh@example.com`; blank lines and lines starting with `#` are ignored.
+
+Run it once by hand with `-DryRun`; it logs what it would send or copy and
+changes nothing else:
+
+```powershell
+pwsh.exe -NoProfile -File C:\invoicebot\laptop_agent.ps1 `
+    -OneDriveRoot "$env:USERPROFILE\OneDrive" `
+    -WorkRoot "$env:USERPROFILE\OneDrive - Trabajo" `
+    -KeyFile C:\invoicebot\laptop-agent.key `
+    -AllowlistFile C:\invoicebot\allowlist.txt `
+    -DryRun
+```
+
+Then schedule it every 5 minutes. The task runs as the signed-in user, in that
+user's session, so Outlook classic is available:
+
+```powershell
+$agentScript = 'C:\invoicebot\laptop_agent.ps1'
+$arguments = @(
+    '-NoProfile'
+    '-ExecutionPolicy Bypass'
+    "-File `"$agentScript`""
+    "-OneDriveRoot `"$env:USERPROFILE\OneDrive`""
+    "-WorkRoot `"$env:USERPROFILE\OneDrive - Trabajo`""
+    "-KeyFile `"C:\invoicebot\laptop-agent.key`""
+    "-AllowlistFile `"C:\invoicebot\allowlist.txt`""
+) -join ' '
+$action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $arguments
+$trigger = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 5)
+Register-ScheduledTask -TaskName 'InvoiceBotLaptopAgent' -Action $action -Trigger $trigger -RunLevel Limited
+```
+
+The log is `agent.log` beside the script (`C:\invoicebot\agent.log`; it holds folder names, so it stays off OneDrive): it appends every run, including the reason a
+job was refused. `sent-jobs.txt` sits beside the script
+(`C:\invoicebot\sent-jobs.txt`, one sent job id per line); an id is written
+before Outlook sends, so a crash cannot send a job twice. Receipts go to the
+personal OneDrive `_outbox/receipts/`, where the bot reads them and completes
+the batch. The bot warns once when a job stays in `_outbox/` for 4 hours
+(BR-D12) and when a receipt is overdue by 24 hours (D109).
+
+## Outlook rule for `inbox_rule`
+
+The bot sends from its own Outlook.com mailbox to the owner's work address. On
+the work mailbox, create one rule in Outlook:
+
+- **from** the bot's mailbox;
+- **subject starts with** `Support release`;
+- **forward to** HR (`rrhh@example.com`).
+
+The bot cannot see the forward (auto-forwards don't appear in Sent Items, and
+Microsoft 365 usually blocks forwarding to outside addresses), so the rule is
+trusted (D67). The batch is `sent` when Graph accepts the bot's email, and the
+completion message carries a **[No llegó]** button (BR-D13).
+
+The rule depends on S0.11 tests (1) and (2): a test mail from the bot's mailbox
+is forwarded to an internal address, and the same mail with three attachments
+lands in the Inbox, not Junk.
+
 ## Config-only mode
 
 The app reloads its config on `SIGHUP`, so a config change does not need a new

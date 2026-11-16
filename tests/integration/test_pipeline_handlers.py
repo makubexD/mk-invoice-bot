@@ -21,9 +21,8 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, InboundMessage
+from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
-from invoicebot.channels.whatsapp.payloads import ButtonPress
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound

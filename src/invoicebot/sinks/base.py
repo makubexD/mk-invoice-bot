@@ -73,6 +73,35 @@ class Drive(Protocol):
         """Write ``data`` to the file at ``path``, replacing what was there."""
         ...
 
+    async def download(self, path: str, max_bytes: int) -> bytes:
+        """Return the bytes of the file at ``path``, refusing a body over ``max_bytes`` (R-7.14).
+
+        The body is read while streaming, so a file larger than ``max_bytes`` never
+        arrives whole; reading stops as soon as the cap is passed.
+
+        Raises:
+            FolderMissing: the file at ``path`` does not exist.
+            FileTooLarge: the body exceeds ``max_bytes``.
+        """
+        ...
+
+    async def move(self, path: str, new_parent: str, new_name: str) -> None:
+        """Move and rename the item at ``path`` to ``new_parent/new_name`` (R-7.11).
+
+        Raises:
+            FolderMissing: the item at ``path`` or ``new_parent`` does not exist.
+            FolderExists: an entry with ``new_name`` already exists under ``new_parent``.
+        """
+        ...
+
+    async def delete(self, path: str) -> None:
+        """Delete the item at ``path``; an item already gone is accepted (R-7.14).
+
+        Raises:
+            GraphError: the item could not be deleted.
+        """
+        ...
+
 
 class TokenSource(Protocol):
     """A bearer token for one account, fetched when needed (D84)."""

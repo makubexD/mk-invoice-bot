@@ -36,7 +36,7 @@ from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchRe
 from invoicebot.fetchers.chain import WAIT_REASONS, Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUG, RULE_AUTH_ADMIN
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
-from invoicebot.pipeline.manual_message import RULE_EXHAUSTED, manual_message, portal_for
+from invoicebot.pipeline.manual_message import RULE_EXHAUSTED, manual_message
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
@@ -67,6 +67,8 @@ MANUAL_STATE = "MANUAL_REQUIRED"
 PORTAL_FETCHER = "portal_registry"
 #: The first-wait text per fetcher; every other fetcher says the portal line (D100).
 _WAITING_TEXTS: Mapping[str, str] = {EMAIL_INBOX_FETCHER: FETCH_WAITING_MAIL}
+#: How one fetcher's retry delays are chosen from its flow and invoice (D65, D98).
+type Schedule = Callable[[Flow, FetchInvoice], tuple[timedelta, ...]]
 
 
 @dataclass(frozen=True)
@@ -98,13 +100,18 @@ def make_fetch_handler(
     directory: StoreDirectory,
     registries: Mapping[str, Mapping[str, Fetcher]],
     data_dir: Path,
+    *,
+    schedules: Mapping[str, Schedule] | None = None,
 ) -> Handler:
     """Build the handler that fetches documents for an invoice in ``FETCHING_DOCS`` (S7.1).
 
     Each flow has its own registry and fetcher order; both, with the recorded attempts,
-    feed the chain decision (D65, D98). A missing reading, an unrouted invoice or an
-    unknown flow raises, so the queue retries the job.
+    feed the chain decision (D65, D98). ``schedules`` holds the retry schedule of each
+    fetcher that has its own; a fetcher without an entry uses ``DEFAULT_RETRY_SCHEDULE``.
+    A missing reading, an unrouted invoice or an unknown flow raises, so the queue retries
+    the job.
     """
+    retry_schedules = schedules or {}
 
     async def handle(job: Job) -> None:
         started = time.perf_counter()
@@ -137,7 +144,7 @@ def make_fetch_handler(
             attempts=_attempts(rows),
             directory=directory,
         )
-        schedule_for = _schedule_for(inputs.flow, inputs.invoice.ruc_emisor, directory)
+        schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
         decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for)
         # A Wait means the latest try ended with a wait reason and retries remain; this job is the
         # retry, since its run_after already held the delay (D65), so the fetcher runs now.
@@ -190,6 +197,7 @@ async def _run(
         shutil.rmtree(out_dir, ignore_errors=True)
     delay = retry_delay(fetcher, inputs.attempts, schedule_for(fetcher))
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
+    committed = False
     try:
         async with inputs.pool.connection() as conn, conn.transaction():
             # Two runs of one job serialize on the job's row lock; the loser writes nothing (R-5.1).
@@ -201,9 +209,11 @@ async def _run(
                 conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
             )
             await _record_result(conn, inputs, fetcher, result, delay)
+            committed = True
     except BaseException:
-        # R-9.2: a commit that fails after the fetch leaves no files behind.
-        shutil.rmtree(out_dir, ignore_errors=True)
+        # R-9.2: a run that did not commit leaves no files behind; a committed run keeps them.
+        if not committed:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     return outcome
 
@@ -358,24 +368,19 @@ def _with_required_docs(result: FetchResult, required_docs: Sequence[str]) -> Fe
 
 
 def _schedule_for(
-    flow: Flow, ruc_emisor: str, directory: StoreDirectory
+    flow: Flow, invoice: FetchInvoice, schedules: Mapping[str, Schedule]
 ) -> Callable[[str], Sequence[timedelta]]:
     """Return each fetcher's retry schedule as parsed delays (D65, D98)."""
 
     def schedule(fetcher: str) -> Sequence[timedelta]:
-        return _schedule_entries(fetcher, flow, ruc_emisor, directory)
+        return _schedule_entries(fetcher, flow, invoice, schedules)
 
     return schedule
 
 
 def _schedule_entries(
-    fetcher: str, flow: Flow, ruc_emisor: str, directory: StoreDirectory
+    fetcher: str, flow: Flow, invoice: FetchInvoice, schedules: Mapping[str, Schedule]
 ) -> Sequence[timedelta]:
-    """Return a fetcher's delays: its inbox's, its portal's, or the D65 default (D65, D98)."""
-    if fetcher == EMAIL_INBOX_FETCHER:
-        inbox = flow.email_inbox
-        return DEFAULT_RETRY_SCHEDULE if inbox is None else inbox.retry_schedule
-    if fetcher != PORTAL_FETCHER:
-        return DEFAULT_RETRY_SCHEDULE
-    portal = portal_for(ruc_emisor, directory)
-    return DEFAULT_RETRY_SCHEDULE if portal is None else portal.retry_schedule
+    """Return a fetcher's delays from ``schedules``, or the D65 default when it has none (D65, D98)."""
+    schedule = schedules.get(fetcher)
+    return DEFAULT_RETRY_SCHEDULE if schedule is None else schedule(flow, invoice)

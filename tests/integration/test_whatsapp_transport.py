@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -314,6 +315,60 @@ async def test_message_template_wins_over_the_rule_table(db_pool: Pool) -> None:
 
     assert len(sent) == 1
     assert sent[0]["template"]["name"] == "admin_alert"
+
+
+async def test_a_free_form_send_returns_metas_message_id(db_pool: Pool) -> None:
+    """D102: a 200 answer with messages[0].id returns that id to the outbox."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": [{"id": "wamid.A"}]})
+
+    await _prepare(db_pool, window_hours_ago=1)
+    async with _transport(db_pool, handler) as (transport, _sent):
+        assert await transport(_row(_message())) == "wamid.A"
+
+
+async def test_a_send_without_messages_returns_none_and_warns_with_the_row_id(
+    db_pool: Pool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D102: a 200 without messages is delivered with no id and logs a warning with the row id."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    await _prepare(db_pool, window_hours_ago=1)
+    with caplog.at_level(logging.WARNING, logger="invoicebot.channels.whatsapp.transport"):
+        async with _transport(db_pool, handler) as (transport, _sent):
+            assert await transport(_row(_message())) is None
+
+    assert "outbox row 1" in caplog.text
+    assert NUMBER not in caplog.text
+    assert "hola" not in caplog.text
+
+
+async def test_a_template_send_returns_its_message_id(db_pool: Pool) -> None:
+    """D102: a closed-window template send also returns Meta's message id."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": [{"id": "wamid.T"}]})
+
+    await _prepare(db_pool, window_hours_ago=None)
+    async with _transport(db_pool, handler) as (transport, sent):
+        assert await transport(_row(_message(rule_id="BR-F07"))) == "wamid.T"
+
+    assert sent[0]["type"] == "template"
+
+
+@pytest.mark.parametrize("message_id", ["a" * 257, "", 42])
+async def test_an_unusable_message_id_is_treated_as_missing(db_pool: Pool, message_id: object) -> None:
+    """D102: an id over 256 characters, empty or not a string is treated as missing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"messages": [{"id": message_id}]})
+
+    await _prepare(db_pool, window_hours_ago=1)
+    async with _transport(db_pool, handler) as (transport, _sent):
+        assert await transport(_row(_message())) is None
 
 
 async def test_outbox_sender_marks_the_row_dead_after_template_missing(db_pool: Pool) -> None:

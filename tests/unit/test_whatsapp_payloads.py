@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from invoicebot.channels.base import Button
+from invoicebot.channels.base import Button, ButtonPress
 from invoicebot.channels.whatsapp.payloads import (
-    ButtonPress,
     button_id,
     buttons_payload,
     list_payload,

@@ -85,18 +85,23 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
          sunat_status_json, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,
          flow_data_json /*data only this invoice's flow uses: folder ref and seq, comercio, claimed amount, reason overrides (D75)*/,
-         payment_id NULL /*R-7.12*/,
+         payment_id NULL /*R-7.12, D107*/,
          error, created_at, updated_at)
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
       remote_ref NULL, sha256, size, xml_trust NULL /*post-MVP, D57*/, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_error) -- queue
 batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
+payment_proposals(id PK, profile_id, flow_id, paid_on DATE, amount NUMERIC, sets_json,
+                  state /*pending|confirmed|rejected|expired*/, created_at)      -- /pagado buttons (D107)
+mail_jobs(job_id TEXT PK, invoice_id, created_at, receipt_at NULL, receipt_error NULL,
+          stale_alerted_at NULL, overdue_alerted_at NULL)                      -- laptop_outlook jobs (D108, D109)
 fetch_attempts(id PK, invoice_id, fetcher, portal_key, ok, reason /*enum code*/, ms, at) -- R-5.7
 upload_rejections(invoice_id, media_ref, rule_id, created_at, PRIMARY KEY(invoice_id, media_ref)) -- D103
 outbox(id PK, channel /*whatsapp|telegram|github|event*/, to /*profile id, repo or subscriber*/,
        payload_json, template NULL, state /*pending|sent|dead*/, attempts, created_at,
-       run_after, last_error NULL, sent_at NULL)                        -- outbox pattern; run_after drives retry backoff
+       run_after, last_error NULL, sent_at NULL,
+       channel_message_id NULL /*the channel's id for the sent message; a quote of it resolves its invoice (D102)*/)  -- outbox pattern; run_after drives retry backoff
 gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|ignored*/,
      hint_url NULL, count, first_seen, last_seen, last_alert_at, issue_url NULL)
 invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint))
@@ -115,7 +120,7 @@ channel_windows(channel, recipient /*profile id*/, last_inbound_at,
 ```
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
-`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id` and the `payments` table arrive with S11.11 (`/pagado`, `widen-b`), their first caller. Merged revisions are not edited.
+`flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `payment_id`, `payments`, `payment_proposals` and `mail_jobs` arrive with `widen-b-deliver` (S11.11, S11.15), their first callers, and `outbox.channel_message_id` with the quote match of D102. Merged revisions are not edited.
 
 - **Profiles** (people) live in config, not in a table: each links one WhatsApp number and one Telegram user id (R-1.9). `profile_id` is the config key.
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
@@ -308,7 +313,7 @@ work_microsoft:
       attach: [excel_template, pdf, xml]
 # top level, next to `flows:`
 env: development                         # production is required for mail.send_enabled: true (R-7.7, D89)
-mail: { send_enabled: false }
+mail: { send_enabled: false, owner_work_address: null, confirm_timeout: 24h, agent_stale_after: 4h }   # D108, D109
 microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 ```
 
@@ -469,7 +474,18 @@ The work tenant may never approve the bot's app. Everything signed in to the wor
 
 - **Accounts:** the owner's personal Microsoft account (OneDrive only), a dedicated Outlook.com mailbox for the bot (sends and reads only its own mail), and the work account only if consent ever comes (`graph_work`, `onedrive_work`). One MSAL token cache each, in the encrypted store.
 - **`inbox_rule`** is always on and needs no laptop. Its rule is documented in the runbook: *from* the bot mailbox, *subject starts with* `Support release` → *forward to* HR. The forward can't be observed (auto-forwards don't appear in Sent Items, and Microsoft 365 usually blocks auto-forwarding to outside addresses, so a copy back to the bot is not relied on): the rule is trusted, and the sender has a [No llegó] button (D67).
-- **`laptop_outlook`** sends a clean email (no `RV:`), but only while the laptop is on. Job and receipt files are JSON (`{"job_id", "invoice_id", "to", "subject", "body", "attachments": [paths inside the invoice folder], "hmac"}`); the agent rejects a job whose HMAC doesn't verify or whose attachments leave the folder (R-7.14).
+- **`laptop_outlook`** sends a clean email (no `RV:`), but only while the laptop is on. The agent rejects a job whose HMAC doesn't verify or whose attachments leave the folder (R-7.14). The files, as built (`sinks/laptop_job.py`, `scripts/laptop_agent.ps1`):
+  - **Job** `_outbox/<job_id>.json`: `{"job_id", "invoice_id", "folder", "to": [...], "subject", "body", "attachments": [file names inside that folder], "hmac"}`. `job_id` is 32 lowercase hex characters (`uuid4().hex`); `folder` is relative to the personal OneDrive root (D111). The file is canonical JSON (sorted keys, no spaces, ASCII escapes), and `hmac` is the hex HMAC-SHA256 of the canonical JSON of every other field, keyed with the age-store secret `laptop_agent_key` (D108).
+  - **Receipt** `_outbox/receipts/<job_id>.json`, under 4 KiB, with exactly `{"job_id", "sent_at", "hmac"}` (ISO 8601 with a timezone) or `{"job_id", "error", "hmac"}` (at most 500 characters). `hmac` is signed like the job's, over the receipt's other fields with the same key. The agent writes it atomically, then deletes the job file; `parse_receipt` rejects any other key set or an `hmac` that doesn't verify. The bot (`pipeline/laptop.py`) applies each receipt in its own transaction and deletes the file once applied; one it can't apply stays on the drive and is logged.
+  - **Agent log** `agent.log` beside the script (`-LogFile` overrides it), on the laptop only: a refused job is logged with its id and the reason, never its content.
+- **Mail modes and how each completes** (D108; the sink lists them in order, `config/example.yaml`). Delivery picks its path from a mapping keyed by `completion`:
+
+  | Mode | Sends through | `completion` | Batch becomes `sent` when | Done rule |
+  |---|---|---|---|---|
+  | `graph` | Graph, account `personal` | `accepted` | Graph accepts the message | BR-D10 |
+  | `inbox_rule` | Graph, account `bot`, to `mail.owner_work_address` only | `accepted` | Graph accepts the mail; the rule is trusted (D67) | BR-D13 |
+  | `laptop_outlook` | job file → laptop agent → Outlook classic | `receipt` | the agent's sent receipt arrives | BR-D10 |
+  | `dry_run` | an `.eml` the owner sends | `tap` | the sender taps [Ya lo envié] | BR-D08 |
 - **No double sending:** one automatic mode sends; another mode is used only when the sender asks (BR-D11).
 - **Why not a mobile app:** Android never lets one app use another app's sign-in, and Intune's app protection treats a custom app like WhatsApp when it hands files to Outlook or OneDrive. A native app would need the same tenant consent to send as the owner. The laptop is the one place where "already signed in" can be used (the OneDrive sync folder and Outlook classic's COM interface).
 - **To verify (S0.11):** the rule's forward to an internal address works; mail from the bot's Outlook.com mailbox with three attachments reaches the work inbox and not Junk; Outlook classic sends through COM without a security prompt and the script is allowed to run; the work OneDrive client uploads files a script writes; a work folder shared with the personal account can (or can't) be listed through Graph with the personal sign-in (expected: can't, so the laptop agent stays the route); WhatsApp → Outlook/OneDrive sharing on the managed phone (expected: blocked).

@@ -12,8 +12,8 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage
-from invoicebot.channels.whatsapp.payloads import ButtonPress, parse_button_id
+from invoicebot.channels.base import ButtonPress, InboundMessage
+from invoicebot.channels.whatsapp.payloads import parse_button_id
 from invoicebot.pipeline.outgoing import Addressee, queue_stale
 from invoicebot.states import PENDING_USER
 from invoicebot.store.flow_b import load_flow_data

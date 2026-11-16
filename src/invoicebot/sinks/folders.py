@@ -1,7 +1,8 @@
-"""The comercio an invoice belongs to and the folder numbers it reads back (spec 03 §7).
+"""The comercio an invoice belongs to, the folder numbers it reads back and its status name (spec 03 §7).
 
-One job: pick the comercio for one invoice and turn the folder template into the regex that finds
-the largest sequence number already used in the delivery folder. Both are pure: no I/O, no clock.
+One job: pick the comercio for one invoice, turn the folder template into the regex that finds the
+largest sequence number already used in the delivery folder, and name that folder for its status.
+All are pure: no I/O, no clock.
 """
 
 from __future__ import annotations
@@ -10,6 +11,8 @@ import re
 import string
 import unicodedata
 from collections.abc import Iterable
+from datetime import date
+from decimal import Decimal
 
 from invoicebot.config.models import Store
 from invoicebot.sinks.expr import ExprError
@@ -72,6 +75,36 @@ def max_seq(names: Iterable[str], pattern: re.Pattern[str]) -> int:
         if number is not None:
             largest = max(largest, int(number))
     return largest
+
+
+def amount_label(amount: Decimal) -> str:
+    """Return the payment total for a folder name, without trailing fractional zeros (R-7.11).
+
+    The decimal point becomes ``_``: ``144.60`` gives ``144_6``, ``42.00`` gives ``42``.
+    """
+    text = f"{amount:f}"
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text.replace(".", "_")
+
+
+def status_name(base: str, sent: bool, paid_on: date | None, payment_total: Decimal | None) -> str:
+    """Return the folder name for an invoice's status: ``base``, ``_Sent`` and ``_PAID_…`` (R-7.11).
+
+    Raises:
+        ValueError: ``paid_on`` is set but ``payment_total`` is not.
+    """
+    name = f"{base}_Sent" if sent else base
+    if paid_on is not None:
+        if payment_total is None:
+            raise ValueError("payment_total is required when paid_on is set")
+        name += f"_PAID_{paid_on:%d}_{paid_on:%m}___{amount_label(payment_total)}"
+    return name
+
+
+def folder_parent(root: str, year: int, paid: bool) -> str:
+    """Return the parent folder for an invoice: ``root``, or ``root/year`` once paid (R-7.11)."""
+    return f"{root}/{year}" if paid else root
 
 
 def _camel_slug(razon_social: str) -> str | None:

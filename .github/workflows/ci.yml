@@ -105,6 +105,19 @@ jobs:
       - name: Check fixtures
         run: uv run python scripts/check_fixtures.py
 
+  laptop-agent:
+    name: Pester (laptop agent)
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run Pester
+        run: pwsh -NoProfile -c "Install-Module Pester -MinimumVersion 5.5.0 -Force -Scope CurrentUser; Invoke-Pester -CI tests/laptop"
+
   schema-compat:
     name: Schema compatibility (expand/contract)
     runs-on: ubuntu-24.04

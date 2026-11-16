@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -31,8 +31,11 @@ EXPECTED_TABLES = {
     "jobs",
     "kv",
     "llm_usage",
+    "mail_jobs",
     "messages",
     "outbox",
+    "payment_proposals",
+    "payments",
     "padron",
     "pending_actions",
     "taught_links",
@@ -86,6 +89,18 @@ async def _version(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> str | Non
         await cur.execute("SELECT version_num FROM alembic_version")
         row = await cur.fetchone()
     return None if row is None else row[0]
+
+
+async def _columns(pool: AsyncConnectionPool[AsyncConnection[Any]], table: str) -> set[str]:
+    """Return the column names of a public table."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_schema = 'public' AND table_name = %s",
+            (table,),
+        )
+        rows = await cur.fetchall()
+    return {row[0] for row in rows}
 
 
 async def test_schema_has_every_section_3_table(
@@ -190,3 +205,70 @@ async def test_file_accepts_eml_and_manifest_and_rejects_unknown_kinds(
                 "INSERT INTO files (invoice_id, kind, sha256, size) VALUES (%s, %s, %s, %s)",
                 (invoice_id, "bogus", "synthetic-sha256", 1),
             )
+
+
+@pytest.mark.parametrize(
+    ("table", "expected_columns"),
+    [
+        (
+            "payments",
+            {"id", "flow_id", "profile_id", "paid_on", "amount", "created_at"},
+        ),
+        (
+            "payment_proposals",
+            {
+                "id",
+                "profile_id",
+                "flow_id",
+                "paid_on",
+                "amount",
+                "sets_json",
+                "state",
+                "created_at",
+            },
+        ),
+        (
+            "mail_jobs",
+            {
+                "job_id",
+                "invoice_id",
+                "created_at",
+                "receipt_at",
+                "receipt_error",
+                "stale_alerted_at",
+                "overdue_alerted_at",
+            },
+        ),
+    ],
+)
+async def test_payment_and_mail_tables_have_their_columns(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    table: str,
+    expected_columns: set[str],
+) -> None:
+    """R-7.12: the payment and mail job tables have their columns after upgrade head."""
+    assert await _columns(db_pool, table) == expected_columns
+
+
+async def test_invoices_gains_payment_id(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: invoices has the payment_id column after upgrade head."""
+    assert "payment_id" in await _columns(db_pool, "invoices")
+
+
+async def test_payment_with_zero_amount_is_rejected(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: a payment with amount 0 is refused and nothing is stored."""
+    with pytest.raises(CheckViolation):
+        async with db_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO payments (flow_id, profile_id, paid_on, amount) VALUES (%s, %s, %s, %s)",
+                ("file-b", "owner", date(2026, 11, 15), 0),
+            )
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM payments")
+        row = await cur.fetchone()
+    assert row is not None
+    assert row[0] == 0

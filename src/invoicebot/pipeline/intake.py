@@ -14,10 +14,11 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import handle_press
-from invoicebot.pipeline.commands import CommandContext, handle_command, parse_command
+from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command, parse_command
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
+from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
@@ -56,26 +57,45 @@ class IntakeResult:
     invoice_id: int | None
 
 
+@dataclass(frozen=True)
+class IntakeRoles:
+    """The config-derived roles intake hands on: who is an admin and which flows are special.
+
+    ``admins`` holds the profile ids a command may reach another profile's invoice for,
+    ``payment_flow`` is the flow whose payments a command may record (R-7.12), and
+    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109).
+    """
+
+    admins: frozenset[str] = frozenset()
+    payment_flow: PaymentFlow | None = None
+    laptop_flows: frozenset[str] = frozenset()
+
+
+#: No admins, no payment flow and no laptop flows: what a caller without config passes.
+NO_ROLES = IntakeRoles()
+
+
 async def handle_inbound(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     *,
     max_queued_per_sender: int,
     timezone: str,
-    admins: frozenset[str] = frozenset(),
+    roles: IntakeRoles = NO_ROLES,
 ) -> IntakeResult:
     """Handle one inbound message inside the caller's transaction.
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), a non-photo is ``stored`` (a pdf/xml upload is linked to
+    ``stored`` (R-3.5), except a payment proposal press, which is answered as stored
+    without an invoice (R-7.12), a non-photo is ``stored`` (a pdf/xml upload is linked to
     the stuck invoice it belongs to, R-1.5) and a text-only message may also
     run a command (R-10.1), apply its edits (D97) and store its overrides (D70). A photo
     becomes an invoice, with its caption's overrides, a ``download_media`` job and a
     BR-S09 acknowledgement, unless the sender already has ``max_queued_per_sender``
     active jobs, in which case it is answered with BR-S01 and ``back_pressure`` (BR-S01).
-    ``admins`` holds the profile ids a command may reach another profile's invoice for,
-    and ``timezone`` is the owner's zone for the dates a command prints (S11.4).
+    ``timezone`` is the owner's zone for the dates a command prints (S11.4), and ``roles``
+    carries the admins, the payment flow and the laptop flows (:class:`IntakeRoles`).
     """
     async with conn.transaction():
         await _lock_profile(conn, msg.profile_id)
@@ -83,11 +103,14 @@ async def handle_inbound(
             return IntakeResult(status="duplicate", invoice_id=None)
         await touch_window(conn, msg.channel, msg.profile_id, msg.received_at)
         if msg.button_id is not None:
-            pressed = await handle_press(conn, msg)
+            if msg.button_id.startswith(PAYMENT_BUTTON_PREFIX):
+                await handle_payment_press(conn, msg)
+                return IntakeResult(status="stored", invoice_id=None)
+            pressed = await handle_press(conn, msg, roles.laptop_flows)
         elif any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
             return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
         else:
-            return await _store_with_overrides(conn, msg, admins, timezone)
+            return await _store_with_overrides(conn, msg, roles, timezone)
     for path in pressed.photo_paths:
         await asyncio.to_thread(path.unlink, missing_ok=True)
     return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
@@ -128,7 +151,7 @@ async def _queue_or_back_pressure(
 async def _store_with_overrides(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
-    admins: frozenset[str],
+    roles: IntakeRoles,
     timezone: str,
 ) -> IntakeResult:
     """Store a non-photo text, running its command or applying its edits and overrides.
@@ -144,7 +167,7 @@ async def _store_with_overrides(
         return IntakeResult(status="stored", invoice_id=await _link_upload(conn, msg))
     command = parse_command(msg.text)
     if command is not None:
-        context = CommandContext(admins=admins, timezone=timezone)
+        context = CommandContext(admins=roles.admins, timezone=timezone, payment_flow=roles.payment_flow)
         await handle_command(conn, msg, command[0], command[1], context=context)
         return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)

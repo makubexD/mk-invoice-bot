@@ -15,6 +15,9 @@ from invoicebot.sinks.onedrive import (
     MAX_LIST_PAGES,
     NOT_SENT_STATUS,
     UPLOAD_CHUNK_BYTES,
+    FileTooLarge,
+    FolderExists,
+    FolderMissing,
     GraphDrive,
     GraphError,
     GraphTransient,
@@ -76,6 +79,43 @@ async def test_list_names_of_a_missing_folder_returns_empty() -> None:
         names = await drive.list_names("/missing")
 
     assert names == []
+
+
+async def test_download_returns_the_body_of_the_content_endpoint() -> None:
+    """R-7.14: a download reads the file's /content and returns its bytes."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, content=b"receipt")
+
+    async with _make_drive(handler) as drive:
+        data = await drive.download("/root/_outbox/receipts/a.json", 4096)
+
+    assert data == b"receipt"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/root/_outbox/receipts/a.json:/content"
+
+
+async def test_download_of_a_missing_file_raises_folder_missing() -> None:
+    """R-7.14: a 404 on download raises FolderMissing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(FolderMissing):
+            await drive.download("/missing.json", 4096)
+
+
+async def test_download_over_the_cap_raises_file_too_large() -> None:
+    """R-7.14: a body one byte over the cap is abandoned with FileTooLarge."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * 4097)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(FileTooLarge, match="4096"):
+            await drive.download("/big.json", 4096)
 
 
 async def test_list_names_at_the_root_uses_the_root_children_endpoint() -> None:
@@ -449,3 +489,116 @@ async def test_a_400_maps_to_graph_error() -> None:
 
     assert raised.value.status == 400
     assert "child" not in str(raised.value)
+
+
+async def test_move_patches_the_item_with_the_new_name_and_parent() -> None:
+    """R-7.11: a move PATCHes the encoded item URL with the new name and parent reference."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "synthetic"})
+
+    async with _make_drive(handler) as drive:
+        await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
+
+    assert len(requests) == 1
+    assert requests[0].method == "PATCH"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/Reembolsos/Pendientes/F001-123.pdf"
+    assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
+    assert json.loads(requests[0].content) == {
+        "name": "F001-123_Sent.pdf",
+        "parentReference": {"path": "/drive/root:/Reembolsos/2026"},
+    }
+
+
+@pytest.mark.parametrize(
+    ("status", "error"),
+    [(404, FolderMissing), (409, FolderExists), (503, GraphTransient)],
+)
+async def test_move_maps_a_failed_status_to_its_error(
+    status: int, error: type[GraphError | GraphTransient]
+) -> None:
+    """R-7.11: a 404 is FolderMissing, a 409 FolderExists and a 5xx GraphTransient."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(error, match=f"status {status}") as raised:
+            await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
+
+    assert raised.value.status == status
+
+
+async def test_delete_sends_a_delete_to_the_encoded_item_url() -> None:
+    """R-7.14: a 204 deletes the item with a DELETE on its encoded path."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        await drive.delete("/root/_outbox/receipts/a b.json")
+
+    assert len(requests) == 1
+    assert requests[0].method == "DELETE"
+    assert str(requests[0].url) == f"{GRAPH_BASE_URL}/me/drive/root:/root/_outbox/receipts/a%20b.json"
+    assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
+
+
+async def test_delete_of_a_missing_item_returns_without_error() -> None:
+    """R-7.14: a 404 means the item is already gone and is not an error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    async with _make_drive(handler) as drive:
+        await drive.delete("/root/_outbox/receipts/gone.json")
+
+
+async def test_delete_maps_a_server_error_to_graph_transient() -> None:
+    """R-7.14: a 500 on delete is retried as a transient failure."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(GraphTransient) as raised:
+            await drive.delete("/root/_outbox/receipts/a.json")
+
+    assert raised.value.status == 500
+    assert len(requests) == 1
+
+
+async def test_delete_refuses_a_dotdot_segment_before_any_request() -> None:
+    """R-7.14: a path with a .. segment is refused before the drive is contacted."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="invalid drive path segment"):
+            await drive.delete("/root/_outbox/../a.json")
+
+    assert requests == []
+
+
+async def test_delete_refuses_the_drive_root_before_any_request() -> None:
+    """R-7.14: the drive root is never deleted, and no request is sent."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(204)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(ValueError, match="drive root"):
+            await drive.delete("/")
+
+    assert requests == []
