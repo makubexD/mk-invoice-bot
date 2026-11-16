@@ -8,3 +8,5 @@ FETCH_STEP = "fetch"
 DELIVER_STEP = "deliver"
 #: Job step that attaches a sender's uploaded document to a stuck invoice (R-1.5, S7.5).
 ATTACH_STEP = "attach_upload"
+#: Job step that converges an invoice's folder name to its sent and paid status (R-7.11).
+FOLDER_STATUS_STEP = "folder_status"
