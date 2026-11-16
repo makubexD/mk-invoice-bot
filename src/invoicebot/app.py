@@ -12,8 +12,9 @@ import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import date, datetime, timedelta
 from functools import partial
+from typing import cast
 
 import httpx
 from fastapi import FastAPI
@@ -48,6 +49,8 @@ from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
+from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, run_backup
+from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
@@ -58,12 +61,12 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
-from invoicebot.pipeline.gaps import GapContext, issue_opened, writes_today
+from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
-from invoicebot.pipeline.outgoing import queue_token_error_alert
+from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
@@ -72,6 +75,7 @@ from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
+from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
 from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
@@ -79,6 +83,7 @@ from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
+from invoicebot.store.retention import prune
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +115,16 @@ OUTBOX_INTERVAL_S = 2.0
 LAPTOP_SWEEP_S = 300.0
 #: Pause before a background task that died is started again.
 RESTART_DELAY_S = 5.0
+#: The only backup target this build uploads to: the personal OneDrive (D119).
+BACKUP_TARGET_KIND = "onedrive"
+#: The dump command; the connection details reach it through the child's environment (D119).
+PG_DUMP_CMD = ("pg_dump",)
+#: BR-O04's alert ceiling: at most one backup-failure alert per twelve hours.
+BACKUP_ALERT_EVERY = timedelta(hours=12)
+#: Retention runs half an hour after the backup, so it prunes what the dump kept (S15.1).
+RETENTION_DELAY = timedelta(minutes=30)
+#: The rule id and rate-limit key of the backup-failure alert (BR-O04).
+RULE_BACKUP_ALERT = "BR-O04"
 
 
 @dataclass(frozen=True)
@@ -253,11 +268,19 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             **_github_transports(cfg, store, http, pool),
         }
         sender = OutboxSender(pool, transports)
+        drive = _personal_drive(settings, cfg, http)
+        daily_tasks = _daily_tasks(
+            cfg,
+            partial(_run_backup, settings, cfg, pool, drive),
+            partial(_run_retention, pool, cfg),
+            partial(daily_digest, pool, cfg.profiles, cfg.gaps),
+        )
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
             "outbox": partial(_send_forever, sender),
             "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
         }
+        background["daily"] = partial(daily_forever, pool, cfg.owner.timezone, daily_tasks)
         if deliver is not None and deliver.laptop is not None:
             background["laptop"] = deliver.laptop
         async with _background(background):
@@ -417,6 +440,89 @@ async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
     """Queue BR-D05's rate-limited owner alert for a rejected installation token (BR-D05)."""
     async with pool.connection() as conn, conn.transaction():
         await queue_token_error_alert(conn, cfg.profiles, cfg.gaps.github.repo, reason)
+
+
+def _daily_tasks(
+    cfg: Config,
+    backup: Callable[[], Awaitable[None]],
+    retention: Callable[[], Awaitable[None]],
+    digest: Callable[[], Awaitable[None]],
+) -> list[DailyTask]:
+    """Build the backup, retention and digest tasks, failing on an unknown target (R-9.11).
+
+    Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
+    ``date.min`` base so a late backup wraps to the next day's early time.
+    """
+    kind = cfg.ops.backup.target.kind
+    if kind != BACKUP_TARGET_KIND:
+        raise ValueError(
+            f"unsupported backup target kind {kind!r}: only {BACKUP_TARGET_KIND!r} is implemented"
+        )
+    backup_at = cfg.ops.backup.at
+    retention_at = (datetime.combine(date.min, backup_at) + RETENTION_DELAY).time()
+    return [
+        DailyTask(key="backup", at=backup_at, run=backup),
+        DailyTask(key="retention", at=retention_at, run=retention),
+        DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
+    ]
+
+
+def _personal_drive(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> GraphDrive:
+    """Build the personal OneDrive drive the backup uploads through (D119)."""
+    provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
+    return GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
+
+
+def _backup_job(settings: Settings, cfg: Config) -> BackupJob:
+    """Build the nightly backup's inputs; the database URL is required (D119)."""
+    database_url = settings.database_url
+    if database_url is None:
+        raise RuntimeError("the backup needs DATABASE_URL")
+    backup = cfg.ops.backup
+    return BackupJob(
+        cmd=PG_DUMP_CMD,
+        database_url=database_url,
+        config_dir=settings.config_path.parent,
+        recipient=backup.age_recipient,
+        target=backup.target.path,
+        max_bytes=backup.max_mb * 1024 * 1024,
+    )
+
+
+async def _owner_today(pool: Pool, timezone: str) -> date:
+    """Return the owner's local date from the database clock, for the artifact names (D119)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
+        row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT (now() AT TIME ZONE %s)::date yielded no row")
+    return cast(date, row[0])
+
+
+async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive) -> None:
+    """Back up once, alerting BR-O04 by stage instead of retrying or raising (BR-O04)."""
+    today = await _owner_today(pool, cfg.owner.timezone)
+    try:
+        await run_backup(_backup_job(settings, cfg), drive, today)
+    except BackupError as error:
+        logger.warning("backup failed", extra={"reason": error.reason})
+        await _alert_backup_failure(pool, cfg, error.reason)
+
+
+async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -> None:
+    """Queue BR-O04's rate-limited admin alert for a failed backup stage (BR-O04)."""
+    text = MESSAGES[RULE_BACKUP_ALERT].format(reason_desc=BACKUP_REASON_DESC[reason])
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn, cfg.profiles, RULE_BACKUP_ALERT, BACKUP_ALERT_EVERY, RULE_BACKUP_ALERT, text
+        )
+
+
+async def _run_retention(pool: Pool, cfg: Config) -> None:
+    """Apply the retention windows in one transaction and log the counts once (R-9.12)."""
+    async with pool.connection() as conn, conn.transaction():
+        counts = await prune(conn, cfg.ops.retention_days)
+    logger.info("retention pruned", extra={"counts": counts})
 
 
 def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
