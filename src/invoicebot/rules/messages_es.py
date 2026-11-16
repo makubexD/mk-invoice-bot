@@ -178,6 +178,14 @@ TOKEN_REASON_DESC: dict[str, str] = {
     "unreachable": "GitHub no responde",
 }
 
+#: BR-O04 ``reason_desc``: which backup stage failed, keyed by ``BackupError.reason`` (D119).
+BACKUP_REASON_DESC: dict[str, str] = {
+    "dump": "no pude exportar la base de datos",
+    "too_large": "el respaldo supera el tamaño máximo",
+    "encrypt": "no pude cifrar el respaldo",
+    "upload": "no pude subirlo a OneDrive",
+}
+
 #: Spec 06 §3 ``kind_desc``: the capability each gap kind is missing, keyed by kind.
 KIND_DESC: dict[str, str] = {
     "PORTAL_MISSING": "portal de descarga desconocido",
