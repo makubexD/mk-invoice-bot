@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -158,6 +160,30 @@ class _FakeMediaSource:
             size=len(body),
             mime=mime,
         )
+
+
+def _all_exist(paths: Sequence[str]) -> bool:
+    """Return True when every stored path still exists on disk."""
+    return all(Path(path).exists() for path in paths)
+
+
+class _CancellingPool:
+    """A pool whose ``cancel_on``-th connection raises CancelledError after its inner context (R-5.1)."""
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]], cancel_on: int) -> None:
+        self._pool = pool
+        self._cancel_on = cancel_on
+        self.calls = 0
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[AsyncConnection[Any]]:
+        """Yield a real pooled connection; the final one raises once the transaction has exited."""
+        self.calls += 1
+        cancels = self.calls == self._cancel_on
+        async with self._pool.connection() as conn:
+            yield conn
+        if cancels:
+            raise asyncio.CancelledError
 
 
 async def _invoice(
@@ -422,6 +448,39 @@ async def test_pdf_then_xml_in_two_messages_missing_then_delivering(
     assert [kind for kind, _path, _ref in files] == ["pdf", "xml"]
     assert files[1][2] == xml_ref
     assert deliver_jobs == 1
+
+
+async def test_cancel_after_the_commit_keeps_the_stored_upload(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: a cancellation after the commit keeps the upload file its committed row points to."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+    )
+    pool = _CancellingPool(db_pool, cancel_on=2)
+    handler = make_attach_handler(
+        pool,
+        _config(),
+        {"whatsapp": _FakeMediaSource({media_ref: (MIME["pdf"], PDF_BYTES)})},
+        tmp_path,
+        _limits(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        state = await _state(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    assert state == "MANUAL_REQUIRED"
+    assert [kind for kind, _path, _ref in files] == ["pdf"]
+    assert _all_exist([path for _kind, path, _ref in files])
 
 
 async def test_mismatching_xml_replies_br_f06_and_stores_nothing(

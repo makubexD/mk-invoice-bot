@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
@@ -199,6 +201,30 @@ class RecordingFetcher:
         del invoice
         self.out_dirs.append(out_dir)
         raise RuntimeError("synthetic fetch failure")
+
+
+def _all_exist(paths: Sequence[str]) -> bool:
+    """Return True when every stored path still exists on disk."""
+    return all(Path(path).exists() for path in paths)
+
+
+class _CancellingPool:
+    """A pool whose ``cancel_on``-th connection raises CancelledError after its inner context (R-5.1)."""
+
+    def __init__(self, pool: AsyncConnectionPool[AsyncConnection[Any]], cancel_on: int) -> None:
+        self._pool = pool
+        self._cancel_on = cancel_on
+        self.calls = 0
+
+    @asynccontextmanager
+    async def connection(self) -> AsyncIterator[AsyncConnection[Any]]:
+        """Yield a real pooled connection; the final one raises once the transaction has exited."""
+        self.calls += 1
+        cancels = self.calls == self._cancel_on
+        async with self._pool.connection() as conn:
+            yield conn
+        if cancels:
+            raise asyncio.CancelledError
 
 
 async def _fetching_invoice(
@@ -662,6 +688,26 @@ async def test_commit_that_raises_after_the_fetch_removes_its_folder(
     assert not out_root.exists() or not any(out_root.rglob("*"))
     assert attempts == []
     assert files == []
+
+
+async def test_cancel_after_the_commit_keeps_the_committed_files(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.1: a cancellation after the commit keeps the files the committed rows point to."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    pool = _CancellingPool(db_pool, cancel_on=2)
+    handler = _handler(pool, FakeFetcher(FetchReason.OK), tmp_path)
+
+    with pytest.raises(asyncio.CancelledError):
+        await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+    assert invoice == ("DELIVERING", None, FLOW)
+    assert [kind for kind, _path, _sha, _size in files] == ["pdf", "xml"]
+    assert _all_exist([path for _kind, path, _sha, _size in files])
 
 
 async def test_invoice_cancelled_mid_fetch_stays_cancelled_and_writes_nothing(

@@ -197,6 +197,7 @@ async def _run(
         shutil.rmtree(out_dir, ignore_errors=True)
     delay = retry_delay(fetcher, inputs.attempts, schedule_for(fetcher))
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
+    committed = False
     try:
         async with inputs.pool.connection() as conn, conn.transaction():
             # Two runs of one job serialize on the job's row lock; the loser writes nothing (R-5.1).
@@ -208,9 +209,11 @@ async def _run(
                 conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
             )
             await _record_result(conn, inputs, fetcher, result, delay)
+            committed = True
     except BaseException:
-        # R-9.2: a commit that fails after the fetch leaves no files behind.
-        shutil.rmtree(out_dir, ignore_errors=True)
+        # R-9.2: a run that did not commit leaves no files behind; a committed run keeps them.
+        if not committed:
+            shutil.rmtree(out_dir, ignore_errors=True)
         raise
     return outcome
 

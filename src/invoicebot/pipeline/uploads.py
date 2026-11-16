@@ -79,7 +79,6 @@ RULE_MISSING_DOCS = "BR-D09"
 class _Inputs:
     """One invoice's attach inputs, shared by every decision branch."""
 
-    pool: Pool
     job: Job
     head: InvoiceHead
     flow: Flow
@@ -141,7 +140,6 @@ def make_attach_handler(
             raise RuntimeError(f"invoice {job.invoice_id} has unknown flow {flow_name!r}")
         serie, numero = _serie_numero(reading, job.invoice_id)
         inputs = _Inputs(
-            pool=pool,
             job=job,
             head=head,
             flow=flow,
@@ -151,12 +149,16 @@ def make_attach_handler(
             numero=numero,
         )
         out_dir = data_dir / TMP_DIRECTORY / str(job.invoice_id) / f"{job.id}-{uuid.uuid4().hex}"
+        committed = False
         try:
             outcome = await _collect(inputs, media, out_dir, limits)
-            stored = await _commit(inputs, outcome)
+            async with pool.connection() as conn, conn.transaction():
+                stored = await _commit(conn, inputs, outcome)
+                committed = True
         except BaseException:
-            # R-9.2: a failed or interrupted run leaves no partial files behind.
-            shutil.rmtree(out_dir, ignore_errors=True)
+            # R-9.2: a run that did not commit leaves no partial files behind; a committed run keeps them.
+            if not committed:
+                shutil.rmtree(out_dir, ignore_errors=True)
             raise
         if not stored:
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -280,41 +282,40 @@ async def _xml_rejection(media: DownloadedMedia, upload: Attachment, inputs: _In
     )
 
 
-async def _commit(inputs: _Inputs, outcome: _Outcome) -> bool:
-    """Store the kept files and record each rejection in one transaction; return whether it stored any.
+async def _commit(conn: AsyncConnection[Any], inputs: _Inputs, outcome: _Outcome) -> bool:
+    """Store the kept files and record each rejection in the caller's transaction.
 
-    The state is re-read first, so a run whose invoice moved on writes nothing (D95). A run
-    that stored no file records its rejections and returns without the missing-docs check or
-    the move to ``DELIVERING`` (D103).
+    Returns whether it stored any file. The state is re-read first, so a run whose invoice
+    moved on writes nothing (D95). A run that stored no file records its rejections and
+    returns without the missing-docs check or the move to ``DELIVERING`` (D103).
     """
-    async with inputs.pool.connection() as conn, conn.transaction():
-        head = await load_invoice_head(conn, inputs.job.invoice_id)
-        if head is None or head.state != MANUAL_REQUIRED:
-            return False
-        addressee = Addressee(inputs.head.origin_channel, inputs.head.profile_id)
-        for rejection in outcome.replies:
-            recorded = await record_upload_rejection(
-                conn, inputs.job.invoice_id, rejection.media_ref, rejection.rule_id
-            )
-            if not recorded:
-                continue  # an overlapping run already answered this upload (D103)
-            await queue_message(
-                conn,
-                addressee,
-                invoice_id=inputs.job.invoice_id,
-                rule_id=rejection.rule_id,
-                text=rejection.text,
-            )
-        if not outcome.kept:
-            return False
-        for record in outcome.kept:
-            await add_file(conn, inputs.job.invoice_id, record)
-        missing = await _missing_docs(conn, inputs)
-        if not missing:
-            await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=MANUAL_REQUIRED)
-            await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
-        else:
-            await _reply_missing(conn, inputs, outcome, missing, addressee)
+    head = await load_invoice_head(conn, inputs.job.invoice_id)
+    if head is None or head.state != MANUAL_REQUIRED:
+        return False
+    addressee = Addressee(inputs.head.origin_channel, inputs.head.profile_id)
+    for rejection in outcome.replies:
+        recorded = await record_upload_rejection(
+            conn, inputs.job.invoice_id, rejection.media_ref, rejection.rule_id
+        )
+        if not recorded:
+            continue  # an overlapping run already answered this upload (D103)
+        await queue_message(
+            conn,
+            addressee,
+            invoice_id=inputs.job.invoice_id,
+            rule_id=rejection.rule_id,
+            text=rejection.text,
+        )
+    if not outcome.kept:
+        return False
+    for record in outcome.kept:
+        await add_file(conn, inputs.job.invoice_id, record)
+    missing = await _missing_docs(conn, inputs)
+    if not missing:
+        await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=MANUAL_REQUIRED)
+        await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
+    else:
+        await _reply_missing(conn, inputs, outcome, missing, addressee)
     return True
 
 
