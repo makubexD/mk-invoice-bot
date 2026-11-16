@@ -342,10 +342,10 @@ Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "via_lapto
 Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_deliver.py`.
 
 - `make_resend_handler(...)` in `deliver.py`, beside `make_deliver_handler` and taking the same dependencies, returns one handler per resend step. It loads the invoice like `_load` but accepts `DONE` and `BATCHED` (not `DELIVERING`), rebuilds the delivery with `_prepare` (which reuses the saved folder and sequence, D88), and leaves the batch state alone.
-- `resend_laptop`: if the invoice's flow data already holds `resending`, a previous attempt died mid-write: drop the marker, send BR-D03 and stop (never a second job, as D89). Otherwise commit `resending` into the flow data, call the `laptop_outlook` mode, then in one transaction store the `mail_jobs` row and drop the marker. No message: the receipt answers.
+- `resend_laptop`: if the invoice's flow data already holds `resending`, a previous attempt died mid-write: drop the marker, ask again with `send_not_confirmed` (BR-D11) and stop, never writing a second job (as D89; BR-D03's `/reprocesar` does not fit a `DONE` invoice). Otherwise commit `resending` into the flow data, call the `laptop_outlook` mode, then in one transaction store the `mail_jobs` row and drop the marker. No message: the receipt answers.
 - `resend_eml`: call the `dry_run` mode and answer BR-D07's text as `_assisted` builds it, with [Ya lo envié] only when the batch is `prepared`. Rewriting the `.eml` is harmless, so no marker.
 - `app.py`: register both steps next to `DELIVER_STEP`, only when the deliver handlers exist.
-- Tests: R-7.14 `resend_laptop` on a `DONE` invoice writes one job and one `mail_jobs` row, batch unchanged; R-7.14 `resend_laptop` with `resending` already set writes no job and sends BR-D03; R-7.8 `resend_eml` on a `sent` batch writes the `.eml` and sends BR-D07's text without [Ya lo envié]; R-7.8 `resend_eml` on a `prepared` batch sends it with [Ya lo envié].
+- Tests: R-7.14 `resend_laptop` on a `DONE` invoice writes one job and one `mail_jobs` row, batch unchanged; R-7.14 `resend_laptop` with `resending` already set writes no job, clears the marker and sends BR-D11; R-7.8 `resend_eml` on a `sent` batch writes the `.eml` and sends BR-D07's text without [Ya lo envié]; R-7.8 `resend_eml` on a `prepared` batch sends it with [Ya lo envié].
 
 Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py -k resend`.
 
