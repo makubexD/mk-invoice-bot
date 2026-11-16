@@ -99,6 +99,27 @@ async def list_open_jobs(
     ]
 
 
+async def waiting_job_age_hours(conn: AsyncConnection[Any], invoice_id: int) -> int | None:
+    """Return whole hours since the invoice's newest unreceipted job, or None; does not commit.
+
+    The age comes from the database clock, as in :func:`list_open_jobs` (R-7.7).
+    """
+    cur = await conn.execute(
+        """
+        SELECT floor(extract(epoch FROM now() - created_at) / 3600)::int
+        FROM mail_jobs
+        WHERE invoice_id = %s
+          AND receipt_at IS NULL
+          AND receipt_error IS NULL
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
+
+
 async def claim_stale_alert(conn: AsyncConnection[Any], job_id: str) -> bool:
     """Mark the job's stale alert sent, returning whether this call won; does not commit (R-7.14)."""
     cur = await conn.execute(

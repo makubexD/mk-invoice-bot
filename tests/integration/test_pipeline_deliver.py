@@ -62,6 +62,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
 )
+from invoicebot.store.mail_jobs import add_mail_job
 from xlsx_factory import build_template
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -188,6 +189,16 @@ class ObservingGraphMode:
         """Read the batch's state; it must be ``sending`` before the send (D89)."""
         async with self._pool.connection() as conn:
             self.seen_state = await get_batch_state(conn, invoice_id)
+
+
+class FailingJobUploadDrive(FakeDrive):
+    """A drive whose laptop job upload fails with a final Graph error (BR-D03)."""
+
+    async def upload(self, path: str, data: bytes) -> None:
+        """Raise a 403 for the job file; every other upload succeeds."""
+        if "/_outbox/" in path:
+            raise GraphError(403)
+        await super().upload(path, data)
 
 
 class AuthRequiredDrive(FakeDrive):
@@ -1252,6 +1263,97 @@ async def test_resend_eml_on_a_sent_batch_writes_the_draft_without_the_button(
     assert outbox == [
         (MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"), "BR-D07", [])
     ]
+
+
+async def test_resend_laptop_with_a_waiting_job_queues_br_d12(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.7: a resend while a job has no receipt writes no file and queues BR-D12."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await add_mail_job(conn, "waiting-job", invoice_id)
+        await conn.execute(
+            "UPDATE mail_jobs SET created_at = now() - interval '5 hours' WHERE job_id = %s",
+            ("waiting-job",),
+        )
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FakeDrive()
+    handlers = _resend_handlers(
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert [path for path in drive.uploads if "/_outbox/" in path] == []
+    assert jobs == ["waiting-job"]
+    assert "resending" not in flow_data
+    assert invoice == ("DONE", None)
+    assert outbox == [(MESSAGES["BR-D12"].format(serie=SERIE, numero=NUMERO, hours=5), "BR-D12", [])]
+
+
+async def test_resend_laptop_after_an_error_receipt_writes_a_new_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.7: a job whose receipt reported an error does not block a new laptop job."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await add_mail_job(conn, "failed-job", invoice_id)
+        await conn.execute(
+            "UPDATE mail_jobs SET receipt_error = 'synthetic failure' WHERE job_id = %s",
+            ("failed-job",),
+        )
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FakeDrive()
+    handlers = _resend_handlers(
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert len([path for path in drive.uploads if "/_outbox/" in path]) == 1
+    assert len(jobs) == 2
+    assert "failed-job" in jobs
+    assert flow_data["resending"] is False
+    assert outbox == []
+
+
+async def test_a_graph_error_on_the_job_upload_fails_the_batch_with_br_d03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.14, BR-D03: a 4xx on the job upload fails the send and never crashes the worker."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_admins(_config(tmp_path, profile_id, mail_mode="laptop_outlook"), profile_id, [])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FailingJobUploadDrive()
+
+    await _handler(
+        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, b"test-key"), mode_name="laptop_outlook"
+    )(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert [path for path in drive.uploads if "/_outbox/" in path] == []
+    assert invoice == ("BATCHED", "BR-D03")
+    assert batch_state == "failed"
+    assert jobs == []
+    assert outbox == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
 
 
 async def test_resend_eml_on_a_prepared_batch_offers_ya_lo_envie(

@@ -87,7 +87,7 @@ from invoicebot.store.invoices import (
     load_reading,
     set_state,
 )
-from invoicebot.store.mail_jobs import add_mail_job
+from invoicebot.store.mail_jobs import add_mail_job, waiting_job_age_hours
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,8 @@ FAILED_BATCH_STATE = "failed"
 DONE_STATE = "DONE"
 #: BR-D03: the rule that reports a mail that could not be sent.
 RULE_SEND_FAILED = "BR-D03"
+#: BR-D12: the rule that tells the sender a waiting laptop job has not gone out yet (R-7.7).
+RULE_STALE = "BR-D12"
 #: BR-D13: the rule that accepts the ``inbox_rule`` send and offers [No llegó] (R-7.8).
 RULE_INBOX = "BR-D13"
 #: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
@@ -262,7 +264,7 @@ def make_resend_handler(context: DeliverContext) -> Mapping[str, Handler]:
 
 def _resend_handler(
     context: DeliverContext,
-    run: Callable[[DeliverContext, _Invoice, _Delivery], Awaitable[None]],
+    run: Callable[[DeliverContext, _Invoice, _Delivery, _Values], Awaitable[None]],
 ) -> Handler:
     """Build one resend step's handler around the action that does its work (R-7.8, R-7.14)."""
 
@@ -307,22 +309,27 @@ async def _resend(
     invoice: _Invoice,
     sinks: _Sinks,
     prepared: _Values,
-    run: Callable[[DeliverContext, _Invoice, _Delivery], Awaitable[None]],
+    run: Callable[[DeliverContext, _Invoice, _Delivery, _Values], Awaitable[None]],
 ) -> _Delivery:
     """Rebuild the invoice's delivery and run the step's resend action (R-7.8, R-7.14)."""
     delivery = await _prepare(context, invoice, sinks, prepared)
-    await run(context, invoice, delivery)
+    await run(context, invoice, delivery, prepared)
     return delivery
 
 
-async def _resend_laptop(context: DeliverContext, invoice: _Invoice, delivery: _Delivery) -> None:
+async def _resend_laptop(
+    context: DeliverContext, invoice: _Invoice, delivery: _Delivery, prepared: _Values
+) -> None:
     """Write a new laptop job for the mail the sender chose to resend (R-7.14, D109).
 
     A ``resending`` marker already in the flow data means a previous attempt died
     mid-write: the marker is cleared and BR-D11 asks the sender again instead of
-    writing a second job (D89). Otherwise the marker is committed before the upload,
-    so a retry after a crash takes that same path, and one transaction stores the
-    ``mail_jobs`` row and clears the marker. The receipt answers; nothing is sent.
+    writing a second job (D89). An invoice whose newest laptop job has no receipt
+    yet already has a claim, so no marker and no job are written; BR-D12 tells the
+    sender how long it has waited instead (R-7.7). Otherwise the marker is committed
+    before the upload, so a retry after a crash takes that same path, and one
+    transaction stores the ``mail_jobs`` row and clears the marker. The receipt
+    answers; nothing is sent.
 
     shortcut: a crash after the upload and before ``add_mail_job`` leaves an orphan
     job file whose receipt is ignored, because its job id is unknown.
@@ -333,6 +340,21 @@ async def _resend_laptop(context: DeliverContext, invoice: _Invoice, delivery: _
             await send_not_confirmed(conn, invoice.job.invoice_id, context.laptop_flows)
         return
     async with context.pool.connection() as conn, conn.transaction():
+        hours = await waiting_job_age_hours(conn, invoice.job.invoice_id)
+        if hours is not None:
+            await _notify(
+                conn,
+                invoice.head,
+                invoice.job.invoice_id,
+                RULE_STALE,
+                MESSAGES[RULE_STALE].format(
+                    serie=prepared.values["serie"],
+                    numero=prepared.values["numero"],
+                    hours=hours,
+                ),
+                [],
+            )
+            return
         await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: True})
     mode = _named_mode(context.modes, LAPTOP_OUTLOOK_MODE)
     try:
@@ -350,7 +372,9 @@ async def _resend_laptop(context: DeliverContext, invoice: _Invoice, delivery: _
         await merge_flow_data(conn, delivery.invoice_id, {RESENDING_KEY: False})
 
 
-async def _resend_eml(context: DeliverContext, _invoice: _Invoice, delivery: _Delivery) -> None:
+async def _resend_eml(
+    context: DeliverContext, _invoice: _Invoice, delivery: _Delivery, _prepared: _Values
+) -> None:
     """Rewrite the draft and answer BR-D07 with [Ya lo envié] only when prepared (R-7.8, D109).
 
     Rewriting the ``.eml`` is harmless, so this step keeps no marker and changes no
@@ -645,9 +669,11 @@ async def _handed_off(
 
     The batch is committed as ``sending`` before the job file is written, so a retry after a
     crash finds it ``sending``, fails it and never writes a second job the laptop would send
-    twice (D89). One transaction then records the batch ``prepared``, stores the job id in
-    ``mail_jobs`` and moves the invoice to ``BATCHED``; no message is queued, because the
-    receipt completes the batch later (R-7.14). The photo stays until the mail is sent.
+    twice (D89). A final Graph error on the upload fails the batch and leaves the invoice
+    ``BATCHED`` with BR-D03, as the automatic mode does. One transaction then records the
+    batch ``prepared``, stores the job id in ``mail_jobs`` and moves the invoice to
+    ``BATCHED``; no message is queued, because the receipt completes the batch later
+    (R-7.14). The photo stays until the mail is sent.
     """
     async with context.pool.connection() as conn, conn.transaction():
         if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
@@ -658,6 +684,9 @@ async def _handed_off(
 
     try:
         job_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
+    except GraphError:
+        await _send_failed(context, delivery, prepared, batch_id)
+        return
     except AuthRequired:
         # The token is fetched before the upload, so no job was written: free the batch so the
         # delivery resumed after re-auth writes it instead of treating it as crashed.
