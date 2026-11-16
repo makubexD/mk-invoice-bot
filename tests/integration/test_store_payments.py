@@ -136,6 +136,25 @@ async def test_record_payment_rejects_an_already_paid_invoice_and_rolls_back(
     assert payment_ids == [first]
 
 
+async def test_record_payment_never_links_another_profiles_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.12: record_payment never links another profile's invoice."""
+    profile_id = _unique("profile")
+    other_profile_id = _unique("profile")
+    flow_id = _unique("flow")
+    async with db_pool.connection() as conn:
+        other_invoice = await _invoice(conn, other_profile_id, flow_id)
+        with pytest.raises(AlreadyPaid):
+            async with conn.transaction():
+                await record_payment(conn, flow_id, profile_id, PAID_ON, Decimal("100.00"), [other_invoice])
+        cur = await conn.execute("SELECT payment_id FROM invoices WHERE id = %s", (other_invoice,))
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert row[0] is None
+
+
 async def test_proposal_round_trips_sets_and_closes(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

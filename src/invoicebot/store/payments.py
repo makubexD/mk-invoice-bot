@@ -140,12 +140,17 @@ async def add_proposal(
 
 
 async def get_proposal(conn: AsyncConnection[Any], proposal_id: int) -> Proposal | None:
-    """Return the stored proposal, or None when it does not exist (R-7.12)."""
+    """Return the stored proposal, or None when it does not exist (R-7.12).
+
+    Locks the proposal's row until the caller's transaction ends, so two presses on
+    one proposal serialize and the second reads its closed state.
+    """
     cur = await conn.execute(
         """
         SELECT id, profile_id, flow_id, paid_on, amount, sets_json, state, created_at
         FROM payment_proposals
         WHERE id = %s
+        FOR UPDATE
         """,
         (proposal_id,),
     )
@@ -184,9 +189,9 @@ async def record_payment(
 ) -> int:
     """Store a payment and link its invoices, returning the payment id (R-7.12).
 
-    Only invoices without a payment are linked. When an invoice already belongs to
-    another payment, :class:`AlreadyPaid` carries the ids and the caller's rollback
-    removes the payment row. Does not commit.
+    Only the profile's and flow's invoices without a payment are linked. When an
+    invoice already belongs to another payment, :class:`AlreadyPaid` carries the ids
+    and the caller's rollback removes the payment row. Does not commit.
     """
     cur = await conn.execute(
         """
@@ -201,8 +206,14 @@ async def record_payment(
         raise RuntimeError("INSERT INTO payments RETURNING id yielded no row")
     payment_id = int(row[0])
     cur = await conn.execute(
-        "UPDATE invoices SET payment_id = %s WHERE id = ANY(%s) AND payment_id IS NULL",
-        (payment_id, list(invoice_ids)),
+        """
+        UPDATE invoices SET payment_id = %s
+        WHERE id = ANY(%s)
+          AND payment_id IS NULL
+          AND profile_id = %s
+          AND flow_id = %s
+        """,
+        (payment_id, list(invoice_ids), profile_id, flow_id),
     )
     if cur.rowcount < len(set(invoice_ids)):
         raise AlreadyPaid(invoice_ids)
