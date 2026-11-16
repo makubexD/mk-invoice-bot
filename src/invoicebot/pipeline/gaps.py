@@ -92,12 +92,14 @@ async def issue_opened(
     """Report the issue, store its URL and alert the owner with the link (R-11.5, D116).
 
     Called by the GitHub transport after it creates or reuses an issue. A kind
-    in ``gaps.digest_kinds`` is reported but never alerted one by one.
+    in ``gaps.digest_kinds`` is reported but never alerted one by one. A repeated
+    call for a URL already stored, as when the outbox row is retried after this
+    commit, alerts nothing.
     """
     async with pool.connection() as conn, conn.transaction():
-        await mark_reported(conn, gap_fingerprint, issue_url)
         gap = await get_gap(conn, gap_fingerprint)
-        if gap is None or gap.kind in gaps_cfg.digest_kinds:
+        await mark_reported(conn, gap_fingerprint, issue_url)
+        if gap is None or gap.issue_url == issue_url or gap.kind in gaps_cfg.digest_kinds:
             return
         await queue_admin_alert(
             conn,
@@ -174,9 +176,14 @@ async def _queue_alert(
     gap: GapRow,
     gap_fingerprint: str,
 ) -> None:
-    """Queue the issue row or the owner alert for one raised gap (R-11.5, R-11.8, D116)."""
-    if ctx.gaps_cfg.github.enabled:
-        if gap.issue_url is None and not await _issue_queued(conn, gap_fingerprint):
+    """Queue the issue row or the owner alert for one raised gap (R-11.5, R-11.8, D116).
+
+    With GitHub enabled and no issue yet, only the issue row is queued: its
+    callback alerts with the link. Once the issue exists, a due re-alert
+    carries that link.
+    """
+    if ctx.gaps_cfg.github.enabled and gap.issue_url is None:
+        if not await _issue_queued(conn, gap_fingerprint):
             await outbox.add(
                 conn,
                 "github",
@@ -194,7 +201,7 @@ async def _queue_alert(
         conn,
         ctx.profiles,
         RULE_GAP_ADMIN,
-        _gap_admin_text(sighting.kind, sighting.subject, None),
+        _gap_admin_text(sighting.kind, sighting.subject, gap.issue_url),
     )
     await mark_alerted(conn, [gap_fingerprint])
 

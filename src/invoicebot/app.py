@@ -505,6 +505,9 @@ def _backup_job(settings: Settings, cfg: Config) -> BackupJob:
         cmd=PG_DUMP_CMD,
         database_url=database_url,
         config_dir=settings.config_path.parent,
+        excluded_paths=tuple(
+            path for path in (settings.secrets_path, settings.age_identity_path) if path is not None
+        ),
         recipient=backup.age_recipient,
         target=backup.target.path,
         max_bytes=backup.max_mb * 1024 * 1024,

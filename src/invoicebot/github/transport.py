@@ -79,11 +79,10 @@ class _Client:
 
 @dataclass(frozen=True)
 class _Request:
-    """One GitHub request: method, URL and the write flag and options it carries."""
+    """One GitHub request: method, URL and the options it carries."""
 
     method: str
     url: str
-    write: bool = False
     json_body: object | None = None
     params: dict[str, str | int] | None = None
 
@@ -153,8 +152,7 @@ async def _send(client: _Client, token: str, request: _Request) -> httpx.Respons
         raise SendLater(RETRY_DELAY, "github unreachable") from None
     status = response.status_code
     if status in _AUTH_REJECTED:
-        if request.write:
-            client.app.invalidate()
+        client.app.invalidate()
         raise SendLater(RETRY_DELAY, f"github {status}")
     if status >= 500:
         raise SendLater(RETRY_DELAY, f"github {status}")
@@ -206,7 +204,6 @@ async def _create_issue(client: _Client, token: str, fingerprint: str, fields: I
         _Request(
             "POST",
             f"{_api_url(client)}/issues",
-            write=True,
             json_body={"title": title, "body": body, "labels": [*client.labels, f"gap:{fields.kind}"]},
         ),
     )
@@ -228,9 +225,7 @@ async def _comment(client: _Client, token: str, issue_url: str, hint_url: str) -
     await _send(
         client,
         token,
-        _Request(
-            "POST", f"{_api_url(client)}/issues/{number}/comments", write=True, json_body={"body": body}
-        ),
+        _Request("POST", f"{_api_url(client)}/issues/{number}/comments", json_body={"body": body}),
     )
 
 

@@ -266,3 +266,18 @@ async def test_a_rejected_token_drops_the_cache() -> None:
 
     assert tokens.invalidated == 1
     assert raised.value.delay == timedelta(minutes=15)
+
+
+async def test_a_token_rejected_on_the_issue_search_drops_the_cache() -> None:
+    """R-11.10: a 401 on the marker search GET also invalidates the cached token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.method == "GET", "a rejected search makes no write"
+        return httpx.Response(401, json={})
+
+    tokens = FakeTokenSource()
+    with pytest.raises(SendLater) as raised:
+        await _run(handler, _create_payload(), Recorder(), tokens=tokens)
+
+    assert tokens.invalidated == 1
+    assert raised.value.delay == timedelta(minutes=15)

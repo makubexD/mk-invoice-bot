@@ -25,6 +25,8 @@ TODAY = date(2026, 11, 16)
 #: A cap no artifact in these tests reaches.
 MAX_BYTES = 100_000_000
 TARGET = "/backups/ops"
+#: The runtime age identity's file name, as deploy/docker-compose.yml mounts it beside the config.
+IDENTITY_NAME = "age-identity.txt"
 
 
 class FakeDrive:
@@ -64,12 +66,13 @@ def drive() -> FakeDrive:
 
 @pytest.fixture
 def config_dir(tmp_path: Path) -> Path:
-    """Return a config directory with one kept file, one secrets file and one age file."""
+    """Return a config directory with one kept file, a secrets, an age and an identity file."""
     directory = tmp_path / "config"
     directory.mkdir()
     (directory / "example.yaml").write_text("ops: {}\n")
     (directory / "secrets.yaml").write_text("token: synthetic\n")
     (directory / "store.age").write_text("ciphertext\n")
+    (directory / IDENTITY_NAME).write_text("AGE-SECRET-KEY-SYNTHETIC\n")
     return directory
 
 
@@ -80,6 +83,7 @@ def job(config_dir: Path, identity: pyrage.x25519.Identity, test_database_url: s
         cmd=("pg_dump",),
         database_url=test_database_url,
         config_dir=config_dir,
+        excluded_paths=(config_dir / IDENTITY_NAME,),
         recipient=str(identity.to_public()),
         target=TARGET,
         max_bytes=MAX_BYTES,
@@ -112,7 +116,7 @@ async def test_backup_dump_restores_invoices_without_kv_data(
 async def test_backup_config_tarball_skips_secrets_and_age_files(
     job: BackupJob, identity: pyrage.x25519.Identity
 ) -> None:
-    """R-9.11: the uploaded config tarball keeps example.yaml and no secrets or age file."""
+    """R-9.11: the uploaded config tarball keeps example.yaml and no secrets, age or identity file."""
     drive = FakeDrive()
     await run_backup(job, drive, TODAY)
 

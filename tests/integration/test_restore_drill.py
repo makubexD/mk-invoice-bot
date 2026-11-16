@@ -64,6 +64,7 @@ def job(tmp_path: Path, identity: pyrage.x25519.Identity, test_database_url: str
         cmd=("pg_dump",),
         database_url=test_database_url,
         config_dir=config_dir,
+        excluded_paths=(),
         recipient=str(identity.to_public()),
         target=TARGET,
         max_bytes=MAX_BYTES,

@@ -58,6 +58,8 @@ class BackupJob:
     cmd: tuple[str, ...]
     database_url: str
     config_dir: Path
+    #: The secrets store and the runtime age identity, left out wherever they sit (R-9.9, D119).
+    excluded_paths: tuple[Path, ...]
     recipient: str
     target: str
     max_bytes: int
@@ -147,11 +149,12 @@ def _pg_environment(database_url: str) -> dict[str, str]:
 
 
 def _config_tarball(job: BackupJob) -> bytes:
-    """Build the config tarball in memory, skipping secrets and age files (D119)."""
+    """Build the config tarball in memory, skipping secrets, age files and the excluded paths (D119)."""
+    excluded = {path.resolve() for path in job.excluded_paths}
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted(job.config_dir.rglob("*")):
-            if path.is_file() and not _is_excluded(path.name):
+            if path.is_file() and not _is_excluded(path.name) and path.resolve() not in excluded:
                 archive.add(path, arcname=str(path.relative_to(job.config_dir)))
     data = buffer.getvalue()
     if len(data) > job.max_bytes:

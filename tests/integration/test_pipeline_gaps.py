@@ -276,6 +276,45 @@ async def test_a_realdert_after_the_window_alerts_again(
     assert counts == {"segundo": 2, "yo": 2}
 
 
+async def test_a_realert_with_github_enabled_carries_the_issue_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.8: with an open issue, a raise 8 days after the last alert alerts again with its link."""
+    ctx = _context(github_enabled=True)
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, ctx, _portal_sighting())
+    await issue_opened(db_pool, ctx.profiles, ctx.gaps_cfg, GAP_FINGERPRINT, ISSUE_URL)
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "UPDATE gaps SET last_alert_at = now() - interval '8 days' WHERE fingerprint = %s",
+            (GAP_FINGERPRINT,),
+        )
+        await raise_gap(conn, ctx, _portal_sighting())
+        alerts = await _rule_rows(conn, "GAP_admin")
+        github_rows = await _outbox_rows(conn, "github")
+
+    assert [recipient for recipient, _ in alerts] == ["segundo", "segundo", "yo", "yo"]
+    assert all(ISSUE_URL in text for _, text in alerts)
+    assert len(github_rows) == 1
+
+
+async def test_a_repeated_issue_callback_alerts_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5: issue_opened called again with the stored URL queues no second alert."""
+    ctx = _context(github_enabled=True)
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, ctx, _portal_sighting())
+
+    await issue_opened(db_pool, ctx.profiles, ctx.gaps_cfg, GAP_FINGERPRINT, ISSUE_URL)
+    await issue_opened(db_pool, ctx.profiles, ctx.gaps_cfg, GAP_FINGERPRINT, ISSUE_URL)
+
+    async with db_pool.connection() as conn:
+        alerts = await _rule_rows(conn, "GAP_admin")
+
+    assert [recipient for recipient, _ in alerts] == ["segundo", "yo"]
+
+
 async def test_ignored_gap_is_counted_but_queues_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
