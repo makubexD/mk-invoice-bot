@@ -53,13 +53,16 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
+from invoicebot.gaps.kinds import fingerprint
+from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
+from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, MESSAGES, modes_desc
+from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, KIND_SUBJECT, MESSAGES, modes_desc
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
@@ -121,6 +124,8 @@ RULE_AUTH = "BR-D01"
 RULE_AUTH_ADMIN = "BR-D01_admin"
 #: BR-D02: the rule that reports an Excel template that cannot be filled (R-7.10).
 RULE_TEMPLATE_INVALID = "BR-D02"
+#: The gap kind of a flow's Excel template that cannot be filled (BR-D02, spec 06 §3).
+TEMPLATE_INVALID = "TEMPLATE_INVALID"
 #: Where a missing token leaves the invoice until the account signs in (BR-D01).
 PENDING_AUTH_STATE = "PENDING_AUTH"
 #: Where a broken Excel template leaves the invoice (BR-D02).
@@ -229,7 +234,9 @@ def make_deliver_handler(context: DeliverContext) -> Handler:
             )
             return
         prepared = await _prepare_values(context, invoice)
-        result = await _handled(context, invoice, _deliver(context, invoice, sinks, prepared))
+        result = await _handled(
+            context, invoice, _deliver(context, invoice, sinks, prepared), sinks.excel.kind
+        )
         if result is None:
             return
         delivery, mode_name = result
@@ -280,7 +287,9 @@ def _resend_handler(
             )
             return
         prepared = await _prepare_values(context, invoice)
-        delivery = await _handled(context, invoice, _resend(context, invoice, sinks, prepared, run))
+        delivery = await _handled(
+            context, invoice, _resend(context, invoice, sinks, prepared, run), sinks.excel.kind
+        )
         if delivery is None:
             return
         logger.info(
@@ -395,7 +404,9 @@ async def _resend_eml(
         )
 
 
-async def _handled[T](context: DeliverContext, invoice: _Invoice, work: Awaitable[T]) -> T | None:
+async def _handled[T](
+    context: DeliverContext, invoice: _Invoice, work: Awaitable[T], sink_name: str
+) -> T | None:
     """Await ``work``, parking or manually filing the invoice on its two known failures.
 
     A sign-in failure leaves the invoice ``PENDING_AUTH`` with BR-D01 and a bad Excel
@@ -407,7 +418,7 @@ async def _handled[T](context: DeliverContext, invoice: _Invoice, work: Awaitabl
     except AuthRequired as required:
         await _pending_auth(context, invoice, required.account)
     except TemplateInvalid:
-        await _template_invalid(context, invoice)
+        await _template_invalid(context, invoice, sink_name)
     return None
 
 
@@ -483,9 +494,8 @@ async def _prepare_values(context: DeliverContext, invoice: _Invoice) -> _Values
     razon_social = _text(invoice.reading, invoice.xml_reading, "razon_social") or ""
     store = None if ruc_emisor is None else context.directory.stores.get(ruc_emisor)
     if store is None:
-        # shortcut: the PORTAL_MISSING gap does not exist yet, so the slug replaces the store.
-        logger.info(
-            "shortcut: the issuer has no store; using the slug until the PORTAL_MISSING gap",
+        logger.debug(
+            "the issuer has no store; the slug stands in for the store name",
             extra={"step": DELIVER_STEP, "invoice_id": invoice.job.invoice_id},
         )
     overrides = _overrides(invoice.flow_data)
@@ -801,8 +811,8 @@ async def _pending_auth(context: DeliverContext, invoice: _Invoice, account: str
         await queue_admin_alert(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
 
 
-async def _template_invalid(context: DeliverContext, invoice: _Invoice) -> None:
-    """Move the invoice to ``MANUAL_REQUIRED`` with BR-D02 (R-7.10)."""
+async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_name: str) -> None:
+    """Move the invoice to ``MANUAL_REQUIRED`` with BR-D02 and raise the template gap (R-7.10, R-11.2)."""
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
@@ -815,10 +825,31 @@ async def _template_invalid(context: DeliverContext, invoice: _Invoice) -> None:
             MESSAGES[RULE_TEMPLATE_INVALID],
             [],
         )
-    # shortcut: the TEMPLATE_INVALID gap is not filed yet, so a fixed template does not resume it.
-    logger.warning(
-        "shortcut: the TEMPLATE_INVALID gap is not filed yet",
-        extra={"step": DELIVER_STEP, "invoice_id": invoice.job.invoice_id},
+        await raise_gap(
+            conn,
+            GapContext(profiles=context.cfg.profiles, gaps_cfg=context.cfg.gaps),
+            _template_sighting(invoice, sink_name),
+        )
+
+
+def _template_sighting(invoice: _Invoice, sink_name: str) -> GapSighting:
+    """Build one TEMPLATE_INVALID sighting from the invoice's flow and failing sink (BR-D02, R-11.12)."""
+    ruc_emisor = invoice.reading.value("ruc_emisor")
+    return GapSighting(
+        kind=TEMPLATE_INVALID,
+        parts=(invoice.flow_name, sink_name),
+        subject=KIND_SUBJECT[TEMPLATE_INVALID].format(flow=invoice.flow_name, sink=sink_name),
+        invoice_id=invoice.job.invoice_id,
+        fields=IssueFields(
+            kind=TEMPLATE_INVALID,
+            fingerprint=fingerprint(TEMPLATE_INVALID, invoice.flow_name, sink_name),
+            ruc_emisor=None if ruc_emisor is None else int(ruc_emisor),
+            razon_social=invoice.reading.value("razon_social"),
+            tipo=invoice.reading.value("tipo"),
+            reasons=(),
+            portal_key=None,
+            hint_url=None,
+        ),
     )
 
 

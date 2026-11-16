@@ -511,6 +511,27 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
 
 
+async def _clear_gaps(conn: AsyncConnection[Any]) -> None:
+    """Delete every gap and invoice link so one test's raise cannot leak into another."""
+    await conn.execute("DELETE FROM invoice_gaps")
+    await conn.execute("DELETE FROM gaps")
+
+
+async def _gaps(conn: AsyncConnection[Any]) -> list[tuple[str, str, int]]:
+    """Return each gap's fingerprint, kind and count."""
+    cur = await conn.execute("SELECT fingerprint, kind, count FROM gaps ORDER BY fingerprint")
+    return [(str(fp), str(kind), int(count)) for fp, kind, count in await cur.fetchall()]
+
+
+async def _gap_links(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the fingerprints of the gaps linked to ``invoice_id``."""
+    cur = await conn.execute(
+        "SELECT fingerprint FROM invoice_gaps WHERE invoice_id = %s ORDER BY fingerprint",
+        (invoice_id,),
+    )
+    return [str(row[0]) for row in await cur.fetchall()]
+
+
 async def test_dry_run_batches_the_invoice_with_br_d07(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -1009,6 +1030,73 @@ async def test_a_bad_template_hash_requires_a_manual_fix(
     profile_id = f"deliver-{uuid4().hex}"
     cfg = _config_with_bad_template(_config(tmp_path, profile_id))
     invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-D02")
+    assert outbox == [(MESSAGES["BR-D02"], "BR-D02", [])]
+
+
+async def test_an_invalid_template_raises_one_gap_linked_to_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02, R-11.2: an invalid template raises one TEMPLATE_INVALID gap linked to the invoice."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    expected = f"template_invalid:{FLOW}:excel_template"
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        links = await _gap_links(conn, invoice_id)
+    assert gaps == [(expected, "TEMPLATE_INVALID", 1)]
+    assert links == [expected]
+
+
+async def test_two_invoices_failing_the_same_template_raise_one_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02, R-11.2: two invoices failing one template make one gap with both links."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    first_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    second_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    expected = f"template_invalid:{FLOW}:excel_template"
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
+
+    handler = _handler(db_pool, cfg, FakeDrive(), tmp_path)
+    await handler(_job(first_id))
+    await handler(_job(second_id))
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        first_links = await _gap_links(conn, first_id)
+        second_links = await _gap_links(conn, second_id)
+    assert gaps == [(expected, "TEMPLATE_INVALID", 2)]
+    assert first_links == [expected]
+    assert second_links == [expected]
+
+
+async def test_the_invalid_template_text_to_the_user_is_unchanged(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D02: an invalid template still moves the invoice and sends BR-D02's text unchanged."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config_with_bad_template(_config(tmp_path, profile_id))
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _clear_gaps(conn)
 
     await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
 
