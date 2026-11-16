@@ -100,6 +100,14 @@ XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
 </Invoice>
 """
 
+#: The fixed time the laptop mode stamps on every job it writes here.
+LAPTOP_NOW = datetime(2026, 11, 16, 12, 0, tzinfo=UTC)
+
+
+def _laptop_clock() -> datetime:
+    """Return the fixed time the laptop mode signs jobs with."""
+    return LAPTOP_NOW
+
 
 class FakeDrive:
     """An in-memory Drive: folders hold their entry names and uploads keep their bytes."""
@@ -734,7 +742,12 @@ async def test_laptop_outlook_writes_one_signed_job_and_batches(
     key = b"test-key"
 
     await _handler(
-        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, key), mode_name="laptop_outlook"
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        LaptopOutlook(drive, root, key, _laptop_clock),
+        mode_name="laptop_outlook",
     )(_job(invoice_id))
 
     async with db_pool.connection() as conn:
@@ -748,6 +761,7 @@ async def test_laptop_outlook_writes_one_signed_job_and_batches(
     document = json.loads(drive.uploads[job_paths[0]])
     job = LaptopJob(
         job_id=document["job_id"],
+        created_at=datetime.fromisoformat(document["created_at"]),
         invoice_id=document["invoice_id"],
         folder=document["folder"],
         to=tuple(document["to"]),
@@ -1227,7 +1241,7 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     drive = FakeDrive()
     key = b"test-key"
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, key)}
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, key, _laptop_clock)}
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1243,6 +1257,7 @@ async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
     document = json.loads(drive.uploads[job_paths[0]])
     job = LaptopJob(
         job_id=document["job_id"],
+        created_at=datetime.fromisoformat(document["created_at"]),
         invoice_id=document["invoice_id"],
         folder=document["folder"],
         to=tuple(document["to"]),
@@ -1311,7 +1326,11 @@ async def test_resend_laptop_after_a_folder_rename_keeps_one_folder(
     invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, flow_data={"folder_path": renamed})
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1344,7 +1363,7 @@ async def test_resend_laptop_with_a_resending_marker_asks_again(
         cfg,
         drive,
         tmp_path,
-        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")},
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
         laptop_flows=frozenset({FLOW}),
     )
 
@@ -1439,7 +1458,11 @@ async def test_resend_laptop_with_a_waiting_job_queues_br_d12(
     root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1472,7 +1495,11 @@ async def test_resend_laptop_after_an_error_receipt_writes_a_new_job(
     root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
     drive = FakeDrive()
     handlers = _resend_handlers(
-        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        {"laptop_outlook": LaptopOutlook(drive, root, b"test-key", _laptop_clock)},
     )
 
     await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
@@ -1499,7 +1526,12 @@ async def test_a_graph_error_on_the_job_upload_fails_the_batch_with_br_d03(
     drive = FailingJobUploadDrive()
 
     await _handler(
-        db_pool, cfg, drive, tmp_path, LaptopOutlook(drive, root, b"test-key"), mode_name="laptop_outlook"
+        db_pool,
+        cfg,
+        drive,
+        tmp_path,
+        LaptopOutlook(drive, root, b"test-key", _laptop_clock),
+        mode_name="laptop_outlook",
     )(_job(invoice_id))
 
     async with db_pool.connection() as conn:

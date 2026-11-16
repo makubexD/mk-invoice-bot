@@ -12,7 +12,7 @@ import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from typing import cast
 
@@ -371,7 +371,7 @@ def _deliver_handlers(
     laptop_task: TaskFactory | None = None
     if found is not None:
         root, key = found
-        laptop = LaptopOutlook(drive, root, key)
+        laptop = LaptopOutlook(drive, root, key, partial(datetime.now, UTC))
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
     context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)

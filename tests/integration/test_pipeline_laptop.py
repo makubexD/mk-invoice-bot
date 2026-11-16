@@ -114,17 +114,17 @@ def _signed_receipt(fields: dict[str, str], key: bytes = KEY) -> bytes:
 
 def _sent_receipt(job_id: str) -> bytes:
     """Return the signed receipt the laptop writes after it sends the job."""
-    return _signed_receipt({"job_id": job_id, "sent_at": SENT_AT})
+    return _signed_receipt({"type": "receipt", "job_id": job_id, "sent_at": SENT_AT})
 
 
 def _error_receipt(job_id: str, error: str = ERROR_TEXT) -> bytes:
     """Return the signed receipt the laptop writes when Outlook fails."""
-    return _signed_receipt({"job_id": job_id, "error": error})
+    return _signed_receipt({"type": "receipt", "job_id": job_id, "error": error})
 
 
 def _forged_receipt(job_id: str) -> bytes:
     """Return a sent receipt signed with a key other than the bot's."""
-    return _signed_receipt({"job_id": job_id, "sent_at": SENT_AT}, key=b"another-key")
+    return _signed_receipt({"type": "receipt", "job_id": job_id, "sent_at": SENT_AT}, key=b"another-key")
 
 
 def _path(name: str) -> str:

@@ -6,13 +6,20 @@ import hashlib
 import hmac
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from invoicebot.sinks.laptop_job import LaptopJob, Receipt, job_document, job_hmac, parse_receipt
+from invoicebot.sinks.laptop_job import (
+    RECEIPT_TYPE,
+    LaptopJob,
+    Receipt,
+    job_document,
+    job_hmac,
+    parse_receipt,
+)
 
 VECTORS = json.loads((Path(__file__).resolve().parents[1] / "laptop" / "vectors.json").read_text("utf-8"))
 KEY: bytes = VECTORS["key"].encode("ascii")
@@ -30,15 +37,21 @@ def _receipt_signature(fields: dict[str, object], key: bytes) -> str:
     return hmac.new(key, text.encode("ascii"), hashlib.sha256).hexdigest()
 
 
-def _signed_receipt(fields: dict[str, object], key: bytes = RECEIPT_KEY) -> bytes:
-    """Return the receipt file the laptop agent writes for ``fields``."""
+def _signed(fields: dict[str, object], key: bytes = RECEIPT_KEY) -> bytes:
+    """Return a file signed over exactly ``fields``, with nothing added."""
     return json.dumps({**fields, "hmac": _receipt_signature(fields, key)}).encode()
+
+
+def _signed_receipt(fields: dict[str, object], key: bytes = RECEIPT_KEY) -> bytes:
+    """Return the receipt file the laptop agent writes for ``fields``, with its type."""
+    return _signed({"type": RECEIPT_TYPE, **fields}, key)
 
 
 def _job(vector: dict[str, Any]) -> LaptopJob:
     """Build the job a frozen vector describes."""
     return LaptopJob(
         job_id=vector["job_id"],
+        created_at=datetime.fromisoformat(vector["created_at"]),
         invoice_id=vector["invoice_id"],
         folder=vector["folder"],
         to=tuple(vector["to"]),
@@ -78,6 +91,20 @@ def test_folder_outside_invoice_root_raises(folder: str) -> None:
         job_document(job, KEY)
 
 
+def test_job_document_signs_its_type_and_creation_time() -> None:
+    """R-7.14: the job signs its type and ``created_at`` as UTC seconds."""
+    job = replace(
+        _job(JOBS[0]),
+        created_at=datetime(2026, 11, 16, 7, 0, 0, 987654, tzinfo=timezone(timedelta(hours=-5))),
+    )
+
+    document = json.loads(job_document(job, KEY))
+
+    assert document["type"] == "job"
+    assert document["created_at"] == "2026-11-16T12:00:00Z"
+    assert document["hmac"] == job_hmac(job, KEY)
+
+
 def test_nested_folder_is_accepted_and_documented() -> None:
     """R-7.14, D111: a nested folder is accepted and appears in the job document."""
     job = _job(JOBS[0])
@@ -91,6 +118,22 @@ def test_bad_job_id_raises() -> None:
 
     with pytest.raises(ValueError, match="invalid job id"):
         job_document(job, KEY)
+
+
+def test_parse_receipt_refuses_a_receipt_without_its_type() -> None:
+    """R-7.14: a receipt whose signed keys lack ``type`` is refused."""
+    data = _signed({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00"})
+
+    with pytest.raises(ValueError, match="unexpected keys"):
+        parse_receipt(data, RECEIPT_KEY)
+
+
+def test_parse_receipt_refuses_another_type() -> None:
+    """R-7.14: a job file renamed into the receipt folder, type ``job``, is refused."""
+    data = _signed({"type": "job", "job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00"})
+
+    with pytest.raises(ValueError, match="invalid type"):
+        parse_receipt(data, RECEIPT_KEY)
 
 
 def test_parse_receipt_accepts_signed_sent() -> None:
@@ -137,12 +180,14 @@ def test_parse_receipt_refuses_a_tampered_field() -> None:
     ("data", "match"),
     [
         pytest.param(
-            b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00"}',
+            b'{"type": "receipt", "job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00"}',
             "unexpected keys",
             id="missing",
         ),
         pytest.param(
-            b'{"job_id": "' + JOB_ID_BYTES + b'", "sent_at": "2026-11-16T10:30:00+00:00", "hmac": 3}',
+            b'{"type": "receipt", "job_id": "'
+            + JOB_ID_BYTES
+            + b'", "sent_at": "2026-11-16T10:30:00+00:00", "hmac": 3}',
             "hmac is not a string",
             id="not-a-string",
         ),
@@ -236,7 +281,9 @@ def test_parse_receipt_refuses_invalid(data: bytes, match: str) -> None:
 
 def test_parse_receipt_refuses_a_non_ascii_hmac_as_a_value_error() -> None:
     """R-7.14: a non-ASCII hmac is refused with ValueError, so the sweep skips it."""
-    data = json.dumps({"job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00", "hmac": "ñ" * 64}).encode()
+    data = json.dumps(
+        {"type": "receipt", "job_id": JOB_ID, "sent_at": "2026-11-16T10:30:00+00:00", "hmac": "ñ" * 64}
+    ).encode()
 
     with pytest.raises(ValueError, match="hmac does not verify"):
         parse_receipt(data, RECEIPT_KEY)
