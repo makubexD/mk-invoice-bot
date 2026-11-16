@@ -60,7 +60,9 @@ RULE_DONE = "BR-D10"
 RULE_STALE = "BR-D12"
 
 
-async def poll_receipts(pool: Pool, drive: Drive, root: str, key: bytes) -> None:
+async def poll_receipts(
+    pool: Pool, drive: Drive, root: str, key: bytes, laptop_flows: frozenset[str]
+) -> None:
     """Apply every signed receipt under ``{root}/_outbox/receipts`` (R-7.14).
 
     Each receipt file is downloaded with a :data:`RECEIPT_MAX_BYTES` cap and
@@ -68,22 +70,26 @@ async def poll_receipts(pool: Pool, drive: Drive, root: str, key: bytes) -> None
     or whose HMAC does not verify under ``key`` is logged and left in place; a
     file whose application raises is logged by name and also left in place, so
     one bad receipt never blocks the others and the sweep goes on.
+    ``laptop_flows`` names the flows whose BR-D11 offers [Por la laptop] (D109).
     """
     folder = f"{root}/_outbox/receipts"
     for name in await drive.list_names(folder):
         try:
-            await _apply_file(pool, drive, f"{folder}/{name}", name, key)
+            await _apply_file(pool, drive, f"{folder}/{name}", name, key, laptop_flows)
         except Exception:  # one bad receipt must not stop the sweep (R-7.14)
             logger.exception("receipt %s failed", name)
 
 
-async def check_overdue(pool: Pool, drive: Drive, root: str, mail: Mail) -> None:
+async def check_overdue(
+    pool: Pool, drive: Drive, root: str, mail: Mail, laptop_flows: frozenset[str]
+) -> None:
     """Alert once on stale and overdue laptop jobs (R-7.8, R-7.14, BR-D11, BR-D12).
 
     A job past ``agent_stale_after`` whose file the agent never picked up gets
     BR-D12, and one past ``confirm_timeout`` gets BR-D11. Each alert is claimed
     in its own transaction, so a later sweep sends nothing and one job can get
-    both. Nothing is re-sent.
+    both. Nothing is re-sent. ``laptop_flows`` names the flows whose BR-D11
+    offers [Por la laptop] (D109).
     """
     async with pool.connection() as conn:
         jobs = await list_open_jobs(conn, mail.agent_stale_after, mail.confirm_timeout)
@@ -92,7 +98,7 @@ async def check_overdue(pool: Pool, drive: Drive, root: str, mail: Mail) -> None
         if job.is_stale and f"{job.job_id}.json" in pending:
             await _notify_stale(pool, job)
         if job.is_overdue:
-            await _notify_overdue(pool, job)
+            await _notify_overdue(pool, job, laptop_flows)
 
 
 async def _notify_stale(pool: Pool, job: OpenMailJob) -> None:
@@ -117,14 +123,16 @@ async def _notify_stale(pool: Pool, job: OpenMailJob) -> None:
         )
 
 
-async def _notify_overdue(pool: Pool, job: OpenMailJob) -> None:
+async def _notify_overdue(pool: Pool, job: OpenMailJob, laptop_flows: frozenset[str]) -> None:
     """Send BR-D11 once for a job still without a receipt (R-7.8)."""
     async with pool.connection() as conn, conn.transaction():
         if await claim_overdue_alert(conn, job.job_id):
-            await send_not_confirmed(conn, job.invoice_id)
+            await send_not_confirmed(conn, job.invoice_id, laptop_flows)
 
 
-async def _apply_file(pool: Pool, drive: Drive, path: str, name: str, key: bytes) -> None:
+async def _apply_file(
+    pool: Pool, drive: Drive, path: str, name: str, key: bytes, laptop_flows: frozenset[str]
+) -> None:
     """Apply one receipt and delete it once the commit stands (R-7.14).
 
     The photo files a completed delivery frees are deleted first. Nothing is
@@ -134,7 +142,7 @@ async def _apply_file(pool: Pool, drive: Drive, path: str, name: str, key: bytes
     if receipt is None:
         return
     async with pool.connection() as conn, conn.transaction():
-        photos = await _apply(conn, receipt)
+        photos = await _apply(conn, receipt, laptop_flows)
     for photo in photos:
         await asyncio.to_thread(photo.unlink, missing_ok=True)
     await drive.delete(path)
@@ -149,7 +157,7 @@ async def _read(drive: Drive, path: str, name: str, key: bytes) -> Receipt | Non
         return None
 
 
-async def _apply(conn: AsyncConnection[Any], receipt: Receipt) -> list[Path]:
+async def _apply(conn: AsyncConnection[Any], receipt: Receipt, laptop_flows: frozenset[str]) -> list[Path]:
     """Apply a receipt for a known job still without one (R-7.8, R-7.14).
 
     A prepared batch follows today's behaviour. A batch already ``sent`` — an
@@ -163,26 +171,30 @@ async def _apply(conn: AsyncConnection[Any], receipt: Receipt) -> list[Path]:
         return []
     state = await get_batch_state(conn, job.invoice_id)
     if state == PREPARED_BATCH_STATE:
-        return await _apply_prepared(conn, job.invoice_id, receipt)
+        return await _apply_prepared(conn, job.invoice_id, receipt, laptop_flows)
     if state == SENT_BATCH_STATE:
-        await _apply_sent(conn, job.invoice_id, receipt)
+        await _apply_sent(conn, job.invoice_id, receipt, laptop_flows)
     else:
         await _stamp(conn, receipt)
     return []
 
 
-async def _apply_prepared(conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt) -> list[Path]:
+async def _apply_prepared(
+    conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt, laptop_flows: frozenset[str]
+) -> list[Path]:
     """Apply a receipt to a prepared batch: close it or ask the sender (R-7.8, R-7.14)."""
     if receipt.sent_at is None:
-        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "")
+        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "", laptop_flows)
         return []
     return await _sent(conn, invoice_id, receipt.job_id)
 
 
-async def _apply_sent(conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt) -> None:
+async def _apply_sent(
+    conn: AsyncConnection[Any], invoice_id: int, receipt: Receipt, laptop_flows: frozenset[str]
+) -> None:
     """Stamp a receipt on an already-sent batch without touching its state (R-7.8, R-7.14)."""
     if receipt.sent_at is None:
-        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "")
+        await _not_confirmed(conn, invoice_id, receipt.job_id, receipt.error or "", laptop_flows)
         return
     await _queue_done(conn, invoice_id)
     await set_receipt_at(conn, receipt.job_id)
@@ -223,10 +235,16 @@ async def _queue_done(conn: AsyncConnection[Any], invoice_id: int) -> None:
     )
 
 
-async def _not_confirmed(conn: AsyncConnection[Any], invoice_id: int, job_id: str, error: str) -> None:
+async def _not_confirmed(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    job_id: str,
+    error: str,
+    laptop_flows: frozenset[str],
+) -> None:
     """Record an error receipt and ask the sender how the mail went out (BR-D11)."""
     await set_receipt_error(conn, job_id, error)
-    await send_not_confirmed(conn, invoice_id)
+    await send_not_confirmed(conn, invoice_id, laptop_flows)
 
 
 async def _sender(conn: AsyncConnection[Any], invoice_id: int) -> Addressee:

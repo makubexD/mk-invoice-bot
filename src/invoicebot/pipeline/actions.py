@@ -72,7 +72,6 @@ from invoicebot.store.invoices import (
     mark_editing,
     set_state,
 )
-from invoicebot.store.mail_jobs import has_mail_job
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
@@ -428,26 +427,20 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
 
 
 async def send_not_confirmed(
-    conn: AsyncConnection[Any], invoice_id: int, laptop_flows: frozenset[str] | None = None
+    conn: AsyncConnection[Any], invoice_id: int, laptop_flows: frozenset[str]
 ) -> None:
     """Queue BR-D11 with D109's buttons for the invoice's sender (R-7.8, BR-D11, D109).
 
     The one BR-D11 sender: [No llegó], an error receipt and an overdue receipt all
     call it. [Por la laptop] is offered only when the invoice's flow lists
-    ``laptop_outlook``, named by ``laptop_flows``. A ``None`` set keeps the older
-    ``mail_jobs`` rule for callers not yet threaded with the set (D109).
+    ``laptop_outlook``, named by ``laptop_flows``.
     """
     head = await load_invoice_head(conn, invoice_id)
     reading = await load_reading(conn, invoice_id)
     if head is None or reading is None:
         raise RuntimeError(f"invoice {invoice_id} cannot be asked about its mail")
     buttons: list[Button] = []
-    if laptop_flows is None:
-        # shortcut: 45c removes this rule once every caller passes the flow set (D109).
-        offers_laptop = await has_mail_job(conn, invoice_id)
-    else:
-        offers_laptop = await load_flow(conn, invoice_id) in laptop_flows
-    if offers_laptop:
+    if await load_flow(conn, invoice_id) in laptop_flows:
         buttons.append(Button(id=button_id(invoice_id, VIA_LAPTOP_ACTION), title=BUTTON_VIA_LAPTOP))
     buttons.append(Button(id=button_id(invoice_id, SELF_SEND_ACTION), title=BUTTON_SELF_SEND))
     buttons.append(Button(id=button_id(invoice_id, ARRIVED_ACTION), title=BUTTON_ARRIVED))

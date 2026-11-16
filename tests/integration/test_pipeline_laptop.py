@@ -46,6 +46,7 @@ from invoicebot.store.mail_jobs import add_mail_job, set_receipt_at
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 FLOW = "work_microsoft"
+LAPTOP_FLOWS = frozenset({FLOW})
 ROOT = "/Reembolsos"
 RECEIPTS = f"{ROOT}/_outbox/receipts"
 FOLDER = "2026-11-Support_1_LaLena"
@@ -252,7 +253,7 @@ async def test_a_sent_receipt_completes_the_batch_with_br_d10(
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
     photo = await _add_photo(db_pool, invoice_id, tmp_path)
 
-    await poll_receipts(db_pool, _drive(f"{job_id}.json", _sent_receipt(job_id)), ROOT, KEY)
+    await poll_receipts(db_pool, _drive(f"{job_id}.json", _sent_receipt(job_id)), ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -280,13 +281,13 @@ async def test_the_same_receipt_seen_again_changes_nothing(
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
     drive = _drive(f"{job_id}.json", _sent_receipt(job_id))
 
-    await poll_receipts(db_pool, drive, ROOT, KEY)
+    await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
     async with db_pool.connection() as conn:
         first_outbox = await _outbox(conn, profile_id)
         first_jobs = await _jobs(conn, invoice_id)
         first_receipt = await _receipt_row(conn, job_id)
 
-    await poll_receipts(db_pool, drive, ROOT, KEY)
+    await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -309,7 +310,7 @@ async def test_an_error_receipt_sends_br_d11_and_leaves_the_batch_prepared(
     job_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
 
-    await poll_receipts(db_pool, _drive(f"{job_id}.json", _error_receipt(job_id)), ROOT, KEY)
+    await poll_receipts(db_pool, _drive(f"{job_id}.json", _error_receipt(job_id)), ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -335,6 +336,36 @@ async def test_an_error_receipt_sends_br_d11_and_leaves_the_batch_prepared(
     assert receipt_error == ERROR_TEXT
 
 
+async def test_an_error_receipt_for_a_flow_outside_laptop_flows_omits_the_laptop_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-7.8, D109: a flow not listed in laptop_flows gets BR-D11 without [Por la laptop]."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+
+    await poll_receipts(
+        db_pool,
+        _drive(f"{job_id}.json", _error_receipt(job_id)),
+        ROOT,
+        KEY,
+        frozenset({"another_flow"}),
+    )
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, SELF_SEND_ACTION), "title": BUTTON_SELF_SEND},
+                {"id": button_id(invoice_id, ARRIVED_ACTION), "title": BUTTON_ARRIVED},
+            ],
+        ),
+    ]
+
+
 async def test_a_receipt_over_four_kib_is_skipped_and_logged(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     caplog: pytest.LogCaptureFixture,
@@ -347,7 +378,7 @@ async def test_a_receipt_over_four_kib_is_skipped_and_logged(
     name = f"{job_id}.json"
 
     with caplog.at_level(logging.WARNING, logger="invoicebot.pipeline.laptop"):
-        await poll_receipts(db_pool, _drive(name, oversized), ROOT, KEY)
+        await poll_receipts(db_pool, _drive(name, oversized), ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -372,7 +403,9 @@ async def test_a_receipt_for_an_unknown_job_changes_nothing(
     unknown_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
 
-    await poll_receipts(db_pool, _drive(f"{unknown_id}.json", _sent_receipt(unknown_id)), ROOT, KEY)
+    await poll_receipts(
+        db_pool, _drive(f"{unknown_id}.json", _sent_receipt(unknown_id)), ROOT, KEY, LAPTOP_FLOWS
+    )
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -407,7 +440,7 @@ async def test_a_failing_receipt_is_logged_and_the_next_receipt_is_applied(
     )
 
     with caplog.at_level(logging.ERROR, logger="invoicebot.pipeline.laptop"):
-        await poll_receipts(db_pool, drive, ROOT, KEY)
+        await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -431,7 +464,7 @@ async def test_an_applied_receipt_is_deleted(
     name = f"{job_id}.json"
     drive = _drive(name, _sent_receipt(job_id))
 
-    await poll_receipts(db_pool, drive, ROOT, KEY)
+    await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
 
     assert drive.deleted == [_path(name)]
     assert drive.files == {}
@@ -447,7 +480,7 @@ async def test_a_forged_receipt_is_not_applied_nor_deleted(
     name = f"{job_id}.json"
     drive = _drive(name, _forged_receipt(job_id))
 
-    await poll_receipts(db_pool, drive, ROOT, KEY)
+    await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -473,7 +506,7 @@ async def test_a_sent_receipt_on_a_sent_batch_stamps_the_job_and_queues_br_d10(
     name = f"{job_id}.json"
     drive = _drive(name, _sent_receipt(job_id))
 
-    await poll_receipts(db_pool, drive, ROOT, KEY)
+    await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
@@ -503,8 +536,8 @@ async def test_check_overdue_runs_after_a_sweep_with_a_failing_receipt(
     drive = _drive(name, _sent_receipt(job_id))
 
     with caplog.at_level(logging.ERROR, logger="invoicebot.pipeline.laptop"):
-        await poll_receipts(db_pool, drive, ROOT, KEY)
-        await check_overdue(db_pool, drive, ROOT, Mail())
+        await poll_receipts(db_pool, drive, ROOT, KEY, LAPTOP_FLOWS)
+        await check_overdue(db_pool, drive, ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -514,7 +547,6 @@ async def test_check_overdue_runs_after_a_sweep_with_a_failing_receipt(
             MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
             "BR-D11",
             [
-                {"id": button_id(invoice_id, VIA_LAPTOP_ACTION), "title": BUTTON_VIA_LAPTOP},
                 {"id": button_id(invoice_id, SELF_SEND_ACTION), "title": BUTTON_SELF_SEND},
                 {"id": button_id(invoice_id, ARRIVED_ACTION), "title": BUTTON_ARRIVED},
             ],
@@ -535,8 +567,8 @@ async def test_a_stale_job_in_the_outbox_gets_one_br_d12(
     await _age_job(db_pool, job_id, 5)
     drive = FakeDrive({_job_file(job_id): b"{}"})
 
-    await check_overdue(db_pool, drive, ROOT, Mail())
-    await check_overdue(db_pool, drive, ROOT, Mail())
+    await check_overdue(db_pool, drive, ROOT, Mail(), LAPTOP_FLOWS)
+    await check_overdue(db_pool, drive, ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -552,8 +584,8 @@ async def test_an_overdue_job_gets_one_br_d11(
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
     await _age_job(db_pool, job_id, 25)
 
-    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
-    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail(), LAPTOP_FLOWS)
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -581,7 +613,7 @@ async def test_a_job_with_a_receipt_gets_no_alert(
     async with db_pool.connection() as conn, conn.transaction():
         await set_receipt_at(conn, job_id)
 
-    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail())
+    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -597,7 +629,7 @@ async def test_a_picked_up_job_gets_no_br_d12(
     await _prepared_invoice(db_pool, profile_id, job_id)
     await _age_job(db_pool, job_id, 5)
 
-    await check_overdue(db_pool, FakeDrive(), ROOT, Mail())
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -616,7 +648,7 @@ async def test_a_job_whose_batch_is_sent_gets_neither_alert(
         batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
         await set_batch_state(conn, batch_id, "sent")
 
-    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail())
+    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)

@@ -317,17 +317,16 @@ def _deliver_handlers(
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
     bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
+    laptop_flows = _laptop_flow_ids(cfg)
     found = _laptop_root_and_key(cfg, store)
     laptop: LaptopOutlook | None = None
     laptop_task: TaskFactory | None = None
     if found is not None:
         root, key = found
         laptop = LaptopOutlook(drive, root, key)
-        laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail)
+        laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
-    context = DeliverContext(
-        pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=_laptop_flow_ids(cfg)
-    )
+    context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)
     return DeliverHandlers(
         deliver=make_deliver_handler(context),
         folder_status=make_folder_status_handler(pool, cfg, drive),
@@ -481,11 +480,13 @@ async def _park_forever(pool: Pool, timeout_h: int) -> None:
         await asyncio.sleep(PARK_SWEEP_S)
 
 
-async def _laptop_forever(pool: Pool, drive: Drive, root: str, key: bytes, mail: Mail) -> None:
+async def _laptop_forever(
+    pool: Pool, drive: Drive, root: str, key: bytes, mail: Mail, laptop_flows: frozenset[str]
+) -> None:
     """Apply signed receipts and alert on overdue jobs every ``LAPTOP_SWEEP_S`` seconds (R-7.8, R-7.14)."""
     while True:
-        await poll_receipts(pool, drive, root, key)
-        await check_overdue(pool, drive, root, mail)
+        await poll_receipts(pool, drive, root, key, laptop_flows)
+        await check_overdue(pool, drive, root, mail, laptop_flows)
         await asyncio.sleep(LAPTOP_SWEEP_S)
 
 
