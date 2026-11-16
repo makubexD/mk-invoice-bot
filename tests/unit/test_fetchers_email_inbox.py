@@ -58,7 +58,7 @@ DOCTYPE = '<!DOCTYPE Invoice [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>'
 
 
 class FakeMailbox:
-    """An in-memory mailbox that records its searches and downloads."""
+    """An in-memory mailbox that records its searches, attachment reads and downloads."""
 
     def __init__(
         self,
@@ -66,21 +66,27 @@ class FakeMailbox:
         attachments: dict[str, list[MailAttachment]],
         files: dict[str, bytes],
         error: Exception | None = None,
+        results: dict[str, list[MailMessage]] | None = None,
     ) -> None:
         self._messages = messages
         self._attachments = attachments
         self._files = files
         self._error = error
+        self._results = results
         self.searches: list[tuple[str, int]] = []
+        self.attachment_calls: list[str] = []
         self.downloaded: list[tuple[str, str]] = []
 
     async def search(self, term: str, top: int) -> list[MailMessage]:
         self.searches.append((term, top))
         if self._error is not None:
             raise self._error
-        return self._messages
+        if self._results is None:
+            return self._messages
+        return self._results.get(term, [])
 
     async def attachments(self, message_id: str) -> list[MailAttachment]:
+        self.attachment_calls.append(message_id)
         return self._attachments.get(message_id, [])
 
     async def download(self, message_id: str, attachment_id: str, max_bytes: int) -> bytes:
@@ -138,7 +144,11 @@ async def test_fetch_xml_and_pdf_are_written_with_their_digests(tmp_path: Path) 
     assert files["xml"].sha256 == hashlib.sha256(xml).hexdigest()
     assert files["pdf"].path == tmp_path / "pdf.pdf"
     assert files["pdf"].sha256 == hashlib.sha256(PDF).hexdigest()
-    assert mailbox.searches == [(SERIE, SEARCH_TOP)]
+    assert mailbox.searches == [
+        (f"{SERIE}-{NUMERO}", SEARCH_TOP),
+        (f"{SERIE}-{NUMERO:0>8}", SEARCH_TOP),
+        (SERIE, SEARCH_TOP),
+    ]
 
 
 async def test_fetch_matches_a_zero_padded_name(tmp_path: Path) -> None:
@@ -152,6 +162,64 @@ async def test_fetch_matches_a_zero_padded_name(tmp_path: Path) -> None:
 
     assert result.reason is FetchReason.OK
     assert mailbox.downloaded == [("M1", "A1")]
+
+
+async def test_fetch_finds_the_padded_name_when_the_serie_search_is_crowded(tmp_path: Path) -> None:
+    """R-5.2: SEARCH_TOP newer serie mails do not hide the mail the padded term returns."""
+    xml = _xml()
+    message = _message("M1", datetime(2026, 11, 13, 10, 0, tzinfo=UTC))
+    attachment = _attachment("A1", "F001-00000123.xml", len(xml))
+    unrelated = [
+        _message(f"U{index}", datetime(2026, 11, 14, 10, 0, tzinfo=UTC)) for index in range(SEARCH_TOP)
+    ]
+    mailbox = FakeMailbox(
+        [],
+        {"M1": [attachment]},
+        {"A1": xml},
+        results={
+            f"{SERIE}-{NUMERO}": [],
+            f"{SERIE}-{NUMERO:0>8}": [message],
+            SERIE: unrelated,
+        },
+    )
+
+    result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.OK
+    assert (tmp_path / "xml.xml").read_bytes() == xml
+
+
+async def test_fetch_reads_a_message_returned_by_two_searches_once(tmp_path: Path) -> None:
+    """R-5.2: a message returned by more than one search is read and downloaded once."""
+    xml = _xml()
+    message = _message("M1", datetime(2026, 11, 13, 10, 0, tzinfo=UTC))
+    attachment = _attachment("A1", "F001-123.xml", len(xml))
+    mailbox = FakeMailbox(
+        [],
+        {"M1": [attachment]},
+        {"A1": xml},
+        results={
+            f"{SERIE}-{NUMERO}": [message],
+            f"{SERIE}-{NUMERO:0>8}": [message],
+            SERIE: [message],
+        },
+    )
+
+    result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.OK
+    assert mailbox.attachment_calls == ["M1"]
+    assert mailbox.downloaded == [("M1", "A1")]
+
+
+async def test_fetch_with_an_eight_digit_numero_searches_twice(tmp_path: Path) -> None:
+    """R-5.2: an 8-digit numero searches the exact term once and the serie, not the padded term twice."""
+    mailbox = FakeMailbox([], {}, {})
+
+    result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice("12345678"), tmp_path)
+
+    assert result.reason is FetchReason.NOT_FOUND_YET
+    assert mailbox.searches == [(f"{SERIE}-12345678", SEARCH_TOP), (SERIE, SEARCH_TOP)]
 
 
 async def test_fetch_does_not_match_a_longer_numero(tmp_path: Path) -> None:
