@@ -164,6 +164,9 @@ MESSAGES: dict[str, str] = {
 #: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
 GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
 
+#: ``{razon_social}`` in BR-F02 and BR-S06 when the issuer's name is unknown.
+UNKNOWN_ISSUER = "este emisor"
+
 #: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
 GAP_DIGEST_LINE = "• {kind_desc} — {subject}"
 

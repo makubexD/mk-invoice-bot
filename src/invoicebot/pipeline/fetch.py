@@ -51,6 +51,7 @@ from invoicebot.rules.messages_es import (
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
     MESSAGES,
+    UNKNOWN_ISSUER,
 )
 from invoicebot.store import taught_links
 from invoicebot.store.db import Pool
@@ -343,7 +344,7 @@ async def _ask_for_portal(
     ruc_emisor = reading.value("ruc_emisor")
     if ruc_emisor is None or await taught_links.exists(conn, int(ruc_emisor)):
         return
-    razon_social = reading.value("razon_social") or "este emisor"
+    razon_social = reading.value("razon_social") or UNKNOWN_ISSUER
     text = MESSAGES[RULE_ASK_PORTAL].format(razon_social=razon_social, ruc_emisor=ruc_emisor)
     await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_ASK_PORTAL, text)
 
