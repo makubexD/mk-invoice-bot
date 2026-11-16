@@ -291,7 +291,7 @@ Files: `src/invoicebot/sinks/laptop_job.py` (new), `tests/unit/test_sinks_laptop
 
 - `job_document(job_id, invoice_id, to, subject, body, attachments: list[str], key: bytes) -> bytes`: the JSON of spec 03 (`job_id`, `invoice_id`, `to`, `subject`, `body`, `attachments`, `hmac`). The HMAC is HMAC-SHA256, hex, over the canonical JSON of every other field (`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`). `attachments` are paths relative to the invoice folder (`"Formato de reembolsos.xlsx"`, no `/` or `..`). A path that is not a plain file name raises `ValueError`.
 - `parse_receipt(data: bytes) -> Receipt`: `{"job_id", "sent_at"}` or `{"job_id", "error"}`, with the job id matching `^[0-9a-f]{32}$`, an error at most 500 characters, and the whole file under 4 KiB; anything else raises `ValueError`.
-- `vectors.json`: two synthetic jobs with key `"test-key"` and their expected HMACs, so the Pester tests in step 32 check the same bytes.
+- `vectors.json`: two synthetic jobs with key `"test-key"` and their expected HMACs, so the Pester tests in step 34 check the same bytes.
 - Tests: R-7.14 the HMAC of each vector; R-7.14 an attachment `../x.pdf` or `a/b.pdf` raises; R-7.14 a receipt with a bad job id, an oversized error or extra size raises.
 
 Test: `uv run pytest -q tests/unit/test_sinks_laptop_job.py`.
@@ -317,17 +317,39 @@ Files: `src/invoicebot/pipeline/laptop.py` (new), `src/invoicebot/sinks/onedrive
 
 Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py`.
 
-## Step 30: [No llegó] and the BR-D11 choices `[worker]`
+## Step 30: [No llegó], [Ya llegó] and the BR-D11 menu `[worker]`
 
-Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`, `tests/integration/test_pipeline_actions.py`.
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/laptop.py`, `tests/integration/test_pipeline_actions.py`.
 
-- `NOT_ARRIVED_ACTION` (valid in `DONE` and `BATCHED`) answers BR-D11 with the buttons of D109: `via_laptop` ([Por la laptop], only when the flow lists `laptop_outlook`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Every BR-D11 sender (steps 29 and 31) uses one helper, `send_not_confirmed(conn, invoice_id)`, defined here.
-- `via_laptop`: a new job through the `laptop_outlook` mode, with a `mail_jobs` row; the batch state is unchanged. `self_send`: writes the `.eml` through the dry-run mode and answers BR-D07's text, with [Ya lo envié] only when the batch is `prepared`. `arrived`: a `prepared` batch becomes `sent`, the invoice `DONE` with BR-D10 and a `folder_status` job; a `sent` batch only gets BR-D10's text. The actions need the deliver modes: pass them through the existing action dependencies (check how `handle_press` gets its context; add a `modes` argument there if there is none).
-- Tests: R-7.8 [No llegó] on BR-D13 → BR-D11 with three buttons when `laptop_outlook` is listed, two when not; R-7.8 [Ya llegó] on a `prepared` laptop batch completes it; R-7.8 [Ya llegó] on a `sent` batch changes no state; R-7.14 [Por la laptop] writes one job and changes no state; R-7.8 [Lo envío yo] on a `sent` batch sends BR-D07's text without [Ya lo envié].
+- `async def send_not_confirmed(conn, invoice_id)` in `actions.py` is the one BR-D11 sender (steps 29 and 33): BR-D11's text with the buttons of D109: `via_laptop` ([Por la laptop], only when the invoice's flow lists `laptop_outlook`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Button titles go in `messages_es.py` next to `BUTTON_NOT_ARRIVED`. `pipeline/laptop.py`'s error-receipt path calls it in place of its own BR-D11 text.
+- `NOT_ARRIVED_ACTION` (valid in `DONE` and `BATCHED`) answers with `send_not_confirmed`. `ARRIVED_ACTION` (valid in `DONE` and `BATCHED`): a `prepared` batch becomes `sent`, the invoice `DONE` with BR-D10 and a `folder_status` job, in the press's transaction; a `sent` batch only gets BR-D10's text. Both press actions touch only the database. `VIA_LAPTOP_ACTION` and `SELF_SEND_ACTION` constants are defined here; step 31 handles them.
+- Tests: R-7.8 [No llegó] on BR-D13 → BR-D11 with three buttons when `laptop_outlook` is listed, two when not; R-7.8 [Ya llegó] on a `prepared` laptop batch completes it with BR-D10 and one `folder_status` job; R-7.8 [Ya llegó] on a `sent` batch changes no state and sends BR-D10's text.
 
-Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "not_arrived or via_laptop or self_send or arrived"`.
+Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "not_arrived or arrived" && uv run pytest -q tests/integration/test_pipeline_laptop.py`.
 
-## Step 31: Overdue receipts and a stale laptop `[worker]`
+## Step 31: [Por la laptop] and [Lo envío yo] enqueue a resend job `[worker]`
+
+Files: `src/invoicebot/pipeline/steps.py`, `src/invoicebot/pipeline/actions.py`, `tests/integration/test_pipeline_actions.py`.
+
+- `steps.py`: `RESEND_LAPTOP_STEP = "resend_laptop"` and `RESEND_EML_STEP = "resend_eml"`, each with a one-line comment.
+- `VIA_LAPTOP_ACTION` and `SELF_SEND_ACTION` (valid in `DONE` and `BATCHED`) only `enqueue` their step in the press's transaction: no file, drive or mail call happens inside a press (the press runs in intake's transaction, so I/O there could outlive a rolled-back commit). No state changes and no reply; the job replies.
+- Tests: R-7.14 [Por la laptop] enqueues one `resend_laptop` job and changes no invoice or batch state; R-7.8 [Lo envío yo] enqueues one `resend_eml` job and changes no state.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "via_laptop or self_send"`.
+
+## Step 32: The resend handler `[worker]`
+
+Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_deliver.py`.
+
+- `make_resend_handler(...)` in `deliver.py`, beside `make_deliver_handler` and taking the same dependencies, returns one handler per resend step. It loads the invoice like `_load` but accepts `DONE` and `BATCHED` (not `DELIVERING`), rebuilds the delivery with `_prepare` (which reuses the saved folder and sequence, D88), and leaves the batch state alone.
+- `resend_laptop`: if the invoice's flow data already holds `resending`, a previous attempt died mid-write: drop the marker, send BR-D03 and stop (never a second job, as D89). Otherwise commit `resending` into the flow data, call the `laptop_outlook` mode, then in one transaction store the `mail_jobs` row and drop the marker. No message: the receipt answers.
+- `resend_eml`: call the `dry_run` mode and answer BR-D07's text as `_assisted` builds it, with [Ya lo envié] only when the batch is `prepared`. Rewriting the `.eml` is harmless, so no marker.
+- `app.py`: register both steps next to `DELIVER_STEP`, only when the deliver handlers exist.
+- Tests: R-7.14 `resend_laptop` on a `DONE` invoice writes one job and one `mail_jobs` row, batch unchanged; R-7.14 `resend_laptop` with `resending` already set writes no job and sends BR-D03; R-7.8 `resend_eml` on a `sent` batch writes the `.eml` and sends BR-D07's text without [Ya lo envié]; R-7.8 `resend_eml` on a `prepared` batch sends it with [Ya lo envié].
+
+Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py -k resend`.
+
+## Step 33: Overdue receipts and a stale laptop `[worker]`
 
 Files: `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_laptop.py`.
 
@@ -337,7 +359,7 @@ Files: `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/inte
 
 Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py -k "stale or overdue"`.
 
-## Step 32: Laptop agent: job checks `[worker]`
+## Step 34: Laptop agent: job checks `[worker]`
 
 Files: `scripts/laptop_agent.ps1` (new), `tests/laptop/laptop_agent.Tests.ps1` (new).
 
@@ -347,7 +369,7 @@ Files: `scripts/laptop_agent.ps1` (new), `tests/laptop/laptop_agent.Tests.ps1` (
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 33: Laptop agent: send once and write the receipt `[worker]`
+## Step 35: Laptop agent: send once and write the receipt `[worker]`
 
 Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
@@ -357,7 +379,7 @@ Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 34: Laptop agent: mirror folders by manifest id `[worker]`
+## Step 36: Laptop agent: mirror folders by manifest id `[worker]`
 
 Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
@@ -366,7 +388,7 @@ Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 35: Pester in CI, plus the runbook section `[worker:low]`
+## Step 37: Pester in CI, plus the runbook section `[worker:low]`
 
 Files: `.github/workflows/ci.yml`, `deploy/README.md`.
 
@@ -375,7 +397,7 @@ Files: `.github/workflows/ci.yml`, `deploy/README.md`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"` and `uv run pytest -q tests/unit/test_rules_parity.py` (no behavior change; the workflow is checked when the PR runs).
 
-## Step 36: Go-live import: read the folders (pure) `[worker]`
+## Step 38: Go-live import: read the folders (pure) `[worker]`
 
 Files: `src/invoicebot/importer.py` (new), `tests/unit/test_importer.py` (new).
 
@@ -385,7 +407,7 @@ Files: `src/invoicebot/importer.py` (new), `tests/unit/test_importer.py` (new).
 
 Test: `uv run pytest -q tests/unit/test_importer.py`.
 
-## Step 37: Go-live import: register the claims `[worker]`
+## Step 39: Go-live import: register the claims `[worker]`
 
 Files: `scripts/import_claims.py` (new), `src/invoicebot/importer.py`, `tests/integration/test_importer.py` (new).
 
@@ -395,7 +417,7 @@ Files: `scripts/import_claims.py` (new), `src/invoicebot/importer.py`, `tests/in
 
 Test: `uv run pytest -q tests/integration/test_importer.py`.
 
-## Step 38: Spec, example config and the live check `[inline: spec text and the owner's live-check list]`
+## Step 40: Spec, example config and the live check `[inline: spec text and the owner's live-check list]`
 
 Files: `specs/02-requirements.md`, `specs/03-design.md`, `config/example.yaml`, `docs/plan-mvp-widen-b-deliver.md`.
 
