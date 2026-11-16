@@ -16,17 +16,17 @@ import asyncio
 import logging
 import shutil
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Attachment
+from invoicebot.channels.base import Attachment, ChannelName, DownloadedMedia, MediaSource
 from invoicebot.channels.media_limits import MediaRejected
-from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
-from invoicebot.channels.whatsapp.media import DownloadedMedia, MediaChecksumMismatch, download_media
+from invoicebot.channels.whatsapp.client import WhatsAppError
+from invoicebot.channels.whatsapp.media import MediaChecksumMismatch
 from invoicebot.config.models import Config, Flow, MediaLimits
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
@@ -110,15 +110,16 @@ class _Outcome:
 def make_attach_handler(
     pool: Pool,
     cfg: Config,
-    client: WhatsAppClient,
+    media: Mapping[str, MediaSource],
     data_dir: Path,
     limits: MediaLimits,
 ) -> Handler:
     """Build the handler that attaches a stuck invoice's uploaded files (S7.5).
 
-    An invoice outside ``MANUAL_REQUIRED`` is left untouched, and so is one whose linked
-    uploads are all stored already, so a redelivered job writes nothing (D101). A missing
-    reading or flow raises, so the queue retries the job.
+    ``media`` maps a channel name to the source that downloads its uploads. An invoice
+    outside ``MANUAL_REQUIRED`` is left untouched, and so is one whose linked uploads are
+    all stored already, so a redelivered job writes nothing (D101). A missing reading, flow
+    or media source raises, so the queue retries the job.
     """
 
     async def handle(job: Job) -> None:
@@ -151,7 +152,7 @@ def make_attach_handler(
         )
         out_dir = data_dir / TMP_DIRECTORY / str(job.invoice_id) / f"{job.id}-{uuid.uuid4().hex}"
         try:
-            outcome = await _collect(inputs, client, out_dir, limits)
+            outcome = await _collect(inputs, media, out_dir, limits)
             stored = await _commit(inputs, outcome)
         except BaseException:
             # R-9.2: a failed or interrupted run leaves no partial files behind.
@@ -165,7 +166,7 @@ def make_attach_handler(
 
 async def _collect(
     inputs: _Inputs,
-    client: WhatsAppClient,
+    media: Mapping[str, MediaSource],
     out_dir: Path,
     limits: MediaLimits,
 ) -> _Outcome:
@@ -180,21 +181,28 @@ async def _collect(
                 extra={"invoice_id": inputs.job.invoice_id, "kind": upload.kind},
             )
             continue
-        media = await _download(client, upload, out_dir, limits, inputs.job.invoice_id)
-        if media is None:
+        downloaded = await _download(
+            media,
+            inputs.head.origin_channel,
+            upload,
+            out_dir,
+            limits,
+            inputs.job.invoice_id,
+        )
+        if downloaded is None:
             continue
-        rejection = await _rejection(media, upload, inputs)
+        rejection = await _rejection(downloaded, upload, inputs)
         if rejection is not None:
-            _discard(media)
+            _discard(downloaded)
             replies.append(rejection)
             continue
         kept.append(
             FileRecord(
                 kind=upload.kind,
-                local_path=str(media.path),
+                local_path=str(downloaded.path),
                 remote_ref=upload.media_ref,
-                sha256=media.sha256,
-                size=media.size,
+                sha256=downloaded.sha256,
+                size=downloaded.size,
             )
         )
         stored_kinds.append(upload.kind)
@@ -202,15 +210,23 @@ async def _collect(
 
 
 async def _download(
-    client: WhatsAppClient,
+    media: Mapping[str, MediaSource],
+    channel: ChannelName,
     upload: Attachment,
     out_dir: Path,
     limits: MediaLimits,
     invoice_id: int,
 ) -> DownloadedMedia | None:
-    """Download one upload, logging and skipping a rejected or ill-formed media ref (R-1.11)."""
+    """Download one upload, logging and skipping a rejected or ill-formed media ref (R-1.11).
+
+    A channel with no registered source raises ``LookupError``; the queue retries the job
+    and parks it after ``MAX_ATTEMPTS`` (BR-S03).
+    """
+    source = media.get(channel)
+    if source is None:
+        raise LookupError(f"no media source for channel {channel!r}")
     try:
-        return await download_media(client, upload.media_ref, upload.kind, out_dir, limits)
+        return await source.download(upload.media_ref, upload.kind, out_dir, limits)
     except (MediaRejected, ValueError) as rejected:
         logger.warning(
             "upload skipped",

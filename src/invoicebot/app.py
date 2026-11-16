@@ -22,6 +22,7 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, scopes_for
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
+from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
@@ -186,7 +187,13 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
             ),
-            ATTACH_STEP: make_attach_handler(pool, cfg, client, settings.data_dir, cfg.limits.media),
+            ATTACH_STEP: make_attach_handler(
+                pool,
+                cfg,
+                {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)},
+                settings.data_dir,
+                cfg.limits.media,
+            ),
         }
         deliver_handler = _deliver_handler(settings, cfg, directory, http, pool)
         if deliver_handler is not None:

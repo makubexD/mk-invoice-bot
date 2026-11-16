@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.channels.whatsapp.client import WhatsAppClient
+from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Brand, Config, RoutingRule, Store, StoreDirectory
@@ -681,7 +682,13 @@ async def test_manual_portal_exhausts_the_chain_then_uploads_deliver(
             graph_api_version=GRAPH_VERSION,
             token=BEARER,
         )
-        attach = make_attach_handler(db_pool, cfg, client, tmp_path, cfg.limits.media)
+        attach = make_attach_handler(
+            db_pool,
+            cfg,
+            {"whatsapp": WhatsAppMediaSource(client)},
+            tmp_path,
+            cfg.limits.media,
+        )
         await attach(_job(attach_job_id, invoice_id, ATTACH_STEP))
 
     async with db_pool.connection() as conn:

@@ -7,11 +7,14 @@ bytes, and the sender role lets the pipeline apply admin/owner permissions.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from invoicebot.config.models import MediaLimits
 
 type ChannelName = Literal["whatsapp", "telegram"]
 type SenderRole = Literal["owner", "admin", "sender"]
@@ -90,4 +93,28 @@ class Channel(Protocol):
 
     async def fetch_media(self, media_ref: str) -> Path:
         """Download media by reference and return the local path."""
+        ...
+
+
+@dataclass(frozen=True)
+class DownloadedMedia:
+    """A downloaded media file and the bytes that were written (R-1.4)."""
+
+    path: Path
+    sha256: str
+    size: int
+    mime: str
+
+
+class MediaSource(Protocol):
+    """The port a channel implements to download one upload's media (R-1.5).
+
+    Implementations write the file under ``out_dir`` and return the stored file with the
+    hash and size they wrote. They raise on failure and leave no partial file behind.
+    """
+
+    async def download(
+        self, media_ref: str, kind: AttachmentKind, out_dir: Path, limits: MediaLimits
+    ) -> DownloadedMedia:
+        """Download ``media_ref`` into ``out_dir`` and return the file, its hash and size (R-1.4)."""
         ...
