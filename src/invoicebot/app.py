@@ -43,6 +43,8 @@ from invoicebot.fetchers.email_inbox import EmailInboxFetcher
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
+from invoicebot.github.app_token import GitHubApp
+from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
@@ -56,15 +58,17 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
+from invoicebot.pipeline.gaps import issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
+from invoicebot.pipeline.outgoing import queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
 from invoicebot.pipeline.uploads import make_attach_handler
-from invoicebot.queue.outbox import OutboxSender
+from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
@@ -96,6 +100,9 @@ BOT_ACCOUNT = "bot"
 LAPTOP_ADAPTER = "laptop_outlook"
 #: The age-store secret the laptop job's HMAC is keyed with (R-7.14).
 LAPTOP_AGENT_KEY = "laptop_agent_key"
+#: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
+GITHUB_ADAPTER = "github"
+GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
@@ -233,18 +240,17 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             handlers.update(deliver.resends)
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
-        sender = OutboxSender(
-            pool,
-            {
-                WHATSAPP_ADAPTER: make_transport(
-                    client,
-                    pool,
-                    numbers=numbers,
-                    templates=channel.templates,
-                    language=channel.template_language,
-                )
-            },
-        )
+        transports = {
+            WHATSAPP_ADAPTER: make_transport(
+                client,
+                pool,
+                numbers=numbers,
+                templates=channel.templates,
+                language=channel.template_language,
+            ),
+            **_github_transports(cfg, store, http, pool),
+        }
+        sender = OutboxSender(pool, transports)
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
             "outbox": partial(_send_forever, sender),
@@ -353,6 +359,50 @@ def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] |
     root = _laptop_root(flow)
     key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
     return root, key
+
+
+def _github_transports(
+    cfg: Config, store: SecretStore, http: httpx.AsyncClient, pool: Pool
+) -> dict[str, Transport]:
+    """Return the GitHub gap transport, or none when gaps stay local (R-11.5, R-11.10).
+
+    A disabled transport reads no secret and asks the store for nothing. With it
+    enabled, the App's private key comes from the age store, so a missing one
+    stops startup (R-9.9); the hooks read the daily write budget, report an
+    opened issue and raise BR-D05's token alert.
+    """
+    github = cfg.gaps.github
+    if not github.enabled:
+        return {}
+    private_key_pem = store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).get(GITHUB_APP_PRIVATE_KEY)
+    app = GitHubApp(
+        http,
+        app_id=github.app_id,
+        installation_id=github.installation_id,
+        private_key_pem=private_key_pem,
+        timeout_s=REQUEST_TIMEOUT_SECONDS,
+    )
+    hooks = GitHubHooks(
+        writes_today=partial(writes_today, pool, cfg.owner.timezone),
+        on_issue=partial(issue_opened, pool, cfg.profiles, cfg.gaps),
+        on_token_error=partial(_alert_token_error, pool, cfg),
+    )
+    return {
+        GITHUB_ADAPTER: make_github_transport(
+            app,
+            http,
+            github.repo,
+            github.labels,
+            budget=github.daily_write_budget,
+            hooks=hooks,
+        )
+    }
+
+
+async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
+    """Queue BR-D05's rate-limited owner alert for a rejected installation token (BR-D05)."""
+    async with pool.connection() as conn, conn.transaction():
+        await queue_token_error_alert(conn, cfg.profiles, cfg.gaps.github.repo, reason)
 
 
 def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
