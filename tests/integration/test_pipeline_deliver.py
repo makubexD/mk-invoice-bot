@@ -32,7 +32,8 @@ from invoicebot.config.models import (
     StoreDirectory,
 )
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
+from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler, make_resend_handler
+from invoicebot.pipeline.steps import RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
@@ -300,12 +301,12 @@ def _config_with_bad_template(cfg: Config) -> Config:
     return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
-def _job(invoice_id: int) -> Job:
-    """Build the deliver job the handler receives."""
+def _job(invoice_id: int, step: str = DELIVER_STEP) -> Job:
+    """Build the job the handler receives."""
     return Job(
         id=1,
         invoice_id=invoice_id,
-        step=DELIVER_STEP,
+        step=step,
         attempts=0,
         crashes=0,
         lease_until=datetime.now(UTC),
@@ -329,6 +330,17 @@ def _handler(
         {mode_name: mode or DryRun(data_dir)},
         data_dir,
     )
+
+
+def _resend_handlers(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    cfg: Config,
+    drive: FakeDrive,
+    data_dir: Path,
+    modes: dict[str, Any],
+) -> dict[str, Handler]:
+    """Build the resend handlers with the given mail modes."""
+    return dict(make_resend_handler(pool, cfg, _directory(), drive, modes, data_dir))
 
 
 def _two_brand_handler(
@@ -381,6 +393,32 @@ async def _delivering_invoice(
             )
         if flow_data:
             await merge_flow_data(conn, invoice_id, flow_data)
+    return invoice_id
+
+
+async def _delivered_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    profile_id: str,
+    *,
+    state: str = "DONE",
+    batch_state: str = "sent",
+    flow_data: dict[str, Any] | None = None,
+) -> int:
+    """Create an invoice the deliver step already filed, with a saved folder and a batch."""
+    folder = f"{FOLDER_PREFIX}1_{COMERCIO}"
+    saved = {
+        "folder": folder,
+        "seq": 1,
+        "folder_path": f"/Reembolsos/{folder}",
+        "year": FECHA.year,
+        "month": FECHA.month,
+        **(flow_data or {}),
+    }
+    invoice_id = await _delivering_invoice(pool, tmp_path, profile_id, state=state, flow_data=saved)
+    async with pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, batch_state)
     return invoice_id
 
 
@@ -1064,3 +1102,159 @@ async def test_flow_without_a_folder_sink_is_a_no_op(
     assert drive.listings == []
     assert drive.created == []
     assert drive.uploads == {}
+
+
+async def test_resend_laptop_writes_one_job_and_leaves_the_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.14: [Por la laptop] on a DONE invoice writes one job and one mail_jobs row."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FakeDrive()
+    key = b"test-key"
+    handlers = _resend_handlers(
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, key)}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    job_paths = [path for path in drive.uploads if path.startswith(f"{root}/_outbox/")]
+    assert len(job_paths) == 1
+    document = json.loads(drive.uploads[job_paths[0]])
+    job = LaptopJob(
+        job_id=document["job_id"],
+        invoice_id=document["invoice_id"],
+        folder=document["folder"],
+        to=tuple(document["to"]),
+        subject=document["subject"],
+        body=document["body"],
+        attachments=tuple(document["attachments"]),
+    )
+    assert job_paths == [f"{root}/_outbox/{job.job_id}.json"]
+    assert job_hmac(job, key) == document["hmac"]
+    assert job.folder == flow_data["folder_path"].lstrip("/")
+    assert jobs == [job.job_id]
+    assert flow_data["resending"] is False
+    assert invoice == ("DONE", None)
+    assert batch_state == "sent"
+    assert outbox == []
+
+
+async def test_resend_laptop_with_a_resending_marker_asks_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.14: a resending marker means the last write died, so BR-D11 asks again and no job is written."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, flow_data={"resending": True})
+    root = next(sink.root for sink in cfg.flows[FLOW].sinks if isinstance(sink, OneDriveFolderSink))
+    drive = FakeDrive()
+    handlers = _resend_handlers(
+        db_pool, cfg, drive, tmp_path, {"laptop_outlook": LaptopOutlook(drive, root, b"test-key")}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert [path for path in drive.uploads if path.startswith(f"{root}/_outbox/")] == []
+    assert jobs == []
+    assert flow_data["resending"] is False
+    assert batch_state == "sent"
+    assert outbox == [
+        (
+            MESSAGES["BR-D11"].format(serie=SERIE, numero=NUMERO),
+            "BR-D11",
+            [
+                {"id": button_id(invoice_id, "self_send"), "title": "Lo envío yo"},
+                {"id": button_id(invoice_id, "arrived"), "title": "Ya llegó"},
+            ],
+        )
+    ]
+
+
+async def test_resend_laptop_after_a_sign_in_failure_clears_the_marker(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.14: a sign-in failure writes no job, so the marker is cleared for the next press."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="laptop_outlook")
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id)
+    handlers = _resend_handlers(
+        db_pool, cfg, FakeDrive(), tmp_path, {"laptop_outlook": RaisingMode(AuthRequired("personal"))}
+    )
+
+    await handlers[RESEND_LAPTOP_STEP](_job(invoice_id, RESEND_LAPTOP_STEP))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _mail_jobs(conn, invoice_id)
+    assert flow_data["resending"] is False
+    assert jobs == []
+
+
+async def test_resend_eml_on_a_sent_batch_writes_the_draft_without_the_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.8: [Lo envío yo] on a sent batch rewrites the .eml and answers BR-D07 with no button."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivered_invoice(db_pool, tmp_path, profile_id, batch_state="sent")
+    handlers = _resend_handlers(db_pool, cfg, FakeDrive(), tmp_path, {"dry_run": DryRun(tmp_path)})
+
+    await handlers[RESEND_EML_STEP](_job(invoice_id, RESEND_EML_STEP))
+
+    eml = tmp_path / "mail" / f"{invoice_id}.eml"
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        emls = await _eml_files(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert eml.is_file()
+    assert emls == []
+    assert invoice == ("DONE", None)
+    assert batch_state == "sent"
+    assert outbox == [
+        (MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"), "BR-D07", [])
+    ]
+
+
+async def test_resend_eml_on_a_prepared_batch_offers_ya_lo_envie(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-7.8: [Lo envío yo] on a prepared batch answers BR-D07 with [Ya lo envié]."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivered_invoice(
+        db_pool, tmp_path, profile_id, state="BATCHED", batch_state="prepared"
+    )
+    handlers = _resend_handlers(db_pool, cfg, FakeDrive(), tmp_path, {"dry_run": DryRun(tmp_path)})
+
+    await handlers[RESEND_EML_STEP](_job(invoice_id, RESEND_EML_STEP))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("BATCHED", None)
+    assert batch_state == "prepared"
+    assert outbox == [
+        (
+            MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"),
+            "BR-D07",
+            [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}],
+        )
+    ]

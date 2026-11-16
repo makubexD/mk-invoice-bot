@@ -16,6 +16,12 @@ the retry treats it as a crashed send: the batch fails, BR-D03 reports it, and t
 never resent (D89). Before the send (filing, Excel upload) a transient error is simply retried.
 A receipt mode follows the same sending-first order, then leaves the batch ``prepared`` with
 its laptop job id recorded and no message to the sender (R-7.14, D108).
+
+:func:`make_resend_handler` builds the two handlers BR-D11's buttons enqueue. Both act on
+an invoice that was already delivered, rebuild its delivery with the saved folder and
+sequence (D88) and leave its state and batch alone. ``resend_laptop`` writes a new laptop
+job, guarded by a ``resending`` marker so a crash never writes a second one; ``resend_eml``
+rewrites the draft and answers BR-D07 (R-7.8, R-7.14, D109).
 """
 
 from __future__ import annotations
@@ -24,7 +30,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -47,10 +53,10 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
-from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION
+from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
-from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
+from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, MESSAGES, modes_desc
@@ -123,6 +129,13 @@ AUTH_PROVIDER_NAME = "Microsoft"
 AUTH_PROVIDER_SLUG = "microsoft"
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
+#: The laptop mode's name, the one a flow lists as ``laptop_outlook`` (R-7.14).
+LAPTOP_OUTLOOK_MODE = "laptop_outlook"
+#: The flow-data key a laptop resend sets before its upload. ``False`` clears it, because
+#: :func:`merge_flow_data` merges and cannot delete a key (D89).
+RESENDING_KEY = "resending"
+#: The invoice states a resend job acts on: delivered, not still in flight (R-7.8, R-7.14).
+RESEND_STATES = frozenset({DONE_STATE, BATCHED_STATE})
 
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"
@@ -206,7 +219,7 @@ def make_deliver_handler(
 
     async def handle(job: Job) -> None:
         started = time.perf_counter()
-        invoice = await _load(context, job)
+        invoice = await _load(context, job, {DELIVERING_STATE})
         if invoice is None:
             return
         sinks = _sinks(invoice.flow)
@@ -217,16 +230,10 @@ def make_deliver_handler(
             )
             return
         prepared = await _prepare_values(context, invoice)
-        try:
-            delivery = await _prepare(context, invoice, sinks, prepared)
-            mode_name, mode = _mode(context.modes, sinks.mailer)
-            await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
-        except AuthRequired as required:
-            await _pending_auth(context, invoice, required.account)
+        result = await _handled(context, invoice, _deliver(context, invoice, sinks, prepared))
+        if result is None:
             return
-        except TemplateInvalid:
-            await _template_invalid(context, invoice)
-            return
+        delivery, mode_name = result
         logger.info(
             "step done",
             extra={
@@ -241,11 +248,161 @@ def make_deliver_handler(
     return handle
 
 
-async def _load(context: _Context, job: Job) -> _Invoice | None:
-    """Read the invoice's delivery inputs, or return None when it is not ``DELIVERING``."""
+def make_resend_handler(
+    pool: Pool,
+    cfg: Config,
+    directory: StoreDirectory,
+    drive: Drive,
+    modes: Mapping[str, MailMode],
+    data_dir: Path,
+) -> Mapping[str, Handler]:
+    """Build the handlers of the two BR-D11 resend steps (R-7.8, R-7.14, D109).
+
+    Both accept a ``DONE`` or ``BATCHED`` invoice, rebuild its delivery with the saved
+    folder and sequence (D88) and leave its state and batch alone. ``resend_laptop``
+    writes a new laptop job unless a ``resending`` marker shows the last write died, in
+    which case BR-D11 asks the sender again. ``resend_eml`` rewrites the draft and
+    answers BR-D07. A flow without a folder sink is left alone, as in the deliver step.
+    """
+    context = _Context(pool, cfg, directory, drive, modes, data_dir)
+    return {
+        RESEND_LAPTOP_STEP: _resend_handler(context, _resend_laptop),
+        RESEND_EML_STEP: _resend_handler(context, _resend_eml),
+    }
+
+
+def _resend_handler(
+    context: _Context,
+    run: Callable[[_Context, _Invoice, _Delivery], Awaitable[None]],
+) -> Handler:
+    """Build one resend step's handler around the action that does its work (R-7.8, R-7.14)."""
+
+    async def handle(job: Job) -> None:
+        invoice = await _load(context, job, RESEND_STATES)
+        if invoice is None:
+            return
+        sinks = _sinks(invoice.flow)
+        if sinks is None:
+            logger.info(
+                "step skipped",
+                extra={"step": job.step, "invoice_id": job.invoice_id, "reason": "no_folder_sink"},
+            )
+            return
+        prepared = await _prepare_values(context, invoice)
+        delivery = await _handled(context, invoice, _resend(context, invoice, sinks, prepared, run))
+        if delivery is None:
+            return
+        logger.info(
+            "step done",
+            extra={"step": job.step, "invoice_id": job.invoice_id, "folder_seq": delivery.seq},
+        )
+
+    return handle
+
+
+async def _deliver(
+    context: _Context,
+    invoice: _Invoice,
+    sinks: _Sinks,
+    prepared: _Values,
+) -> tuple[_Delivery, str]:
+    """Prepare the delivery and hand it to the flow's first mail mode (R-7.7)."""
+    delivery = await _prepare(context, invoice, sinks, prepared)
+    mode_name, mode = _mode(context.modes, sinks.mailer)
+    await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
+    return delivery, mode_name
+
+
+async def _resend(
+    context: _Context,
+    invoice: _Invoice,
+    sinks: _Sinks,
+    prepared: _Values,
+    run: Callable[[_Context, _Invoice, _Delivery], Awaitable[None]],
+) -> _Delivery:
+    """Rebuild the invoice's delivery and run the step's resend action (R-7.8, R-7.14)."""
+    delivery = await _prepare(context, invoice, sinks, prepared)
+    await run(context, invoice, delivery)
+    return delivery
+
+
+async def _resend_laptop(context: _Context, invoice: _Invoice, delivery: _Delivery) -> None:
+    """Write a new laptop job for the mail the sender chose to resend (R-7.14, D109).
+
+    A ``resending`` marker already in the flow data means a previous attempt died
+    mid-write: the marker is cleared and BR-D11 asks the sender again instead of
+    writing a second job (D89). Otherwise the marker is committed before the upload,
+    so a retry after a crash takes that same path, and one transaction stores the
+    ``mail_jobs`` row and clears the marker. The receipt answers; nothing is sent.
+
+    shortcut: a crash after the upload and before ``add_mail_job`` leaves an orphan
+    job file whose receipt is ignored, because its job id is unknown.
+    """
+    if invoice.flow_data.get(RESENDING_KEY) is True:
+        async with context.pool.connection() as conn, conn.transaction():
+            await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: False})
+            await send_not_confirmed(conn, invoice.job.invoice_id)
+        return
+    async with context.pool.connection() as conn, conn.transaction():
+        await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: True})
+    mode = _named_mode(context.modes, LAPTOP_OUTLOOK_MODE)
+    try:
+        job_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
+    except AuthRequired:
+        # The token is fetched before the upload, so no job was written: clear the marker so
+        # the next [Por la laptop] writes it instead of treating it as a crashed write.
+        async with context.pool.connection() as conn, conn.transaction():
+            await merge_flow_data(conn, delivery.invoice_id, {RESENDING_KEY: False})
+        raise
+    if job_id is None:
+        raise RuntimeError("a receipt mail mode returned no job id")
+    async with context.pool.connection() as conn, conn.transaction():
+        await add_mail_job(conn, job_id, delivery.invoice_id)
+        await merge_flow_data(conn, delivery.invoice_id, {RESENDING_KEY: False})
+
+
+async def _resend_eml(context: _Context, _invoice: _Invoice, delivery: _Delivery) -> None:
+    """Rewrite the draft and answer BR-D07 with [Ya lo envié] only when prepared (R-7.8, D109).
+
+    Rewriting the ``.eml`` is harmless, so this step keeps no marker and changes no
+    invoice or batch state; a ``prepared`` batch keeps its button, a ``sent`` one has
+    nothing left to confirm.
+    """
+    mode = _named_mode(context.modes, DRY_RUN_MODE)
+    eml_path = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
+    if eml_path is None:
+        raise RuntimeError("an assisted mail mode returned no .eml path")
+    if not Path(eml_path).is_relative_to(context.data_dir):
+        raise RuntimeError("an assisted mail mode wrote outside the data directory")
+    text, button = _draft_reply(delivery)
+    async with context.pool.connection() as conn, conn.transaction():
+        prepared = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
+        await _notify(
+            conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button] if prepared else []
+        )
+
+
+async def _handled[T](context: _Context, invoice: _Invoice, work: Awaitable[T]) -> T | None:
+    """Await ``work``, parking or manually filing the invoice on its two known failures.
+
+    A sign-in failure leaves the invoice ``PENDING_AUTH`` with BR-D01 and a bad Excel
+    template leaves it ``MANUAL_REQUIRED`` with BR-D02. Those handlers act only on a
+    ``DELIVERING`` invoice, so a resend merely stops (R-7.9, R-7.10).
+    """
+    try:
+        return await work
+    except AuthRequired as required:
+        await _pending_auth(context, invoice, required.account)
+    except TemplateInvalid:
+        await _template_invalid(context, invoice)
+    return None
+
+
+async def _load(context: _Context, job: Job, states: Collection[str]) -> _Invoice | None:
+    """Read the invoice's delivery inputs, or return None when its state is not in ``states``."""
     async with context.pool.connection() as conn:
         head = await load_invoice_head(conn, job.invoice_id)
-        if head is None or head.state != DELIVERING_STATE:
+        if head is None or head.state not in states:
             return None
         reading = await load_reading(conn, job.invoice_id)
         flow_name = await load_flow(conn, job.invoice_id)
@@ -384,10 +541,15 @@ async def _prepare(context: _Context, invoice: _Invoice, sinks: _Sinks, prepared
 def _mode(modes: Mapping[str, MailMode], mailer: MailerSink) -> tuple[str, MailMode]:
     """Return the flow's first configured mail mode (R-7.7)."""
     name = mailer.modes[0]
+    return name, _named_mode(modes, name)
+
+
+def _named_mode(modes: Mapping[str, MailMode], name: str) -> MailMode:
+    """Return the configured mode called ``name``, or raise when the build lacks it."""
     mode = modes.get(name)
     if mode is None:
         raise RuntimeError(f"mail mode {name!r} is not configured")
-    return name, mode
+    return mode
 
 
 async def _assisted(context: _Context, delivery: _Delivery, _prepared: _Values, mode: MailMode) -> None:
@@ -399,8 +561,7 @@ async def _assisted(context: _Context, delivery: _Delivery, _prepared: _Values, 
     if not eml.is_relative_to(context.data_dir):
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     data = await _read_bytes(eml)
-    text = MESSAGES[RULE_BATCHED].format(folder=delivery.folder, modes_desc=modes_desc([DRY_RUN_MODE]))
-    button = Button(id=button_id(delivery.invoice_id, SENT_ACTION), title=BUTTON_SENT)
+    text, button = _draft_reply(delivery)
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
             return
@@ -419,6 +580,13 @@ async def _assisted(context: _Context, delivery: _Delivery, _prepared: _Values, 
         )
         await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
         await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
+
+
+def _draft_reply(delivery: _Delivery) -> tuple[str, Button]:
+    """Return BR-D07's text and its [Ya lo envié] button for a ready draft (R-8.1)."""
+    text = MESSAGES[RULE_BATCHED].format(folder=delivery.folder, modes_desc=modes_desc([DRY_RUN_MODE]))
+    button = Button(id=button_id(delivery.invoice_id, SENT_ACTION), title=BUTTON_SENT)
+    return text, button
 
 
 async def _automatic(

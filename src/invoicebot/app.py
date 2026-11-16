@@ -45,7 +45,7 @@ from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.pipeline.commands import PaymentFlow
-from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
+from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler, make_resend_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -207,9 +207,10 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         }
         deliver_handlers = _deliver_handlers(settings, cfg, directory, http, pool, store)
         if deliver_handlers is not None:
-            deliver_handler, folder_status_handler = deliver_handlers
+            deliver_handler, folder_status_handler, resend_handlers = deliver_handlers
             handlers[DELIVER_STEP] = deliver_handler
             handlers[FOLDER_STATUS_STEP] = folder_status_handler
+            handlers.update(resend_handlers)
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         sender = OutboxSender(
@@ -278,14 +279,14 @@ def _deliver_handlers(
     http: httpx.AsyncClient,
     pool: Pool,
     store: SecretStore,
-) -> tuple[Handler, Handler] | None:
-    """Build flow B's deliver and folder_status handlers, or None without a OneDrive sink (R-7.1, R-7.11).
+) -> tuple[Handler, Handler, Mapping[str, Handler]] | None:
+    """Build flow B's deliver, folder_status and resend handlers, or None without OneDrive (R-7.1, D109).
 
     The provider only reads the age identity here; nothing signs in or calls Graph until
-    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Both handlers
-    share one drive, so the folder the delivery filed is the one folder_status moves. A
-    flow that lists ``laptop_outlook`` needs its agent key, so a missing one stops startup
-    (R-7.14).
+    the first delivery, where a missing cache surfaces as BR-D01 (R-7.9). Every handler
+    shares one drive and one mode mapping, so the folder the delivery filed is the one
+    folder_status moves and a resend reuses. A flow that lists ``laptop_outlook`` needs
+    its agent key, so a missing one stops startup (R-7.14).
     """
     if not any(isinstance(sink, OneDriveFolderSink) for flow in cfg.flows.values() for sink in flow.sinks):
         return None
@@ -299,6 +300,7 @@ def _deliver_handlers(
     return (
         make_deliver_handler(pool, cfg, directory, drive, modes, settings.data_dir),
         make_folder_status_handler(pool, cfg, drive),
+        make_resend_handler(pool, cfg, directory, drive, modes, settings.data_dir),
     )
 
 
