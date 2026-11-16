@@ -407,6 +407,16 @@ Files: `scripts/laptop_agent.ps1`, `src/invoicebot/sinks/laptop_job.py`, `tests/
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop" && uv run pytest -q tests/unit/test_laptop_job.py`.
 
+## Step 40: Laptop agent: exact key set and job expiry, PowerShell side `[worker]`
+
+Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
+
+- Part B of step 39 (the bot side is committed: jobs sign `type: "job"` and `created_at` as `yyyy-MM-ddTHH:mm:ssZ` UTC, receipts need a signed `type: "receipt"`, `tests/laptop/vectors.json` is regenerated).
+- `Test-JobFile` accepts only the job's exact key set (`type`, `created_at`, `job_id`, `invoice_id`, `folder`, `to`, `subject`, `body`, `attachments`, `hmac`), refuses a `type` other than `job`, and refuses a `created_at` older than `$MaxJobAgeDays = 7` (an unparsable one too). The receipt writer adds `type = "receipt"` to the signed payload.
+- Tests: R-7.14 the vectors verify; a receipt renamed into `_outbox/` is refused; a job with an extra key is refused; an 8-day-old job is refused and not sent; a fresh job passes; a written receipt carries `type` and verifies against the Python side.
+
+Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
+
 ## Deferred: live check
 
 Run once S0.10, the `age` key pair and the OneDrive backup folder exist. Not a step of this plan, so the phase finishes without it; the roadmap tracks it. The private key and the App key stay off the repo.
