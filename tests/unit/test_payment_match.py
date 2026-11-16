@@ -1,12 +1,19 @@
 """Unit tests for the pure payment matcher (R-7.12, R-7.13, D107)."""
 
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
 
-from invoicebot.pipeline.payment_match import Candidate, claimed_cents, match_sets
+from invoicebot.pipeline.payment_match import (
+    Candidate,
+    PagadoAmount,
+    PagadoIds,
+    claimed_cents,
+    match_sets,
+    parse_pagado,
+)
 
 
 def _candidate(invoice_id: int, day: int, claimed_cents: int) -> Candidate:
@@ -87,3 +94,40 @@ def test_match_sets_prunes_twenty_candidates_quickly() -> None:
 def test_claimed_cents_caps_and_converts_to_cents(total: Decimal, cap: Decimal | None, expected: int) -> None:
     """R-7.13: the claimed amount is min(total, cap), converted to cents."""
     assert claimed_cents(total, cap) == expected
+
+
+@pytest.mark.parametrize(
+    "arg",
+    ["15/12 144.60", "15/12 144,6", "15/12 S/ 144.60", "15/12 S/144.60"],
+)
+def test_parse_pagado_reads_the_amount(arg: str) -> None:
+    """R-7.12: an amount with '.' or ',' and an optional 'S/' parses to the same value."""
+    assert parse_pagado(arg, date(2026, 12, 20)) == PagadoAmount(date(2026, 12, 15), Decimal("144.60"))
+
+
+def test_parse_pagado_reads_the_named_ids() -> None:
+    """R-7.12: 'dd/mm #id #id' parses to the ids in the order given."""
+    assert parse_pagado("15/12 #12 #14", date(2026, 12, 20)) == PagadoIds(date(2026, 12, 15), (12, 14))
+
+
+def test_parse_pagado_falls_back_to_last_year() -> None:
+    """R-7.12: a dd/mm after today belongs to the year before."""
+    assert parse_pagado("15/12 50", date(2026, 1, 10)) == PagadoAmount(date(2025, 12, 15), Decimal("50"))
+
+
+@pytest.mark.parametrize(
+    "arg",
+    [
+        "31/02 10",
+        "15/12 0",
+        "15/12",
+        "hola",
+        "15/12 12345678901",
+        "15/12 #1234567890",
+        "15/12 #",
+        " ".join(f"#{index}" for index in range(21)),
+    ],
+)
+def test_parse_pagado_rejects_bad_arguments(arg: str) -> None:
+    """R-7.12: an impossible date, a non-positive amount, a missing amount or too many ids is refused."""
+    assert parse_pagado(arg, date(2026, 12, 20)) is None
