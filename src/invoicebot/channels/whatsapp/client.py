@@ -22,6 +22,7 @@ REQUEST_TIMEOUT_SECONDS = 30.0
 WINDOW_EXPIRED_CODE = 131047
 ALLOWED_MEDIA_HOST_SUFFIXES = (".facebook.com", ".fbcdn.net", ".whatsapp.net", ".fbsbx.com")
 NOT_SENT_STATUS = 0  # the status of an error raised before any request
+MESSAGE_ID_MAX_CHARS = 256
 _MEDIA_ID_PATTERN = r"[0-9A-Za-z_-]{1,128}"
 
 
@@ -91,7 +92,11 @@ def _error_for(response: httpx.Response) -> WhatsAppError:
 
 
 def _sent_message_id(body: object) -> str | None:
-    """Return ``messages[0].id`` from a send answer, or None when it is absent."""
+    """Return ``messages[0].id`` from a send answer, or None when it is absent or unusable.
+
+    Meta's answer is untrusted input, so an id that is not a non-empty string of
+    at most ``MESSAGE_ID_MAX_CHARS`` characters counts as missing.
+    """
     if not isinstance(body, dict):
         return None
     messages = body.get("messages")
@@ -101,7 +106,9 @@ def _sent_message_id(body: object) -> str | None:
     if not isinstance(first, dict):
         return None
     message_id = first.get("id")
-    return message_id if isinstance(message_id, str) and message_id else None
+    if not isinstance(message_id, str) or not 0 < len(message_id) <= MESSAGE_ID_MAX_CHARS:
+        return None
+    return message_id
 
 
 def _media_info(body: object) -> MediaInfo | None:
@@ -152,11 +159,13 @@ class WhatsAppClient:
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self._token}"}
 
-    async def send(self, payload: dict[str, Any]) -> str:
+    async def send(self, payload: dict[str, Any]) -> str | None:
         """POST a message payload and return Meta's message id (R-3.2).
 
-        Raises ``WindowExpired`` when Meta reports the closed 24-hour window and
-        ``WhatsAppError`` for any other failure or a missing message id.
+        Returns None when Meta's answer carries no usable id: the message was
+        accepted, so the caller must not treat it as a failure. Raises
+        ``WindowExpired`` when Meta reports the closed 24-hour window and
+        ``WhatsAppError`` for any other failure.
         """
         response = await self._http.post(
             f"{self._base_url}/{self._phone_number_id}/messages",
@@ -166,10 +175,7 @@ class WhatsAppClient:
         )
         if not response.is_success:
             raise _error_for(response)
-        message_id = _sent_message_id(_json_body(response))
-        if message_id is None:
-            raise WhatsAppError(status=response.status_code)
-        return message_id
+        return _sent_message_id(_json_body(response))
 
     async def media_info(self, media_id: str) -> MediaInfo:
         """GET a media item's URL and integrity metadata (R-1.4).

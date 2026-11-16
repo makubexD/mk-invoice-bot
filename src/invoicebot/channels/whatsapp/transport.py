@@ -11,6 +11,7 @@ across the HTTP call.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
 
@@ -28,6 +29,8 @@ from invoicebot.queue.outbox import OutboxRow, PermanentSendError, Transport
 from invoicebot.rules.messages_es import LIST_BUTTON
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import window_open
+
+logger = logging.getLogger(__name__)
 
 #: Meta error codes no retry can fix: invalid parameter, parameter value invalid,
 #: message undeliverable, unsupported message type.
@@ -70,9 +73,13 @@ def make_transport(
     templates: ChannelTemplates,
     language: str,
 ) -> Transport:
-    """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4)."""
+    """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4).
 
-    async def transport(row: OutboxRow) -> None:
+    The returned id is Meta's message id, or None when Meta's answer carried
+    none, which the outbox stores as the row's ``channel_message_id`` (D102).
+    """
+
+    async def transport(row: OutboxRow) -> str | None:
         msg = OutboundMessage.model_validate(row.payload)
         try:
             to = numbers[row.to]
@@ -80,27 +87,37 @@ def make_transport(
             raise PermanentSendError(f"no WhatsApp number for {row.to}") from exc
         if await _recipient_window_open(pool, msg, row.to):
             try:
-                await _send(client, _free_form_payload(to, msg))
-                return
+                message_id = await _send(client, _free_form_payload(to, msg))
+                return _channel_message_id(row, message_id)
             except WindowExpired:
                 pass
         try:
             name = _template_name(templates, msg)
         except TemplateMissing as exc:
             raise PermanentSendError(str(exc)) from exc
-        await _send(client, template_payload(to, name, language, [_template_parameter(msg.text)]))
+        message_id = await _send(
+            client, template_payload(to, name, language, [_template_parameter(msg.text)])
+        )
+        return _channel_message_id(row, message_id)
 
     return transport
 
 
-async def _send(client: WhatsAppClient, payload: dict[str, Any]) -> None:
-    """Send one payload, making a Meta code that no retry can fix permanent (R-11.5)."""
+async def _send(client: WhatsAppClient, payload: dict[str, Any]) -> str | None:
+    """Send one payload and return Meta's message id, making a permanent code fail at once (R-11.5)."""
     try:
-        await client.send(payload)
+        return await client.send(payload)
     except WhatsAppError as exc:
         if exc.code in PERMANENT_META_CODES:
             raise PermanentSendError(str(exc)) from exc
         raise
+
+
+def _channel_message_id(row: OutboxRow, message_id: str | None) -> str | None:
+    """Return the delivered row's message id, warning with the row id only when there is none."""
+    if message_id is None:
+        logger.warning("outbox row %d was delivered without a channel message id", row.id)
+    return message_id
 
 
 async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: str) -> bool:
