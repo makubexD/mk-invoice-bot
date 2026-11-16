@@ -1,0 +1,33 @@
+{
+  "key": "test-key",
+  "jobs": [
+    {
+      "attachments": [
+        "Formato de reembolsos.xlsx",
+        "F001-123.pdf"
+      ],
+      "body": "Hola, adjunto el reembolso año 2026.",
+      "hmac": "772066253a58597a943ddce4f75a2dd7f7fcaf4f92dcd74b791112557cfe75eb",
+      "invoice_id": 1,
+      "job_id": "0123456789abcdef0123456789abcdef",
+      "subject": "Support release 0001",
+      "to": [
+        "hr@example.com"
+      ]
+    },
+    {
+      "attachments": [
+        "Formato de reembolsos.xlsx",
+        "F001-124.pdf"
+      ],
+      "body": "Hola, adjunto los documentos.",
+      "hmac": "3e031f3698af18d906de9c55daff93a2d28fa00b39ff62c54a263aa6ad74536d",
+      "invoice_id": 2,
+      "job_id": "fedcba9876543210fedcba9876543210",
+      "subject": "Support release 0002",
+      "to": [
+        "hr@example.com"
+      ]
+    }
+  ]
+}
