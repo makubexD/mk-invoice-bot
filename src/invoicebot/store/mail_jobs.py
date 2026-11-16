@@ -65,9 +65,13 @@ async def list_open_jobs(
     stale_after: timedelta,
     confirm_timeout: timedelta,
 ) -> list[OpenMailJob]:
-    """Return every unreceipted job whose batch is still prepared, oldest first; does not commit.
+    """Return every unreceipted job, oldest first; does not commit.
 
-    The age and both thresholds are compared by the database clock (R-7.8, R-7.14).
+    A job is stale once past ``stale_after`` whatever its batch state, so a
+    resend on a batch already ``sent`` still gets BR-D12 (D109). It is overdue
+    once past ``confirm_timeout`` only while its batch is still ``prepared``,
+    because BR-D11 asks how a prepared batch went out (R-7.8, R-7.14). The age
+    and both thresholds are compared by the database clock.
     """
     cur = await conn.execute(
         """
@@ -75,13 +79,12 @@ async def list_open_jobs(
                m.invoice_id,
                floor(extract(epoch FROM now() - m.created_at) / 3600)::int,
                m.created_at < now() - %s,
-               m.created_at < now() - %s
+               m.created_at < now() - %s AND b.state = 'prepared'
         FROM mail_jobs AS m
         JOIN invoices AS i ON i.id = m.invoice_id
         JOIN batches AS b ON b.id = i.batch_id
         WHERE m.receipt_at IS NULL
           AND m.receipt_error IS NULL
-          AND b.state = 'prepared'
         ORDER BY m.created_at
         """,
         (stale_after, confirm_timeout),

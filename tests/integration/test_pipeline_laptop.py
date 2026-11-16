@@ -575,6 +575,27 @@ async def test_a_stale_job_in_the_outbox_gets_one_br_d12(
     assert outbox == [(MESSAGES["BR-D12"].format(serie=SERIE, numero=NUMERO, hours=5), "BR-D12", [])]
 
 
+async def test_a_resend_job_on_a_sent_batch_gets_one_br_d12(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D109: a resend job on a sent batch past agent_stale_after gets BR-D12 once."""
+    profile_id = f"laptop-{uuid4().hex}"
+    job_id = uuid4().hex
+    invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
+    await _age_job(db_pool, job_id, 5)
+    async with db_pool.connection() as conn, conn.transaction():
+        batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
+        await set_batch_state(conn, batch_id, "sent")
+    drive = FakeDrive({_job_file(job_id): b"{}"})
+
+    await check_overdue(db_pool, drive, ROOT, Mail(), LAPTOP_FLOWS)
+    await check_overdue(db_pool, drive, ROOT, Mail(), LAPTOP_FLOWS)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == [(MESSAGES["BR-D12"].format(serie=SERIE, numero=NUMERO, hours=5), "BR-D12", [])]
+
+
 async def test_an_overdue_job_gets_one_br_d11(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -639,7 +660,7 @@ async def test_a_picked_up_job_gets_no_br_d12(
 async def test_a_job_whose_batch_is_sent_gets_neither_alert(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8, R-7.14: a 25 h job whose batch already went out gets neither alert."""
+    """R-7.8: a 25 h job on a sent batch whose file the agent picked up gets neither alert."""
     profile_id = f"laptop-{uuid4().hex}"
     job_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
@@ -648,7 +669,7 @@ async def test_a_job_whose_batch_is_sent_gets_neither_alert(
         batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
         await set_batch_state(conn, batch_id, "sent")
 
-    await check_overdue(db_pool, FakeDrive({_job_file(job_id): b"{}"}), ROOT, Mail(), LAPTOP_FLOWS)
+    await check_overdue(db_pool, FakeDrive(), ROOT, Mail(), LAPTOP_FLOWS)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
