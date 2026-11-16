@@ -8,7 +8,9 @@ and stores the message id the channel returned. A failure increments
 ``attempts``, stores ``last_error`` and reschedules the row with exponential
 backoff; once ``max_attempts`` is reached the row becomes ``dead`` and is
 logged. A :class:`PermanentSendError` marks the row ``dead`` at once, whatever
-the attempt count. All scheduling uses the database clock.
+the attempt count, and a :class:`SendLater` reschedules the row by the delay it
+carries without counting an attempt (R-11.10). All scheduling uses the database
+clock.
 """
 
 import logging
@@ -48,6 +50,28 @@ Transport = Callable[[OutboxRow], Awaitable[str | None]]
 
 class PermanentSendError(Exception):
     """The row can never be sent; retrying is pointless."""
+
+
+class SendLater(Exception):
+    """Reschedule the row by ``delay`` without counting an attempt (R-11.10).
+
+    A transport raises it when sending must wait rather than fail, such as a
+    daily budget or a 5xx answer, so the row never goes dead from the delay.
+    """
+
+    def __init__(self, delay: timedelta, reason: str) -> None:
+        super().__init__(reason)
+        self.delay = delay
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class _Failure:
+    """How one delivery failed and how the row is scheduled again (R-11.10)."""
+
+    error: str
+    permanent: bool = False
+    delay: timedelta | None = None
 
 
 async def add(
@@ -228,50 +252,59 @@ class OutboxSender:
                         )
                         sent += 1
                     else:
-                        error, permanent = failure
-                        await self._record_failure(conn, row, error, permanent=permanent)
+                        await self._record_failure(conn, row, failure)
 
-    async def _deliver(self, row: OutboxRow) -> tuple[str | None, tuple[str, bool] | None]:
+    async def _deliver(self, row: OutboxRow) -> tuple[str | None, _Failure | None]:
         """Call the row's transport.
 
         Return the channel's message id and no failure when the row was
-        delivered, or None and the error description with whether it is
-        permanent.
+        delivered, or None and how the send failed (R-11.10).
         """
         transport = self._transports.get(row.channel)
         if transport is None:
-            return None, (f"no transport for channel {row.channel}", False)
+            return None, _Failure(f"no transport for channel {row.channel}")
         try:
             message_id = await transport(row)
+        except SendLater as exc:
+            return None, _Failure(exc.reason, delay=exc.delay)
         except Exception as exc:  # CancelledError is a BaseException and propagates
-            return None, (describe_error(exc), isinstance(exc, PermanentSendError))
+            return None, _Failure(describe_error(exc), permanent=isinstance(exc, PermanentSendError))
         return message_id, None
 
     async def _record_failure(
         self,
         conn: AsyncConnection[Any],
         row: OutboxRow,
-        error: str,
-        *,
-        permanent: bool,
+        failure: _Failure,
     ) -> None:
         """Increment ``attempts`` and reschedule the row, or mark it dead."""
+        if failure.delay is not None:
+            await conn.execute(
+                """
+                UPDATE outbox
+                SET last_error = %(error)s,
+                    run_after = now() + make_interval(secs => %(delay)s)
+                WHERE id = %(id)s
+                """,
+                {"error": failure.error, "delay": failure.delay.total_seconds(), "id": row.id},
+            )
+            return
         attempts = row.attempts + 1
-        if permanent or attempts >= self._max_attempts:
+        if failure.permanent or attempts >= self._max_attempts:
             await conn.execute(
                 """
                 UPDATE outbox
                 SET attempts = %(attempts)s, last_error = %(error)s, state = 'dead'
                 WHERE id = %(id)s
                 """,
-                {"attempts": attempts, "error": error, "id": row.id},
+                {"attempts": attempts, "error": failure.error, "id": row.id},
             )
             logger.error(
                 "outbox row %d on channel %s is dead after %d attempts: %s",
                 row.id,
                 row.channel,
                 attempts,
-                error,
+                failure.error,
             )
             return
         await conn.execute(
@@ -284,7 +317,7 @@ class OutboxSender:
             """,
             {
                 "attempts": attempts,
-                "error": error,
+                "error": failure.error,
                 "backoff": backoff_minutes(attempts),
                 "id": row.id,
             },
