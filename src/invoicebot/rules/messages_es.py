@@ -70,6 +70,7 @@ MESSAGES: dict[str, str] = {
         'Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. '
         'Si no, responde "no sé".'
     ),
+    "BR-F02_dont_know": "Gracias. Ya avisé al administrador para agregar este portal.",
     "BR-F03": "• Portal {portal}: con fallas, ya avisé para arreglarlo",
     "BR-F04": "• Portal {portal}: captcha que no puedo resolver",
     "BR-F05": "Se venció el tiempo del captcha; sigo con otras opciones.",
@@ -144,6 +145,8 @@ MESSAGES: dict[str, str] = {
     "BR-S06_owner": (
         "🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?"
     ),
+    "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.",
+    "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
     "BR-S07": "No encontré el comprobante #{id}.",
     "BR-S08": (
         "Dejé el comprobante #{id} en pendientes porque no tuve respuesta. "
@@ -154,7 +157,12 @@ MESSAGES: dict[str, str] = {
     "BR-O02": "💾 El disco está al {pct}%.",
     "BR-O03": "🔑 El token de {channel} no funciona. Renuévalo.",
     "BR-O04": "🗄️ Falló la copia de seguridad de anoche ({reason_desc}).",
+    "GAP_admin": "🧩 Falta configurar: {kind_desc} — {subject}.{issue_line}",
+    "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
 }
+
+#: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
+GAP_DIGEST_LINE = "• {kind_desc} — {subject}"
 
 #: Spec 06 §3 ``kind_desc``: the capability each gap kind is missing, keyed by kind.
 KIND_DESC: dict[str, str] = {

@@ -46,6 +46,12 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-D03_admin": "admin_alert",
     "BR-E08_admin": "admin_alert",
     "BR-S03_admin": "admin_alert",
+    "GAP_admin": "admin_alert",
+    "GAP_DIGEST_admin": "admin_alert",
+    "BR-O02": "admin_alert",
+    "BR-O03": "admin_alert",
+    "BR-O04": "admin_alert",
+    "BR-D05": "admin_alert",
 }
 
 #: Meta caps one template body parameter at 1024 characters.
