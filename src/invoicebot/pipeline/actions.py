@@ -26,8 +26,7 @@ from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage
-from invoicebot.channels.whatsapp.payloads import ButtonPress
+from invoicebot.channels.base import ButtonPress, InboundMessage
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (

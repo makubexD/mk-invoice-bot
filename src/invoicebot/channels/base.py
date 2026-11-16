@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Literal, NamedTuple, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 type ChannelName = Literal["whatsapp", "telegram"]
 type SenderRole = Literal["owner", "admin", "sender"]
 type AttachmentKind = Literal["photo", "pdf", "xml", "xlsx", "captcha"]
+
+MENU_MAX = 9999
 
 
 class Attachment(BaseModel):
@@ -52,6 +54,15 @@ class Button(BaseModel):
 
     id: str
     title: str
+
+
+class ButtonPress(NamedTuple):
+    """The invoice, action, optional choice and its menu number a reply id carries."""
+
+    invoice_id: int
+    action: str
+    choice: int | None
+    menu: int | None
 
 
 class OutboundMessage(BaseModel):

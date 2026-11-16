@@ -22,8 +22,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Button
-from invoicebot.channels.whatsapp.payloads import MENU_MAX
+from invoicebot.channels.base import MENU_MAX, Button
 from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import check_date, doubtful_fields

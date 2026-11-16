@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from typing import Any, NamedTuple
+from typing import Any
 
-from invoicebot.channels.base import Button
+from invoicebot.channels.base import MENU_MAX, Button, ButtonPress
 
 PRODUCT = "whatsapp"
 TEXT_MAX_CHARS = 4096
@@ -24,20 +24,10 @@ BUTTON_ID_MAX_CHARS = 256
 LIST_ROWS_MAX_COUNT = 10
 LIST_ROW_TITLE_MAX_CHARS = 24
 ACTION_MAX_CHARS = 32
-MENU_MAX = 9999
 
 _MIN_LENGTH = 1
 _ACTION_PATTERN = rf"[a-z_]{{1,{ACTION_MAX_CHARS}}}"
 _BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})(?::([0-9]):([0-9]{{1,4}}))?"
-
-
-class ButtonPress(NamedTuple):
-    """The invoice, action, optional choice and its menu number a reply id carries."""
-
-    invoice_id: int
-    action: str
-    choice: int | None
-    menu: int | None
 
 
 def _check_chars(value: str, *, maximum: int, field: str) -> None:
