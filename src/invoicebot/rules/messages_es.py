@@ -156,6 +156,24 @@ MESSAGES: dict[str, str] = {
     "BR-O04": "🗄️ Falló la copia de seguridad de anoche ({reason_desc}).",
 }
 
+#: Spec 06 §3 ``kind_desc``: the capability each gap kind is missing, keyed by kind.
+KIND_DESC: dict[str, str] = {
+    "PORTAL_MISSING": "portal de descarga desconocido",
+    "PORTAL_BROKEN": "portal con fallas",
+    "TEMPLATE_INVALID": "plantilla inválida",
+    "PARSER_MISS": "no puedo leer los comprobantes de un emisor",
+    "UNROUTED_BUYER": "RUC comprador sin flujo",
+}
+
+#: Spec 06 §3 subject format of each gap kind, keyed by kind.
+KIND_SUBJECT: dict[str, str] = {
+    "PORTAL_MISSING": "RUC {ruc_emisor}",
+    "PORTAL_BROKEN": "{portal_key}",
+    "TEMPLATE_INVALID": "{flow}/{sink}",
+    "PARSER_MISS": "RUC {ruc_emisor}",
+    "UNROUTED_BUYER": "RUC {num_doc_adq}",
+}
+
 STATE_DESC: dict[str, str] = {
     "RECEIVED": "recibido",
     "EXTRACTING": "en lectura",
