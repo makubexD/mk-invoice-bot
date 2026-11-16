@@ -19,6 +19,7 @@ from invoicebot.config.loader import load_config
 from invoicebot.config.models import Brand, Config, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Flag, Reading
 from invoicebot.extract.qr_payload import INFERRED_CONFIDENCE
+from invoicebot.gaps.kinds import fingerprint
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
@@ -37,6 +38,9 @@ OWNER_RUC = "20000000001"
 WORK_RUC = "51900000000"
 UNKNOWN_BUYER_RUC = "20000000002"
 DNI_BUYER = "40382716"
+#: Buyer RUCs used only by the BR-R06 tests, each failing its check digit (synthetic).
+THRICE_BUYER_RUC = "20000000006"
+TWICE_BUYER_RUC = "20000000007"
 OWNER_FLOW = "personal_google"
 WORK_FLOW = "work_microsoft"
 FULL_PROFILE = "yo"
@@ -204,6 +208,15 @@ async def _texts(conn: AsyncConnection[Any], profile_id: str, rule_id: str | Non
     return [str(text) for (text,) in await cur.fetchall()]
 
 
+async def _gap(conn: AsyncConnection[Any], buyer: str) -> tuple[str, int, Any] | None:
+    """Return ``(kind, count, raised_at)`` of the buyer's UNROUTED_BUYER gap, if any."""
+    cur = await conn.execute(
+        "SELECT kind, count, raised_at FROM gaps WHERE fingerprint = %s",
+        (fingerprint("UNROUTED_BUYER", buyer),),
+    )
+    return await cur.fetchone()
+
+
 async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None, Any]]:
     """Return the outbox's ``(text, rule_id, buttons)`` rows for ``profile_id``, oldest first."""
     cur = await conn.execute(
@@ -296,6 +309,59 @@ async def test_unknown_buyer_is_asked_which_flow(
     assert texts == [
         f"Este comprobante está a nombre del RUC {UNKNOWN_BUYER_RUC}. ¿En qué flujo lo registro?"
     ]
+
+
+async def test_three_unrouted_invoices_raise_one_unrouted_buyer_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-R06: three unrouted invoices with one buyer RUC raise one UNROUTED_BUYER gap."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    today = await _today(db_pool)
+    invoice_ids: list[int] = []
+    for _ in range(3):
+        invoice_id = await _routing_invoice(db_pool, profile_id, _reading(today, buyer=THRICE_BUYER_RUC))
+        await _run(db_pool, cfg, invoice_id)
+        invoice_ids.append(invoice_id)
+
+    async with db_pool.connection() as conn:
+        gap = await _gap(conn, THRICE_BUYER_RUC)
+        questions = await _texts(conn, profile_id, "BR-R03")
+        admins = await _texts(conn, profile_id, "GAP_admin")
+
+    assert len(set(invoice_ids)) == 3
+    assert gap is not None
+    kind, count, raised_at = gap
+    assert kind == "UNROUTED_BUYER"
+    assert count == 3
+    assert raised_at is not None
+    assert len(questions) == 3
+    assert all(THRICE_BUYER_RUC in text for text in questions)
+    assert admins == []
+
+
+async def test_two_unrouted_invoices_do_not_raise_the_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-R06: two unrouted invoices with one buyer RUC stay below the gap's threshold."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    today = await _today(db_pool)
+    for _ in range(2):
+        invoice_id = await _routing_invoice(db_pool, profile_id, _reading(today, buyer=TWICE_BUYER_RUC))
+        await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        gap = await _gap(conn, TWICE_BUYER_RUC)
+        questions = await _texts(conn, profile_id, "BR-R03")
+        admins = await _texts(conn, profile_id, "GAP_admin")
+
+    assert gap is not None
+    _kind, count, raised_at = gap
+    assert count == 2
+    assert raised_at is None
+    assert len(questions) == 2
+    assert admins == []
 
 
 async def test_profile_without_the_flow_is_cancelled(
