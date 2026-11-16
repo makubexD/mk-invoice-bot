@@ -51,6 +51,7 @@ from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, run_backup
 from invoicebot.ops.daily import DailyTask, daily_forever
+from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
@@ -281,6 +282,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
         }
         background["daily"] = partial(daily_forever, pool, cfg.owner.timezone, daily_tasks)
+        background["selfcheck"] = partial(
+            selfcheck_forever, pool, cfg.profiles, cfg.ops.self_alerts, settings.data_dir, disk_used_pct
+        )
         if deliver is not None and deliver.laptop is not None:
             background["laptop"] = deliver.laptop
         async with _background(background):
