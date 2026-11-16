@@ -265,6 +265,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 numbers=numbers,
                 templates=channel.templates,
                 language=channel.template_language,
+                on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
             ),
             **_github_transports(cfg, store, http, pool),
         }
@@ -444,6 +445,23 @@ async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
     """Queue BR-D05's rate-limited owner alert for a rejected installation token (BR-D05)."""
     async with pool.connection() as conn, conn.transaction():
         await queue_token_error_alert(conn, cfg.profiles, cfg.gaps.github.repo, reason)
+
+
+async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
+    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
+    logger.error("channel token rejected", extra={"channel": channel})
+    # shortcut: the alert goes out through the same WhatsApp channel whose token
+    # failed, so it waits in the outbox until the token works; the ERROR log is the
+    # only immediate signal until a second channel exists.
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn,
+            cfg.profiles,
+            f"BR-O03:{channel.lower()}",
+            timedelta(hours=cfg.ops.self_alerts.realert_hours),
+            "BR-O03",
+            MESSAGES["BR-O03"].format(channel=channel),
+        )
 
 
 def _daily_tasks(
