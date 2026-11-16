@@ -64,7 +64,7 @@ TOKEN_REJECTED_CODE = 190
 #: How long a row waits for the token to be renewed before it is tried again (BR-O03).
 TOKEN_RETRY_DELAY = timedelta(minutes=15)
 #: The rule whose alert tells the owner to renew the channel token (BR-O03).
-RULE_TOKEN_REJECTED = "BR-O03"  # noqa: S105 - a rule id, not a secret
+RULE_TOKEN_REJECTED = "BR-O03"  # noqa: S105  # nosec B105  # a rule id, not a secret
 
 
 class TemplateMissing(Exception):
