@@ -77,6 +77,16 @@ QUESTION_TEXT = "¿En qué flujo lo registro?"
 FLOW = "work_microsoft"
 
 
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def drop_channel_windows(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> AsyncIterator[None]:
+    """Leave no window behind: each inbound message opens one, and later tests read them per profile."""
+    yield
+    async with db_pool.connection() as conn:
+        await conn.execute("DELETE FROM channel_windows")
+
+
 def _profile() -> str:
     """Return a profile id no other test uses."""
     return f"profile-{uuid4().hex}"
