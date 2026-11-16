@@ -94,11 +94,13 @@ async def queue_admin_alert(
     profiles: Mapping[str, Profile],
     rule_id: str,
     text: str,
+    *,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue one rule's admin alert for every admin profile on its preferred channel."""
     for profile_id, profile in profiles.items():
         if profile.admin:
-            await _notify_admin(conn, profile_id, profile, rule_id, text)
+            await _notify_admin(conn, profile_id, profile, rule_id, text, buttons=buttons)
 
 
 async def _notify_admin(
@@ -107,6 +109,8 @@ async def _notify_admin(
     profile: Profile,
     rule_id: str,
     text: str,
+    *,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue a rule's admin text for one admin profile on its preferred channel, if it has one."""
     channel = profile.preferred_channel
@@ -114,7 +118,7 @@ async def _notify_admin(
         # One unreachable admin must not undo the state change or the other alerts.
         logger.warning("admin alert skipped: no preferred_channel", extra={"rule_id": rule_id})
         return
-    await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id)
+    await queue_message(conn, Addressee(channel, profile_id), text, rule_id=rule_id, buttons=buttons)
 
 
 async def queue_rate_limited_alert(
