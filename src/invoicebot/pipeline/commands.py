@@ -21,6 +21,7 @@ from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.payments import pagado
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
@@ -30,6 +31,7 @@ from invoicebot.rules.messages_es import (
     HELP_CANCELAR,
     HELP_ESTADO,
     HELP_HEADER,
+    HELP_PAGADO,
     HELP_PENDIENTES,
     HELP_REPROCESAR,
     MESSAGES,
@@ -357,4 +359,5 @@ COMMANDS: Mapping[str, Command] = {
     "cancelar": Command(_cancelar, HELP_CANCELAR),
     "reprocesar": Command(_reprocesar, HELP_REPROCESAR),
     "pendientes": Command(_pendientes, HELP_PENDIENTES),
+    "pagado": Command(pagado, HELP_PAGADO),
 }

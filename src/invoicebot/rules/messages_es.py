@@ -341,6 +341,8 @@ BUTTON_CANCEL = "Cancelar"
 BUTTON_EDIT = "Editar"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
+#: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
+BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
 #: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
 LIST_BUTTON = "Elegir"
@@ -383,6 +385,13 @@ HELP_REPROCESAR = "/reprocesar 12: reintenta el comprobante #12 si falló"
 #: ``/pendientes``'s own line in the command list (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
+#: ``/pagado``'s own line in the command list (R-7.12).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+HELP_PAGADO = "/pagado dd/mm monto, o /pagado dd/mm #12 #14: registra un reembolso recibido"
+#: BR-P02's button label for one matching set; ``{fecha_min}`` is its oldest invoice (D107).
+PAYMENT_SET_LABEL = "{fecha_min}…: {n} facturas, {ids}"
+#: One invoice line of BR-P03's pending list (R-7.12, BR-P03).
+PAYMENT_LINE = "#{id} · {fecha} · S/ {monto}"
 #: ``/pendientes``'s answer when nothing waits on the sender (S4.8, S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_NONE = "No tienes comprobantes pendientes."
