@@ -41,6 +41,14 @@ param(
 #: The largest job file the agent reads (64 KiB, R-7.14).
 $script:MaxJobBytes = 65536
 
+#: How long a job may wait in `_outbox/` before it is too old to send (R-7.14).
+$script:MaxJobAgeDays = 7
+
+#: Every property a job file has, and no other (R-7.14).
+$script:JobKeys = [string[]] @(
+    'type', 'created_at', 'job_id', 'invoice_id', 'folder', 'to', 'subject', 'body', 'attachments', 'hmac'
+)
+
 #: A job id is 32 lowercase hex characters, the form of `uuid4().hex`.
 $script:JobIdPattern = '^[0-9a-f]{32}\z'
 
@@ -322,10 +330,12 @@ function Test-JobFile {
         The file's bytes are read once and the parsed, checked object is
         returned, so the agent sends exactly what it verified. The file must be
         under 64 KiB and valid JSON, its name must be `<job_id>.json`, its
-        HMAC must match, every recipient must be on the allowlist, `folder`
-        must be a plain relative path, and every attachment must be a plain
-        file name inside that folder. A refusal logs the job id and the reason
-        only.
+        properties must be exactly the job's key set, its `type` must be
+        `job`, its `created_at` must parse as `yyyy-MM-ddTHH:mm:ssZ` and be no
+        more than `$MaxJobAgeDays` old, its HMAC must match, every recipient
+        must be on the allowlist, `folder` must be a plain relative path, and
+        every attachment must be a plain file name inside that folder. A
+        refusal logs the job id and the reason only.
     .PARAMETER Path
         The job file in `_outbox/`.
     .PARAMETER Key
@@ -334,6 +344,9 @@ function Test-JobFile {
         The allowed recipient addresses.
     .PARAMETER Root
         The personal OneDrive root the job's `folder` is relative to (D111).
+    .PARAMETER Now
+        The current UTC time, passed in rather than read here so the tests can
+        fix the clock; the job's age is measured against it.
     #>
     [CmdletBinding()]
     param(
@@ -345,7 +358,9 @@ function Test-JobFile {
         [AllowNull()]
         [string[]] $Allowlist,
         [Parameter(Mandatory)]
-        [string] $Root
+        [string] $Root,
+        [Parameter(Mandatory)]
+        [datetime] $Now
     )
 
     $file = Get-Item -LiteralPath $Path -ErrorAction SilentlyContinue
@@ -393,6 +408,45 @@ function Test-JobFile {
     }
     if (-not [string]::Equals($file.Name, $jobId + '.json', [System.StringComparison]::Ordinal)) {
         Write-JobRefusal -JobId $jobId -Reason 'job file name does not match job id'
+        return $null
+    }
+
+    $actualKeys = [System.Collections.Generic.HashSet[string]]::new(
+        [string[]] @($job.PSObject.Properties.Name),
+        [System.StringComparer]::Ordinal
+    )
+    $keysMatch = $actualKeys.Count -eq $script:JobKeys.Count
+    foreach ($requiredKey in $script:JobKeys) {
+        if (-not $actualKeys.Contains($requiredKey)) {
+            $keysMatch = $false
+        }
+    }
+    if (-not $keysMatch) {
+        Write-JobRefusal -JobId $jobId -Reason 'job keys are not the expected set'
+        return $null
+    }
+
+    $jobType = $job.PSObject.Properties['type'].Value
+    if ($jobType -isnot [string] -or $jobType -cne 'job') {
+        Write-JobRefusal -JobId $jobId -Reason 'job type is not job'
+        return $null
+    }
+
+    $createdAtValue = $job.PSObject.Properties['created_at'].Value
+    $createdAt = [datetime]::MinValue
+    if ($createdAtValue -isnot [string] -or -not [datetime]::TryParseExact(
+            $createdAtValue,
+            'yyyy-MM-ddTHH:mm:ssZ',
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::AssumeUniversal -bor
+                [System.Globalization.DateTimeStyles]::AdjustToUniversal,
+            [ref] $createdAt
+        )) {
+        Write-JobRefusal -JobId $jobId -Reason 'created_at is invalid'
+        return $null
+    }
+    if ($Now - $createdAt -gt [timespan]::FromDays($script:MaxJobAgeDays)) {
+        Write-JobRefusal -JobId $jobId -Reason 'job is too old'
         return $null
     }
 
@@ -542,9 +596,10 @@ function Write-JobReceipt {
     .SYNOPSIS
         Write `_outbox/receipts/<job id>.json` atomically (R-7.14).
     .DESCRIPTION
-        The receipt has exactly `job_id`, `sent_at` and `hmac`, or `job_id`,
-        `error` and `hmac`, so it parses with the bot's `parse_receipt`. The
-        HMAC signs the other fields the way `Get-FieldsSignature` signs a job.
+        The receipt has exactly `job_id`, `sent_at`, `type` and `hmac`, or
+        `job_id`, `error`, `type` and `hmac`, with `type` set to `receipt`, so
+        it parses with the bot's `parse_receipt`. The HMAC signs the other
+        fields the way `Get-FieldsSignature` signs a job.
     .PARAMETER Key
         The shared secret; only the bot and the laptop agent hold it.
     #>
@@ -567,10 +622,10 @@ function Write-JobReceipt {
         New-Item -ItemType Directory -Path $ReceiptsFolder -Force | Out-Null
     }
     if ($PSBoundParameters.ContainsKey('SentAt')) {
-        $payload = [ordered] @{ job_id = $JobId; sent_at = $SentAt }
+        $payload = [ordered] @{ job_id = $JobId; sent_at = $SentAt; type = 'receipt' }
     }
     else {
-        $payload = [ordered] @{ job_id = $JobId; error = [string] $ErrorText }
+        $payload = [ordered] @{ job_id = $JobId; error = [string] $ErrorText; type = 'receipt' }
     }
     $payload['hmac'] = Get-FieldsSignature -Fields ([pscustomobject] $payload) -Key $Key
     $json = ConvertTo-Json -InputObject $payload -Compress
@@ -1059,7 +1114,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     $validJobs = [System.Collections.Generic.List[object]]::new()
     foreach ($jobFile in @(Get-ChildItem -LiteralPath $outbox -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
         $job = Test-JobFile -Path $jobFile.FullName -Key $agentKey -Allowlist $agentAllowlist `
-            -Root $OneDriveRoot
+            -Root $OneDriveRoot -Now ([DateTime]::UtcNow)
         if ($null -ne $job) {
             Write-Verbose ("job {0} is valid" -f $jobFile.BaseName)
             $folder = Join-RootPath -Root $OneDriveRoot -Relative $job.folder
