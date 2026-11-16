@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
@@ -14,10 +14,20 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Brand, Config, Portal, Store, StoreDirectory
+from invoicebot.config.models import (
+    DEFAULT_RETRY_SCHEDULE,
+    EMAIL_INBOX_FETCHER,
+    Brand,
+    Config,
+    Flow,
+    Portal,
+    Store,
+    StoreDirectory,
+)
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchedFile, Fetcher, FetchInvoice, FetchReason, FetchResult
-from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
+from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
+from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
@@ -42,6 +52,7 @@ MINUTES_55 = 55
 HOURS_5_5 = 5.5
 HOURS_6_5 = 6.5
 MINUTES_65 = 65
+MINUTES_42 = 42
 _FILE_BYTES: dict[Literal["pdf", "xml"], bytes] = {"pdf": PDF_BYTES, "xml": XML_BYTES}
 
 
@@ -68,6 +79,22 @@ def _directory() -> StoreDirectory:
         portal=PORTAL_KEY,
     )
     return StoreDirectory(stores={STORE_RUC: store}, portals={PORTAL_KEY: portal})
+
+
+def _inbox_schedule(flow: Flow, _invoice: FetchInvoice) -> tuple[timedelta, ...]:
+    """Return the app's inbox entry: the flow's inbox schedule, or the default (D65, D98)."""
+    inbox = flow.email_inbox
+    return DEFAULT_RETRY_SCHEDULE if inbox is None else inbox.retry_schedule
+
+
+def _portal_schedule(directory: StoreDirectory) -> Schedule:
+    """Return the app's portal entry over ``directory``: the store's portal schedule or the default."""
+
+    def schedule(_flow: Flow, invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        portal = portal_for(invoice.ruc_emisor, directory)
+        return DEFAULT_RETRY_SCHEDULE if portal is None else portal.retry_schedule
+
+    return schedule
 
 
 def _field(value: str) -> Field:
@@ -207,13 +234,15 @@ def _handler(
     fetcher: Fetcher,
     data_dir: Path,
 ) -> Handler:
-    """Build the fetch handler with the one-fetcher registry."""
+    """Build the fetch handler with the one-fetcher registry and the portal schedule."""
+    directory = _directory()
     return make_fetch_handler(
         pool,
         _config(),
-        _directory(),
+        directory,
         {FLOW: {"portal_registry": fetcher}},
         data_dir,
+        schedules={PORTAL_FETCHER: _portal_schedule(directory)},
     )
 
 
@@ -280,6 +309,18 @@ async def _latest_fetch_job_id(conn: AsyncConnection[Any], invoice_id: int) -> i
     row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _latest_delay(conn: AsyncConnection[Any], invoice_id: int) -> timedelta:
+    """Return the furthest fetch job's ``run_after`` relative to the database clock."""
+    cur = await conn.execute(
+        "SELECT max(run_after) - now() FROM jobs WHERE invoice_id = %s AND step = %s",
+        (invoice_id, FETCH_STEP),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    assert row[0] is not None
+    return row[0]
 
 
 async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -433,7 +474,12 @@ async def test_not_found_yet_with_an_empty_retry_schedule_schedules_at_once_and_
     portal = directory.portals[PORTAL_KEY].model_copy(update={"retry_schedule": ()})
     directory = directory.model_copy(update={"portals": {PORTAL_KEY: portal}})
     handler = make_fetch_handler(
-        db_pool, _config(), directory, {FLOW: {"portal_registry": fetcher}}, tmp_path
+        db_pool,
+        _config(),
+        directory,
+        {FLOW: {"portal_registry": fetcher}},
+        tmp_path,
+        schedules={PORTAL_FETCHER: _portal_schedule(directory)},
     )
 
     await handler(_job(invoice_id))
@@ -446,6 +492,58 @@ async def test_not_found_yet_with_an_empty_retry_schedule_schedules_at_once_and_
     assert len(jobs) == 1  # the next job is due at once, so the chain moves on
     assert abs((jobs[0] - datetime.now(UTC)).total_seconds()) < 10
     assert outbox == []
+
+
+async def test_fetcher_without_a_schedule_entry_retries_on_the_default_schedule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.2: a fetcher with no entry in ``schedules`` retries on DEFAULT_RETRY_SCHEDULE."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("made_up_fetcher",)),
+        _directory(),
+        {FLOW: {"made_up_fetcher": fetcher}},
+        tmp_path,
+        schedules={},
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+        first_delay = await _latest_delay(conn, invoice_id)
+
+    await handler(_job(invoice_id, retry_job_id))
+    async with db_pool.connection() as conn:
+        second_delay = await _latest_delay(conn, invoice_id)
+
+    assert MINUTES_55 <= first_delay.total_seconds() / 60 <= MINUTES_65
+    assert HOURS_5_5 <= second_delay.total_seconds() / 3600 <= HOURS_6_5
+
+
+async def test_schedule_entry_for_a_made_up_fetcher_sets_its_retry_delay(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-5.2: an entry for a made-up fetcher name is used for that fetcher."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("made_up_fetcher",)),
+        _directory(),
+        {FLOW: {"made_up_fetcher": fetcher}},
+        tmp_path,
+        schedules={"made_up_fetcher": lambda _flow, _invoice: (timedelta(minutes=MINUTES_42),)},
+    )
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        delay = await _latest_delay(conn, invoice_id)
+    assert abs(delay.total_seconds() - MINUTES_42 * 60) < 60
 
 
 async def test_second_not_found_yet_retries_in_6h_without_a_second_message(
@@ -713,7 +811,12 @@ async def test_inbox_second_not_found_yet_retries_in_1h(
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
     handler = make_fetch_handler(
-        db_pool, _config(("email_inbox",)), _directory(), {FLOW: {"email_inbox": fetcher}}, tmp_path
+        db_pool,
+        _config(("email_inbox",)),
+        _directory(),
+        {FLOW: {"email_inbox": fetcher}},
+        tmp_path,
+        schedules={EMAIL_INBOX_FETCHER: _inbox_schedule},
     )
     await handler(_job(invoice_id))
     async with db_pool.connection() as conn:
@@ -749,6 +852,7 @@ async def test_inbox_first_wait_says_waiting_for_mail_once(
         directory,
         {FLOW: {"portal_registry": portal, "email_inbox": inbox}},
         tmp_path,
+        schedules={EMAIL_INBOX_FETCHER: _inbox_schedule, PORTAL_FETCHER: _portal_schedule(directory)},
     )
 
     await handler(_job(invoice_id))

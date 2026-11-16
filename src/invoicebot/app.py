@@ -11,6 +11,7 @@ import os
 import signal
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from datetime import timedelta
 from functools import partial
 
 import httpx
@@ -24,6 +25,7 @@ from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAp
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
+    DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
@@ -32,7 +34,7 @@ from invoicebot.config.models import (
     WhatsAppChannel,
 )
 from invoicebot.extract.parsing_rules import load_rules
-from invoicebot.fetchers.base import Fetcher
+from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
@@ -42,9 +44,10 @@ from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.pipeline.deliver import DELIVER_STEP, make_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
-from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, make_fetch_handler
+from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP
@@ -181,6 +184,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 directory,
                 _fetch_registries(settings, cfg, directory, guarded_http, http),
                 settings.data_dir,
+                schedules=_fetch_schedules(directory),
             ),
             ATTACH_STEP: make_attach_handler(pool, cfg, client, settings.data_dir, cfg.limits.media),
         }
@@ -291,6 +295,20 @@ def _fetcher_builders(
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
         EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, graph_http),
     }
+
+
+def _fetch_schedules(directory: StoreDirectory) -> Mapping[str, Schedule]:
+    """Return each fetcher's retry schedule: its flow's inbox or its store's portal (D65, D98)."""
+
+    def inbox(flow: Flow, _invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        inbox_cfg = flow.email_inbox
+        return DEFAULT_RETRY_SCHEDULE if inbox_cfg is None else inbox_cfg.retry_schedule
+
+    def portal(_flow: Flow, invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        portal_cfg = portal_for(invoice.ruc_emisor, directory)
+        return DEFAULT_RETRY_SCHEDULE if portal_cfg is None else portal_cfg.retry_schedule
+
+    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal}
 
 
 def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:
