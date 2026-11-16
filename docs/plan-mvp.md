@@ -141,7 +141,7 @@ Each item goes into the named phase's plan.
 
 Each item goes into the `widen-b-gaps-ops` plan unless named otherwise.
 
-- **Owner decision:** payment matching windows, orders and dates candidates by `created_at` (D107). An imported claim's `created_at` is the import time, so BR-P02/BR-P03 show the import day, a claim older than 180 days still counts, and "oldest first" follows the walk order. Either match on `fecha_emision` or record it as a known limit.
+- **D107 amended (owner, 2026-11-16):** payment candidates are ordered by the invoice date (`fecha`), then id, and BR-P02/BR-P03 show invoice dates; the 180-day window stays on `created_at`, so imported old claims stay matchable. Today the code orders and dates by `created_at` (`store/payments.py` `candidates`, `Candidate.created_at`, `pipeline/payments.py` `_set_line`/`_pending_line`).
 - `laptop_agent.ps1` `Test-JobFile` does not check the job's exact key set; jobs and receipts share the key and the signing. Refuse any other key set, or sign a `type` field on both sides.
 - `laptop_agent.ps1` forgets a failed job id, and jobs carry no expiry: a job restored from the OneDrive recycle bin is sent again. Keep the ids of final error receipts, or sign a `created_at` with a maximum age.
 - `payment_match` runs the subset search on the event loop (up to about 2^20 nodes with 20 candidates). Cap the nodes visited or run it in `asyncio.to_thread`.
