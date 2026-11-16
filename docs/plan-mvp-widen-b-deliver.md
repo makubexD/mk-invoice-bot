@@ -206,18 +206,35 @@ Files: `src/invoicebot/pipeline/payment_match.py`, `tests/unit/test_payment_matc
 
 Test: `uv run pytest -q tests/unit/test_payment_match.py -k parse`.
 
-## Step 19: The `/pagado` command `[worker]`
+## Step 19: The `track_payments` flag `[worker]`
 
-Files: `src/invoicebot/config/models.py`, `tests/unit/test_config_models.py`, `src/invoicebot/pipeline/payments.py` (new), `src/invoicebot/pipeline/commands.py`, `tests/integration/test_payments.py` (new). Sent to the worker as two sub-steps (the config flag, then the command) and committed once.
+Files: `src/invoicebot/config/models.py`, `tests/unit/test_config_models.py`.
 
-- `Reimbursement` gets `track_payments: bool = False` (spec 03 §flow B). Test: R-7.12 a flow with `reimbursement: {cap: 50, track_payments: true}` loads; the default is false.
-- `async def pagado(conn, msg, arg, ctx)`, registered as `"pagado"` in `COMMANDS` with its help line. A bad argument answers the help line for `/pagado`. No profile-to-flow mapping exists, so the flow is the first configured flow whose `reimbursement.track_payments` is true; with none, `/pagado` answers its help line. Candidates are always the sender's own (`profile_id`).
-- Amount form: candidates (step 17) → `match_sets`. One set → BR-P01 with [Sí] [No]. Several → BR-P02 with one button per set (D107 label from spec 06, step 1) plus [No]. None → BR-P03 with `{invoice_lines}` of the candidates (`#id serie-numero S/ claimed`, the format of `/pendientes`). The `#id` form carries no amount (R-7.12, step 18): when every id is a candidate, the amount is the sum of their claimed amounts → BR-P01; when any id is not a candidate → BR-P03 with that sum as `{monto}`. BR-P01 and BR-P02 store a proposal first, and their buttons carry `p<proposal_id>:pay:<index>` and `p<proposal_id>:pay_no`.
-- Tests with the fake channel: R-7.12 BR-P01 for one set, with the buttons' ids; R-7.12 BR-P02 lists 2 sets, oldest first; R-7.12 BR-P03 lists the pending invoices; R-7.12 the `#id` form naming an id that is not a candidate → BR-P03; R-7.12 the `#id` form naming candidates → BR-P01 with their summed amount; R-7.12 an invoice from another profile is never a candidate; R-7.12 with no flow tracking payments `/pagado` answers its help line.
+- `Reimbursement` gets `track_payments: bool = False` (spec 03 §flow B). No profile-to-flow mapping exists, so `/pagado` uses the first configured flow whose `reimbursement.track_payments` is true.
+- Tests: R-7.12 a flow with `reimbursement: {cap: 50, track_payments: true}` loads; the default is false; an unknown key is rejected.
 
-Test: `uv run pytest -q tests/unit/test_config_models.py tests/integration/test_payments.py -k "command or track_payments"`.
+Test: `uv run pytest -q tests/unit/test_config_models.py -k track_payments`.
 
-## Step 20: Confirming a payment `[worker]`
+## Step 20: Commands see the payment flow `[worker]`
+
+Files: `src/invoicebot/pipeline/commands.py`, `src/invoicebot/pipeline/intake.py`, `src/invoicebot/api/webhook.py` (and where its deps are built in `src/invoicebot/app.py`). A pure pass-through, one concern.
+
+- `CommandContext` gets `payment_flow: PaymentFlow | None = None`, where `PaymentFlow` is a frozen dataclass `(flow_id: str, cap: Decimal | None)` in `commands.py`. `handle_inbound` and `_store_with_overrides` take `payment_flow: PaymentFlow | None = None` and pass it into the context. The webhook deps carry it, built once at startup from the first flow whose `reimbursement.track_payments` is true (None without one).
+- Tests: R-7.12 the webhook deps for a config with a tracking flow carry its id and cap; without one, None. Existing callers keep working with the default.
+
+Test: `uv run pytest -q tests/unit/test_app.py tests/integration/test_webhook.py -k payment_flow` (use the real file names).
+
+## Step 21: The `/pagado` command `[worker]`
+
+Files: `src/invoicebot/pipeline/payments.py` (new), `src/invoicebot/pipeline/commands.py` (registration only), `src/invoicebot/rules/messages_es.py` (`HELP_PAGADO`, the D107 set label), `tests/integration/test_payments.py` (new).
+
+- `async def pagado(conn, msg, arg, ctx)`, registered as `"pagado"` in `COMMANDS` with `HELP_PAGADO`. `payments.py` must not import `commands.py` at module level beyond the context types (no cycle: `commands.py` imports `pagado`); it answers through `pipeline/outgoing.queue_message`. A bad argument (`parse_pagado` is None) or `ctx.payment_flow is None` answers `HELP_PAGADO`. Candidates are always the sender's own (`profile_id`).
+- Amount form: candidates (step 17) → `match_sets`. One set → BR-P01 with [Sí] [No]. Several → BR-P02 with one button per set (D107 label from spec 06) plus [No]. None → BR-P03 with `{invoice_lines}` of the candidates (`#id serie-numero S/ claimed`, the format of `/pendientes`). The `#id` form carries no amount (R-7.12, step 18): when every id is a candidate, the amount is the sum of their claimed amounts → BR-P01; when any id is not a candidate → BR-P03 with that sum as `{monto}`. BR-P01 and BR-P02 store a proposal first, and their buttons carry `p<proposal_id>:pay:<index>` and `p<proposal_id>:pay_no`.
+- Tests with the fake channel: R-7.12 BR-P01 for one set, with the buttons' ids; R-7.12 BR-P02 lists 2 sets, oldest first; R-7.12 BR-P03 lists the pending invoices; R-7.12 the `#id` form naming an id that is not a candidate → BR-P03; R-7.12 the `#id` form naming candidates → BR-P01 with their summed amount; R-7.12 an invoice from another profile is never a candidate; R-7.12 with no payment flow `/pagado` answers its help line.
+
+Test: `uv run pytest -q tests/integration/test_payments.py -k command`.
+
+## Step 22: Confirming a payment `[worker]`
 
 Files: `src/invoicebot/pipeline/payments.py`, `src/invoicebot/pipeline/intake.py`, `tests/integration/test_payments.py`.
 
@@ -227,7 +244,7 @@ Files: `src/invoicebot/pipeline/payments.py`, `src/invoicebot/pipeline/intake.py
 
 Test: `uv run pytest -q tests/integration/test_payments.py -k press`.
 
-## Step 21: Mail config for the new modes `[worker]`
+## Step 23: Mail config for the new modes `[worker]`
 
 Files: `src/invoicebot/config/models.py`, `config/example.yaml`, `tests/unit/test_config_models.py` (use the real file name).
 
@@ -239,17 +256,17 @@ Files: `src/invoicebot/config/models.py`, `config/example.yaml`, `tests/unit/tes
 
 Test: `uv run pytest -q tests/unit/test_config_models.py`.
 
-## Step 22: `MailMode` says how it completes `[worker]`
+## Step 24: `MailMode` says how it completes `[worker]`
 
 Files: `src/invoicebot/sinks/mailer.py`, `src/invoicebot/pipeline/deliver.py`, `tests/unit/test_sinks_mailer.py`.
 
 - `MailMode` replaces `automatic: bool` with `completion: Literal["accepted", "receipt", "tap"]` and `done_rule: str` (D108). `DryRun` is `tap`/`BR-D08`, `GraphSend` is `accepted`/`BR-D10`.
-- `deliver.py` picks `_automatic` for `accepted` and `_assisted` for `tap` from a dict keyed by `completion`; `_automatic` uses the mode's `done_rule` for the invoice's rule and reply. `receipt` gets its handler in step 26; until then it is not in `mail_modes`, so no mode returns it.
+- `deliver.py` picks `_automatic` for `accepted` and `_assisted` for `tap` from a dict keyed by `completion`; `_automatic` uses the mode's `done_rule` for the invoice's rule and reply. `receipt` gets its handler in step 28; until then it is not in `mail_modes`, so no mode returns it.
 - Tests: the existing deliver and mailer tests pass unchanged; R-7.8 each built mode reports the `completion` and `done_rule` above.
 
 Test: `uv run pytest -q tests/unit/test_sinks_mailer.py tests/integration/test_pipeline_deliver.py`.
 
-## Step 23: The `inbox_rule` mode `[worker]`
+## Step 25: The `inbox_rule` mode `[worker]`
 
 Files: `src/invoicebot/sinks/mailer.py`, `src/invoicebot/app.py`, `tests/unit/test_sinks_mailer.py`.
 
@@ -259,57 +276,57 @@ Files: `src/invoicebot/sinks/mailer.py`, `src/invoicebot/app.py`, `tests/unit/te
 
 Test: `uv run pytest -q tests/unit/test_sinks_mailer.py -k inbox_rule`.
 
-## Step 24: BR-D13 with [No llegó] `[worker]`
+## Step 26: BR-D13 with [No llegó] `[worker]`
 
 Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/rules/messages_es.py`, `tests/integration/test_pipeline_deliver.py`.
 
-- When the mode's `done_rule` is BR-D13, `_notify` adds the button `button_id(invoice_id, NOT_ARRIVED_ACTION)` with title `BUTTON_NOT_ARRIVED = "No llegó"`. `NOT_ARRIVED_ACTION = "not_arrived"` lives in `pipeline/actions.py` (step 28 handles it).
+- When the mode's `done_rule` is BR-D13, `_notify` adds the button `button_id(invoice_id, NOT_ARRIVED_ACTION)` with title `BUTTON_NOT_ARRIVED = "No llegó"`. `NOT_ARRIVED_ACTION = "not_arrived"` lives in `pipeline/actions.py` (step 30 handles it).
 - Tests: R-7.8 an `inbox_rule` send Graph accepts makes the batch `sent`, the invoice `DONE` with BR-D13, leaves one `folder_status` job and offers [No llegó]; R-7.8 a `graph` send still answers BR-D10 with no button.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py -k inbox_rule`.
 
-## Step 25: The laptop job file and its HMAC (pure) `[worker]`
+## Step 27: The laptop job file and its HMAC (pure) `[worker]`
 
 Files: `src/invoicebot/sinks/laptop_job.py` (new), `tests/unit/test_sinks_laptop_job.py` (new), `tests/laptop/vectors.json` (new).
 
 - `job_document(job_id, invoice_id, to, subject, body, attachments: list[str], key: bytes) -> bytes`: the JSON of spec 03 (`job_id`, `invoice_id`, `to`, `subject`, `body`, `attachments`, `hmac`). The HMAC is HMAC-SHA256, hex, over the canonical JSON of every other field (`json.dumps(sort_keys=True, separators=(",", ":"), ensure_ascii=True)`). `attachments` are paths relative to the invoice folder (`"Formato de reembolsos.xlsx"`, no `/` or `..`). A path that is not a plain file name raises `ValueError`.
 - `parse_receipt(data: bytes) -> Receipt`: `{"job_id", "sent_at"}` or `{"job_id", "error"}`, with the job id matching `^[0-9a-f]{32}$`, an error at most 500 characters, and the whole file under 4 KiB; anything else raises `ValueError`.
-- `vectors.json`: two synthetic jobs with key `"test-key"` and their expected HMACs, so the Pester tests in step 30 check the same bytes.
+- `vectors.json`: two synthetic jobs with key `"test-key"` and their expected HMACs, so the Pester tests in step 32 check the same bytes.
 - Tests: R-7.14 the HMAC of each vector; R-7.14 an attachment `../x.pdf` or `a/b.pdf` raises; R-7.14 a receipt with a bad job id, an oversized error or extra size raises.
 
 Test: `uv run pytest -q tests/unit/test_sinks_laptop_job.py`.
 
-## Step 26: The `laptop_outlook` mode hands the email to the laptop `[worker]`
+## Step 28: The `laptop_outlook` mode hands the email to the laptop `[worker]`
 
 Files: `src/invoicebot/sinks/mailer.py`, `src/invoicebot/pipeline/deliver.py`, `tests/integration/test_pipeline_deliver.py`.
 
-- `LaptopOutlook(drive, root, key)`: `completion="receipt"`, `done_rule="BR-D10"`. `deliver(invoice_id, mail)` writes `{root}/_outbox/<job_id>.json` (job id `uuid4().hex`, built by step 25's `job_document`) with `drive.upload` and returns the job id. The attachments are the invoice folder's file names. The secret `laptop_agent_key` comes from the age store through a scoped `Secrets` view. `mail_modes` adds the mode when a flow lists it, and a missing secret is a startup error (`app.py` builds it: the step's one extra file).
+- `LaptopOutlook(drive, root, key)`: `completion="receipt"`, `done_rule="BR-D10"`. `deliver(invoice_id, mail)` writes `{root}/_outbox/<job_id>.json` (job id `uuid4().hex`, built by step 27's `job_document`) with `drive.upload` and returns the job id. The attachments are the invoice folder's file names. The secret `laptop_agent_key` comes from the age store through a scoped `Secrets` view. `mail_modes` adds the mode when a flow lists it, and a missing secret is a startup error (`app.py` builds it: the step's one extra file).
 - `deliver.py`: `completion="receipt"` maps to a new `_handed_off` path. The batch becomes `prepared`, a `mail_jobs` row is stored, the invoice is `BATCHED`, and nothing is sent to the sender yet.
 - Tests with a fake `Drive`: R-7.14 a `laptop_outlook` delivery writes one job file whose HMAC verifies with the test key, leaves the batch `prepared` and one `mail_jobs` row, and sends no message; R-7.14 a missing `laptop_agent_key` with `laptop_outlook` listed fails at startup.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py -k laptop`.
 
-## Step 27: The receipt poller `[worker]`
+## Step 29: The receipt poller `[worker]`
 
 Files: `src/invoicebot/pipeline/laptop.py` (new), `src/invoicebot/sinks/onedrive.py`, `tests/integration/test_pipeline_laptop.py` (new).
 
 - `Drive.download(path, max_bytes) -> bytes` if the port lacks it (check `sinks/base.py`): `GraphDrive` reads `/content`, refuses a body over `max_bytes` while streaming, and maps 404 to `FolderMissing`. `sinks/base.py` is the step's one extra file.
-- `async def poll_receipts(pool, drive, root)` lists `{root}/_outbox/receipts/`, downloads each receipt with a 4 KiB cap and parses it with `parse_receipt`. A known job with `sent_at` and a `prepared` batch → batch `sent`, invoice `DONE` with BR-D10, a `folder_status` job, `mail_jobs.receipt_at` set. A receipt with `error` → `receipt_error` set and BR-D11 (step 28 adds its buttons; here, the text only). An unknown or already-handled job id changes nothing. Each receipt is handled in its own transaction.
+- `async def poll_receipts(pool, drive, root)` lists `{root}/_outbox/receipts/`, downloads each receipt with a 4 KiB cap and parses it with `parse_receipt`. A known job with `sent_at` and a `prepared` batch → batch `sent`, invoice `DONE` with BR-D10, a `folder_status` job, `mail_jobs.receipt_at` set. A receipt with `error` → `receipt_error` set and BR-D11 (step 30 adds its buttons; here, the text only). An unknown or already-handled job id changes nothing. Each receipt is handled in its own transaction.
 - Tests with a fake `Drive`: R-7.8 a receipt with `sent_at` completes the batch with BR-D10 and one `folder_status` job; R-7.8 the same receipt seen again changes nothing; R-7.8 an error receipt sends BR-D11 and leaves the batch `prepared`; R-7.14 a receipt over 4 KiB is skipped and logged; R-7.14 a receipt for an unknown job id changes nothing.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py`.
 
-## Step 28: [No llegó] and the BR-D11 choices `[worker]`
+## Step 30: [No llegó] and the BR-D11 choices `[worker]`
 
 Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`, `tests/integration/test_pipeline_actions.py`.
 
-- `NOT_ARRIVED_ACTION` (valid in `DONE` and `BATCHED`) answers BR-D11 with the buttons of D109: `via_laptop` ([Por la laptop], only when the flow lists `laptop_outlook`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Every BR-D11 sender (steps 27 and 29) uses one helper, `send_not_confirmed(conn, invoice_id)`, defined here.
+- `NOT_ARRIVED_ACTION` (valid in `DONE` and `BATCHED`) answers BR-D11 with the buttons of D109: `via_laptop` ([Por la laptop], only when the flow lists `laptop_outlook`), `self_send` ([Lo envío yo]), `arrived` ([Ya llegó]). Every BR-D11 sender (steps 29 and 31) uses one helper, `send_not_confirmed(conn, invoice_id)`, defined here.
 - `via_laptop`: a new job through the `laptop_outlook` mode, with a `mail_jobs` row; the batch state is unchanged. `self_send`: writes the `.eml` through the dry-run mode and answers BR-D07's text, with [Ya lo envié] only when the batch is `prepared`. `arrived`: a `prepared` batch becomes `sent`, the invoice `DONE` with BR-D10 and a `folder_status` job; a `sent` batch only gets BR-D10's text. The actions need the deliver modes: pass them through the existing action dependencies (check how `handle_press` gets its context; add a `modes` argument there if there is none).
 - Tests: R-7.8 [No llegó] on BR-D13 → BR-D11 with three buttons when `laptop_outlook` is listed, two when not; R-7.8 [Ya llegó] on a `prepared` laptop batch completes it; R-7.8 [Ya llegó] on a `sent` batch changes no state; R-7.14 [Por la laptop] writes one job and changes no state; R-7.8 [Lo envío yo] on a `sent` batch sends BR-D07's text without [Ya lo envié].
 
 Test: `uv run pytest -q tests/integration/test_pipeline_actions.py -k "not_arrived or via_laptop or self_send or arrived"`.
 
-## Step 29: Overdue receipts and a stale laptop `[worker]`
+## Step 31: Overdue receipts and a stale laptop `[worker]`
 
 Files: `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/integration/test_pipeline_laptop.py`.
 
@@ -319,17 +336,17 @@ Files: `src/invoicebot/pipeline/laptop.py`, `src/invoicebot/app.py`, `tests/inte
 
 Test: `uv run pytest -q tests/integration/test_pipeline_laptop.py -k "stale or overdue"`.
 
-## Step 30: Laptop agent: job checks `[worker]`
+## Step 32: Laptop agent: job checks `[worker]`
 
 Files: `scripts/laptop_agent.ps1` (new), `tests/laptop/laptop_agent.Tests.ps1` (new).
 
 - The script takes `-OneDriveRoot`, `-WorkRoot`, `-KeyFile`, `-AllowlistFile` and `-DryRun`. Its functions live in the script and are dot-sourceable for tests; the main block runs only when the script is invoked, not dot-sourced.
-- `Test-JobFile $path $key $allowlist $folder` returns `$true` only when: the file is under 64 KiB and valid JSON; the HMAC over the canonical JSON (the same rule as step 25: sorted keys, no spaces, ASCII escapes) matches, compared in constant time; every `to` is on the allowlist; every attachment is a plain file name that exists inside the invoice's folder (`Resolve-Path` stays under the folder). It logs the reason for a `$false` by job id only.
+- `Test-JobFile $path $key $allowlist $folder` returns `$true` only when: the file is under 64 KiB and valid JSON; the HMAC over the canonical JSON (the same rule as step 27: sorted keys, no spaces, ASCII escapes) matches, compared in constant time; every `to` is on the allowlist; every attachment is a plain file name that exists inside the invoice's folder (`Resolve-Path` stays under the folder). It logs the reason for a `$false` by job id only.
 - Tests (Pester): R-7.14 both `tests/laptop/vectors.json` jobs verify with `test-key`; R-7.14 one changed byte → refused; R-7.14 a recipient not on the allowlist → refused; R-7.14 an attachment `..\x.pdf` or one missing from the folder → refused; R-7.14 a 70 KiB file → refused.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 31: Laptop agent: send once and write the receipt `[worker]`
+## Step 33: Laptop agent: send once and write the receipt `[worker]`
 
 Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
@@ -339,7 +356,7 @@ Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 32: Laptop agent: mirror folders by manifest id `[worker]`
+## Step 34: Laptop agent: mirror folders by manifest id `[worker]`
 
 Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
@@ -348,7 +365,7 @@ Files: `scripts/laptop_agent.ps1`, `tests/laptop/laptop_agent.Tests.ps1`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"`.
 
-## Step 33: Pester in CI, plus the runbook section `[worker:low]`
+## Step 35: Pester in CI, plus the runbook section `[worker:low]`
 
 Files: `.github/workflows/ci.yml`, `deploy/README.md`.
 
@@ -357,7 +374,7 @@ Files: `.github/workflows/ci.yml`, `deploy/README.md`.
 
 Test: `pwsh -NoProfile -c "Invoke-Pester -CI tests/laptop"` and `uv run pytest -q tests/unit/test_rules_parity.py` (no behavior change; the workflow is checked when the PR runs).
 
-## Step 34: Go-live import: read the folders (pure) `[worker]`
+## Step 36: Go-live import: read the folders (pure) `[worker]`
 
 Files: `src/invoicebot/importer.py` (new), `tests/unit/test_importer.py` (new).
 
@@ -367,7 +384,7 @@ Files: `src/invoicebot/importer.py` (new), `tests/unit/test_importer.py` (new).
 
 Test: `uv run pytest -q tests/unit/test_importer.py`.
 
-## Step 35: Go-live import: register the claims `[worker]`
+## Step 37: Go-live import: register the claims `[worker]`
 
 Files: `scripts/import_claims.py` (new), `src/invoicebot/importer.py`, `tests/integration/test_importer.py` (new).
 
@@ -377,7 +394,7 @@ Files: `scripts/import_claims.py` (new), `src/invoicebot/importer.py`, `tests/in
 
 Test: `uv run pytest -q tests/integration/test_importer.py`.
 
-## Step 36: Spec, example config and the live check `[inline: spec text and the owner's live-check list]`
+## Step 38: Spec, example config and the live check `[inline: spec text and the owner's live-check list]`
 
 Files: `specs/02-requirements.md`, `specs/03-design.md`, `config/example.yaml`, `docs/plan-mvp-widen-b-deliver.md`.
 
