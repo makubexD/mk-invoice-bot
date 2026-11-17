@@ -292,14 +292,19 @@ def _press(profile_id: str, *, approved: bool, version: int = 1) -> InboundMessa
     return _button_press(profile_id, f"t{ISSUER_RUC}v{version}:{suffix}")
 
 
-async def _insert_gap(conn: AsyncConnection[Any], *, issue_url: str | None = None) -> None:
+async def _insert_gap(
+    conn: AsyncConnection[Any],
+    *,
+    issue_url: str | None = None,
+    raised: bool = False,
+) -> None:
     """Insert the PORTAL_MISSING gap an approved taught link fills (D118)."""
     await conn.execute(
         """
-        INSERT INTO gaps (fingerprint, kind, subject, state, issue_url)
-        VALUES (%s, 'PORTAL_MISSING', %s, 'open', %s)
+        INSERT INTO gaps (fingerprint, kind, subject, state, issue_url, raised_at)
+        VALUES (%s, 'PORTAL_MISSING', %s, 'open', %s, CASE WHEN %s THEN now() END)
         """,
-        (GAP_FINGERPRINT, f"RUC {ISSUER_RUC}", issue_url),
+        (GAP_FINGERPRINT, f"RUC {ISSUER_RUC}", issue_url, raised),
     )
 
 
@@ -481,6 +486,63 @@ async def test_press_approve_sets_the_pending_issue_hint(
         rows = await _github_rows(conn)
 
     assert len(rows) == 1
+    assert rows[0]["fields"]["hint_url"] == GOOD_URL
+
+
+async def test_press_approve_while_the_issue_is_sending_queues_a_comment(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: [Aprobar] after the create_issue row was picked up queues one comment without issue_url."""
+    fields: dict[str, Any] = {
+        "kind": "PORTAL_MISSING",
+        "fingerprint": GAP_FINGERPRINT,
+        "hint_url": None,
+    }
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await _insert_gap(conn, raised=True)
+        await outbox.add(
+            conn,
+            "github",
+            GITHUB_REPO,
+            {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": fields},
+        )
+        await conn.execute(
+            """
+            UPDATE outbox SET state = 'sent'
+            WHERE channel = 'github' AND payload_json->>'op' = 'create_issue'
+            """
+        )
+        await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+        rows = await _github_rows(conn)
+
+    comments = [row for row in rows if row.get("op") == "comment"]
+    assert comments == [{"op": "comment", "fingerprint": GAP_FINGERPRINT, "hint_url": GOOD_URL}]
+
+
+async def test_press_approve_while_the_issue_row_is_pending_writes_the_hint(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: [Aprobar] while the create_issue row is pending writes the hint into it and queues no comment."""
+    fields: dict[str, Any] = {
+        "kind": "PORTAL_MISSING",
+        "fingerprint": GAP_FINGERPRINT,
+        "hint_url": None,
+    }
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await _insert_gap(conn, raised=True)
+        await outbox.add(
+            conn,
+            "github",
+            GITHUB_REPO,
+            {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": fields},
+        )
+        await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+        rows = await _github_rows(conn)
+
+    assert len(rows) == 1
+    assert rows[0]["op"] == "create_issue"
     assert rows[0]["fields"]["hint_url"] == GOOD_URL
 
 

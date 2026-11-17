@@ -116,14 +116,15 @@ async def set_pending_issue_hint(
     conn: AsyncConnection[Any],
     fingerprint: str,
     hint_url: str,
-) -> None:
+) -> int:
     """Put an approved portal link into a pending ``create_issue`` row's fields (D118).
 
     The issue does not exist yet, so the hint waits in the row the transport will send
-    and becomes part of the issue body. A fingerprint with no pending row changes
-    nothing. Does not commit.
+    and becomes part of the issue body. Returns how many rows were updated: 0 means no
+    pending row waits for this fingerprint, so the ``create_issue`` row was already
+    picked up. Does not commit.
     """
-    await conn.execute(
+    cur = await conn.execute(
         """
         UPDATE outbox
         SET payload_json = jsonb_set(payload_json, '{fields,hint_url}', to_jsonb(%s::text))
@@ -133,6 +134,7 @@ async def set_pending_issue_hint(
         """,
         (hint_url, fingerprint),
     )
+    return cur.rowcount
 
 
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
