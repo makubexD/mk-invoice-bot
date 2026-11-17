@@ -78,6 +78,57 @@ def test_example_config_has_daily_times_and_ops_defaults() -> None:
     assert cfg.ops.self_alerts.realert_hours == 6
 
 
+def test_example_config_has_pdf_and_validez_settings() -> None:
+    """R-9.6: the example config names the PDF limits and the validez API endpoints."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.limits.media.max_pdf_pages == 5
+    assert cfg.extraction.pdf_min_text_chars == 40
+    assert cfg.sunat.validez_api.enabled is False
+    assert "{client_id}" in cfg.sunat.validez_api.token_url
+    assert "{ruc}" in cfg.sunat.validez_api.api_url
+    assert cfg.sunat.validez_api.timeout_s == 10
+
+
+def test_zero_max_pdf_pages_fails(tmp_path: Path) -> None:
+    """R-2.15: limits.media.max_pdf_pages is a positive page bound, so 0 fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["limits"]["media"]["max_pdf_pages"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "limits.media.max_pdf_pages" in str(excinfo.value)
+
+
+def test_plain_http_token_url_fails(tmp_path: Path) -> None:
+    """R-4.1: the token endpoint is only called over TLS, so an http:// URL fails at load."""
+    plain_http_endpoint = "http://api-seguridad.sunat.gob.pe/v1/clientesextranet/{client_id}/oauth2/token/"
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["sunat"]["validez_api"]["token_url"] = plain_http_endpoint
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "sunat.validez_api.token_url" in str(excinfo.value)
+
+
+def test_api_url_without_the_ruc_placeholder_fails(tmp_path: Path) -> None:
+    """R-4.1: the validate URL fills the RUC, so a template without {ruc} fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["sunat"]["validez_api"]["api_url"] = (
+        "https://api.sunat.gob.pe/v1/contribuyente/validarcomprobante"
+    )
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError) as excinfo:
+        load_config(path)
+
+    assert "sunat.validez_api.api_url" in str(excinfo.value)
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
