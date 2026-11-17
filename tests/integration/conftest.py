@@ -9,6 +9,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import cv2
 import httpx
@@ -213,10 +214,11 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
     """
 
     async def run(with_qr: bool, *, printed: bool = False) -> tuple[FakeChannel, str]:
-        payload = _qr_payload(datetime.now(UTC).date())
-        printed_lines = _printed_lines(payload) if printed else ()
         profile_id = f"profile-{uuid4().hex}"
         cfg = _read_config(profile_id)
+        # The issue date is the owner's today: a UTC date is tomorrow there in the evening (BR-E03).
+        payload = _qr_payload(datetime.now(ZoneInfo(cfg.owner.timezone)).date())
+        printed_lines = _printed_lines(payload) if printed else ()
         msg = InboundMessage(
             channel="whatsapp",
             external_id=f"ext-{uuid4().hex}",
