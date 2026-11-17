@@ -29,3 +29,9 @@ def _message(rule_id: str) -> OutboundMessage:
 def test_new_admin_alert_rule_resolves_to_admin_alert(rule_id: str) -> None:
     """R-1.10: the gap and operations alerts use the approved admin_alert template."""
     assert template_slot(_message(rule_id)) == "admin_alert"
+
+
+@pytest.mark.parametrize("rule_id", ["BR-D16", "BR-D17"])
+def test_flow_a_completion_resolves_to_completion(rule_id: str) -> None:
+    """R-1.10: the flow A completion (BR-D16, BR-D17) uses the approved completion template."""
+    assert template_slot(_message(rule_id)) == "completion"
