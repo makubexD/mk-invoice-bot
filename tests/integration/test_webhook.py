@@ -158,6 +158,17 @@ def _photo_payload(sender_number: str, *, message_id: str | None = None) -> dict
     return _payload(_photo_message(sender_number, message_id=message_id))
 
 
+def _text_message(sender_number: str, *, message_id: str) -> dict[str, Any]:
+    """Return one text message with the given id from sender_number."""
+    return {
+        "from": sender_number,
+        "id": message_id,
+        "timestamp": EPOCH,
+        "type": "text",
+        "text": {"body": "hola"},
+    }
+
+
 def _statuses_payload() -> dict[str, Any]:
     """Return a delivery-status webhook, which carries no message."""
     return {
@@ -209,6 +220,17 @@ async def _counts(pool: Pool, profile_id: str) -> tuple[int, int, int, int]:
         )
         outbox = await _scalar(conn, 'SELECT count(*) FROM outbox WHERE "to" = %s', (profile_id,))
     return messages, invoices, jobs, outbox
+
+
+async def _message_ids(pool: Pool, external_ids: list[str]) -> set[str]:
+    """Return which of external_ids the messages table holds."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT external_id FROM messages WHERE channel = %s AND external_id = ANY(%s)",
+            ("whatsapp", external_ids),
+        )
+        rows = await cur.fetchall()
+    return {row[0] for row in rows}
 
 
 async def _outbox_rule_ids(pool: Pool, profile_id: str) -> list[str | None]:
@@ -377,6 +399,29 @@ async def test_one_refused_message_does_not_drop_the_rest_of_the_batch(
     assert "webhook message refused by the database" in caplog.text
     assert "bad" not in caplog.text
     assert "Traceback" not in caplog.text
+
+
+async def test_nul_byte_in_one_message_id_skips_only_that_message(db_pool: Pool) -> None:
+    """R-1.2: a batch with a NUL in one id answers 200 and stores the other two messages."""
+    sender = _sender()
+    first_id = f"wamid.{uuid4().hex}"
+    middle_id = f"wamid.{uuid4().hex}\u0000"
+    third_id = f"wamid.{uuid4().hex}"
+    body = _body(
+        _payload(
+            _text_message(sender.number, message_id=first_id),
+            _text_message(sender.number, message_id=middle_id),
+            _text_message(sender.number, message_id=third_id),
+        )
+    )
+    async with _client(_deps(db_pool, sender)) as client:
+        response = await _post(client, body)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert await _message_ids(db_pool, [first_id, third_id]) == {first_id, third_id}
+    messages, _, _, _ = await _counts(db_pool, sender.profile_id)
+    assert messages == 2
 
 
 async def test_database_operational_error_returns_503(
