@@ -278,12 +278,14 @@ Test: `uv run pytest -q tests/unit/test_browser_sol_login.py`.
 
 ## Step 25: The SOL helper entry `[worker]`
 
-Files: `src/invoicebot/fetchers/browser/sol.py` (new), `src/invoicebot/fetchers/browser/__main__.py`, `tests/unit/test_browser_sol.py` (new).
+Files: `src/invoicebot/fetchers/browser/sol.py` (new), `src/invoicebot/fetchers/browser/session.py` (new), `src/invoicebot/fetchers/browser/__main__.py`, `tests/unit/test_browser_sol.py` (new).
+
+The shared launch goes in `session.py`, not `__main__.py`: `sol.py` cannot import the package's `__main__` module cleanly. `session.py` holds the resource limits, the Chromium launch behind the guard proxy, the navigation-host record, `_guarded_result`, `_output` and `_emit`; `__main__.py` keeps the portal entry and imports them (the integration test's `from invoicebot.fetchers.browser.__main__ import _guarded_result` must keep working). The SOL entry runs as `python -m invoicebot.fetchers.browser.sol`.
 
 - Beside the portal wire format in `fetchers/browser/protocol.py`, `sol.py` defines `SolRequest(site: SunatSolSite, invoice, out_dir, max_bytes, page_timeout_ms, credentials: SolCredentials)` parsed from stdin (pydantic, `extra="forbid"`; the credentials as `SecretStr`). Reuse `__main__.py`'s launch, proxy and resource limits: make the launch part a function both entries call (no copy). `async run_sol(page, request) -> FetchResult`: `page.goto(login.url)`, `log_in` (a `False` → reason `technical`), then `form.fill_and_download(page, site.query, invoice, out_dir, max_bytes)`. `main()` emits `HelperOutput`. Nothing logs the request.
 - Tests (fake page and a fake form filler): R-5.2 a run logs in then fills the query; R-9.10 a login refused on origin returns `technical` without filling the query; R-9.16 a request whose parse fails writes no credential to stderr; the portal helper's tests still pass.
 
-Test: `uv run pytest -q tests/unit/test_browser_sol.py tests/unit/test_browser_main.py`.
+Test: `uv run pytest -q tests/unit/test_browser_sol.py tests/integration/test_browser_helper.py tests/integration/test_browser_proxy.py` (the portal helper's tests are integration tests; there is no `tests/unit/test_browser_main.py`).
 
 ## Step 26: `sunat_sol` fetcher `[worker]`
 
