@@ -9,9 +9,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from invoicebot.config.models import MediaMaxBytes, Portal
+from invoicebot.config.models import MediaMaxBytes, Portal, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
 
 
@@ -25,6 +25,29 @@ class HelperRequest(BaseModel):
     out_dir: Path
     max_bytes: MediaMaxBytes
     page_timeout_ms: int = Field(gt=0)
+
+
+class SolCredentialsIn(BaseModel):
+    """The SOL credentials as they arrive on stdin; their text form never shows them (R-9.16)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    ruc: SecretStr
+    user: SecretStr
+    password: SecretStr
+
+
+class SolRequest(BaseModel):
+    """The SOL fetch the helper performs (D82, R-9.10)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    site: SunatSolSite
+    invoice: FetchInvoice
+    out_dir: Path
+    max_bytes: MediaMaxBytes
+    page_timeout_ms: int = Field(gt=0)
+    credentials: SolCredentialsIn
 
 
 class HelperFile(BaseModel):

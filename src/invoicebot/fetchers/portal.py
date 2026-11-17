@@ -61,7 +61,7 @@ class PortalFetcher:
         output = await self._run(portal, invoice, out_dir)
         if isinstance(output, FetchResult):
             return output
-        return _result_from(output, out_dir, invoice, self._max_bytes, portal.key)
+        return result_from(output, out_dir, invoice, self._max_bytes, portal.key)
 
     def _portal_for(self, ruc: str) -> Portal | FetchResult:
         """Return the store's usable portal, or why the fetch cannot run (R-5.8, S10.10, D99)."""
@@ -94,7 +94,7 @@ class PortalFetcher:
                 stdout = await run_helper(
                     self._helper_command,
                     request.model_dump_json().encode(),
-                    _helper_env(Path(scratch)),
+                    helper_env(Path(scratch)),
                     self._helper_timeout_s,
                     MAX_HELPER_OUTPUT_BYTES,
                 )
@@ -108,7 +108,7 @@ class PortalFetcher:
             return FetchResult(FetchReason.TECHNICAL, (), portal.key)
 
 
-def _helper_env(tmp_dir: Path) -> dict[str, str]:
+def helper_env(tmp_dir: Path) -> dict[str, str]:
     """Return the helper's minimal environment, with its temp files confined to ``tmp_dir``.
 
     ``tmp_dir`` is the caller's scratch folder, removed after the run, so a killed helper
@@ -122,7 +122,7 @@ def _helper_env(tmp_dir: Path) -> dict[str, str]:
     return env
 
 
-def _result_from(
+def result_from(
     output: HelperOutput,
     out_dir: Path,
     invoice: FetchInvoice,

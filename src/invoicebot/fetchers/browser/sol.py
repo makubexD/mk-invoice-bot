@@ -15,12 +15,11 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from playwright.async_api import Page
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
-from invoicebot.config.models import MediaMaxBytes, Portal, SunatSolSite
+from invoicebot.config.models import MediaMaxBytes, Portal
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
-from invoicebot.fetchers.browser.protocol import HelperOutput
+from invoicebot.fetchers.browser.protocol import HelperOutput, SolCredentialsIn, SolRequest
 from invoicebot.fetchers.browser.session import (
     BadRequest,
     browse,
@@ -31,32 +30,11 @@ from invoicebot.fetchers.browser.session import (
 )
 from invoicebot.fetchers.browser.sol_login import SolCredentials, log_in
 
+__all__ = ["SolCredentialsIn", "SolRequest", "main", "run_sol"]
+
 logger = logging.getLogger(__name__)
 
 type Fill = Callable[[Page, Portal, FetchInvoice, Path, MediaMaxBytes], Awaitable[FetchResult]]
-
-
-class SolCredentialsIn(BaseModel):
-    """The SOL credentials as they arrive on stdin; their text form never shows them (R-9.16)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    ruc: SecretStr
-    user: SecretStr
-    password: SecretStr
-
-
-class SolRequest(BaseModel):
-    """The SOL fetch the helper performs (D82, R-9.10)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    site: SunatSolSite
-    invoice: FetchInvoice
-    out_dir: Path
-    max_bytes: MediaMaxBytes
-    page_timeout_ms: int = Field(gt=0)
-    credentials: SolCredentialsIn
 
 
 async def run_sol(page: Page, request: SolRequest, fill: Fill = fill_and_download) -> FetchResult:
