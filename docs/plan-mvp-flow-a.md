@@ -231,9 +231,9 @@ Files: `src/invoicebot/fetchers/gmail.py` (new), `tests/unit/test_fetchers_gmail
 - `GMAIL_URL = "https://gmail.googleapis.com/gmail/v1/users/me"`. `class GmailMailbox(http, tokens, account, timeout_s)` implements `Mailbox` (D135):
   - `search(term, top)`: `messages.list` with the D135 query and `maxResults=top`, then `messages.get?format=metadata` per hit for `internalDate` → `MailMessage` (newest first).
   - `attachments(message_id)`: `messages.get?format=full`, walking `payload.parts` recursively (depth capped at 10) for parts with a `filename` and `body.attachmentId` → `MailAttachment(id, name, size)`.
-  - `download(message_id, attachment_id, max_bytes)`: refuses when the listed size is above `max_bytes`; fetches, decodes base64url, and refuses a decoded body above `max_bytes`.
-  - Ids are checked against `^[A-Za-z0-9_-]{1,256}$`; failures go through `raise_google_error` and are re-raised as `MailboxError` (except `AuthRequired`).
-- Tests: R-5.2 the query holds the quoted term and the attachment filter; a term with `"` has it removed; nested parts are found; an attachment over the cap is not downloaded; base64url decodes; a 401 raises `AuthRequired`; a 500 raises `MailboxError`.
+  - `download(message_id, attachment_id, max_bytes)`: streams the response and raises `ValueError` once the raw body passes `max_bytes * 4 // 3 + _JSON_OVERHEAD_BYTES` (named constant, 4096), then decodes base64url and raises `ValueError` for a decoded body above `max_bytes`. It does not look up the listed size itself: the fetcher already checks `MailAttachment.size` before calling `download` (D135's check before fetching), and Gmail may return a different `attachmentId` on each `messages.get`, so matching by id is unreliable.
+  - Ids are checked against `^[A-Za-z0-9_-]{1,2048}$` (Gmail attachment ids are often several hundred characters); failures go through `raise_google_error` and are re-raised as `MailboxError` (except `AuthRequired`).
+- Tests: R-5.2 the query holds the quoted term and the attachment filter; a term with `"` has it removed; nested parts are found; a 600-character attachment id is accepted; a streamed body over the raw cap raises `ValueError`; a decoded body over `max_bytes` raises `ValueError`; base64url decodes; a 401 raises `AuthRequired`; a 500 raises `MailboxError`; a bad id is refused before any request.
 
 Test: `uv run pytest -q tests/unit/test_fetchers_gmail.py`.
 
