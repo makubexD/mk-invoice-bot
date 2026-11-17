@@ -16,6 +16,7 @@ from invoicebot.app import (
     GITHUB_ADAPTER,
     GITHUB_APP_PRIVATE_KEY,
     LAPTOP_AGENT_KEY,
+    _github_app,
     _github_transports,
     _laptop_root_and_key,
     _payment_flow,
@@ -152,8 +153,10 @@ def test_github_disabled_registers_no_transport_and_reads_no_secret(tmp_path: Pa
     cfg = _github_config(tmp_path, enabled=False)
     store = _RecordingStore({"other_key": "synthetic-other-value"})
 
-    transports = _github_transports(cfg, store, cast(Any, None), cast(Any, None))
+    app = _github_app(cfg, store, cast(Any, None))
+    transports = _github_transports(cfg, app, cast(Any, None), cast(Any, None))
 
+    assert app is None
     assert transports == {}
     assert store.scoped_calls == []
 
@@ -165,7 +168,7 @@ async def test_github_enabled_missing_key_fails_startup_naming_the_key(tmp_path:
 
     async with httpx.AsyncClient() as http:
         with pytest.raises(SecretMissing) as excinfo:
-            _github_transports(cfg, store, http, cast(Any, None))
+            _github_app(cfg, store, http)
 
     assert GITHUB_APP_PRIVATE_KEY in str(excinfo.value)
     assert "synthetic-other-value" not in str(excinfo.value)
@@ -177,6 +180,6 @@ async def test_github_enabled_with_key_registers_only_the_github_transport(tmp_p
     store = _loaded(tmp_path, {GITHUB_APP_PRIVATE_KEY: "test-key"})
 
     async with httpx.AsyncClient() as http:
-        transports = _github_transports(cfg, store, http, cast(Any, None))
+        transports = _github_transports(cfg, _github_app(cfg, store, http), http, cast(Any, None))
 
     assert set(transports) == {GITHUB_ADAPTER}

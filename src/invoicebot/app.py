@@ -57,8 +57,8 @@ from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
-from invoicebot.github.app_token import GitHubApp
-from invoicebot.github.transport import GitHubHooks, make_github_transport
+from invoicebot.github.app_token import GitHubApp, GitHubTokenError
+from invoicebot.github.transport import GitHubHooks, TokenSource, make_github_transport
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
@@ -300,6 +300,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
+        github_app = _github_app(cfg, store, http)
         transports = {
             WHATSAPP_ADAPTER: make_transport(
                 client,
@@ -309,7 +310,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 language=channel.template_language,
                 on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
             ),
-            **_github_transports(cfg, store, http, pool),
+            **_github_transports(cfg, github_app, http, pool),
         }
         sender = OutboxSender(pool, transports)
         drive = _personal_drive(settings, cfg, http)
@@ -318,6 +319,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             partial(_run_backup, settings, cfg, pool, drive),
             partial(_run_retention, pool, cfg),
             partial(daily_digest, pool, cfg.profiles, cfg.gaps),
+            None if github_app is None else partial(_github_health, github_app, pool, cfg),
         )
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
@@ -587,27 +589,36 @@ def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] |
     return root, key
 
 
-def _github_transports(
-    cfg: Config, store: SecretStore, http: httpx.AsyncClient, pool: Pool
-) -> dict[str, Transport]:
-    """Return the GitHub gap transport, or none when gaps stay local (R-11.5, R-11.10).
+def _github_app(cfg: Config, store: SecretStore, http: httpx.AsyncClient) -> GitHubApp | None:
+    """Return the GitHub App, or None when gaps stay local (R-11.5, R-11.10).
 
-    A disabled transport reads no secret and asks the store for nothing. With it
-    enabled, the App's private key comes from the age store, so a missing one
-    stops startup (R-9.9); the hooks read the daily write budget, report an
-    opened issue and raise BR-D05's token alert.
+    A disabled transport reads no secret. With it enabled, the App's private
+    key comes from the age store, so a missing one stops startup (R-9.9).
     """
     github = cfg.gaps.github
     if not github.enabled:
-        return {}
+        return None
     private_key_pem = store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).get(GITHUB_APP_PRIVATE_KEY)
-    app = GitHubApp(
+    return GitHubApp(
         http,
         app_id=github.app_id,
         installation_id=github.installation_id,
         private_key_pem=private_key_pem,
         timeout_s=REQUEST_TIMEOUT_SECONDS,
     )
+
+
+def _github_transports(
+    cfg: Config, app: GitHubApp | None, http: httpx.AsyncClient, pool: Pool
+) -> dict[str, Transport]:
+    """Return the GitHub gap transport, or none without a GitHub App (R-11.5, R-11.10).
+
+    The hooks read the daily write budget, report an opened issue and raise
+    BR-D05's token alert.
+    """
+    if app is None:
+        return {}
+    github = cfg.gaps.github
     hooks = GitHubHooks(
         writes_today=partial(writes_today, pool, cfg.owner.timezone),
         on_issue=partial(issue_opened, pool, cfg.profiles, cfg.gaps),
@@ -624,6 +635,15 @@ def _github_transports(
             hooks=hooks,
         )
     }
+
+
+async def _github_health(app: TokenSource, pool: Pool, cfg: Config) -> None:
+    """Prove the App can mint a token, queueing BR-D05's alert when it cannot (BR-D05)."""
+    app.invalidate()
+    try:
+        await app.token()
+    except GitHubTokenError as exc:
+        await _alert_token_error(pool, cfg, exc.reason)
 
 
 async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
@@ -661,11 +681,13 @@ def _daily_tasks(
     backup: Callable[[], Awaitable[None]],
     retention: Callable[[], Awaitable[None]],
     digest: Callable[[], Awaitable[None]],
+    github_health: Callable[[], Awaitable[None]] | None,
 ) -> list[DailyTask]:
-    """Build the backup, retention and digest tasks, failing on an unknown target (R-9.11).
+    """Build the daily tasks, failing on an unknown target (R-9.11, BR-D05).
 
     Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
-    ``date.min`` base so a late backup wraps to the next day's early time.
+    ``date.min`` base so a late backup wraps to the next day's early time. The
+    GitHub App health check runs at the digest time only when GitHub is configured.
     """
     kind = cfg.ops.backup.target.kind
     if kind != BACKUP_TARGET_KIND:
@@ -674,11 +696,14 @@ def _daily_tasks(
         )
     backup_at = cfg.ops.backup.at
     retention_at = (datetime.combine(date.min, backup_at) + RETENTION_DELAY).time()
-    return [
+    tasks = [
         DailyTask(key="backup", at=backup_at, run=backup),
         DailyTask(key="retention", at=retention_at, run=retention),
         DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
     ]
+    if github_health is not None:
+        tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=github_health))
+    return tasks
 
 
 def _personal_drive(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> GraphDrive:

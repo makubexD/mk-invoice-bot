@@ -119,7 +119,7 @@ def test_daily_tasks_have_the_three_keys_at_their_times() -> None:
     """R-9.11: backup runs at its configured time, retention 30 min later and digest at digest_at."""
     cfg = load_config(EXAMPLE)
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop)
+    tasks = _daily_tasks(cfg, _noop, _noop, _noop, None)
 
     assert {task.key for task in tasks} == {"backup", "retention", "digest"}
     by_key = {task.key: task.at for task in tasks}
@@ -132,7 +132,7 @@ def test_daily_tasks_retention_wraps_past_midnight() -> None:
     """R-9.11: a 23:45 backup wraps retention to 00:15 rather than staying past midnight."""
     cfg = _with_backup_at(load_config(EXAMPLE), time(23, 45))
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop)
+    tasks = _daily_tasks(cfg, _noop, _noop, _noop, None)
 
     assert {task.key: task.at for task in tasks}["retention"] == time(0, 15)
 
@@ -145,7 +145,26 @@ def test_daily_tasks_with_another_backup_target_kind_raise() -> None:
     unsupported = cfg.model_copy(update={"ops": cfg.ops.model_copy(update={"backup": backup})})
 
     with pytest.raises(ValueError, match="s3"):
-        _daily_tasks(unsupported, _noop, _noop, _noop)
+        _daily_tasks(unsupported, _noop, _noop, _noop, None)
+
+
+def test_daily_tasks_with_github_health_add_it_at_the_digest_time() -> None:
+    """BR-D05: with GitHub configured the daily list checks the App at the digest time."""
+    cfg = load_config(EXAMPLE)
+
+    tasks = _daily_tasks(cfg, _noop, _noop, _noop, _noop)
+
+    by_key = {task.key: task.at for task in tasks}
+    assert by_key["github_health"] == cfg.gaps.digest_at
+
+
+def test_daily_tasks_without_github_health_add_no_check() -> None:
+    """BR-D05: with GitHub disabled the daily list has no GitHub App health check."""
+    cfg = load_config(EXAMPLE)
+
+    tasks = _daily_tasks(cfg, _noop, _noop, _noop, None)
+
+    assert "github_health" not in {task.key for task in tasks}
 
 
 def test_sunat_validation_off_reads_no_secret(tmp_path: Path) -> None:
