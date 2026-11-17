@@ -51,6 +51,8 @@ EMAIL_SCOPE = "email"
 IDENTITY_SCOPES = (OPENID_SCOPE, EMAIL_SCOPE)
 #: The Drive scope a Google sink's account signs in with (R-6.5, D129).
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+#: The Sheets scope an account needs only for the owner's existing sheet (R-6.5, D145).
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 #: The Gmail scope a ``gmail`` inbox's account signs in with (R-6.5, D129).
 GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
 #: The inbox provider that talks to Gmail instead of Graph (R-6.5, D135).
@@ -158,6 +160,16 @@ def _google_sink_accounts(cfg: Config) -> set[str]:
     }
 
 
+def _existing_sheet_accounts(cfg: Config) -> set[str]:
+    """Return the accounts whose sheets sink is the owner's existing sheet (R-6.5, D145)."""
+    return {
+        sink.account
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+        if isinstance(sink, GoogleSheetsSink) and sink.existing
+    }
+
+
 def _gmail_inbox_accounts(cfg: Config) -> set[str]:
     """Return the accounts a ``gmail`` inbox fetcher searches (R-6.5, D129)."""
     return {
@@ -181,6 +193,8 @@ def google_scopes_for(cfg: Config, account: str) -> list[str]:
     scopes: list[str] = []
     if account in _google_sink_accounts(cfg):
         scopes.append(DRIVE_FILE_SCOPE)
+    if account in _existing_sheet_accounts(cfg):
+        scopes.append(SHEETS_SCOPE)
     if account in _gmail_inbox_accounts(cfg):
         scopes.append(GMAIL_READ_SCOPE)
     if not scopes:

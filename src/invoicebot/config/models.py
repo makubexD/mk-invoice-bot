@@ -348,6 +348,12 @@ SHEETS_KEY_COLUMN = "Clave"
 
 
 class GoogleSheetsSink(BaseModel):
+    """A flow's Google Sheets sink: the row it appends (R-6.3, D130).
+
+    With ``existing`` true, ``spreadsheet_id`` is the owner's own sheet, whose
+    account needs the broader spreadsheets scope (R-6.5, D145).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_sheets"]
@@ -355,6 +361,8 @@ class GoogleSheetsSink(BaseModel):
     spreadsheet_id: str
     tab: str
     columns: dict[str, str] = Field(min_length=1)
+    #: D145: true when the sheet is the owner's, not one ``google-setup`` creates.
+    existing: bool = False
 
     @field_validator("spreadsheet_id")
     @classmethod

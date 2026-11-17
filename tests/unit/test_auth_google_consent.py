@@ -21,11 +21,12 @@ from invoicebot.auth.providers import (
     EMAIL_SCOPE,
     GMAIL_READ_SCOPE,
     OPENID_SCOPE,
+    SHEETS_SCOPE,
     google_accounts,
     google_scopes_for,
 )
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, Flow, GoogleSheetsSink
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -41,6 +42,22 @@ def example_config() -> Config:
     return load_config(EXAMPLE)
 
 
+def _sheets_sink(flow: Flow) -> GoogleSheetsSink:
+    """Return ``flow``'s sheets sink."""
+    return next(sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink))
+
+
+def _with_sheets(flow: Flow, sheets: list[GoogleSheetsSink]) -> Flow:
+    """Return ``flow`` with ``sheets`` in place of its own sheets sink."""
+    sinks = [sink for sink in flow.sinks if not isinstance(sink, GoogleSheetsSink)]
+    return flow.model_copy(update={"sinks": [*sinks, *sheets]})
+
+
+def _config_with_flows(cfg: Config, flows: dict[str, Flow]) -> Config:
+    """Return ``cfg`` with ``flows`` in place of its flows."""
+    return cfg.model_copy(update={"flows": flows})
+
+
 def test_example_config_owner_signs_in_with_drive_file_only(example_config: Config) -> None:
     """R-6.5: a Google sink's account gets drive.file, not gmail.readonly."""
     assert google_scopes_for(example_config, "owner") == [OPENID_SCOPE, EMAIL_SCOPE, DRIVE_FILE_SCOPE]
@@ -53,6 +70,45 @@ def test_example_config_invoices_a_signs_in_with_gmail_read_only(example_config:
         EMAIL_SCOPE,
         GMAIL_READ_SCOPE,
     ]
+
+
+def test_created_sheet_gets_no_spreadsheets_scope(example_config: Config) -> None:
+    """D145: a sink whose sheet the bot creates signs in without the spreadsheets scope."""
+    assert SHEETS_SCOPE not in google_scopes_for(example_config, "owner")
+
+
+def test_existing_sheets_add_one_spreadsheets_scope(example_config: Config) -> None:
+    """D145: two existing sheets on one account add the spreadsheets scope exactly once."""
+    flow = example_config.flows["personal_google"]
+    sheet = _sheets_sink(flow).model_copy(update={"existing": True})
+    cfg = _config_with_flows(
+        example_config, {**example_config.flows, "personal_google": _with_sheets(flow, [sheet, sheet])}
+    )
+
+    scopes = google_scopes_for(cfg, "owner")
+
+    assert scopes == [OPENID_SCOPE, EMAIL_SCOPE, DRIVE_FILE_SCOPE, SHEETS_SCOPE]
+    assert scopes.count(SHEETS_SCOPE) == 1
+
+
+def test_another_account_without_an_existing_sheet_gets_no_spreadsheets_scope(
+    example_config: Config,
+) -> None:
+    """D145: only the account whose sink uses an existing sheet gets the spreadsheets scope."""
+    flow = example_config.flows["personal_google"]
+    owned = _sheets_sink(flow).model_copy(update={"existing": True})
+    created = _sheets_sink(flow).model_copy(update={"account": "invoices_a"})
+    cfg = _config_with_flows(
+        example_config,
+        {
+            **example_config.flows,
+            "personal_google": _with_sheets(flow, [owned]),
+            "second_google": _with_sheets(flow, [created]),
+        },
+    )
+
+    assert SHEETS_SCOPE in google_scopes_for(cfg, "owner")
+    assert SHEETS_SCOPE not in google_scopes_for(cfg, "invoices_a")
 
 
 def test_consent_url_asks_for_openid_and_email(example_config: Config) -> None:
