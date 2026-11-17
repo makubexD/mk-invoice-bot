@@ -94,7 +94,7 @@ async def browse(portal: Portal, page_timeout_ms: int, work: BrowserWork) -> Fet
             idle_timeout_s=page_timeout_ms / 1000,
         ) as proxy,
     ):
-        browser = await playwright.chromium.launch(**_launch_options(portal, proxy.port))
+        browser = await playwright.chromium.launch(**launch_options(portal, proxy.port))
         try:
             context = await browser.new_context(accept_downloads=True, service_workers="block")
             context.set_default_timeout(page_timeout_ms)
@@ -104,7 +104,7 @@ async def browse(portal: Portal, page_timeout_ms: int, work: BrowserWork) -> Fet
             result = await work(page)
         finally:
             await browser.close()
-    return _guarded_result(result, proxy.block_for(navigation_hosts))
+    return guarded_result(result, proxy.block_for(navigation_hosts))
 
 
 def record_navigation_hosts(page: Page) -> list[str]:
@@ -125,7 +125,7 @@ def record_navigation_hosts(page: Page) -> list[str]:
     return hosts
 
 
-def _guarded_result(result: FetchResult, block: GuardReason | None) -> FetchResult:
+def guarded_result(result: FetchResult, block: GuardReason | None) -> FetchResult:
     """Promote a technical or timeout result to ``guard_blocked`` (R-5.10).
 
     ``block`` is the proxy's refusal of a host the page navigated to; a blocked sub-resource
@@ -144,7 +144,7 @@ def _launch_args(portal: Portal) -> list[str]:
     return args
 
 
-def _launch_options(portal: Portal, proxy_port: int) -> dict[str, Any]:
+def launch_options(portal: Portal, proxy_port: int) -> dict[str, Any]:
     """Chromium's launch keyword arguments, with every connection through the proxy.
 
     Playwright already adds ``--proxy-bypass-list=<-loopback>`` for a launch proxy, so

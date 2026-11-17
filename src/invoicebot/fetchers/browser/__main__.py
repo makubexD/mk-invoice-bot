@@ -22,30 +22,21 @@ from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import HelperOutput, HelperRequest
 from invoicebot.fetchers.browser.session import (
     BadRequest,
-    _guarded_result,
-    _launch_options,
     browse,
     emit,
     limit_resources,
     output,
     read_request,
-    record_navigation_hosts,
 )
 
-#: Re-exported from :mod:`.session` because the integration tests import them here.
-__all__ = ["_guarded_result", "_launch_options", "record_navigation_hosts"]
-
 logger = logging.getLogger(__name__)
-
-#: The portal entry's name for the shared parse failure.
-_BadRequest = BadRequest
 
 
 def main() -> int:
     """Read the request, run one fetch and print its result (S10.1)."""
     try:
         request = _read_request()
-    except _BadRequest:
+    except BadRequest:
         emit(HelperOutput(reason=FetchReason.TECHNICAL))
         return 0
     limit_resources(request.max_bytes)
