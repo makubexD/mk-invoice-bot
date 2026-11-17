@@ -8,7 +8,8 @@ answers a stale or foreign press with BR-S02 (BR-S02).
 A routing question's answer is stored in the invoice's flow data under ``answers``; the
 action puts the invoice back in ``ROUTING`` and enqueues the route step, which validates
 the answer again on its next run (D92). [Continuar] answers BR-D06's cap question,
-[Cancelar] cancels the invoice from any cancellable state (R-3.4), [Sí] accepts a
+[Confirmar] accepts the routed summary before validation (D126), [Cancelar] cancels the
+invoice from any cancellable state (R-3.4), [Sí] accepts a
 BR-V02/BR-V06 comprobante and fetches its documents (D125), and [Ya lo envié] closes a
 prepared batch as sent (R-7.8, BR-D08). A press that answers the question a
 ``PENDING_USER`` invoice was parked on resumes the waiting state before its action runs:
@@ -29,12 +30,14 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.extract.validate import RULE_BAD_DATE
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
     BRAND_ACTION,
     CANCEL_ACTION,
     CHANGE_ACTION,
+    CONFIRM_ACTION,
     CONTINUE_ACTION,
     EDIT_ACTION,
     INVALID_OK_ACTION,
@@ -42,6 +45,7 @@ from invoicebot.pipeline.questions import (
     RULE_BRAND,
     RULE_BUYER,
     RULE_CAP,
+    RULE_CONFIRM,
     YES_ACTION,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
@@ -109,6 +113,7 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     CHANGE_ACTION: frozenset({CONFIRMING_STATE}),
     BRAND_ACTION: frozenset({CONFIRMING_STATE}),
     CONTINUE_ACTION: frozenset({CONFIRMING_STATE}),
+    CONFIRM_ACTION: frozenset({CONFIRMING_STATE}),
     CANCEL_ACTION: CANCELLABLE,
     EDIT_ACTION: EDITABLE,
     INVALID_OK_ACTION: frozenset({CONFIRM_INVALID}),
@@ -126,6 +131,7 @@ ASKED_RULES: Mapping[str, frozenset[str]] = {
     CHANGE_ACTION: frozenset({RULE_BUYER}),
     BRAND_ACTION: frozenset({RULE_BRAND}),
     CONTINUE_ACTION: frozenset({RULE_CAP}),
+    CONFIRM_ACTION: frozenset({RULE_BAD_DATE, RULE_CONFIRM}),
     INVALID_OK_ACTION: frozenset({RULE_ANNULLED, RULE_NOT_AUTHORIZED}),
 }
 
@@ -248,6 +254,20 @@ async def _continue(
     if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[CONTINUE_ACTION]):
         return ()
     await _record_answer(conn, invoice_id, RULE_CAP, {"cap_ok": True})
+    return ()
+
+
+async def _confirm(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Record that the sender confirmed the summary and re-run routing (D126)."""
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[CONFIRM_ACTION]):
+        return ()
+    await _record_answer(conn, invoice_id, RULE_CONFIRM, {"confirmed": True})
     return ()
 
 
@@ -539,6 +559,7 @@ ACTIONS: Mapping[str, Action] = {
     CHANGE_ACTION: _change,
     BRAND_ACTION: _brand,
     CONTINUE_ACTION: _continue,
+    CONFIRM_ACTION: _confirm,
     INVALID_OK_ACTION: _invalid_ok,
     CANCEL_ACTION: _cancel,
     EDIT_ACTION: _edit,

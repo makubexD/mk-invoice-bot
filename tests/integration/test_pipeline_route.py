@@ -63,6 +63,12 @@ def _config(profile_id: str, template: str) -> Config:
     return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles[template]}})
 
 
+def _config_with_confirm(profile_id: str, template: str, mode: str) -> Config:
+    """Return the example config with routing's ``confirm_mode`` replaced (D126)."""
+    cfg = _config(profile_id, template)
+    return cfg.model_copy(update={"routing": cfg.routing.model_copy(update={"confirm_mode": mode})})
+
+
 def _field(
     value: str,
     confidence: float = 1.0,
@@ -131,6 +137,30 @@ async def _routing_invoice(
             await merge_flow_data(conn, invoice_id, {"answers": answers})
         await set_state(conn, invoice_id, "ROUTING")
     return invoice_id
+
+
+def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
+    """Build a canonical button press for the invoice and action."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=uuid4().hex,
+        profile_id=profile_id,
+        sender_role="owner",
+        button_id=button_id(invoice_id, action),
+        received_at=datetime.now(UTC),
+    )
+
+
+def _text_message(profile_id: str, text: str) -> InboundMessage:
+    """Build a canonical text message from the profile."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=uuid4().hex,
+        profile_id=profile_id,
+        sender_role="owner",
+        text=text,
+        received_at=datetime.now(UTC),
+    )
 
 
 def _job(job_id: int, invoice_id: int, step: str = ROUTE_STEP) -> Job:
@@ -202,6 +232,20 @@ async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     return [str(step) for (step,) in await cur.fetchall()]
 
 
+async def _latest_job_id(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, step: str = ROUTE_STEP
+) -> int:
+    """Return the id of the invoice's newest queued job for ``step``."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s ORDER BY id DESC LIMIT 1",
+            (invoice_id, step),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
+
+
 async def _texts(conn: AsyncConnection[Any], profile_id: str, rule_id: str | None = None) -> list[str]:
     """Return the outbox texts for ``profile_id``, optionally only under ``rule_id``."""
     cur = await conn.execute(
@@ -258,11 +302,12 @@ async def _route_and_validate_one(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     reading: Reading,
     template: str = FULL_PROFILE,
+    answers: dict[str, Any] | None = None,
 ) -> tuple[tuple[str, str | None, str | None], list[str]]:
     """Route one invoice of a fresh profile then validate it with validation off (D124)."""
     profile_id = f"{template}-{uuid4().hex}"
     cfg = _config(profile_id, template)
-    invoice_id = await _routing_invoice(pool, profile_id, reading)
+    invoice_id = await _routing_invoice(pool, profile_id, reading, answers=answers)
     await _run(pool, cfg, invoice_id)
     await _run_validate(pool, cfg, invoice_id)
     async with pool.connection() as conn:
@@ -438,10 +483,10 @@ async def test_profile_without_the_flow_is_cancelled(
 
 
 async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
-    """D80: a date 400 days old still routes, and the summary's warning line names the date."""
+    """D80, D126: a confirmed date 400 days old routes, and the summary's warning line names the date."""
     old = await _today(db_pool) - timedelta(days=OLD_INVOICE_DAYS)
 
-    row, texts = await _route_and_validate_one(db_pool, _reading(old))
+    row, texts = await _route_and_validate_one(db_pool, _reading(old), answers={"confirmed": True})
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert texts[0].splitlines()[-1] == "⚠️ Revisa: fecha"
@@ -1126,3 +1171,137 @@ async def test_route_waits_for_an_uncommitted_edit_and_yields_to_it(
         assert await _invoice(conn, invoice_id) == ("ROUTING", None, None)
         assert await _outbox(conn, profile_id) == []
         assert await _stored_key(conn, invoice_id) is None
+
+
+async def test_confirm_mode_always_asks_once_then_confirm_routes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4, D126: confirm_mode always asks once; [Confirmar] sends the invoice to VALIDATING."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config_with_confirm(profile_id, FULL_PROFILE, "always")
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("CONFIRMING", "BR-S10", None)
+        assert await _jobs(conn, invoice_id) == []
+        outbox = await _outbox(conn, profile_id)
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-S10"
+    assert text.endswith("¿Está todo bien?")
+    assert buttons == [
+        {"id": button_id(invoice_id, "confirm"), "title": "Confirmar"},
+        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, _press(invoice_id, "confirm", profile_id), max_queued_per_sender=5, timezone=TIMEZONE
+        )
+
+    await _run(db_pool, cfg, invoice_id, job=_job(await _latest_job_id(db_pool, invoice_id), invoice_id))
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("VALIDATING", "BR-R02", WORK_FLOW)
+        assert await _jobs(conn, invoice_id) == [ROUTE_STEP, VALIDATE_STEP]
+        assert len(await _texts(conn, profile_id, "BR-S10")) == 1
+
+
+async def test_auto_with_a_good_date_routes_without_the_confirm_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4, D126: confirm_mode auto with a good date goes straight to VALIDATING."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config_with_confirm(profile_id, FULL_PROFILE, "auto")
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("VALIDATING", "BR-R02", WORK_FLOW)
+        assert await _jobs(conn, invoice_id) == [VALIDATE_STEP]
+        assert await _outbox(conn, profile_id) == []
+
+
+async def test_date_one_year_and_a_day_old_asks_with_br_e03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-E03, D126: a date one year and a day old asks in CONFIRMING with BR-E03's text first."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    old = await _today(db_pool) - timedelta(days=366)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(old))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("CONFIRMING", "BR-E03", None)
+        outbox = await _outbox(conn, profile_id)
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-E03"
+    assert text.splitlines()[0] == (
+        f"La fecha {old:%d/%m/%Y} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa"
+    )
+    assert text.endswith("¿Está todo bien?")
+    assert buttons[0] == {"id": button_id(invoice_id, "confirm"), "title": "Confirmar"}
+    assert [button["title"] for button in buttons] == ["Confirmar", "Editar", "Cancelar"]
+
+
+async def test_edit_of_the_bad_date_routes_on(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-E03, D126: editing the date re-enters ROUTING and, with a good date, routes on."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    today = await _today(db_pool)
+    invoice_id = await _routing_invoice(db_pool, profile_id, _reading(today - timedelta(days=366)))
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, _press(invoice_id, "edit", profile_id), max_queued_per_sender=5, timezone=TIMEZONE
+        )
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _text_message(profile_id, f"fecha={today:%d/%m/%Y}"),
+            max_queued_per_sender=5,
+            timezone=TIMEZONE,
+        )
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("ROUTING", None, None)
+
+    await _run(db_pool, cfg, invoice_id, job=_job(await _latest_job_id(db_pool, invoice_id), invoice_id))
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("VALIDATING", "BR-R02", WORK_FLOW)
+        assert len(await _texts(conn, profile_id, "BR-E03")) == 1
+
+
+async def test_one_llm_field_asks_even_with_auto(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-2.11, D126: a reading with one llm-sourced field asks for confirmation even with auto."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    base = _reading(await _today(db_pool))
+    reading = Reading(
+        fields={**base.fields, "total": _field(base.value("total") or "", source="llm")},
+        document_url=None,
+    )
+    invoice_id = await _routing_invoice(db_pool, profile_id, reading)
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("CONFIRMING", "BR-S10", None)
+        outbox = await _outbox(conn, profile_id)
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-S10"
+    assert text.endswith("¿Está todo bien?")
+    assert [button["title"] for button in buttons] == ["Confirmar", "Editar", "Cancelar"]

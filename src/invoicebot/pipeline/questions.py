@@ -16,6 +16,7 @@ from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
     BUTTON_CHANGE,
+    BUTTON_CONFIRM,
     BUTTON_CONTINUE,
     BUTTON_EDIT,
     BUTTON_YES,
@@ -33,10 +34,14 @@ CANCEL_ACTION = "cancel"
 EDIT_ACTION = "edit"
 #: The [Sí] that accepts a BR-V02/BR-V06 comprobante (D125).
 INVALID_OK_ACTION = "invalid_ok"
+#: D126's [Confirmar]: the sender accepts the routed summary before validation.
+CONFIRM_ACTION = "confirm"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
 RULE_CAP = "BR-D06"
+#: The confirmation question's rule when BR-E03's date check did not ask it (D126).
+RULE_CONFIRM = "BR-S10"
 
 
 def candidate_flows(
@@ -119,4 +124,12 @@ def summary_buttons(invoice_id: int) -> list[Button]:
     return [
         Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+
+
+def confirm_buttons(invoice_id: int) -> list[Button]:
+    """Return the confirmation's [Confirmar], [Editar] and [Cancelar] buttons (D126, R-3.4)."""
+    return [
+        Button(id=button_id(invoice_id, CONFIRM_ACTION), title=BUTTON_CONFIRM),
+        *summary_buttons(invoice_id),
     ]

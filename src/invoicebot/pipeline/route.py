@@ -3,7 +3,8 @@
 :func:`make_route_handler` builds the handler of the ``route`` job step. In ``ROUTING`` it
 first claims the invoice's natural key (BR-E04, D93), then runs D92's ordered, resumable
 checks over the stored answers: flow (rule match, else BR-R03),
-buyer confidence (BR-R04), reimbursement cap (BR-D06) and brand (BR-R09). The first
+buyer confidence (BR-R04), reimbursement cap (BR-D06), brand (BR-R09) and the
+confirmation before validation (D126, BR-E03, BR-S10). The first
 unanswered check moves the invoice to ``CONFIRMING`` with its rule and its question; when
 every check passes the invoice stores its flow, queues its ``validate`` job and waits in
 ``VALIDATING`` (D124), where that job sends the summary and asks SUNAT. A refused invoice
@@ -27,6 +28,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import MENU_MAX, Button
 from invoicebot.config.models import Config, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
+from invoicebot.extract.validate import RULE_BAD_DATE, check_date
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
@@ -36,10 +38,12 @@ from invoicebot.pipeline.questions import (
     RULE_BRAND,
     RULE_BUYER,
     RULE_CAP,
+    RULE_CONFIRM,
     brand_question,
     buyer_question,
     candidate_flows,
     cap_question,
+    confirm_buttons,
     flow_question,
 )
 from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
@@ -58,6 +62,7 @@ from invoicebot.routing.router import (
 from invoicebot.rules.messages_es import (
     KIND_SUBJECT,
     MESSAGES,
+    SUMMARY_DATE_FORMAT,
     buyer_desc,
     tipo_phrase,
     tipos_desc,
@@ -139,11 +144,11 @@ def make_route_handler(
 ) -> Handler:
     """Build the handler that routes an invoice in ``ROUTING`` (S4.2, S4.3, S4.4, D92).
 
-    The ordered checks are :func:`_resolve_flow`, :func:`_buyer_check`, :func:`_cap_check`
-    and :func:`_brand_check`; a button answer stores its value and enqueues the route job
-    again (step 12), so a re-run skips the answered checks. BR-R05, BR-R07 and BR-R08 cancel
-    the invoice with their message. A missing reading or an unknown profile raises, so the
-    queue retries.
+    The ordered checks are :func:`_resolve_flow`, :func:`_buyer_check`, :func:`_cap_check`,
+    :func:`_brand_check` and :func:`_confirm_check`; a button answer stores its value and
+    enqueues the route job again (step 12), so a re-run skips the answered checks.
+    BR-R05, BR-R07 and BR-R08 cancel the invoice with their message. A missing reading or
+    an unknown profile raises, so the queue retries.
     """
 
     async def handle(job: Job) -> None:
@@ -222,7 +227,41 @@ def _decide(decision: _Decision) -> _Step:
     brand = _brand_check(decision, resolved.flow_id)
     if brand is not None:
         return brand
+    confirm = _confirm_check(decision, summary)
+    if confirm is not None:
+        return confirm
     return _Step("route", resolved.rule_id, summary, flow_id=resolved.flow_id)
+
+
+def _confirm_check(decision: _Decision, summary: str) -> _Step | None:
+    """Ask the sender to confirm the summary before validation (D126, BR-E03, BR-S10).
+
+    The question is asked when routing is set to ``always``, when the issue date fails
+    BR-E03, or when any field came from the LLM (R-2.11); a stored ``confirmed`` answer
+    skips it. BR-E03's text comes first, then the summary and BR-S10's question.
+    """
+    reading = decision.reading
+    if decision.answers.get("confirmed") is True:
+        return None
+    fecha = reading.fecha()
+    bad_date = (
+        fecha is not None
+        and check_date(fecha, decision.today, decision.cfg.extraction.max_invoice_age_days) is not None
+    )
+    from_llm = any(field.source == "llm" for field in reading.fields.values())
+    if not (decision.cfg.routing.confirm_mode == "always" or bad_date or from_llm):
+        return None
+    rule_id = RULE_BAD_DATE if bad_date else RULE_CONFIRM
+    return _Step("ask", rule_id, _confirm_text(rule_id, fecha, summary), confirm_buttons(decision.invoice_id))
+
+
+def _confirm_text(rule_id: str, fecha: date | None, summary: str) -> str:
+    """Return the confirm question's text: BR-E03's line when it asked, the summary, BR-S10 (D126)."""
+    lines = []
+    if rule_id == RULE_BAD_DATE and fecha is not None:
+        lines.append(MESSAGES[rule_id].format(fecha=fecha.strftime(SUMMARY_DATE_FORMAT)))
+    lines.extend((summary, MESSAGES[RULE_CONFIRM]))
+    return "\n".join(lines)
 
 
 def _resolve_flow(decision: _Decision) -> _Resolved | _Step:
