@@ -24,9 +24,8 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import MENU_MAX, Button
-from invoicebot.config.models import Config, Extraction, Flow, Profile, StoreDirectory
+from invoicebot.config.models import Config, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
-from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
@@ -44,6 +43,7 @@ from invoicebot.pipeline.questions import (
     flow_question,
     summary_buttons,
 )
+from invoicebot.pipeline.summary import summary_text
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
@@ -58,13 +58,7 @@ from invoicebot.routing.router import (
 from invoicebot.rules.messages_es import (
     KIND_SUBJECT,
     MESSAGES,
-    SUMMARY,
-    SUMMARY_DATE_FORMAT,
-    SUMMARY_INFERRED,
-    SUMMARY_REVIEW,
-    TIPO_DESC,
     buyer_desc,
-    fields_desc,
     tipo_phrase,
     tipos_desc,
 )
@@ -96,7 +90,6 @@ ROUTING_STATE = "ROUTING"
 ROUTED_STATE = "FETCHING_DOCS"
 #: Where an invoice waits for an answer to one of D92's questions.
 CONFIRMING_STATE = "CONFIRMING"
-DATE_FIELD = "fecha_emision"
 
 #: The summary's flow line for a flow the sender picked in the BR-R03 menu (spec 06 §1).
 #: BR-R01 and BR-R02 already carry this same ``➡️ {flow.label}`` line as their rule message,
@@ -221,7 +214,7 @@ def _decide(decision: _Decision) -> _Step:
     buyer = _buyer_check(decision, resolved)
     if buyer is not None:
         return buyer
-    summary = _summary(
+    summary = summary_text(
         decision.reading,
         _flow_line(resolved.flow, resolved.rule_id),
         decision.today,
@@ -541,30 +534,3 @@ def _doubtful_buyer(reading: Reading, threshold: float) -> bool:
     """Return whether the buyer was read by OCR below the review threshold (BR-R04)."""
     buyer = reading.fields.get("num_doc_adq")
     return buyer is not None and buyer.source == "ocr" and buyer.confidence < threshold
-
-
-def _summary(reading: Reading, flow_line: str, today: date, extraction: Extraction) -> str:
-    """Return the routed-invoice summary (spec 06 §1 "Summary message", D79, D80)."""
-    fecha = reading.fecha()
-    tipo = reading.value("tipo") or ""
-    lines = [
-        SUMMARY.format(
-            tipo_desc=TIPO_DESC.get(tipo, tipo),
-            serie=reading.value("serie") or "",
-            numero=reading.value("numero") or "",
-            fecha=(reading.value(DATE_FIELD) or "") if fecha is None else fecha.strftime(SUMMARY_DATE_FORMAT),
-            ruc_emisor=reading.value("ruc_emisor") or "",
-            total=reading.value("total") or "",
-            flow_line=flow_line,
-        )
-    ]
-    inferred = [name for name, field in reading.fields.items() if field.flag == "inferred"]
-    if inferred:
-        lines.append(SUMMARY_INFERRED.format(fields_desc=fields_desc(inferred)))
-    doubtful = list(doubtful_fields(reading, extraction.review_threshold, extraction.igv_rates))
-    date_is_doubtful = fecha is None or check_date(fecha, today, extraction.max_invoice_age_days) is not None
-    if date_is_doubtful and DATE_FIELD not in doubtful:
-        doubtful.append(DATE_FIELD)
-    if doubtful:
-        lines.append(SUMMARY_REVIEW.format(fields_desc=fields_desc(doubtful)))
-    return "\n".join(lines)
