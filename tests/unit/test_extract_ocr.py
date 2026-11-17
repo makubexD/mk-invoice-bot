@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-import subprocess
+import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
 import pytest
 
 from invoicebot.config.models import Ocr
-from invoicebot.extract.ocr import OcrWord, parse_tsv, preprocess, read_text
+from invoicebot.extract.ocr import OcrText, OcrWord, parse_tsv, preprocess, read_text
 
 # Synthetic RUC from tests/synthetic_rucs.txt. No real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
@@ -28,6 +29,11 @@ FONT_THICKNESS = 3
 TIMEOUT_S = 30
 TIMEOUT_FOR_TEST_S = 1
 OCR_CONFIG = Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=TIMEOUT_S)
+SHORT_TIMEOUT_CONFIG = Ocr(engine="tesseract", lang="spa", psm=4, timeout_s=TIMEOUT_FOR_TEST_S)
+FAKE_TESSERACT = Path(__file__).resolve().parents[1] / "fake_tesseract.py"
+FAKE_COMMAND = (sys.executable, str(FAKE_TESSERACT))
+MISSING_TESSERACT = "/nonexistent/tesseract"
+MODE_ENV = "FAKE_TESSERACT_MODE"
 
 TSV = "\n".join(
     (
@@ -77,36 +83,33 @@ def test_read_text_timeout_returns_none(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     """R-9.2: a Tesseract run longer than timeout_s returns ``None`` and logs a warning."""
+    monkeypatch.setenv(MODE_ENV, "sleep")
 
-    def _timeout(*_args: object, **_kwargs: object) -> None:
-        raise subprocess.TimeoutExpired(cmd="tesseract", timeout=TIMEOUT_FOR_TEST_S)
-
-    monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _timeout)
-
-    assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+    assert read_text(_canvas(100, 100), SHORT_TIMEOUT_CONFIG, command=FAKE_COMMAND) is None
     assert "tesseract timed out" in caplog.text
 
 
-def test_read_text_missing_tesseract_binary_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_read_text_missing_tesseract_binary_returns_none() -> None:
     """D81: a missing Tesseract binary makes ``read_text`` return ``None`` instead of raising."""
-
-    def _missing(*_args: object, **_kwargs: object) -> None:
-        raise FileNotFoundError("tesseract")
-
-    monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _missing)
-
-    assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+    assert read_text(_canvas(100, 100), OCR_CONFIG, command=(MISSING_TESSERACT,)) is None
 
 
 def test_read_text_non_zero_exit_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
     """D81: a Tesseract run that exits non-zero makes ``read_text`` return ``None``."""
+    monkeypatch.setenv(MODE_ENV, "fail")
 
-    def _failed(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(args=["tesseract"], returncode=1, stdout=b"")
+    assert read_text(_canvas(100, 100), OCR_CONFIG, command=FAKE_COMMAND) is None
 
-    monkeypatch.setattr("invoicebot.extract.ocr.subprocess.run", _failed)
 
-    assert read_text(_canvas(100, 100), OCR_CONFIG) is None
+def test_read_text_fake_tesseract_tsv_returns_words(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R-2.3: the Tesseract TSV on stdout comes back as the ``OcrText`` lines and words."""
+    monkeypatch.setenv(MODE_ENV, "tsv")
+
+    result = read_text(_canvas(100, 100), OCR_CONFIG, command=FAKE_COMMAND)
+
+    assert result == OcrText(
+        lines=((OcrWord(text="RUC", confidence=0.965), OcrWord(text="20000000001", confidence=0.88)),)
+    )
 
 
 def test_parse_tsv_groups_words_and_scales_confidence() -> None:

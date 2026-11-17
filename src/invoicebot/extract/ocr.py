@@ -12,7 +12,8 @@ from __future__ import annotations
 import logging
 import math
 import resource
-import subprocess  # nosec B404  # runs only the fixed Tesseract argument list below
+import subprocess  # nosec B404  # runs an argument list, never a shell
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import cast
 
@@ -99,8 +100,15 @@ def _no_file_writes() -> None:
     resource.setrlimit(resource.RLIMIT_FSIZE, (0, 0))
 
 
-def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
+def read_text(
+    image: np.ndarray,
+    ocr_cfg: Ocr,
+    command: Sequence[str] = (TESSERACT_COMMAND,),
+) -> OcrText | None:
     """Run Tesseract over ``image`` and return its words, or ``None`` when OCR did not run.
+
+    ``command`` is the argv prefix, Tesseract by default; a test passes a fake in its place. The
+    fixed arguments follow it.
 
     A missing binary, a timeout or a non-zero exit is treated as "no OCR". Stderr is discarded
     and the text is never logged (R-9.16).
@@ -111,8 +119,8 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
     encoded, buffer = cv2.imencode(PNG_FORMAT, image)
     if not encoded:
         return None
-    command = [
-        TESSERACT_COMMAND,
+    argv = [
+        *command,
         TESSERACT_STDIN,
         TESSERACT_STDOUT,
         "-l",
@@ -124,8 +132,8 @@ def read_text(image: np.ndarray, ocr_cfg: Ocr) -> OcrText | None:
         TSV_CONFIG,
     ]
     try:
-        completed = subprocess.run(  # noqa: S603  # nosec B603  # fixed argument list, no shell
-            command,
+        completed = subprocess.run(  # noqa: S603  # nosec B603  # argument list, never a shell
+            argv,
             input=cast(np.ndarray, buffer).tobytes(),
             capture_output=True,
             timeout=ocr_cfg.timeout_s,
