@@ -36,7 +36,7 @@ Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `specs/04-tas
 - Spec 06: BR-E07's `{reason_desc}` list gains `too_many_pages` (`tiene más de {max_pages} páginas`); BR-V02 and BR-V06 note the `invalid_ok` button. New owner texts: `BR-V02_admin` `⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) está ANULADO.` and `BR-V06_admin` `⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) NO está AUTORIZADO.` The confirm question: the summary followed by `¿Está todo bien?` with [Confirmar] [Editar] [Cancelar].
 - Spec 04: S3.4 cites D123, S3.8 and S3.9 cite D127, S3.10 cites D121 and D122, S6.1 and S6.2 cite D124 and D125.
 - Spec 03: §4 (route → `VALIDATING`, the summary sent by `validate`, D126), §5 (`sunat_status_json` shape: `estado_cp`, `estado_ruc`, `cond_domi_ruc`, `checked_at`, `rechecks`), §11 (D127), the `extract/pdf.py` text of D122, the padrón swap of D123.
-- Roadmap: drop the "Known drift" items S3.10 and `confirm_mode` close; row 7 notes D121–D127.
+- Roadmap: row 7 notes D121–D127 (the "Known drift" lines go in step 30, once the code closes them).
 
 Test: none (spec text only); `uv run pytest -q tests/unit/test_rules_parity.py` still passes.
 
@@ -52,7 +52,7 @@ Test: `uv run python -c "import pypdfium2; print(pypdfium2.PdfDocument.new())"`.
 
 Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/rules/catalog.py`, `tests/unit/test_rules_parity.py`.
 
-- Add the texts of step 1 verbatim: `BR-V02_admin`, `BR-V06_admin`, the confirm question line (`CONFIRM_QUESTION`), the button title `BUTTON_CONFIRM = "Confirmar"`, `REJECTION_DESC["too_many_pages"]`.
+- Add the texts of step 1 verbatim: `BR-V02_admin`, `BR-V06_admin`, the confirm question `BR-S10`, the button title `BUTTON_CONFIRM = "Confirmar"`, `REJECTION_DESC["too_many_pages"]`. (Done in the step 1 commit: the parity test needs spec 06 and the code to change together.)
 - Catalog entries for `BR-V02_admin` and `BR-V06_admin` follow the existing `*_admin` entries.
 - The parity test already compares spec 06 to the module; extend it only if it skips `_admin` texts.
 
@@ -243,8 +243,8 @@ Test: `uv run pytest -q tests/integration/test_pipeline_route.py tests/unit/test
 
 Files: `src/invoicebot/pipeline/route.py`, `src/invoicebot/pipeline/actions.py`, `tests/integration/test_pipeline_route.py`.
 
-- In `_decide`, after the flow and buyer questions and before `route`: when `confirm_mode == "always"`, `check_date(fecha, …)` returns BR-E03, or any field has source `llm`, and the recorded answers lack `{"confirmed": true}`, return an `ask` in `CONFIRMING` with the summary (`summary_text`), `CONFIRM_QUESTION`, and [Confirmar] `<id>:confirm`, [Editar], [Cancelar]; for BR-E03 the rule is BR-E03 and its text comes first.
-- `actions.py`: `CONFIRM_ACTION = "confirm"`, valid in `CONFIRMING`, asked rules BR-E03 and the confirm question's rule id (use `BR-E09`'s neighbour pattern: pick the existing rule id for a plain confirmation if spec 06 has one, else a new `CONFIRM` id added in step 3's catalog; say which in the summary). It records `{"confirmed": true}` with `_record_answer`.
+- In `_decide`, after the flow and buyer questions and before `route`: when `confirm_mode == "always"`, `check_date(fecha, …)` returns BR-E03, or any field has source `llm`, and the recorded answers lack `{"confirmed": true}`, return an `ask` in `CONFIRMING` with the summary (`summary_text`), BR-S10's text, and [Confirmar] `<id>:confirm`, [Editar], [Cancelar]; for BR-E03 the rule is BR-E03 and its text comes first.
+- `actions.py`: `CONFIRM_ACTION = "confirm"`, valid in `CONFIRMING`, asked rules BR-E03 and the confirm question's rule id (use `BR-E09`'s neighbour pattern: the confirmation rule is BR-S10, added with step 1). It records `{"confirmed": true}` with `_record_answer`.
 - Tests: R-3.4 `confirm_mode: always` asks once, then [Confirmar] moves to `VALIDATING`; R-3.4 `auto` with a good date goes straight to `VALIDATING`; BR-E03 a date one year and a day old asks with BR-E03's text; BR-E03 an edit `fecha=…` re-enters `ROUTING` and, with a good date, routes on; R-2.11 a reading with one `llm` field asks even with `auto`.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_route.py -k "confirm or E03 or llm"`.
