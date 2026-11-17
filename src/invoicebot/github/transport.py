@@ -58,11 +58,12 @@ class TokenSource(Protocol):
 
 @dataclass(frozen=True)
 class GitHubHooks:
-    """The caller's callbacks: budget, a created issue and a token failure (R-11.5, BR-D05)."""
+    """The caller's callbacks: budget, a created issue, a token failure and a gap's issue (R-11.5, D118)."""
 
     writes_today: Callable[[], Awaitable[int]]
     on_issue: Callable[[str, str], Awaitable[None]]
     on_token_error: Callable[[str], Awaitable[None]]
+    issue_url: Callable[[str], Awaitable[str | None]]
 
 
 @dataclass(frozen=True)
@@ -112,16 +113,25 @@ async def _transport(client: _Client, row: OutboxRow) -> str | None:
     if await client.hooks.writes_today() >= client.budget:
         raise SendLater(BUDGET_DELAY, "budget")
     fingerprint = _payload_text(row.payload, "fingerprint")
-    token = await _access_token(client)
     if op == "create_issue":
+        token = await _access_token(client)
         return await _create_issue(client, token, fingerprint, _issue_fields(row.payload.get("fields")))
-    await _comment(
-        client,
-        token,
-        _payload_text(row.payload, "issue_url"),
-        _payload_text(row.payload, "hint_url"),
-    )
+    hint_url = _payload_text(row.payload, "hint_url")
+    issue_url = await _comment_issue_url(client, fingerprint, row.payload)
+    token = await _access_token(client)
+    await _comment(client, token, issue_url, hint_url)
     return None
+
+
+async def _comment_issue_url(client: _Client, fingerprint: str, payload: dict[str, Any]) -> str:
+    """Return the issue a comment targets, waiting while its issue is still being created (D118)."""
+    issue_url = payload.get("issue_url")
+    if isinstance(issue_url, str) and issue_url:
+        return issue_url
+    resolved = await client.hooks.issue_url(fingerprint)
+    if resolved is None:
+        raise SendLater(BUDGET_DELAY, "issue pending")
+    return resolved
 
 
 async def _access_token(client: _Client) -> str:

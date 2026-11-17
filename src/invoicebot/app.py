@@ -103,6 +103,7 @@ from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
+from invoicebot.store.gaps import get_gap
 from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
@@ -611,6 +612,7 @@ def _github_transports(
         writes_today=partial(writes_today, pool, cfg.owner.timezone),
         on_issue=partial(issue_opened, pool, cfg.profiles, cfg.gaps),
         on_token_error=partial(_alert_token_error, pool, cfg),
+        issue_url=partial(_gap_issue_url, pool),
     )
     return {
         GITHUB_ADAPTER: make_github_transport(
@@ -628,6 +630,13 @@ async def _alert_token_error(pool: Pool, cfg: Config, reason: str) -> None:
     """Queue BR-D05's rate-limited owner alert for a rejected installation token (BR-D05)."""
     async with pool.connection() as conn, conn.transaction():
         await queue_token_error_alert(conn, cfg.profiles, cfg.gaps.github.repo, reason)
+
+
+async def _gap_issue_url(pool: Pool, fingerprint: str) -> str | None:
+    """Return the GitHub issue URL of the gap, or None while it is still pending (D118)."""
+    async with pool.connection() as conn:
+        gap = await get_gap(conn, fingerprint)
+    return None if gap is None else gap.issue_url
 
 
 async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:

@@ -47,10 +47,12 @@ class FakeTokenSource:
 class Recorder:
     """Records the hooks the transport calls and the budget the caller reports."""
 
-    def __init__(self, writes_today: int = 0) -> None:
+    def __init__(self, writes_today: int = 0, issue_url: str | None = None) -> None:
         self.writes_today = writes_today
+        self.issue_url = issue_url
         self.issues: list[tuple[str, str]] = []
         self.token_errors: list[str] = []
+        self.issue_url_calls: list[str] = []
 
     async def budget(self) -> int:
         return self.writes_today
@@ -61,11 +63,16 @@ class Recorder:
     async def on_token_error(self, reason: str) -> None:
         self.token_errors.append(reason)
 
+    async def gap_issue_url(self, fingerprint: str) -> str | None:
+        self.issue_url_calls.append(fingerprint)
+        return self.issue_url
+
     def hooks(self) -> GitHubHooks:
         return GitHubHooks(
             writes_today=self.budget,
             on_issue=self.on_issue,
             on_token_error=self.on_token_error,
+            issue_url=self.gap_issue_url,
         )
 
 
@@ -234,6 +241,64 @@ async def test_comment_posts_to_the_issue_number_of_the_url() -> None:
     assert requests[0].method == "POST"
     assert str(requests[0].url) == f"{ISSUES_URL}/42/comments"
     assert json.loads(requests[0].content) == {"body": f"```\n{REDUCED_HINT_URL}\n```"}
+
+
+async def test_comment_without_an_issue_url_posts_to_the_issue_the_hook_returns() -> None:
+    """D118: a comment row with no issue_url posts to the issue number the hook resolves."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={})
+
+    payload = {"op": "comment", "fingerprint": FINGERPRINT, "hint_url": HINT_URL}
+    recorder = Recorder(issue_url=f"{ISSUE_URL}/77")
+    result = await _run(handler, payload, recorder)
+
+    assert result is None
+    assert len(requests) == 1
+    assert str(requests[0].url) == f"{ISSUES_URL}/77/comments"
+    assert recorder.issue_url_calls == [FINGERPRINT]
+
+
+async def test_comment_without_an_issue_yet_waits_without_a_request() -> None:
+    """D118: a comment row whose issue is not created yet reschedules before fetching a token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a pending issue makes no request")
+
+    payload = {"op": "comment", "fingerprint": FINGERPRINT, "hint_url": HINT_URL}
+    recorder = Recorder(issue_url=None)
+    tokens = FakeTokenSource()
+    with pytest.raises(SendLater) as raised:
+        await _run(handler, payload, recorder, tokens=tokens)
+
+    assert raised.value.delay == timedelta(hours=1)
+    assert raised.value.reason == "issue pending"
+    assert tokens.calls == 0
+    assert recorder.issue_url_calls == [FINGERPRINT]
+
+
+async def test_comment_with_an_issue_url_does_not_ask_the_hook() -> None:
+    """D118: a comment row that carries issue_url never calls the issue_url hook."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={})
+
+    payload = {
+        "op": "comment",
+        "fingerprint": FINGERPRINT,
+        "issue_url": f"{ISSUE_URL}/42",
+        "hint_url": HINT_URL,
+    }
+    recorder = Recorder(issue_url=f"{ISSUE_URL}/99")
+    await _run(handler, payload, recorder)
+
+    assert recorder.issue_url_calls == []
+    assert len(requests) == 1
+    assert str(requests[0].url) == f"{ISSUES_URL}/42/comments"
 
 
 async def test_a_malformed_issue_url_is_permanent() -> None:
