@@ -42,11 +42,14 @@ from invoicebot.store.invoices import (
     save_reading,
     set_flow,
     set_state,
+    set_sunat_status,
+    sunat_rechecks,
     touch_window,
     unpark,
     window_open,
 )
 from invoicebot.store.messages import link_message_to_invoice, store_inbound
+from invoicebot.sunat.validez import CpStatus
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -563,6 +566,57 @@ async def test_load_reading_is_none_before_a_reading_is_saved(
 
     assert unsaved is None
     assert missing is None
+
+
+async def test_set_sunat_status_stores_the_answer_with_the_database_clock(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.1: set_sunat_status stores the status fields and stamps checked_at from the database clock."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await set_sunat_status(
+            conn,
+            invoice_id,
+            CpStatus(estado_cp=1, estado_ruc="10", cond_domi_ruc="00"),
+            1,
+        )
+        cur = await conn.execute(
+            """
+            SELECT sunat_status_json->>'estado_cp',
+                   sunat_status_json->>'estado_ruc',
+                   sunat_status_json->>'cond_domi_ruc',
+                   (sunat_status_json->>'checked_at')::timestamptz,
+                   (sunat_status_json->>'rechecks')::int,
+                   now()
+            FROM invoices
+            WHERE id = %s
+            """,
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert row[:3] == ("1", "10", "00")
+    assert row[4] == 1
+    assert row[3] == row[5]
+
+
+async def test_sunat_rechecks_reads_zero_before_a_status_and_the_count_after(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.1: sunat_rechecks reads 0 when no status is stored and the stored count after one."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        before = await sunat_rechecks(conn, invoice_id)
+        await set_sunat_status(
+            conn,
+            invoice_id,
+            CpStatus(estado_cp=0, estado_ruc=None, cond_domi_ruc=None),
+            2,
+        )
+        after = await sunat_rechecks(conn, invoice_id)
+
+    assert (before, after) == (0, 2)
 
 
 async def test_get_file_path_returns_the_first_path_of_a_kind(

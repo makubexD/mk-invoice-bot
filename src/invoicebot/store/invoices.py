@@ -27,6 +27,7 @@ from invoicebot.states import (
     WAITING_FOR_USER,
     StateMoved,
 )
+from invoicebot.sunat.validez import CpStatus
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -626,6 +627,48 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     if row is None or row[0] is None:
         return None
     return reading_from_json(row[0])
+
+
+async def set_sunat_status(
+    conn: AsyncConnection[Any], invoice_id: int, status: CpStatus | None, rechecks: int
+) -> None:
+    """Store the SUNAT answer for invoice_id and count its rechecks (R-4.1).
+
+    The three status fields are JSON null when SUNAT gave no answer, and the database
+    clock stamps ``checked_at``. Does not commit.
+    """
+    if status is None:
+        estado_cp, estado_ruc, cond_domi_ruc = None, None, None
+    else:
+        estado_cp, estado_ruc, cond_domi_ruc = status.estado_cp, status.estado_ruc, status.cond_domi_ruc
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET sunat_status_json = jsonb_build_object(
+                'estado_cp', %s::int,
+                'estado_ruc', %s::text,
+                'cond_domi_ruc', %s::text,
+                'checked_at', now(),
+                'rechecks', %s::int
+            )
+        WHERE id = %s
+        """,
+        (estado_cp, estado_ruc, cond_domi_ruc, rechecks, invoice_id),
+    )
+
+
+async def sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    """Return how many SUNAT checks invoice_id recorded, or 0 when it has none (R-4.1)."""
+    cur = await conn.execute(
+        """
+        SELECT COALESCE((sunat_status_json->>'rechecks')::int, 0)
+        FROM invoices
+        WHERE id = %s
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    return 0 if row is None else int(row[0])
 
 
 async def record_upload_rejection(
