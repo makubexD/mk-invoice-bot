@@ -674,6 +674,26 @@ async def set_sunat_status(
     )
 
 
+async def bump_rechecks(conn: AsyncConnection[Any], invoice_id: int, rechecks: int) -> None:
+    """Count a SUNAT check that gave no answer, keeping the last answer (R-4.1, D125).
+
+    Only the ``rechecks`` key of ``sunat_status_json`` changes, so the stored status and
+    ``checked_at`` survive an outage. Does not commit.
+    """
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET sunat_status_json = jsonb_set(
+                COALESCE(sunat_status_json, '{}'::jsonb),
+                '{rechecks}',
+                to_jsonb(%s::int)
+            )
+        WHERE id = %s
+        """,
+        (rechecks, invoice_id),
+    )
+
+
 async def sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> int:
     """Return how many SUNAT checks invoice_id recorded, or 0 when it has none (R-4.1)."""
     cur = await conn.execute(

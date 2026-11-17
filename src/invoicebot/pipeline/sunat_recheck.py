@@ -36,6 +36,7 @@ from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
     CpStatus,
+    bump_rechecks,
     load_invoice_head,
     load_reading,
     lock_sunat_rechecks,
@@ -149,7 +150,10 @@ async def _record(
     if state == CANCELLED or stored_rechecks != recheck.rechecks:
         return
     count = stored_rechecks + 1
-    await set_sunat_status(conn, recheck.invoice_id, status, rechecks=count)
+    if status is None:
+        await bump_rechecks(conn, recheck.invoice_id, count)
+    else:
+        await set_sunat_status(conn, recheck.invoice_id, status, rechecks=count)
     if verdict.ask:
         await _alert(conn, cfg, recheck, verdict.rule_id)
     elif verdict.recheck and count < MAX_RECHECKS:
