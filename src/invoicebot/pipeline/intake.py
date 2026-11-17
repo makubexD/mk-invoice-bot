@@ -208,14 +208,11 @@ async def _refuse_lone_xml(
 ) -> IntakeResult:
     """Answer BR-E07 for an XML sent on its own and create nothing (D58, D121).
 
-    The text still names the photo cap as its single ``max_mb``; the photo and
-    PDF caps come alongside it for the wording step that follows.
+    The text quotes the photo and PDF size caps from ``media_max_bytes``.
     """
-    max_mb = media_max_bytes.image // MEGABYTE
     text = MESSAGES[RULE_MEDIA_REJECTED].format(
         reason_desc=REJECTION_DESC["unsupported_type"],
-        max_mb=max_mb,
-        image_mb=max_mb,
+        image_mb=media_max_bytes.image // MEGABYTE,
         pdf_mb=media_max_bytes.pdf // MEGABYTE,
     )
     await _add_outbox(conn, msg, RULE_MEDIA_REJECTED, text)

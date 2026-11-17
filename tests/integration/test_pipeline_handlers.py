@@ -349,7 +349,10 @@ async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(
     assert files == []
     assert (state, rule_id) == ("CANCELLED", "BR-E07")
     assert len(outbox_rows) == 1
-    assert "la imagen es demasiado grande" in outbox_rows[0][1]
+    assert outbox_rows[0][1] == (
+        "No puedo procesar este archivo (la imagen es demasiado grande). "
+        "Envíame una foto (JPG o PNG, hasta 8 MB) o el PDF del comprobante (hasta 16 MB)."
+    )
 
 
 async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
@@ -383,7 +386,10 @@ async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
     assert files == []
     assert (state, rule_id) == ("CANCELLED", "BR-E07")
     assert len(outbox_rows) == 1
-    assert "es demasiado grande" in outbox_rows[0][1]
+    assert outbox_rows[0][1] == (
+        "No puedo procesar este archivo (es demasiado grande). "
+        "Envíame una foto (JPG o PNG, hasta 8 MB) o el PDF del comprobante (hasta 16 MB)."
+    )
 
 
 async def test_media_info_failure_raises_and_changes_nothing(

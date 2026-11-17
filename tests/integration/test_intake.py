@@ -32,7 +32,7 @@ from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
-from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, REJECTION_DESC, state_desc
+from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
 from invoicebot.store import taught_links
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
@@ -1314,17 +1314,19 @@ async def test_lone_xml_gets_br_e07_and_creates_nothing(
     assert len(replies) == 1
     text, rule_id = replies[0]
     assert rule_id == "BR-E07"
-    assert REJECTION_DESC["unsupported_type"] in text
-    assert "de hasta 7 MB" in text
+    assert text == (
+        "No puedo procesar este archivo (el tipo de archivo no es compatible). "
+        "Envíame una foto (JPG o PNG, hasta 7 MB) o el PDF del comprobante (hasta 7 MB)."
+    )
 
 
-async def test_lone_xml_refusal_names_the_photo_cap_not_the_pdf_cap(
+async def test_lone_xml_refusal_names_the_photo_and_pdf_caps_separately(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-E07: a lone XML's refusal names the photo cap, never the larger PDF cap."""
+    """BR-E07: a lone XML's refusal quotes the photo cap and the PDF cap separately."""
     profile_id = _profile()
     msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
-    media_max_bytes = MediaMaxBytes(image=7 * MEGABYTE, pdf=20 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
+    media_max_bytes = MediaMaxBytes(image=10 * MEGABYTE, pdf=20 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -1340,8 +1342,12 @@ async def test_lone_xml_refusal_names_the_photo_cap_not_the_pdf_cap(
     assert len(replies) == 1
     text, rule_id = replies[0]
     assert rule_id == "BR-E07"
-    assert "de hasta 7 MB" in text
-    assert "20 MB" not in text
+    assert text == (
+        "No puedo procesar este archivo (el tipo de archivo no es compatible). "
+        "Envíame una foto (JPG o PNG, hasta 10 MB) o el PDF del comprobante (hasta 20 MB)."
+    )
+    assert "hasta 10 MB" in text
+    assert "hasta 20 MB" in text
 
 
 async def test_lone_pdf_over_the_queue_cap_gets_br_s01(

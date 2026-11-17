@@ -45,8 +45,8 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-E05": "Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.",
     "BR-E07": (
-        "No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) "
-        "o el PDF del comprobante, de hasta {max_mb} MB."
+        "No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG, "
+        "hasta {image_mb} MB) o el PDF del comprobante (hasta {pdf_mb} MB)."
     ),
     "BR-E09": (
         "Revisa estos datos antes de seguir: {fields_desc}. Si están bien, confírmalos; "
