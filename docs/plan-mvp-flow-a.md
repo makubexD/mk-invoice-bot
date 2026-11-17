@@ -289,10 +289,10 @@ Test: `uv run pytest -q tests/unit/test_browser_sol.py tests/integration/test_br
 
 ## Step 26: `sunat_sol` fetcher `[worker]`
 
-Files: `src/invoicebot/fetchers/sunat_sol.py` (new), `tests/unit/test_fetchers_sunat_sol.py` (new).
+Files: `src/invoicebot/fetchers/sunat_sol.py` (new), `src/invoicebot/fetchers/portal.py` (only to make `_helper_env` and `_result_from` public as `helper_env` and `result_from`, so the SOL fetcher reuses them), `tests/unit/test_fetchers_sunat_sol.py` (new).
 
 - `SUNAT_SOL_FETCHER = "sunat_sol"`, `SECRETS = ("sol_ruc", "sol_user", "sol_password")`. `class SunatSolFetcher(site, secrets: Secrets, max_bytes, timeout_s, helper_command = SOL_HELPER_COMMAND)` implements `Fetcher`: builds the `SolRequest`, runs `run_helper` with it on stdin and the same minimal env as the portal fetcher (no secret in env or argv), and maps the output as `PortalFetcher` does, with `portal_key="sunat_sol"` (R-5.7 stats).
-- Tests (a fake helper script, as the portal fetcher's tests use): R-9.10 the credentials reach the helper on stdin and not in its argv or environment; R-5.2 an `ok` output returns the XML file; R-5.1 `not_found_yet` passes through; a helper timeout is `technical`; R-9.10 a `Secrets` view without `sol_password` raises at construction.
+- Tests (a fake helper script, as the portal fetcher's tests use): R-9.10 the credentials reach the helper on stdin and not in its argv or environment; R-5.2 an `ok` output returns the XML file; R-5.1 `not_found_yet` passes through; a helper timeout is `timeout`, as for a portal; R-9.10 a `Secrets` view without `sol_password` raises at construction.
 
 Test: `uv run pytest -q tests/unit/test_fetchers_sunat_sol.py`.
 
