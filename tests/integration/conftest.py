@@ -130,14 +130,14 @@ _TEXT_TOP_PX = 500
 _TEXT_STEP_PX = 60
 
 
-def _qr_payload(fecha: date) -> str:
-    """Return a SUNAT QR payload for a factura from ISSUER_RUC to WORK_RUC.
+def _qr_payload(fecha: date, *, buyer_ruc: str = WORK_RUC) -> str:
+    """Return a SUNAT QR payload for a factura from ISSUER_RUC to ``buyer_ruc``.
 
     Each payload gets its own numero, so routing never sees one conversation's invoice
     as a duplicate of another's (BR-E04), whatever order the tests run in.
     """
     numero = next(_NEXT_NUMERO)
-    return f"{ISSUER_RUC}|01|{SERIE}|{numero}|7.61|{TOTAL}|{fecha.isoformat()}|6|{WORK_RUC}"
+    return f"{ISSUER_RUC}|01|{SERIE}|{numero}|7.61|{TOTAL}|{fecha.isoformat()}|6|{buyer_ruc}"
 
 
 def _draw_text(canvas: np.ndarray, lines: Sequence[str]) -> None:
@@ -188,11 +188,11 @@ def _write_photo(path: Path, payload: str | None, printed_lines: Sequence[str] =
     return path
 
 
-def _read_config(profile_id: str) -> AppConfig:
-    """Return the example config with ``profile_id`` as the full profile and WORK_RUC routed."""
+def _read_config(profile_id: str, *, buyer_ruc: str = WORK_RUC, flow: str = WORK_FLOW) -> AppConfig:
+    """Return the example config with ``profile_id`` as the full profile and ``buyer_ruc`` routed."""
     cfg = load_config(EXAMPLE_CONFIG)
     routing = cfg.routing.model_copy(
-        update={"rules": [RoutingRule(id="BR-R02", when={"num_doc_adq": [WORK_RUC]}, flow=WORK_FLOW)]}
+        update={"rules": [RoutingRule(id="BR-R02", when={"num_doc_adq": [buyer_ruc]}, flow=flow)]}
     )
     return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles["yo"]}, "routing": routing})
 
@@ -213,11 +213,17 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
     text, so OCR reads it (R-2.3, R-9.16).
     """
 
-    async def run(with_qr: bool, *, printed: bool = False) -> tuple[FakeChannel, str]:
+    async def run(
+        with_qr: bool,
+        *,
+        printed: bool = False,
+        buyer_ruc: str = WORK_RUC,
+        flow: str = WORK_FLOW,
+    ) -> tuple[FakeChannel, str]:
         profile_id = f"profile-{uuid4().hex}"
-        cfg = _read_config(profile_id)
+        cfg = _read_config(profile_id, buyer_ruc=buyer_ruc, flow=flow)
         # The issue date is the owner's today: a UTC date is tomorrow there in the evening (BR-E03).
-        payload = _qr_payload(datetime.now(ZoneInfo(cfg.owner.timezone)).date())
+        payload = _qr_payload(datetime.now(ZoneInfo(cfg.owner.timezone)).date(), buyer_ruc=buyer_ruc)
         printed_lines = _printed_lines(payload) if printed else ()
         msg = InboundMessage(
             channel="whatsapp",
