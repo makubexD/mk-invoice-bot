@@ -217,10 +217,10 @@ Test: `uv run pytest -q tests/unit/test_cli_google_setup.py`.
 
 ## Step 19: Provider-neutral mailbox errors `[worker]`
 
-Files: `src/invoicebot/fetchers/email_inbox.py`, `src/invoicebot/fetchers/graph_mail.py`, `tests/unit/test_fetchers_graph_mail.py`.
+Files: `src/invoicebot/fetchers/base.py`, `src/invoicebot/fetchers/email_inbox.py`, `src/invoicebot/fetchers/graph_mail.py`, `tests/unit/test_fetchers_graph_mail.py`, `tests/unit/test_fetchers_email_inbox.py`.
 
-- `email_inbox.py` defines `class MailboxError(Exception)` (the mailbox answered with a refusal or broke); the fetcher maps `MailboxError` and `httpx.HTTPError` to `TECHNICAL` and `AuthRequired` to `AUTH_REQUIRED`, and no longer imports Graph's errors. `GraphMailbox` raises `MailboxError` from its `GraphError`/`GraphTransient` (`raise … from err`).
-- Tests: R-5.2 a Graph 500 surfaces as `MailboxError`; the existing `test_fetchers_email_inbox.py` passes unchanged.
+- `fetchers/base.py` defines `class MailboxError(Exception)` (the mailbox answered with a refusal or broke); it lives there, not in `email_inbox.py`, because `email_inbox` imports `graph_mail` and the reverse import would be circular. The fetcher maps `MailboxError` and `httpx.HTTPError` to `TECHNICAL` and `AuthRequired` to `AUTH_REQUIRED`, and no longer imports Graph's errors. `GraphMailbox`'s public methods (`search`, `attachments`, `download`) raise `MailboxError` from its `GraphError`/`GraphTransient` (`raise … from err`); `AuthRequired` passes through.
+- Tests: R-5.2 a Graph 500 surfaces as `MailboxError` from `GraphMailbox.search`. In `test_fetchers_email_inbox.py` the two tests whose fake raises `GraphTransient(503)` / `GraphError(403)` change to raise `MailboxError("…")` and `httpx.ConnectError("…")` (renamed to a mailbox error / an HTTP error, both still `TECHNICAL`), and the `sinks.onedrive` import goes; every other test there is unchanged.
 
 Test: `uv run pytest -q tests/unit/test_fetchers_graph_mail.py tests/unit/test_fetchers_email_inbox.py`.
 
