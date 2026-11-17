@@ -135,6 +135,17 @@ def test_example_config_has_no_problems() -> None:
     assert check_config.main([str(EXAMPLE)]) == 0
 
 
+def test_example_config_dni_flow_has_no_blocking_problem() -> None:
+    """D142: the shipped personal_dni flow and its BR-R10 rule pass every blocking check."""
+    cfg = load_config(EXAMPLE)
+    directory = load_directory(ROOT / "config")
+
+    problems = run_checks(cfg, directory, changed_portals=frozenset())
+
+    assert "personal_dni" in cfg.flows
+    assert [problem for problem in problems if problem.blocking] == []
+
+
 def test_repo_config_has_no_blocking_problems() -> None:
     """R-5.8: the shipped config and its store directory pass every blocking check."""
     cfg = load_config(Path("config/example.yaml"))

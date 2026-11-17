@@ -1013,7 +1013,7 @@ def test_example_config_declares_each_flows_manual_uploads() -> None:
     """R-1.5: each flow declares the file kinds a sender may upload, in preference order."""
     cfg = load_config(EXAMPLE)
 
-    assert cfg.flows["personal_google"].manual_uploads == ["xml", "pdf"]
+    assert cfg.flows["personal_google"].manual_uploads == ["pdf", "xml"]
     assert cfg.flows["work_microsoft"].manual_uploads == ["pdf", "xml"]
 
 
@@ -1047,6 +1047,8 @@ def test_owner_without_a_dni_loads_as_none(tmp_path: Path) -> None:
     """D143: owner.dni is optional, so a config without it loads with None."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["owner"]["dni"]
+    rules = document["routing"]["rules"]
+    document["routing"]["rules"] = [rule for rule in rules if rule["id"] != "BR-R10"]
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     assert load_config(path).owner.dni is None

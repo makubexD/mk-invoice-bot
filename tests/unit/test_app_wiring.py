@@ -104,10 +104,21 @@ def _with_backup_at(cfg: Config, at: time) -> Config:
     return cfg.model_copy(update={"ops": cfg.ops.model_copy(update={"backup": backup})})
 
 
+def _drop_dni_flow(document: dict[str, Any]) -> None:
+    """Remove the Sheets-only ``personal_dni`` flow and what names it (D144)."""
+    del document["flows"]["personal_dni"]
+    del document["llm_fallback"]["flows"]["personal_dni"]
+    rules = document["routing"]["rules"]
+    document["routing"]["rules"] = [rule for rule in rules if rule["flow"] != "personal_dni"]
+    for profile in document["profiles"].values():
+        profile["flows"] = [name for name in profile["flows"] if name != "personal_dni"]
+
+
 def _without_google(tmp_path: Path) -> Config:
     """Load the example config with no Google sink, gmail inbox or google block (R-6.4)."""
     document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["google"]
+    _drop_dni_flow(document)
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
@@ -134,6 +145,7 @@ def _without_google_sinks(tmp_path: Path) -> Config:
     """Load the example config with no Google sink, keeping the google block (D144)."""
     document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     document["flows"]["personal_google"]["sinks"] = []
+    _drop_dni_flow(document)
     path = tmp_path / "no-google-sinks.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return load_config(path)
