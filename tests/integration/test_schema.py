@@ -297,3 +297,26 @@ async def test_gaps_gains_raised_at(
 ) -> None:
     """R-11.2: gaps has the raised_at column after upgrade head (D115)."""
     assert "raised_at" in await _columns(db_pool, "gaps")
+
+
+async def test_taught_link_gains_version(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D137: a taught link inserted at revision 0010 has version 1 after upgrading to 0011."""
+    ruc_emisor = 20000000911
+    try:
+        await asyncio.to_thread(_run_alembic, db_pool.conninfo, "0010", downgrade=True)
+        async with db_pool.connection() as conn:
+            await conn.execute(
+                "INSERT INTO taught_links (ruc_emisor, url, profile_id, state) VALUES (%s, %s, %s, %s)",
+                (ruc_emisor, "https://example.test/facturas", "owner", "approved"),
+            )
+        await asyncio.to_thread(_run_alembic, db_pool.conninfo, "0011")
+        async with db_pool.connection() as conn:
+            cur = await conn.execute("SELECT version FROM taught_links WHERE ruc_emisor = %s", (ruc_emisor,))
+            row = await cur.fetchone()
+    finally:
+        # Leave the database at head even if an assertion below fails.
+        await asyncio.to_thread(_run_alembic, db_pool.conninfo, "head")
+    assert row is not None
+    assert row[0] == 1
