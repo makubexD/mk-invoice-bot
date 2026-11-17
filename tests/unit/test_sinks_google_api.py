@@ -40,6 +40,32 @@ def test_403_raises_google_error_with_the_status_and_not_the_body() -> None:
     assert BODY not in str(caught.value)
 
 
+@pytest.mark.parametrize("reason", ["rateLimitExceeded", "userRateLimitExceeded"])
+def test_403_rate_limit_raises_google_transient(reason: str) -> None:
+    """R-6.4: a 403 whose body names a rate limit is worth retrying."""
+    response = httpx.Response(403, json={"error": {"errors": [{"reason": reason}]}})
+    with pytest.raises(GoogleTransient) as caught:
+        raise_google_error(response, ACCOUNT)
+    assert caught.value.status == 403
+
+
+def test_403_permission_error_raises_google_error() -> None:
+    """R-6.4: a 403 for an insufficient permission is final."""
+    response = httpx.Response(403, json={"error": {"errors": [{"reason": "insufficientPermissions"}]}})
+    with pytest.raises(GoogleError) as caught:
+        raise_google_error(response, ACCOUNT)
+    assert not isinstance(caught.value, GoogleTransient)
+    assert caught.value.status == 403
+
+
+def test_403_non_json_body_raises_google_error() -> None:
+    """R-6.4: a 403 with a body that is not JSON stays a final error."""
+    with pytest.raises(GoogleError) as caught:
+        raise_google_error(_response(403), ACCOUNT)
+    assert not isinstance(caught.value, GoogleTransient)
+    assert caught.value.status == 403
+
+
 def test_200_returns_without_raising() -> None:
     """R-6.4: a successful response is not an error."""
     raise_google_error(_response(200), ACCOUNT)

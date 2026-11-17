@@ -19,7 +19,12 @@ import httpx
 
 from invoicebot.config.models import GOOGLE_ID_PATTERN
 from invoicebot.sinks.base import TokenSource
-from invoicebot.sinks.google_api import GoogleError, auth_headers, raise_google_error
+from invoicebot.sinks.google_api import (
+    GoogleError,
+    auth_headers,
+    json_object,
+    raise_google_error,
+)
 
 #: The Drive v3 endpoint; the only host this client talks to.
 DRIVE_URL = "https://www.googleapis.com/drive/v3"
@@ -52,17 +57,6 @@ def _escape_query(value: str) -> str:
     backslash is not doubled a second time.
     """
     return value.replace("\\", "\\\\").replace("'", "\\'")
-
-
-def _json_object(response: httpx.Response) -> dict[str, object]:
-    """Return the decoded JSON object, or raise when the body is not one."""
-    try:
-        body: object = response.json()
-    except ValueError as err:
-        raise GoogleError() from err
-    if not isinstance(body, dict):
-        raise GoogleError()
-    return body
 
 
 def _read_id(item: Mapping[str, object]) -> str:
@@ -131,7 +125,7 @@ class GoogleDrive:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        return _read_id(_json_object(response))
+        return _read_id(json_object(response))
 
     async def put_file(self, folder_id: str, name: str, data: bytes, mime: str) -> DriveFile:
         """Upload ``data`` as ``name`` under ``folder_id`` (R-6.1, R-6.3).
@@ -155,7 +149,7 @@ class GoogleDrive:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        return _read_file(_json_object(response))
+        return _read_file(json_object(response))
 
     def folder_link(self, folder_id: str) -> str:
         """Return the browser link of a Drive folder (R-6.1)."""
@@ -178,7 +172,7 @@ class GoogleDrive:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        files = _json_object(response).get("files")
+        files = json_object(response).get("files")
         if not isinstance(files, list) or not files:
             return None
         first = files[0]

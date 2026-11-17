@@ -17,7 +17,12 @@ import httpx
 
 from invoicebot.config.models import GOOGLE_ID_PATTERN
 from invoicebot.sinks.base import TokenSource
-from invoicebot.sinks.google_api import GoogleError, auth_headers, raise_google_error
+from invoicebot.sinks.google_api import (
+    GoogleError,
+    auth_headers,
+    json_object,
+    raise_google_error,
+)
 from invoicebot.text import escape_formula
 
 #: The Sheets v4 endpoint; the only host this client talks to.
@@ -39,17 +44,6 @@ _PROPERTIES_FIELDS = "sheets.properties"
 
 #: The first row number in an A1 range such as ``A7:K7``.
 _ROW_IN_RANGE = re.compile(r"(\d+)")
-
-
-def _json_object(response: httpx.Response) -> dict[str, object]:
-    """Return the decoded JSON object, or raise when the body is not one."""
-    try:
-        body: object = response.json()
-    except ValueError as err:
-        raise GoogleError() from err
-    if not isinstance(body, dict):
-        raise GoogleError()
-    return body
 
 
 def _a1(tab: str, cells: str) -> str:
@@ -151,7 +145,7 @@ class GoogleSheets:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        spreadsheet_id = _spreadsheet_id(_json_object(response))
+        spreadsheet_id = _spreadsheet_id(json_object(response))
         await self.update(spreadsheet_id, tab, 1, header)
         return spreadsheet_id
 
@@ -167,7 +161,7 @@ class GoogleSheets:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        values = _json_object(response).get("values", [])
+        values = json_object(response).get("values", [])
         if not isinstance(values, list):
             raise GoogleError()
         keys: dict[str, int] = {}
@@ -192,7 +186,7 @@ class GoogleSheets:
             timeout=self._timeout_s,
         )
         raise_google_error(response, self._account)
-        return _updated_row(_json_object(response))
+        return _updated_row(json_object(response))
 
     async def update(self, spreadsheet_id: str, tab: str, row_number: int, row: list[str]) -> None:
         """Write ``row`` over the row at ``row_number`` (R-6.3, R-6.6).
@@ -224,7 +218,7 @@ class GoogleSheets:
                 timeout=self._timeout_s,
             )
             raise_google_error(response, self._account)
-            sheet_id = _sheet_id(_json_object(response), tab)
+            sheet_id = _sheet_id(json_object(response), tab)
             self._sheet_ids[key] = sheet_id
         return ROW_LINK_TEMPLATE.format(
             spreadsheet_id=spreadsheet_id,
