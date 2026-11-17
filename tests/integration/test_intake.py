@@ -1099,6 +1099,66 @@ async def test_ambiguous_upload_asks_which_invoice(
     assert newer_jobs == []
 
 
+def _listed_invoices(reply: str) -> str:
+    """Return the ``{invoices}`` part of a BR-D14 reply."""
+    prefix, suffix = MESSAGES["BR-D14"].split("{invoices}")
+    return reply.removeprefix(prefix).removesuffix(suffix)
+
+
+async def test_ambiguous_upload_lists_ten_newest_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D14: twelve open invoices list the ten newest, then ``, …`` (D140)."""
+    profile_id = _profile()
+    readings = [_reading(await _today(db_pool)) for _ in range(12)]
+    invoice_ids = [
+        await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", reading, rule_id="BR-F07")
+        for reading in readings
+    ]
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+
+    assert len(replies) == 1
+    text, rule_id = replies[0]
+    assert rule_id == "BR-D14"
+    invoices_text = _listed_invoices(text)
+    assert invoices_text.endswith(", …")
+    labels = invoices_text.removesuffix(", …").split(", ")
+    newest_first = sorted(zip(invoice_ids, readings, strict=True), key=lambda pair: pair[0], reverse=True)
+    expected = [f"#{invoice_id} F001-{reading.value('numero')}" for invoice_id, reading in newest_first[:10]]
+    assert labels == expected
+    assert labels[0].startswith(f"#{max(invoice_ids)} ")
+
+
+async def test_ambiguous_upload_lists_both_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D14: two open invoices list both newest first with no ``, …`` (D140)."""
+    profile_id = _profile()
+    readings = [_reading(await _today(db_pool)) for _ in range(2)]
+    invoice_ids = [
+        await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", reading, rule_id="BR-F07")
+        for reading in readings
+    ]
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        replies = await _replies(conn, profile_id)
+
+    assert len(replies) == 1
+    text, rule_id = replies[0]
+    assert rule_id == "BR-D14"
+    invoices_text = _listed_invoices(text)
+    newest_first = sorted(zip(invoice_ids, readings, strict=True), key=lambda pair: pair[0], reverse=True)
+    expected = [f"#{invoice_id} F001-{reading.value('numero')}" for invoice_id, reading in newest_first]
+    assert invoices_text == ", ".join(expected)
+    assert "…" not in invoices_text
+
+
 async def test_ambiguous_upload_quoting_one_invoice_links_it(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

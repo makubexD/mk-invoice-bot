@@ -48,6 +48,8 @@ RULE_BACK_PRESSURE = "BR-S01"
 RULE_ACK = "BR-S09"
 #: Rule that asks which open invoice an ambiguous upload belongs to (BR-D14).
 RULE_AMBIGUOUS_UPLOAD = "BR-D14"
+#: Most invoices BR-D14 lists before ending the list with ``, …`` (BR-D14, D140).
+BR_D14_MAX_ITEMS = 10
 #: Job step that downloads a photo before extraction (R-1.4).
 DOWNLOAD_STEP = "download_media"
 #: Advisory-lock namespace that serialises one profile's intake (R-1.6, PT-2).
@@ -274,11 +276,18 @@ async def _link_upload(conn: AsyncConnection[Any], msg: InboundMessage) -> int |
 
 
 async def _ask_which_invoice(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
-    """Queue BR-D14 when the sender has more than one open invoice to choose from (D102)."""
+    """Queue BR-D14 when the sender has more than one open invoice to choose from (D102).
+
+    The list is newest first (highest id) and shows at most ``BR_D14_MAX_ITEMS``
+    invoices, then ``, …`` when there are more (BR-D14, D140).
+    """
     open_invoices = await list_open_invoices(conn, msg.profile_id)
     if len(open_invoices) <= 1:
         return
-    invoices = ", ".join(_invoice_label(*invoice) for invoice in open_invoices)
+    newest_first = sorted(open_invoices, key=lambda invoice: invoice[0], reverse=True)
+    invoices = ", ".join(_invoice_label(*invoice) for invoice in newest_first[:BR_D14_MAX_ITEMS])
+    if len(newest_first) > BR_D14_MAX_ITEMS:
+        invoices += ", …"
     text = MESSAGES[RULE_AMBIGUOUS_UPLOAD].format(invoices=invoices)
     await _add_outbox(conn, msg, RULE_AMBIGUOUS_UPLOAD, text)
 
