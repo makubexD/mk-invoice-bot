@@ -4,6 +4,11 @@
 #
 # 20 + 00000 + a 3-digit sequence is the deliberately synthetic RUC shape.
 20000000001
+# Issuers and buyers for scripts/make_golden.py.
+20000000010
+20000000028
+20000000036
+20000000044
 # Synthetic WhatsApp placeholder used by tests/unit/test_channels_base.py: it is a
 # phone number that happens to pass the RUC check digit, so it must be listed too.
 51900000000
