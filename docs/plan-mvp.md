@@ -58,7 +58,7 @@ Each item goes into the named phase's plan.
 - **`ocr` (step 4):** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
 - **`widen-b` (with S7.2 `qr_url`, moved from `fetch`; widen-b-fetch):** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
 - **`ops` (moved from `fetch`, a host setting):** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared. The browser helper (D82) needs network, so it gets its own user with internet-only egress instead.
-- **`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.
+- ~~**`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.~~ Done in `read-more`.
 
 ## Carried over from the `ocr` review
 
@@ -70,8 +70,8 @@ Each item goes into the named phase's plan.
 - **`fetch` step 17:** the helper's `variant` and `decoder` strings are logged unchecked. Move the QR variant and decoder names to a module without cv2 and make the result fields `Literal`s of them (R-9.16).
 - **`widen-b-fetch` (widen-b-fetch, D101):** drop `printed_urls` until a step reads them, or put them to use.
 - **`fetch` step 12 (moved from `read-more`: a fetched XML is the first caller):** `parse_invoice_xml` relies on the hardened parser plus the docinfo check, not on its byte scan for `<!doctype` (a UTF-16 document without a BOM passes the scan). Before a caller lands, refuse input that does not start with `<` after an optional UTF-8 BOM and whitespace.
-- **`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.
-- **`read-more`:** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
+- ~~**`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.~~ Done in `read-more`.
+- **`read-more` live check (`docs/plan-mvp-read-more.md` § "Deferred: live check", item 2):** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
 - **Known, accepted:** the helper's process group is killed once more after the helper exits, by the old process ID; a reused ID could be hit in that window, which is very small.
 
 ## Carried over from the `fetch` review
@@ -111,7 +111,7 @@ Each item goes into the named phase's plan.
 - ~~**`widen-b` (widen-b-harden):** cap the pages `Drive.list_names` follows through `@odata.nextLink` (e.g. 50) and raise `GraphError` past it.~~ Done in `widen-b-harden`.
 - ~~**`widen-b` (with the work account, S11.1):** `auth-microsoft --account` becomes a choice of the configured accounts, and a sign-in resumes only that account's `PENDING_AUTH` invoices.~~ Dropped by D91.
 - ~~**`widen-b` (widen-b-harden):** a control character in a reading's text (`razon_social`, `serie`) makes lxml, the `.eml` builder or the drive path raise `ValueError`; map it to BR-D02 or strip it when the reading is stored.~~ Done in `widen-b-harden`.
-- **`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.
+- ~~**`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.~~ Done in `read-more`.
 - **Known, accepted (D89):** a transient Graph error during an automatic send leaves the batch `sending`, so the retry ends with BR-D03 instead of resending, even for a 429 that sent nothing.
 
 ## Carried over from the `widen-b-harden` review
@@ -163,8 +163,6 @@ The specs run ahead of the code in these places; each has a named story that clo
 
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
-- `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
-- `confirm_mode: always`, the `VALIDATING` state and asking in `CONFIRMING` for BR-E03 or a `source=llm` field (spec 03 §4) are not built; routing goes straight to `FETCHING_DOCS`. `read-more` builds them with BR-E03.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans
