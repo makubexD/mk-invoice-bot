@@ -640,10 +640,11 @@ function Send-Job {
     .SYNOPSIS
         Send one validated job through Outlook and write its receipt (R-7.14).
     .DESCRIPTION
-        A job id already in the state file is never sent again: the receipt is
-        rewritten. Otherwise the id is appended to the state file before
-        `Send()`, so a crash cannot send twice; if the send throws, the id is
-        removed again and an error receipt is written. The job file that
+        A job id already in either state file is never sent again: it is
+        refused with a `replay` error receipt. Otherwise the id is appended to
+        `sent-jobs.txt` before `Send()`, so a crash cannot send twice; if the
+        send throws, the id is added to `failed-jobs.txt` first and removed
+        from `sent-jobs.txt`, and an error receipt is written. The job file that
         `Test-JobFile` read is deleted after its receipt, whatever the outcome:
         an error is final and the bot asks the sender what to do (BR-D11).
     .PARAMETER Job
@@ -658,6 +659,9 @@ function Send-Job {
         The Outlook COM application, or `$null` with `-DryRun`.
     .PARAMETER StateFile
         The local `sent-jobs.txt`, one sent job id per line.
+    .PARAMETER FailedStateFile
+        The local `failed-jobs.txt`, one failed job id per line; an id in
+        either state file is refused as a replay (S11.14).
     .PARAMETER Outbox
         The `_outbox/` folder: `receipts/` live there.
     .PARAMETER Key
@@ -681,6 +685,8 @@ function Send-Job {
         [Parameter(Mandatory)]
         [string] $StateFile,
         [Parameter(Mandatory)]
+        [string] $FailedStateFile,
+        [Parameter(Mandatory)]
         [string] $Outbox,
         [Parameter(Mandatory)]
         [AllowEmptyString()]
@@ -703,17 +709,17 @@ function Send-Job {
         return
     }
 
-    if (Test-JobIdInState -StateFile $StateFile -JobId $jobId) {
-        Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId `
-            -SentAt ([DateTime]::UtcNow.ToString('o')) -Key $Key
+    $isReplay = (Test-JobIdInState -StateFile $StateFile -JobId $jobId) -or
+        (Test-JobIdInState -StateFile $FailedStateFile -JobId $jobId)
+    if ($isReplay) {
+        Write-JobReceipt -ReceiptsFolder $receiptsFolder -JobId $jobId -ErrorText 'replay' -Key $Key
         Write-AgentLog -LogFile $LogFile -Message (
-            'job {0}: already sent, receipt rewritten ({1} attachments)' -f $jobId, $attachments.Count
+            'job {0}: replay refused ({1} attachments)' -f $jobId, $attachments.Count
         )
         Remove-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
         return
     }
 
-    $stateAppended = $false
     $sendError = $null
     try {
         [System.IO.File]::AppendAllText(
@@ -721,7 +727,6 @@ function Send-Job {
             $jobId + [Environment]::NewLine,
             [System.Text.UTF8Encoding]::new($false)
         )
-        $stateAppended = $true
         $mail = $Outlook.CreateItem(0)
         $mail.To = @($Job.to) -join '; '
         $mail.Subject = [string] $Job.subject
@@ -736,8 +741,18 @@ function Send-Job {
     }
 
     if ($null -ne $sendError) {
-        if ($stateAppended) {
+        try {
+            [System.IO.File]::AppendAllText(
+                $FailedStateFile,
+                $jobId + [Environment]::NewLine,
+                [System.Text.UTF8Encoding]::new($false)
+            )
             Remove-JobIdFromState -StateFile $StateFile -JobId $jobId
+        }
+        catch {
+            Write-AgentLog -LogFile $LogFile -Message (
+                'job {0}: state write failed ({1})' -f $jobId, $_.Exception.GetType().Name
+            )
         }
         $errorText = '{0}: {1}' -f $sendError.Exception.GetType().Name, $sendError.Exception.Message
         if ($errorText.Length -gt $script:MaxErrorLength) {
@@ -1129,13 +1144,15 @@ if ($MyInvocation.InvocationName -ne '.') {
     $agentLog = Join-Path -Path $PSScriptRoot -ChildPath 'agent.log'
     if ($validJobs.Count -gt 0) {
         $stateFile = Join-Path -Path $PSScriptRoot -ChildPath 'sent-jobs.txt'
+        $failedStateFile = Join-Path -Path $PSScriptRoot -ChildPath 'failed-jobs.txt'
         $outlook = $null
         if (-not $DryRun) {
             $outlook = New-Object -ComObject Outlook.Application
         }
         foreach ($validJob in $validJobs) {
             Send-Job -Job $validJob.Job -Path $validJob.Path -Folder $validJob.Folder -Outlook $outlook `
-                -StateFile $stateFile -Outbox $outbox -Key $agentKey -LogFile $agentLog -DryRun:$DryRun
+                -StateFile $stateFile -FailedStateFile $failedStateFile -Outbox $outbox -Key $agentKey `
+                -LogFile $agentLog -DryRun:$DryRun
         }
     }
 
