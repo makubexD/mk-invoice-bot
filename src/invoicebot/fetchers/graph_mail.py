@@ -9,18 +9,22 @@ status only, never a URL, a path or a body (R-9.16).
 
 from __future__ import annotations
 
+import contextlib
 import re
 import urllib.parse
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
 
 import httpx
 
+from invoicebot.fetchers.base import MailboxError
 from invoicebot.sinks.base import TokenSource
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
     NOT_SENT_STATUS,
     GraphError,
+    GraphTransient,
     auth_headers,
     raise_graph_error,
 )
@@ -139,6 +143,15 @@ def _attachment(item: object) -> MailAttachment | None:
     return MailAttachment(id=attachment_id, name=name, size=size)
 
 
+@contextlib.asynccontextmanager
+async def _mailbox_errors() -> AsyncIterator[None]:
+    """Re-raise Graph's failures as MailboxError so callers see no provider (R-5.2)."""
+    try:
+        yield
+    except (GraphError, GraphTransient) as err:
+        raise MailboxError(str(err)) from err
+
+
 class GraphMailbox:
     """One Microsoft account's mailbox, over Graph and an injected HTTP client (R-5.2).
 
@@ -164,65 +177,68 @@ class GraphMailbox:
         quoted ``$search`` phrase. Only the first ``top`` messages are looked at.
 
         Raises:
-            GraphError: Graph answers with an error or a malformed body.
+            MailboxError: Graph answers with an error or a malformed body.
         """
-        clean = term.replace('"', "").replace("\\", "")
-        params = {
-            "$search": f'"{clean}"',
-            "$top": str(top),
-            "$select": _MESSAGE_SELECT,
-        }
-        token = await self._tokens.token()
-        response = await self._http.get(
-            f"{GRAPH_BASE_URL}/me/messages",
-            params=params,
-            headers={**auth_headers(token), "ConsistencyLevel": "eventual"},
-            timeout=self._timeout_s,
-        )
-        raise_graph_error(response, self._account)
-        messages = (_message(item) for item in _items(_json_dict(response)))
-        return [message for message in messages if message is not None]
+        async with _mailbox_errors():
+            clean = term.replace('"', "").replace("\\", "")
+            params = {
+                "$search": f'"{clean}"',
+                "$top": str(top),
+                "$select": _MESSAGE_SELECT,
+            }
+            token = await self._tokens.token()
+            response = await self._http.get(
+                f"{GRAPH_BASE_URL}/me/messages",
+                params=params,
+                headers={**auth_headers(token), "ConsistencyLevel": "eventual"},
+                timeout=self._timeout_s,
+            )
+            raise_graph_error(response, self._account)
+            messages = (_message(item) for item in _items(_json_dict(response)))
+            return [message for message in messages if message is not None]
 
     async def attachments(self, message_id: str) -> list[MailAttachment]:
         """Return the file attachments of ``message_id`` (R-5.2).
 
         Raises:
-            GraphError: ``message_id`` is not a Graph id (before any request), or
+            MailboxError: ``message_id`` is not a Graph id (before any request), or
                 Graph answers with an error or a malformed body.
         """
-        message_path = _encoded_id(message_id)
-        token = await self._tokens.token()
-        response = await self._http.get(
-            f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments",
-            params={"$select": _ATTACHMENT_SELECT},
-            headers=auth_headers(token),
-            timeout=self._timeout_s,
-        )
-        raise_graph_error(response, self._account)
-        attachments = (_attachment(item) for item in _items(_json_dict(response)))
-        return [attachment for attachment in attachments if attachment is not None]
+        async with _mailbox_errors():
+            message_path = _encoded_id(message_id)
+            token = await self._tokens.token()
+            response = await self._http.get(
+                f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments",
+                params={"$select": _ATTACHMENT_SELECT},
+                headers=auth_headers(token),
+                timeout=self._timeout_s,
+            )
+            raise_graph_error(response, self._account)
+            attachments = (_attachment(item) for item in _items(_json_dict(response)))
+            return [attachment for attachment in attachments if attachment is not None]
 
     async def download(self, message_id: str, attachment_id: str, max_bytes: int) -> bytes:
         """Return the bytes of one attachment, refusing anything over ``max_bytes`` (R-5.2).
 
         Raises:
-            GraphError: an id is not a Graph id (before any request) or Graph
+            MailboxError: an id is not a Graph id (before any request) or Graph
                 answers with an error.
             ValueError: the attachment is larger than ``max_bytes``.
         """
-        message_path = _encoded_id(message_id)
-        attachment_path = _encoded_id(attachment_id)
-        url = f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments/{attachment_path}/$value"
-        token = await self._tokens.token()
-        chunks: list[bytes] = []
-        total = 0
-        async with self._http.stream(
-            "GET", url, headers=auth_headers(token), timeout=self._timeout_s
-        ) as response:
-            raise_graph_error(response, self._account)
-            async for chunk in response.aiter_bytes():
-                total += len(chunk)
-                if total > max_bytes:
-                    raise ValueError(f"attachment exceeds {max_bytes} bytes")
-                chunks.append(chunk)
-        return b"".join(chunks)
+        async with _mailbox_errors():
+            message_path = _encoded_id(message_id)
+            attachment_path = _encoded_id(attachment_id)
+            url = f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments/{attachment_path}/$value"
+            token = await self._tokens.token()
+            chunks: list[bytes] = []
+            total = 0
+            async with self._http.stream(
+                "GET", url, headers=auth_headers(token), timeout=self._timeout_s
+            ) as response:
+                raise_graph_error(response, self._account)
+                async for chunk in response.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise ValueError(f"attachment exceeds {max_bytes} bytes")
+                    chunks.append(chunk)
+            return b"".join(chunks)

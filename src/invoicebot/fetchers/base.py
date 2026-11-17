@@ -28,6 +28,10 @@ def is_pdf(data: bytes) -> bool:
     return data.removeprefix(UTF8_BOM).lstrip(ASCII_WHITESPACE).startswith(_PDF_MAGIC)
 
 
+class MailboxError(Exception):
+    """The mailbox answered with a refusal or broke (R-5.2)."""
+
+
 class FetchReason(StrEnum):
     """Why one fetch ended; only ``OK`` carries files (S7.1)."""
 
