@@ -12,7 +12,7 @@ from invoicebot.config.models import ValidezApi
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.store.invoices import CpStatus
 from invoicebot.sunat.token import MAX_RESPONSE_BYTES, SunatUnavailable
-from invoicebot.sunat.validez import validate
+from invoicebot.sunat.validez import SunatUnauthorized, validate
 
 # Both values come from tests/synthetic_rucs.txt; no real RUC appears in this file.
 OWNER_RUC = "20000000001"
@@ -155,6 +155,21 @@ async def test_unusable_answer_raises_sunat_unavailable(handler: Handler) -> Non
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(SunatUnavailable):
             await validate(http, BEARER, _cfg(), OWNER_RUC, _reading())
+
+
+async def test_unauthorized_raises_sunat_unauthorized_without_the_token() -> None:
+    """R-5.4: a 401 raises SunatUnauthorized whose message holds the status and no token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": "invalid_token", "echo": BEARER})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(SunatUnauthorized) as excinfo:
+            await validate(http, BEARER, _cfg(), OWNER_RUC, _reading())
+
+    message = str(excinfo.value)
+    assert "401" in message
+    assert BEARER not in message
 
 
 async def test_incomplete_reading_raises_value_error() -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,9 +12,13 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.config.models import ValidezApi
+from invoicebot.config.loader import load_config
+from invoicebot.config.models import Config, ValidezApi
+from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.validate import ask_sunat
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store import kv
+from invoicebot.store.invoices import CpStatus
 from invoicebot.sunat.token import (
     ADAPTER,
     CACHE_KEY,
@@ -30,6 +35,17 @@ CLIENT_ID = "synthetic-client-id"
 CLIENT_CREDENTIAL = "synthetic-client-secret"
 ACCESS_VALUE = "synthetic-access-token"
 REFRESHED_VALUE = "synthetic-refreshed-token"
+# Both values come from tests/synthetic_rucs.txt; no real RUC appears in this file.
+OWNER_RUC = "20000000001"
+ISSUER_RUC = "51900000000"
+
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
+
+#: The validez body a retried request gets back.
+_VALIDEZ_ANSWER: dict[str, object] = {
+    "success": True,
+    "data": {"estadoCp": 1, "estadoRuc": "00", "condDomiRuc": "00"},
+}
 
 ENDPOINT_TEMPLATE = "https://api-seguridad.example.test/v1/clientesextranet/{client_id}/oauth2/token/"
 FILLED_ENDPOINT = "https://api-seguridad.example.test/v1/clientesextranet/synthetic-client-id/oauth2/token/"
@@ -66,6 +82,32 @@ def _secrets() -> Secrets:
 def _cfg() -> ValidezApi:
     """The validez API settings the token client reads."""
     return ValidezApi(enabled=True, token_url=ENDPOINT_TEMPLATE, api_url=API_URL, timeout_s=5)
+
+
+def _config() -> Config:
+    """The app config ``ask_sunat`` reads, pointing at the synthetic owner and test APIs."""
+    cfg = load_config(EXAMPLE)
+    return cfg.model_copy(
+        update={
+            "owner": cfg.owner.model_copy(update={"ruc": OWNER_RUC}),
+            "sunat": cfg.sunat.model_copy(update={"validez_api": _cfg()}),
+        }
+    )
+
+
+def _reading() -> Reading:
+    """Build a complete reading for the validez request."""
+    return Reading(
+        fields={
+            "ruc_emisor": Field(value=ISSUER_RUC, source="qr", confidence=1.0),
+            "tipo": Field(value="01", source="qr", confidence=1.0),
+            "serie": Field(value="F001", source="qr", confidence=1.0),
+            "numero": Field(value="123", source="qr", confidence=1.0),
+            "fecha_emision": Field(value="2026-11-13", source="qr", confidence=1.0),
+            "total": Field(value="118.50", source="ocr", confidence=1.0),
+        },
+        document_url=None,
+    )
 
 
 def _assert_secret_free(message: str) -> None:
@@ -277,6 +319,57 @@ async def test_short_expires_in_returns_the_token_without_caching_it(
         found = await token(db_pool, http, _secrets(), _cfg())
 
     assert found == ACCESS_VALUE
+    async with db_pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
+    assert cached is None
+
+
+async def test_validez_401_fetches_a_new_token_and_retries_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-5.4: a validez 401 drops the cached token, fetches another and returns the retried answer."""
+    token_calls = 0
+    validez_requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_calls
+        if "oauth2/token" in str(request.url):
+            token_calls += 1
+            value = ACCESS_VALUE if token_calls == 1 else REFRESHED_VALUE
+            return httpx.Response(200, json={"access_token": value, "expires_in": 3600})
+        validez_requests.append(request)
+        if len(validez_requests) == 1:
+            return httpx.Response(401, json={"success": False})
+        return httpx.Response(200, json=_VALIDEZ_ANSWER)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        status = await ask_sunat(db_pool, http, _secrets(), _config(), _reading())
+
+    assert status == CpStatus(estado_cp=1, estado_ruc="00", cond_domi_ruc="00")
+    assert token_calls == 2
+    assert len(validez_requests) == 2
+    assert validez_requests[0].headers["Authorization"] == f"Bearer {ACCESS_VALUE}"
+    assert validez_requests[1].headers["Authorization"] == f"Bearer {REFRESHED_VALUE}"
+
+
+async def test_two_validez_401s_are_unavailable_and_leave_no_token_cached(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-5.4: a second 401 reads as unavailable and leaves no token cached."""
+    token_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal token_calls
+        if "oauth2/token" in str(request.url):
+            token_calls += 1
+            return httpx.Response(200, json={"access_token": REFRESHED_VALUE, "expires_in": 3600})
+        return httpx.Response(401, json={"success": False})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        status = await ask_sunat(db_pool, http, _secrets(), _config(), _reading())
+
+    assert status is None
+    assert token_calls == 2
     async with db_pool.connection() as conn:
         cached = await kv.get(conn, CACHE_KEY)
     assert cached is None
