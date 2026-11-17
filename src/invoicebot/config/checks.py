@@ -22,6 +22,7 @@ from invoicebot.config.models import (
     StoreDirectory,
 )
 from invoicebot.rules import RULES
+from invoicebot.sunat_origins import SUNAT_SOL
 
 PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
 MANUAL_PORTAL = "manual"
@@ -59,9 +60,6 @@ _FLOW_ATTACH_CODE = "FLOW_MAIL_ATTACH"
 _FLOW_LABEL_CODE = "FLOW_LABEL_LENGTH"
 _STORE_COMERCIO_CODE = "STORE_COMERCIO_LENGTH"
 _SOL_DISABLED_CODE = "SOL_DISABLED"
-
-#: The fetcher name a flow lists for SUNAT's SOL site (D134); ``pipeline`` owns the same name.
-_SUNAT_FETCHER = "sunat_sol"
 
 
 @dataclass(frozen=True)
@@ -358,7 +356,7 @@ def _sol_problems(cfg: Config, directory: StoreDirectory) -> list[Problem]:
         query = site.query.model_copy(update={"status": "active"})
         problems.extend(
             _portal_problems(
-                _SUNAT_FETCHER,
+                SUNAT_SOL,
                 query,
                 changed=False,
                 path_prefix="sunat_sol.yaml:query",
@@ -377,13 +375,13 @@ def _sol_disabled_problems(cfg: Config) -> list[Problem]:
             code=_SOL_DISABLED_CODE,
             path=f"flows.{flow_name}.fetchers",
             message=(
-                f"flow '{flow_name}' lists the '{_SUNAT_FETCHER}' fetcher, "
+                f"flow '{flow_name}' lists the '{SUNAT_SOL}' fetcher, "
                 "but sunat.sol.enabled is false, so the chain skips it (R-5.8)"
             ),
             blocking=False,
         )
         for flow_name, flow in cfg.flows.items()
-        if _SUNAT_FETCHER in flow.fetchers
+        if SUNAT_SOL in flow.fetchers
     ]
 
 

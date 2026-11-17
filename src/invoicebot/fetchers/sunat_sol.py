@@ -27,9 +27,8 @@ from invoicebot.fetchers.portal import (
 )
 from invoicebot.helper import run_helper
 from invoicebot.secrets import Secrets
+from invoicebot.sunat_origins import SUNAT_SOL
 
-#: The fetcher's key in a flow and in the fetch statistics (R-5.7).
-SUNAT_SOL_FETCHER = "sunat_sol"
 #: The secrets the SOL sign-in needs; the view must declare all three (R-9.10).
 SECRETS = ("sol_ruc", "sol_user", "sol_password")
 #: The SOL helper module; ``-P`` keeps the working directory off its import path (D82).
@@ -69,7 +68,7 @@ class SunatSolFetcher:
         output = await self._run(_payload(request))
         if isinstance(output, FetchResult):
             return output
-        return result_from(output, out_dir, invoice, self._max_bytes, SUNAT_SOL_FETCHER)
+        return result_from(output, out_dir, invoice, self._max_bytes, SUNAT_SOL)
 
     async def _run(self, payload: bytes) -> HelperOutput | FetchResult:
         """Run the helper in its own temp folder and validate its one JSON line (R-9.2, R-9.10)."""
@@ -83,13 +82,13 @@ class SunatSolFetcher:
                     MAX_HELPER_OUTPUT_BYTES,
                 )
         except TimeoutError:
-            return FetchResult(FetchReason.TIMEOUT, (), SUNAT_SOL_FETCHER)
+            return FetchResult(FetchReason.TIMEOUT, (), SUNAT_SOL)
         except RuntimeError:
-            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL_FETCHER)
+            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL)
         try:
             return HelperOutput.model_validate_json(stdout)
         except ValidationError:
-            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL_FETCHER)
+            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL)
 
 
 def _credentials(secrets: Secrets) -> SolCredentialsIn:

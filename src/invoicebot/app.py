@@ -56,7 +56,7 @@ from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
-from invoicebot.fetchers.sunat_sol import SECRETS, SUNAT_SOL_FETCHER, SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.github.app_token import GitHubApp
 from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
@@ -105,6 +105,7 @@ from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
 from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
+from invoicebot.sunat_origins import SUNAT_SOL
 
 logger = logging.getLogger(__name__)
 
@@ -768,7 +769,7 @@ def _sol_fetcher(cfg: Config, directory: StoreDirectory, store: SecretStore) -> 
     site = directory.sunat_sol
     if not cfg.sunat.sol.enabled or site is None or site.status != "active":
         return None
-    secrets = store.scoped(SUNAT_SOL_FETCHER, set(SECRETS))
+    secrets = store.scoped(SUNAT_SOL, set(SECRETS))
     if secrets.enabled and not hmac.compare_digest(secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()):
         raise ValueError("sunat_sol: secret sol_ruc does not match owner.ruc (R-9.10)")
     return SunatSolFetcher(site, secrets, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
@@ -807,7 +808,7 @@ def _fetcher_builders(
         PORTAL_FETCHER: lambda _name, _flow: portal,
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
         EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, inbox),
-        SUNAT_SOL_FETCHER: lambda _name, _flow: sol,
+        SUNAT_SOL: lambda _name, _flow: sol,
     }
 
 
@@ -826,7 +827,7 @@ def _fetch_schedules(directory: StoreDirectory) -> Mapping[str, Schedule]:
         site = directory.sunat_sol
         return DEFAULT_RETRY_SCHEDULE if site is None else site.query.retry_schedule
 
-    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal, SUNAT_SOL_FETCHER: sunat_sol}
+    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal, SUNAT_SOL: sunat_sol}
 
 
 def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:

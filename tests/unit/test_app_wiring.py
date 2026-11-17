@@ -25,13 +25,14 @@ from invoicebot.app import (
 from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
-from invoicebot.fetchers.sunat_sol import SUNAT_SOL_FETCHER, SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SunatSolFetcher
 from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
+from invoicebot.sunat_origins import SUNAT_SOL
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -255,7 +256,7 @@ def test_sunat_sol_schedule_comes_from_the_site_file() -> None:
     """R-5.2: sunat_sol's retry schedule is the site query's schedule."""
     directory = _sol_directory("todo")
 
-    schedule = _fetch_schedules(directory)[SUNAT_SOL_FETCHER]
+    schedule = _fetch_schedules(directory)[SUNAT_SOL]
 
     assert directory.sunat_sol is not None
     assert schedule(cast(Any, None), cast(Any, None)) == directory.sunat_sol.query.retry_schedule

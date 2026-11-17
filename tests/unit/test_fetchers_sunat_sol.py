@@ -15,8 +15,9 @@ import yaml
 
 from invoicebot.config.models import MediaMaxBytes, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
-from invoicebot.fetchers.sunat_sol import SECRETS, SUNAT_SOL_FETCHER, SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.sunat_origins import SUNAT_SOL
 
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "sunat_sol.yaml"
 SOL_RUC = "20000000001"
@@ -114,7 +115,7 @@ def _secrets(values: dict[str, str] | None = None) -> Secrets:
     """A ``sunat_sol`` view over a synthetic in-memory store (R-9.10)."""
     if values is None:
         values = dict(zip(SECRETS, (SOL_RUC, SOL_USER, SOL_PASSWORD), strict=True))
-    return SecretStore(values).scoped(SUNAT_SOL_FETCHER, set(SECRETS))
+    return SecretStore(values).scoped(SUNAT_SOL, set(SECRETS))
 
 
 def _invoice() -> FetchInvoice:
@@ -178,7 +179,7 @@ async def test_fetch_matching_xml_is_ok(tmp_path: Path) -> None:
     result = await _fetcher(tmp_path, "match").fetch(_invoice(), out_dir)
 
     assert result.reason is FetchReason.OK
-    assert result.portal_key == SUNAT_SOL_FETCHER
+    assert result.portal_key == SUNAT_SOL
     assert [file.kind for file in result.files] == ["xml"]
     file = result.files[0]
     content = (out_dir / XML_NAME).read_bytes()
@@ -193,7 +194,7 @@ async def test_fetch_not_found_yet_passes_through(tmp_path: Path) -> None:
 
     assert result.reason is FetchReason.NOT_FOUND_YET
     assert result.files == ()
-    assert result.portal_key == SUNAT_SOL_FETCHER
+    assert result.portal_key == SUNAT_SOL
 
 
 async def test_fetch_helper_outliving_its_timeout_reports_timeout(tmp_path: Path) -> None:
@@ -204,7 +205,7 @@ async def test_fetch_helper_outliving_its_timeout_reports_timeout(tmp_path: Path
 
     assert result.reason is FetchReason.TIMEOUT
     assert result.files == ()
-    assert result.portal_key == SUNAT_SOL_FETCHER
+    assert result.portal_key == SUNAT_SOL
 
 
 def test_importing_the_fetcher_does_not_load_playwright() -> None:

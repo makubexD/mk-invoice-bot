@@ -8,6 +8,9 @@ from __future__ import annotations
 
 from urllib.parse import urlsplit
 
+#: The SOL fetcher's name and the name of its secrets view (R-5.7, R-9.10).
+SUNAT_SOL = "sunat_sol"
+
 #: The exact ``scheme://host`` origins SOL signs in and queries on (R-9.10).
 SUNAT_ORIGINS = frozenset({"https://api-seguridad.sunat.gob.pe", "https://e-menu.sunat.gob.pe"})
 
