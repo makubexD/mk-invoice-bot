@@ -70,7 +70,7 @@ class GoogleTokens:
         self._lock = asyncio.Lock()
         self._access_token: str | None = None
         self._expires_at = 0.0
-        self._token_mtime_ns: int | None = None
+        self._token_file_signature: tuple[int, int, int] | None = None
 
     async def token(self) -> str:
         """Return a current access token, refreshing it when it is near expiry (D128).
@@ -93,9 +93,9 @@ class GoogleTokens:
     async def _refresh(self) -> str:
         """Exchange the stored refresh token for a new access token and cache it."""
         self._access_token = None
-        self._token_mtime_ns = None
+        self._token_file_signature = None
         try:
-            token_mtime_ns = self._token_path.stat().st_mtime_ns
+            token_file_signature = _file_signature(self._token_path.stat())
         except OSError as err:
             raise AuthRequired(self._account) from err
         refresh_token = self._load_refresh_token()
@@ -117,7 +117,7 @@ class GoogleTokens:
         access_token, lifetime_s = _access_token(response)
         self._access_token = access_token
         self._expires_at = self._clock() + min(lifetime_s, MAX_TOKEN_LIFETIME_S)
-        self._token_mtime_ns = token_mtime_ns
+        self._token_file_signature = token_file_signature
         return access_token
 
     def _token_file_unchanged(self) -> bool:
@@ -127,7 +127,7 @@ class GoogleTokens:
         the next refresh raises :class:`AuthRequired` as a missing file does.
         """
         try:
-            return self._token_path.stat().st_mtime_ns == self._token_mtime_ns
+            return _file_signature(self._token_path.stat()) == self._token_file_signature
         except OSError:
             return False
 
@@ -167,6 +167,11 @@ def save_refresh_token(
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _file_signature(info: os.stat_result) -> tuple[int, int, int]:
+    """Identify the token file by inode, nanosecond mtime and size, so any rewrite is seen (R-4.3)."""
+    return (info.st_ino, info.st_mtime_ns, info.st_size)
 
 
 def _raise_refresh_error(response: httpx.Response, account: str) -> None:
