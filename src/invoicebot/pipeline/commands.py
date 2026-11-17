@@ -28,9 +28,17 @@ from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
+    GAP_IGNORED,
+    GAP_UNKNOWN,
+    GAPS_EMPTY,
+    GAPS_HEADER,
+    GAPS_ISSUE,
+    GAPS_LINE,
     HELP_AYUDA,
     HELP_CANCELAR,
     HELP_ESTADO,
+    HELP_GAP,
+    HELP_GAPS,
     HELP_HEADER,
     HELP_PAGADO,
     HELP_PENDIENTES,
@@ -60,6 +68,7 @@ from invoicebot.states import (
     PENDING_USER,
 )
 from invoicebot.store.flow_b import get_batch_state
+from invoicebot.store.gaps import GapRow, ignore_gap, open_gaps
 from invoicebot.store.invoices import (
     InvoiceHead,
     PendingRow,
@@ -84,6 +93,12 @@ MAX_PENDING_LINES = 20
 PENDING_REQUEUES = 3
 #: The least time between two sends of the same parked question (S4.8, D94).
 PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
+#: The most open gaps ``/gaps`` lists before it says there are more (S8.9, D139).
+MAX_GAP_LINES = 20
+#: The last line of ``/gaps`` when exactly :data:`MAX_GAP_LINES` gaps came back (S8.9, D139).
+GAPS_TRUNCATED = "…"
+#: The ``/gap`` argument that ignores a gap (S8.9, D139).
+GAP_IGNORE_ARG = "ignorar"
 
 
 @dataclass(frozen=True)
@@ -110,10 +125,11 @@ type Handler = Callable[[AsyncConnection[Any], InboundMessage, str, CommandConte
 
 @dataclass(frozen=True)
 class Command:
-    """One chat command: the handler it runs and the help line that describes it."""
+    """One chat command: the handler it runs, its help line and who may run it."""
 
     handler: Handler
     help: str
+    admin_only: bool = False
 
 
 def parse_command(text: str) -> tuple[str, str] | None:
@@ -139,10 +155,15 @@ async def handle_command(
     *,
     context: CommandContext,
 ) -> None:
-    """Run the named command in the caller's transaction; an unknown name answers the help."""
+    """Run the named command in the caller's transaction.
+
+    An unknown name, or an admin command from a sender who is not an admin, answers
+    the help exactly alike (R-10.1).
+    """
+    is_admin = msg.profile_id in context.admins
     command = COMMANDS.get(name)
-    if command is None:
-        await _reply(conn, msg, None, help_text())
+    if command is None or (command.admin_only and not is_admin):
+        await _reply(conn, msg, None, help_text(is_admin))
         return
     await command.handler(conn, msg, arg, context)
 
@@ -171,9 +192,14 @@ async def resolve_target(
     return invoice_id, head
 
 
-def help_text() -> str:
-    """Return the help: the header followed by each command's line, in command order."""
-    return "\n".join([HELP_HEADER, *(command.help for command in COMMANDS.values())])
+def help_text(is_admin: bool) -> str:
+    """Return the help: the header followed by each command's line, in command order.
+
+    An admin command's line is listed only when ``is_admin`` is true, so a sender who
+    cannot run it does not learn it exists (R-10.1).
+    """
+    lines = [command.help for command in COMMANDS.values() if is_admin or not command.admin_only]
+    return "\n".join([HELP_HEADER, *lines])
 
 
 def _invoice_id(arg: str) -> int | None:
@@ -188,10 +214,10 @@ async def _ayuda(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     _arg: str,
-    _context: CommandContext,
+    context: CommandContext,
 ) -> None:
-    """Answer with every command and what it does (R-10.1)."""
-    await _reply(conn, msg, None, help_text())
+    """Answer with every command the sender may run and what it does (R-10.1)."""
+    await _reply(conn, msg, None, help_text(msg.profile_id in context.admins))
 
 
 async def _estado(
@@ -359,7 +385,7 @@ async def _portal(
     command is unknown and answers the help (R-10.1).
     """
     if context.teach is None:
-        await _reply(conn, msg, None, help_text())
+        await _reply(conn, msg, None, help_text(msg.profile_id in context.admins))
         return
     parts = arg.split()
     if len(parts) != 2 or not _is_ruc(parts[0]):
@@ -384,6 +410,54 @@ def _is_ruc(token: str) -> bool:
     return token.isascii() and token.isdigit() and len(token) == RUC_DIGITS
 
 
+async def _gaps(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    _arg: str,
+    _context: CommandContext,
+) -> None:
+    """List the open or reported gaps, most recently seen first (S8.9, D139)."""
+    rows = await open_gaps(conn, MAX_GAP_LINES)
+    if not rows:
+        await _reply(conn, msg, None, GAPS_EMPTY)
+        return
+    lines = [GAPS_HEADER, *(_gap_line(row) for row in rows)]
+    if len(rows) == MAX_GAP_LINES:
+        lines.append(GAPS_TRUNCATED)
+    await _reply(conn, msg, None, "\n".join(lines))
+
+
+def _gap_line(row: GapRow) -> str:
+    """Return the line ``/gaps`` lists for one gap, with its issue link when it has one (S8.9)."""
+    issue = "" if row.issue_url is None else GAPS_ISSUE.format(issue_url=row.issue_url)
+    return GAPS_LINE.format(
+        fingerprint=row.fingerprint,
+        kind=row.kind,
+        subject=row.subject,
+        count=row.count,
+        issue=issue,
+    )
+
+
+async def _gap(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    _context: CommandContext,
+) -> None:
+    """Stop reporting the gap ``/gap ignorar <fingerprint>`` names (S8.9, D139).
+
+    Any other argument answers the usage line.
+    """
+    parts = arg.split()
+    if len(parts) != 2 or parts[0] != GAP_IGNORE_ARG:
+        await _reply(conn, msg, None, HELP_GAP)
+        return
+    fingerprint = parts[1]
+    text = GAP_IGNORED if await ignore_gap(conn, fingerprint) else GAP_UNKNOWN
+    await _reply(conn, msg, None, text.format(fingerprint=fingerprint))
+
+
 async def _reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -403,4 +477,6 @@ COMMANDS: Mapping[str, Command] = {
     "pendientes": Command(_pendientes, HELP_PENDIENTES),
     "pagado": Command(pagado, HELP_PAGADO),
     "portal": Command(_portal, HELP_PORTAL),
+    "gaps": Command(_gaps, HELP_GAPS, admin_only=True),
+    "gap": Command(_gap, HELP_GAP, admin_only=True),
 }

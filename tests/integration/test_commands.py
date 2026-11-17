@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import MediaMaxBytes
+from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.commands import (
@@ -39,7 +40,14 @@ from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
+    GAP_IGNORED,
+    GAPS_EMPTY,
+    GAPS_HEADER,
+    GAPS_ISSUE,
+    GAPS_LINE,
     HELP_AYUDA,
+    HELP_GAP,
+    HELP_GAPS,
     HELP_HEADER,
     HELP_PORTAL,
     MESSAGES,
@@ -59,6 +67,7 @@ from invoicebot.rules.messages_es import (
 from invoicebot.states import StateMoved
 from invoicebot.store import taught_links
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
+from invoicebot.store.gaps import mark_reported, upsert_gap
 from invoicebot.store.invoices import (
     InvoiceHead,
     create_invoice,
@@ -78,6 +87,13 @@ UNKNOWN_INVOICE_ID = 999_999_999
 QUESTION_TEXT = "¿En qué flujo lo registro?"
 #: The flow an invoice must have before ``/reprocesar`` restarts its fetch (D96).
 FLOW = "work_microsoft"
+#: A synthetic subject for the gaps the gap command tests seed (S8.9).
+GAP_SUBJECT = "RUC 20000000001"
+#: A synthetic issue link a seeded gap is reported to (S8.9, D139).
+GAP_ISSUE_URL = "https://example.invalid/issues/7"
+#: The gap kinds those tests seed, one reported and one left open (S8.9).
+PORTAL_MISSING = GAP_KINDS["PORTAL_MISSING"]
+PARSER_MISS = GAP_KINDS["PARSER_MISS"]
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -303,8 +319,9 @@ async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[st
 
 
 def _help() -> str:
-    """Return the help text: the header and each command's line, in command order."""
-    return "\n".join([HELP_HEADER, *(command.help for command in COMMANDS.values())])
+    """Return the help a non-admin gets: the header and each public command's line."""
+    lines = [command.help for command in COMMANDS.values() if not command.admin_only]
+    return "\n".join([HELP_HEADER, *lines])
 
 
 async def test_ayuda_replies_with_the_command_list(
@@ -1133,7 +1150,7 @@ async def test_ayuda_lists_the_portal_command(
         await _portal_run(conn, "ayuda", "", _portal_context())
         sender_rows = await _portal_outbox(conn, SENDER)
 
-    assert sender_rows == [(help_text(), None, [])]
+    assert sender_rows == [(help_text(False), None, [])]
     assert HELP_PORTAL in sender_rows[0][0]
 
 
@@ -1147,5 +1164,124 @@ async def test_portal_with_teaching_off_answers_the_help_and_stores_nothing(
         sender_rows = await _portal_outbox(conn, SENDER)
         links = await _link_count(conn)
 
-    assert sender_rows == [(help_text(), None, [])]
+    assert sender_rows == [(help_text(False), None, [])]
     assert links == 0
+
+
+@pytest_asyncio.fixture
+async def clean_gaps(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> AsyncIterator[None]:
+    """Start a gap command test from empty gaps and invoice_gaps (S8.9, D139)."""
+    async with db_pool.connection() as conn:
+        await conn.execute("DELETE FROM invoice_gaps")
+        await conn.execute("DELETE FROM gaps")
+    yield
+
+
+async def _run_as(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    text: str,
+    *,
+    is_admin: bool,
+) -> list[tuple[str, str | None]]:
+    """Run ``text`` for profile_id, admin or not, and return its replies (S8.9)."""
+    admins = frozenset({profile_id}) if is_admin else frozenset()
+    context = CommandContext(admins=admins, timezone=TIMEZONE)
+    parsed = parse_command(text)
+    assert parsed is not None
+    name, arg = parsed
+    await handle_command(conn, _message(profile_id, text), name, arg, context=context)
+    return await _replies(conn, profile_id)
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_admin_gaps_lists_each_gap_with_its_issue_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9: an admin's /gaps lists two open gaps, the reported one with its issue link."""
+    profile_id = _profile()
+    reported_fp = f"portal_missing:{uuid4().hex}"
+    open_fp = f"parser_miss:{uuid4().hex}"
+    async with db_pool.connection() as conn, conn.transaction():
+        await upsert_gap(conn, PORTAL_MISSING, reported_fp, GAP_SUBJECT, None)
+        await upsert_gap(conn, PARSER_MISS, open_fp, GAP_SUBJECT, None)
+        await mark_reported(conn, reported_fp, GAP_ISSUE_URL)
+    async with db_pool.connection() as conn, conn.transaction():
+        replies = await _run_as(conn, profile_id, "/gaps", is_admin=True)
+
+    reported = GAPS_LINE.format(
+        fingerprint=reported_fp,
+        kind=PORTAL_MISSING.kind,
+        subject=GAP_SUBJECT,
+        count=1,
+        issue=GAPS_ISSUE.format(issue_url=GAP_ISSUE_URL),
+    )
+    opened = GAPS_LINE.format(
+        fingerprint=open_fp,
+        kind=PARSER_MISS.kind,
+        subject=GAP_SUBJECT,
+        count=1,
+        issue="",
+    )
+    lines = replies[0][0].splitlines()
+    assert lines[0] == GAPS_HEADER
+    assert set(lines[1:]) == {reported, opened}
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_gaps_with_none_open_answers_gaps_empty(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9: /gaps with no open gap answers GAPS_EMPTY."""
+    profile_id = _profile()
+    async with db_pool.connection() as conn, conn.transaction():
+        replies = await _run_as(conn, profile_id, "/gaps", is_admin=True)
+
+    assert replies == [(GAPS_EMPTY, None)]
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_gap_ignorar_hides_the_gap_from_the_next_listing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9: /gap ignorar <fp> ignores the gap and a second /gaps omits it."""
+    profile_id = _profile()
+    fingerprint = f"portal_missing:{uuid4().hex}"
+    async with db_pool.connection() as conn, conn.transaction():
+        await upsert_gap(conn, PORTAL_MISSING, fingerprint, GAP_SUBJECT, None)
+    async with db_pool.connection() as conn, conn.transaction():
+        ignored = await _run_as(conn, profile_id, f"/gap ignorar {fingerprint}", is_admin=True)
+    async with db_pool.connection() as conn, conn.transaction():
+        listed = await _run_as(conn, profile_id, "/gaps", is_admin=True)
+
+    assert ignored == [(GAP_IGNORED.format(fingerprint=fingerprint), None)]
+    assert listed[-1] == (GAPS_EMPTY, None)
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_non_admin_gaps_answers_like_an_unknown_command(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9: a non-admin's /gaps gets the same answer an unknown command gets."""
+    profile_id = _profile()
+    async with db_pool.connection() as conn, conn.transaction():
+        replies = await _run_as(conn, profile_id, "/gaps", is_admin=False)
+
+    assert replies == [(_help(), None)]
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_ayuda_lists_the_gap_commands_to_an_admin_only(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9: /ayuda shows the gap help lines to an admin and hides them from others."""
+    admin_id = _profile()
+    other_id = _profile()
+    async with db_pool.connection() as conn, conn.transaction():
+        admin_help = await _run_as(conn, admin_id, "/ayuda", is_admin=True)
+        other_help = await _run_as(conn, other_id, "/ayuda", is_admin=False)
+
+    assert HELP_GAPS in admin_help[0][0]
+    assert HELP_GAP in admin_help[0][0]
+    assert HELP_GAPS not in other_help[0][0]
+    assert HELP_GAP not in other_help[0][0]
