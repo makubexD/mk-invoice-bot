@@ -50,6 +50,14 @@ class OutgoingMail:
     attachments: tuple[Attachment, ...]
 
 
+@dataclass(frozen=True)
+class DriveFile:
+    """A file on the drive: its Google id and its browser link (R-6.1)."""
+
+    id: str
+    link: str
+
+
 class Drive(Protocol):
     """One storage target's files and folders.
 
@@ -100,6 +108,55 @@ class Drive(Protocol):
         Raises:
             GraphError: the item could not be deleted.
         """
+        ...
+
+
+class FolderDrive(Protocol):
+    """The folders and files one delivery sink needs.
+
+    Invariants every implementation keeps:
+
+    - ``ensure_folder`` reuses an existing folder of that name under the parent
+      instead of creating a second one;
+    - ``put_file`` returns the uploaded file's id and link.
+    """
+
+    async def ensure_folder(self, parent_id: str, name: str) -> str:
+        """Return the id of the folder ``name`` under ``parent_id``."""
+        ...
+
+    async def put_file(self, folder_id: str, name: str, data: bytes, mime: str) -> DriveFile:
+        """Upload ``data`` as ``name`` under ``folder_id`` and return its file."""
+        ...
+
+    def folder_link(self, folder_id: str) -> str:
+        """Return the browser link of the folder ``folder_id``."""
+        ...
+
+
+class RowSheet(Protocol):
+    """The rows one delivery sink needs from a spreadsheet.
+
+    Invariants every implementation keeps:
+
+    - ``keys`` maps each column-A value to its 1-based row number;
+    - ``append`` returns the new row number.
+    """
+
+    async def keys(self, spreadsheet_id: str, tab: str) -> dict[str, int]:
+        """Return each column-A value in ``tab`` mapped to its row number."""
+        ...
+
+    async def append(self, spreadsheet_id: str, tab: str, row: list[str]) -> int:
+        """Append ``row`` to ``tab`` and return the row number it landed on."""
+        ...
+
+    async def update(self, spreadsheet_id: str, tab: str, row_number: int, row: list[str]) -> None:
+        """Write ``row`` over the row at ``row_number`` in ``tab``."""
+        ...
+
+    async def row_link(self, spreadsheet_id: str, tab: str, row_number: int) -> str:
+        """Return the browser link to ``row_number`` in ``tab``."""
         ...
 
 

@@ -13,12 +13,11 @@ from __future__ import annotations
 import json
 import secrets
 from collections.abc import Mapping
-from dataclasses import dataclass
 
 import httpx
 
 from invoicebot.config.models import GOOGLE_ID_PATTERN
-from invoicebot.sinks.base import TokenSource
+from invoicebot.sinks.base import DriveFile, TokenSource
 from invoicebot.sinks.google_api import (
     GoogleError,
     auth_headers,
@@ -40,14 +39,6 @@ _LOOKUP_FIELDS = "files(id,webViewLink)"
 
 #: The number of random bytes in a multipart boundary.
 _BOUNDARY_BYTES = 16
-
-
-@dataclass(frozen=True)
-class DriveFile:
-    """A file on the drive: its Google id and its browser link (R-6.1)."""
-
-    id: str
-    link: str
 
 
 def _escape_query(value: str) -> str:

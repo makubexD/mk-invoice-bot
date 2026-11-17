@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from invoicebot.config.models import GoogleDriveSink
+from invoicebot.sinks.base import DriveFile, FolderDrive
 from invoicebot.sinks.expr import ExprError, render
-from invoicebot.sinks.google_drive import DriveFile, GoogleDrive
 
 #: The file kinds ``sink.upload`` may name (R-6.1).
 PHOTO_KIND = "photo"
@@ -49,7 +49,7 @@ class DriveInput:
 
 async def file_to_drive(
     sink: GoogleDriveSink,
-    drive: GoogleDrive,
+    drive: FolderDrive,
     files: DriveInput,
     values: Mapping[str, object],
 ) -> dict[str, str]:
@@ -79,7 +79,7 @@ async def file_to_drive(
     return links
 
 
-async def _ensure_folders(sink: GoogleDriveSink, drive: GoogleDrive, values: Mapping[str, object]) -> str:
+async def _ensure_folders(sink: GoogleDriveSink, drive: FolderDrive, values: Mapping[str, object]) -> str:
     """Return the id of the last folder in the rendered path (R-6.1)."""
     folder_id = sink.root_folder_id
     for raw_part in render(sink.path, values).split(_PATH_SEPARATOR):
@@ -90,7 +90,7 @@ async def _ensure_folders(sink: GoogleDriveSink, drive: GoogleDrive, values: Map
     return folder_id
 
 
-async def _upload_photos(drive: GoogleDrive, folder_id: str, name: str, photos: list[Path]) -> str:
+async def _upload_photos(drive: FolderDrive, folder_id: str, name: str, photos: list[Path]) -> str:
     """Upload the photos as ``<name>.jpg``, ``<name>_2.jpg``, … and return the first link (R-6.1)."""
     first_link = ""
     for index, photo in enumerate(photos):

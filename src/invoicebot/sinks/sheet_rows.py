@@ -9,8 +9,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from invoicebot.config.models import GoogleSheetsSink
+from invoicebot.sinks.base import RowSheet
 from invoicebot.sinks.expr import render
-from invoicebot.sinks.google_sheets import GoogleSheets
 
 #: The flat value every sink returns for the later sinks and the completion message (D131).
 LINK_ROW = "link_row"
@@ -18,7 +18,7 @@ LINK_ROW = "link_row"
 
 async def upsert_row(
     sink: GoogleSheetsSink,
-    sheets: GoogleSheets,
+    sheets: RowSheet,
     key: str,
     values: Mapping[str, object],
 ) -> dict[str, str]:
