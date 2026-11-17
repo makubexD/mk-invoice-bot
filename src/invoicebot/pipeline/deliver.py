@@ -34,7 +34,7 @@ from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from psycopg import AsyncConnection
 
@@ -60,6 +60,7 @@ from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
+from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, KIND_SUBJECT, MESSAGES, modes_desc
@@ -490,15 +491,16 @@ async def _prepare_values(context: DeliverContext, invoice: _Invoice) -> _Values
     profile = context.cfg.profiles.get(invoice.head.profile_id)
     if profile is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has unknown profile")
-    fecha = _fecha(invoice.reading, invoice.xml_reading)
+    values = invoice_values(invoice.reading, invoice.xml_reading, None)
+    fecha = cast(date | None, values["fecha"])
     if fecha is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has no issue date")
-    serie = _text(invoice.reading, invoice.xml_reading, "serie")
-    numero = _text(invoice.reading, invoice.xml_reading, "numero")
+    serie = cast(str | None, values["serie"])
+    numero = cast(str | None, values["numero"])
     if serie is None or numero is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} lacks its serie or numero")
-    ruc_emisor = _text(invoice.reading, invoice.xml_reading, "ruc_emisor")
-    razon_social = _text(invoice.reading, invoice.xml_reading, "razon_social") or ""
+    ruc_emisor = cast(str | None, values["ruc_emisor"])
+    razon_social = cast(str | None, values["razon_social"]) or ""
     store = None if ruc_emisor is None else context.directory.stores.get(ruc_emisor)
     if store is None:
         logger.debug(
@@ -514,7 +516,7 @@ async def _prepare_values(context: DeliverContext, invoice: _Invoice) -> _Values
     return _Values(
         fecha=fecha,
         overrides=overrides,
-        values=_values(invoice.reading, invoice.xml_reading, fecha, comercio, overrides, profile.legal_name),
+        values=_values(values, comercio, overrides, profile.legal_name),
     )
 
 
@@ -886,26 +888,15 @@ async def _notify(
 
 
 def _values(
-    reading: Reading,
-    xml: Reading | None,
-    fecha: date,
+    base: Mapping[str, object],
     comercio: str,
     overrides: Mapping[str, str],
     legal_name: str,
 ) -> dict[str, object]:
     """Return the step-6 names the folder, cell, subject and body templates render (R-7.1, R-7.4)."""
-    amounts = reading if xml is None else xml
     return {
-        "fecha": fecha,
+        **base,
         "comercio": comercio,
-        "serie": _text(reading, xml, "serie"),
-        "numero": _text(reading, xml, "numero"),
-        "ruc_emisor": _text(reading, xml, "ruc_emisor"),
-        "razon_social": _text(reading, xml, "razon_social"),
-        "base": amounts.amount("base"),
-        "igv": amounts.amount("igv"),
-        "service_charge": amounts.amount("service_charge"),
-        "total": amounts.amount("total"),
         "motivo": overrides.get("motivo"),
         "descripcion": overrides.get("descripcion"),
         "profile": {"legal_name": legal_name},
@@ -928,18 +919,6 @@ def _attachments(
     if xml is not None:
         files["xml"] = Attachment(render(folder.files.xml, values), xml, XML_MIME)
     return files
-
-
-def _text(reading: Reading, xml: Reading | None, name: str) -> str | None:
-    """Return ``name`` from the photo's reading, falling back to the XML (R-7.4)."""
-    value = reading.value(name)
-    return value if value is not None or xml is None else xml.value(name)
-
-
-def _fecha(reading: Reading, xml: Reading | None) -> date | None:
-    """Return the issue date from the reading, falling back to the XML (R-7.1)."""
-    fecha = reading.fecha()
-    return xml.fecha() if fecha is None and xml is not None else fecha
 
 
 def _comercio(store: Store | None, flow_data: Mapping[str, Any], serie: str, razon_social: str) -> str | None:
