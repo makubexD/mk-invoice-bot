@@ -19,12 +19,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
+from invoicebot.extract.padron import with_padron
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
@@ -38,6 +40,7 @@ from invoicebot.rules.messages_es import KIND_SUBJECT, MESSAGES, tipo_phrase
 from invoicebot.states import EXTRACTING, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import InvoiceHead, get_file_path, load_invoice_head, save_reading, set_state
+from invoicebot.store.padron import lookup
 
 #: BR-E07 counts megapixels; OpenCV's decode cap counts pixels.
 PIXELS_PER_MEGAPIXEL = 1_000_000
@@ -164,6 +167,7 @@ def make_extract_handler(
             raise RuntimeError("extract helper returned neither a reading nor a rule")
 
         async with pool.connection() as conn, conn.transaction():
+            reading = await _with_padron(conn, reading)
             await save_reading(conn, job.invoice_id, reading)
             await set_state(conn, job.invoice_id, "ROUTING", expected=EXTRACTING)
             await enqueue(conn, job.invoice_id, ROUTE_STEP)
@@ -243,6 +247,19 @@ def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId |
     if (tipo_rule := check_tipo(tipo, supported)) is not None:
         return tipo_rule, reading
     return None, reading
+
+
+async def _with_padron(conn: AsyncConnection[Any], reading: Reading) -> Reading:
+    """Return ``reading`` with its issuer's razón social from the padrón when it has one (R-2.5).
+
+    The lookup runs on the caller's connection, in the transaction that saves the reading,
+    so no extra connection is taken and the name cannot outlive a rolled-back save.
+    """
+    ruc = reading.value("ruc_emisor")
+    if ruc is None:
+        return reading
+    row = await lookup(conn, ruc)
+    return with_padron(reading, None if row is None else row.razon_social)
 
 
 async def _finish(

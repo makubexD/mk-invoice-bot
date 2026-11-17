@@ -9,10 +9,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import os
 import signal
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -22,12 +24,13 @@ from uuid import uuid4
 import cv2
 import numpy as np
 import pytest
+import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading, reading_to_json
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
 from invoicebot.gaps.kinds import fingerprint
@@ -35,6 +38,7 @@ from invoicebot.pipeline import extract as extract_module
 from invoicebot.pipeline.extract import (
     MAX_HELPER_OUTPUT_BYTES,
     ROUTE_STEP,
+    _HelperResult,
     _parse_result,
     make_extract_handler,
 )
@@ -82,6 +86,10 @@ PRINTED_LINES = (
 )
 #: The OCR total when the printed value disagrees with the QR (D81).
 CONFLICT_TOTAL = "12.50"
+#: The synthetic razón social the seeded padrón row carries (R-2.5).
+PADRON_RAZON_SOCIAL = "EMPRESA DE PRUEBA"
+#: The synthetic razón social the fake OCR reading carries, which the padrón replaces (R-2.5).
+OCR_RAZON_SOCIAL = "EMPRESA LEIDA"
 #: The gap two unreadable invoices from SYNTHETIC_RUC share (BR-E06, D115).
 PARSER_MISS_FINGERPRINT = fingerprint("PARSER_MISS", SYNTHETIC_RUC)
 #: A QR payload carrying the same values as PRINTED_LINES (D81).
@@ -113,6 +121,16 @@ GRANDCHILD_GONE_TIMEOUT_S = 3.0
 GRANDCHILD_POLL_S = 0.05
 CHILD_START_TIMEOUT_S = 10
 SIGKILL_EXIT_CODE = -9
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _empty_padron(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> AsyncIterator[None]:
+    """Start each test from an empty padrón, so no row from another test fills a reading (R-2.5)."""
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute("DELETE FROM padron")
+    yield
 
 
 #: The media limits of config/example.yaml (R-1.11).
@@ -246,6 +264,52 @@ async def _run_handler(
     )(_job(invoice_id))
 
 
+def _ocr_reading() -> Reading:
+    """Return a valid reading with an OCR razón social the padrón can replace (R-2.5)."""
+    reading = parse_qr_payload(VALID_PAYLOAD)
+    assert reading is not None
+    return replace(
+        reading,
+        fields={**reading.fields, "razon_social": Field(OCR_RAZON_SOCIAL, "ocr", FULL_CONFIDENCE)},
+    )
+
+
+async def _run_handler_with_reading(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    reading: Reading,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the extract handler once with ``reading`` in place of the helper's output (R-2.5)."""
+    result = _HelperResult(
+        reading=reading_to_json(reading),
+        variant=None,
+        decoder=None,
+        ocr=True,
+        error=None,
+    )
+
+    async def _fake_run_helper(*_args: Any, **_kwargs: Any) -> _HelperResult:
+        return result
+
+    monkeypatch.setattr(extract_module, "_run_helper", _fake_run_helper)
+    await _run_handler(pool, invoice_id)
+
+
+async def _seed_padron_row(pool: AsyncConnectionPool[AsyncConnection[Any]], razon_social: str) -> None:
+    """Seed the fake reading's issuer in the padrón with ``razon_social`` (R-2.5)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO padron (ruc, razon_social, estado, condicion) VALUES (%s, %s, %s, %s)",
+            (int(SYNTHETIC_RUC), razon_social, "ACTIVO", "HABIDO"),
+        )
+
+
+def _record_text(record: logging.LogRecord) -> str:
+    """Return the record's message and every attribute, extras included, as one string."""
+    return " ".join([record.getMessage(), *(str(value) for value in vars(record).values())])
+
+
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
     """Return ``(state, rule_id)`` of an invoice."""
     cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
@@ -359,6 +423,70 @@ async def test_text_only_photo_routes_with_ocr_fields(
     assert reading.value("ruc_emisor") == SYNTHETIC_RUC
     assert reading.value("fecha_emision") == PRINTED_DATE.isoformat()
     assert reading.value("total") == TOTAL
+
+
+async def test_seeded_padron_replaces_the_ocr_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-2.5: a seeded padrón row replaces the OCR razón social with source ``padron``."""
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"padron{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+
+    assert reading is not None
+    razon_social = reading.fields["razon_social"]
+    assert (razon_social.value, razon_social.source, razon_social.confidence) == (
+        PADRON_RAZON_SOCIAL,
+        "padron",
+        FULL_CONFIDENCE,
+    )
+
+
+async def test_empty_padron_keeps_the_ocr_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-2.5: an empty padrón keeps the OCR razón social as the fallback."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"no-padron{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+
+    assert reading is not None
+    razon_social = reading.fields["razon_social"]
+    assert (razon_social.value, razon_social.source) == (OCR_RAZON_SOCIAL, "ocr")
+
+
+async def test_extraction_logs_carry_no_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-9.16: the extraction log lines carry neither the OCR nor the padrón razón social."""
+    caplog.set_level(logging.DEBUG)
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"secret{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    assert any(getattr(record, "step", None) == EXTRACT_STEP for record in caplog.records)
+    leaks = [
+        (record.name, value)
+        for record in caplog.records
+        for value in (PADRON_RAZON_SOCIAL, OCR_RAZON_SOCIAL)
+        if value in _record_text(record)
+    ]
+    assert leaks == []
 
 
 async def test_qr_and_printed_text_confirm_each_other(
