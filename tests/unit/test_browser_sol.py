@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from collections.abc import Awaitable, Callable
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -37,6 +38,10 @@ class FakePage:
         """Record the navigation and land on the configured URL."""
         self.calls.append(("goto", url))
         self.url = self._url_after_goto
+
+    async def route(self, url: str, handler: Callable[..., Awaitable[None]]) -> None:
+        """Record the registration of the request guard."""
+        self.calls.append(("route", url))
 
     async def fill(self, selector: str, value: str) -> None:
         """Record one filled field."""
@@ -137,6 +142,7 @@ async def test_a_sunat_sign_in_runs_the_query_field_filler(tmp_path: Path) -> No
     assert result is expected
     assert page.calls == [
         ("goto", request.site.login.url),
+        ("route", "**/*"),
         ("fill", request.site.login.ruc, RUC),
         ("fill", request.site.login.user, USER),
         ("fill", request.site.login.password, HIDDEN_TEXT),

@@ -2,16 +2,36 @@
 
 The form is filled value by value, and the origin is checked again immediately
 before each fill and before the submit click, so a redirect never receives a
-credential. Nothing here logs a value.
+credential. A route guard also aborts every request that leaves the SUNAT hosts.
+Nothing here logs a value.
 """
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Protocol
 
 from invoicebot.config.models import SolLogin
 from invoicebot.sunat_origins import is_sunat_origin
+
+
+class RouteRequest(Protocol):
+    """The part of an intercepted request the guard reads (R-9.10)."""
+
+    @property
+    def url(self) -> str: ...
+
+
+class Route(Protocol):
+    """The part of an intercepted route the guard uses (R-9.10)."""
+
+    @property
+    def request(self) -> RouteRequest: ...
+
+    async def abort(self) -> None: ...
+
+    async def continue_(self) -> None: ...
 
 
 class LoginPage(Protocol):
@@ -20,11 +40,21 @@ class LoginPage(Protocol):
     @property
     def url(self) -> str: ...
 
+    async def route(self, url: str, handler: Callable[[Route], Awaitable[None]]) -> object: ...
+
     async def fill(self, selector: str, value: str) -> None: ...
 
     async def click(self, selector: str) -> None: ...
 
     async def wait_for_load_state(self) -> None: ...
+
+
+async def _allow_only_sunat(route: Route) -> None:
+    """Continue a request to a SUNAT origin and abort any other (R-9.10)."""
+    if is_sunat_origin(route.request.url):
+        await route.continue_()
+    else:
+        await route.abort()
 
 
 @dataclass(frozen=True)
@@ -43,10 +73,12 @@ async def log_in(page: LoginPage, login: SolLogin, creds: SolCredentials) -> boo
     """Fill the SOL form and submit it, only while the page stays on SUNAT (R-9.10).
 
     Returns ``False`` without typing anything, or part way through, as soon as
-    ``page.url`` leaves the hard-coded SUNAT origins.
+    ``page.url`` leaves the hard-coded SUNAT origins. Every request made while
+    the form is being filled is aborted unless it goes to a SUNAT origin.
     """
     if not is_sunat_origin(page.url):
         return False
+    await page.route("**/*", _allow_only_sunat)
     fields = (
         (login.ruc, creds.ruc),
         (login.user, creds.user),

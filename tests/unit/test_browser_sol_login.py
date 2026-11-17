@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+
+import pytest
+
 from invoicebot.config.models import SolLogin
 from invoicebot.fetchers.browser.sol_login import SolCredentials, log_in
+from invoicebot.sunat_origins import SUNAT_ORIGINS
 
 SUNAT_URL = "https://api-seguridad.sunat.gob.pe/login"
 LOOKALIKE_URL = "https://api-seguridad.sunat.gob.pe.evil.test/login"
 AWAY_URL = "https://evil.test/login"
+SUNAT_ORIGIN = next(iter(SUNAT_ORIGINS))
+ROUTE_GLOB = "**/*"
 
 RUC_FIELD = "#ruc"
 USER_FIELD = "#user"
@@ -26,6 +33,27 @@ LOGIN = SolLogin(
 CREDS = SolCredentials(ruc=RUC_TEXT, user=USER_TEXT, password=HIDDEN_TEXT)
 
 
+class FakeRequest:
+    """A request with only the URL the guard reads."""
+
+    def __init__(self, url: str) -> None:
+        self.url = url
+
+
+class FakeRoute:
+    """A routed request that records whether the guard aborted or continued it."""
+
+    def __init__(self, url: str) -> None:
+        self.request = FakeRequest(url)
+        self.actions: list[str] = []
+
+    async def abort(self) -> None:
+        self.actions.append("abort")
+
+    async def continue_(self) -> None:
+        self.actions.append("continue")
+
+
 class FakePage:
     """A page that records every call and moves to ``redirect_to`` after N fills."""
 
@@ -35,10 +63,15 @@ class FakePage:
         self._redirect_after = redirect_after
         self._fills = 0
         self.calls: list[tuple[str, ...]] = []
+        self.route_handlers: list[Callable[[FakeRoute], Awaitable[None]]] = []
 
     @property
     def url(self) -> str:
         return self._url
+
+    async def route(self, url: str, handler: Callable[[FakeRoute], Awaitable[None]]) -> None:
+        self.calls.append(("route", url))
+        self.route_handlers.append(handler)
 
     async def fill(self, selector: str, value: str) -> None:
         self.calls.append(("fill", selector, value))
@@ -60,6 +93,7 @@ async def test_a_sunat_page_gets_all_three_fields_and_the_submit_click() -> None
     assert await log_in(page, LOGIN, CREDS)
 
     assert page.calls == [
+        ("route", ROUTE_GLOB),
         ("fill", LOGIN.ruc, CREDS.ruc),
         ("fill", LOGIN.user, CREDS.user),
         ("fill", LOGIN.password, CREDS.password),
@@ -83,7 +117,7 @@ async def test_a_redirect_after_the_first_fill_stops_the_form() -> None:
 
     assert not await log_in(page, LOGIN, CREDS)
 
-    assert page.calls == [("fill", LOGIN.ruc, CREDS.ruc)]
+    assert page.calls == [("route", ROUTE_GLOB), ("fill", LOGIN.ruc, CREDS.ruc)]
 
 
 async def test_a_redirect_after_the_last_fill_skips_the_submit_click() -> None:
@@ -93,10 +127,44 @@ async def test_a_redirect_after_the_last_fill_skips_the_submit_click() -> None:
     assert not await log_in(page, LOGIN, CREDS)
 
     assert page.calls == [
+        ("route", ROUTE_GLOB),
         ("fill", LOGIN.ruc, CREDS.ruc),
         ("fill", LOGIN.user, CREDS.user),
         ("fill", LOGIN.password, CREDS.password),
     ]
+
+
+async def test_the_route_guard_is_registered_before_the_first_fill() -> None:
+    """R-9.10, R-9.16: the guard is in place before a value is typed."""
+    page = FakePage(SUNAT_URL)
+
+    assert await log_in(page, LOGIN, CREDS)
+
+    route_at = page.calls.index(("route", ROUTE_GLOB))
+    first_fill_at = next(index for index, call in enumerate(page.calls) if call[0] == "fill")
+    assert route_at < first_fill_at
+    assert len(page.route_handlers) == 1
+
+
+@pytest.mark.parametrize(
+    ("url", "expected_action"),
+    [
+        ("https://evil.example/x", "abort"),
+        (f"{SUNAT_ORIGIN}/x", "continue"),
+    ],
+)
+async def test_the_route_guard_aborts_away_from_sunat_and_continues_sunat(
+    url: str,
+    expected_action: str,
+) -> None:
+    """R-9.10, R-9.16: a request off SUNAT is aborted, one on SUNAT continues."""
+    page = FakePage(SUNAT_URL)
+    assert await log_in(page, LOGIN, CREDS)
+    route = FakeRoute(url)
+
+    await page.route_handlers[0](route)
+
+    assert route.actions == [expected_action]
 
 
 def test_the_credentials_repr_and_str_hold_none_of_the_values() -> None:
