@@ -22,7 +22,13 @@ from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GoogleTokens
-from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, google_token_path, scopes_for
+from invoicebot.auth.providers import (
+    GRAPH_MODE,
+    build_token_provider,
+    google_accounts,
+    google_token_path,
+    scopes_for,
+)
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -34,6 +40,7 @@ from invoicebot.config.models import (
     Config,
     Flow,
     GoogleDriveSink,
+    GoogleSheetsSink,
     Mail,
     MailerSink,
     OneDriveFolderSink,
@@ -119,8 +126,8 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
-#: The adapter and secret the flow A delivery's Google OAuth client signs in with (R-9.10, D128).
-GOOGLE_DELIVERY_ADAPTER = "google_delivery"
+#: The adapter and secret the Google OAuth clients sign in with (R-9.10, D128).
+GOOGLE_OAUTH_ADAPTER = "google_oauth"
 GOOGLE_CLIENT_SECRET = "google_client_secret"  # noqa: S105 - the age-store key's name, not a value
 #: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
 GOOGLE_DRIVE_KIND = "google_drive"
@@ -445,7 +452,7 @@ def _deliver_registry(
     status and resends stay registered as before, only when a OneDrive sink exists.
     """
     by_kind: dict[str, Handler] = {}
-    google = _google_deliver_handler(settings, cfg, http, pool, store)
+    google = _google_deliver_handler(cfg, http, pool, _google_tokens(settings, cfg, http, store))
     if google is not None:
         by_kind[GOOGLE_DRIVE_KIND] = google
     handlers: dict[str, Handler] = {}
@@ -459,45 +466,89 @@ def _deliver_registry(
     return handlers
 
 
-def _google_deliver_handler(
+def _google_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
+    return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+
+
+def _google_tokens(
     settings: Settings,
     cfg: Config,
     http: httpx.AsyncClient,
-    pool: Pool,
     store: SecretStore,
+) -> dict[str, GoogleTokens]:
+    """Build one token provider per Google account, or none when Google is off (R-6.5, D128).
+
+    Every account shares the one client secret and the one age identity. With ``google``
+    config set, a missing ``google_client_secret`` or ``AGE_IDENTITY_PATH`` is a
+    configuration mistake, so it fails at startup rather than on the first delivery
+    (R-9.9, R-9.10). The secret never appears in the message.
+    """
+    google = cfg.google
+    if google is None:
+        return {}
+    secrets = _google_secrets(store)
+    if not secrets.enabled:
+        raise ValueError(
+            f"google config needs the missing secret(s) {', '.join(sorted(secrets.missing))} (R-9.9)"
+        )
+    if settings.age_identity_path is None:
+        raise ValueError("google config needs AGE_IDENTITY_PATH to decrypt the refresh tokens (D128)")
+    client_secret = secrets.get(GOOGLE_CLIENT_SECRET)
+    identity = load_identity(settings.age_identity_path)
+    return {
+        account: GoogleTokens(
+            http,
+            google.client_id,
+            client_secret,
+            account,
+            google_token_path(settings.data_dir, account),
+            identity,
+            google.timeout_s,
+        )
+        for account in google_accounts(cfg)
+    }
+
+
+def _google_deliver_handler(
+    cfg: Config,
+    http: httpx.AsyncClient,
+    pool: Pool,
+    tokens: Mapping[str, GoogleTokens],
 ) -> Handler | None:
     """Build flow A's deliver handler, or None when no flow files in Google Drive (R-6.1, D129).
 
-    The client secret comes from the age store's ``google_delivery`` view, so a missing one
-    stops startup (R-9.9). A Google sink without ``google`` config or an age identity is a
-    configuration mistake, so it fails at startup rather than on the first delivery.
+    Each sink calls Google with its own account's token provider. A Google sink without
+    ``google`` config is a configuration mistake, so it fails at startup rather than on
+    the first delivery (D128).
     """
-    account = _google_drive_account(cfg)
-    if account is None:
+    sinks = _google_sinks(cfg)
+    if sinks is None:
         return None
-    if cfg.google is None or settings.age_identity_path is None:
-        raise ValueError("a google_drive sink needs the google config and AGE_IDENTITY_PATH (D128)")
-    secret = store.scoped(GOOGLE_DELIVERY_ADAPTER, {GOOGLE_CLIENT_SECRET}).get(GOOGLE_CLIENT_SECRET)
-    tokens = GoogleTokens(
+    if cfg.google is None:
+        raise ValueError("a google_drive sink needs the google config (D128)")
+    drive_sink, sheets_sink = sinks
+    drive = GoogleDrive(http, tokens[drive_sink.account], cfg.google.timeout_s, account=drive_sink.account)
+    sheets = GoogleSheets(
         http,
-        cfg.google.client_id,
-        secret,
-        account,
-        google_token_path(settings.data_dir, account),
-        load_identity(settings.age_identity_path),
+        tokens[sheets_sink.account],
         cfg.google.timeout_s,
+        account=sheets_sink.account,
+        max_rows=cfg.google.max_rows,
     )
-    drive = GoogleDrive(http, tokens, cfg.google.timeout_s, account=account)
-    sheets = GoogleSheets(http, tokens, cfg.google.timeout_s, account=account, max_rows=cfg.google.max_rows)
     return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drive, sheets, cfg.profiles))
 
 
-def _google_drive_account(cfg: Config) -> str | None:
-    """Return the account of the first ``google_drive`` sink, or None when no flow has one (R-6.1)."""
+def _google_sinks(cfg: Config) -> tuple[GoogleDriveSink, GoogleSheetsSink] | None:
+    """Return the first flow's Drive sink and its Sheets sink, or None without a Drive sink (R-6.1)."""
     for flow in cfg.flows.values():
-        for sink in flow.sinks:
-            if isinstance(sink, GoogleDriveSink):
-                return sink.account
+        drive = next((sink for sink in flow.sinks if isinstance(sink, GoogleDriveSink)), None)
+        if drive is None:
+            continue
+        sheets = next((sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink)), None)
+        if sheets is None:
+            raise ValueError("a flow with a google_drive sink needs a google_sheets sink (R-6.2)")
+        return drive, sheets
     return None
 
 

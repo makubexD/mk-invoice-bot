@@ -11,13 +11,23 @@ import pyrage
 import pytest
 import yaml
 
-from invoicebot.app import _daily_tasks, _validation_handlers, _validation_secrets
+from invoicebot.app import (
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_OAUTH_ADAPTER,
+    _daily_tasks,
+    _google_deliver_handler,
+    _google_secrets,
+    _google_tokens,
+    _validation_handlers,
+    _validation_secrets,
+)
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -64,6 +74,18 @@ def _with_backup_at(cfg: Config, at: time) -> Config:
     """Return ``cfg`` with the backup moved to ``at``."""
     backup = cfg.ops.backup.model_copy(update={"at": at})
     return cfg.model_copy(update={"ops": cfg.ops.model_copy(update={"backup": backup})})
+
+
+def _without_google(tmp_path: Path) -> Config:
+    """Load the example config with no Google sink, gmail inbox or google block (R-6.4)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["google"]
+    flow = document["flows"]["personal_google"]
+    flow["sinks"] = []
+    flow["email_inbox"]["provider"] = "graph"
+    path = tmp_path / "no-google.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return load_config(path)
 
 
 def test_daily_tasks_have_the_three_keys_at_their_times() -> None:
@@ -141,3 +163,36 @@ def test_sunat_validation_on_with_secrets_registers_the_recheck_step(tmp_path: P
     assert secrets.enabled
     handlers = _validation_handlers(cfg, cast(Any, None), cast(Any, None), secrets)
     assert set(handlers) == {VALIDATE_STEP, SUNAT_RECHECK_STEP}
+
+
+def test_google_secret_view_declares_only_the_client_secret() -> None:
+    """R-9.10: the Google OAuth view declares google_client_secret and nothing else."""
+    store = _RecordingStore({"other_key": "synthetic-other-value"})
+
+    view = _google_secrets(store)
+
+    assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
+    assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
+    assert not view.enabled
+
+
+def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
+    """R-6.4: without google config there are no Google tokens and no flow A deliverer."""
+    cfg = _without_google(tmp_path)
+    store = _RecordingStore({})
+
+    tokens = _google_tokens(Settings(data_dir=tmp_path), cfg, cast(Any, None), store)
+    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), tokens)
+
+    assert tokens == {}
+    assert handler is None
+    assert store.scoped_calls == []
+
+
+def test_config_with_google_and_no_secret_fails_startup(tmp_path: Path) -> None:
+    """R-6.4: google config without google_client_secret stops startup naming the key."""
+    cfg = load_config(EXAMPLE)
+    store = _loaded(tmp_path, {"other_key": "synthetic-other-value"})
+
+    with pytest.raises(ValueError, match=GOOGLE_CLIENT_SECRET):
+        _google_tokens(Settings(data_dir=tmp_path, age_identity_path=None), cfg, cast(Any, None), store)
