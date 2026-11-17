@@ -101,11 +101,11 @@ async def _outbox(
     return [(str(text), rule_id, cast(list[dict[str, str]], buttons)) for text, rule_id, buttons in rows]
 
 
-def _decision_buttons() -> list[dict[str, str]]:
+def _decision_buttons(version: int = 1) -> list[dict[str, str]]:
     """Return the button payload BR-S06's owner message must carry."""
     return [
-        {"id": f"t{ISSUER_RUC}:ok", "title": BUTTON_APPROVE},
-        {"id": f"t{ISSUER_RUC}:no", "title": BUTTON_REJECT},
+        {"id": f"t{ISSUER_RUC}v{version}:ok", "title": BUTTON_APPROVE},
+        {"id": f"t{ISSUER_RUC}v{version}:no", "title": BUTTON_REJECT},
     ]
 
 
@@ -202,9 +202,9 @@ async def test_store_propose_replaces_a_rejected_row(
 ) -> None:
     """BR-S06: a rejected link can be proposed again."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
-        assert await taught_links.decide(conn, ISSUER_RUC, approved=False) is not None
-        assert await taught_links.propose(conn, ISSUER_RUC, OTHER_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) == 1
+        assert await taught_links.decide(conn, ISSUER_RUC, 1, approved=False) is not None
+        assert await taught_links.propose(conn, ISSUER_RUC, OTHER_URL, SENDER) == 2
         link = await taught_links.get(conn, ISSUER_RUC)
 
     assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
@@ -218,9 +218,9 @@ async def test_store_decide_moves_a_proposed_link_once(
     """BR-S06: decide moves a proposed link to approved or rejected, then returns None."""
     state = "approved" if approved else "rejected"
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
-        first = await taught_links.decide(conn, ISSUER_RUC, approved=approved)
-        second = await taught_links.decide(conn, ISSUER_RUC, approved=approved)
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        first = await taught_links.decide(conn, ISSUER_RUC, 1, approved=approved)
+        second = await taught_links.decide(conn, ISSUER_RUC, 1, approved=approved)
         cur = await conn.execute(
             "SELECT approved_at IS NOT NULL FROM taught_links WHERE ruc_emisor = %s",
             (ISSUER_RUC,),
@@ -274,17 +274,22 @@ def _setup(*, github_repo: str | None = None) -> TeachSetup:
     return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver, github_repo=github_repo)
 
 
-def _press(profile_id: str, *, approved: bool) -> InboundMessage:
-    """Build a BR-S06 decision press from ``profile_id`` (D118)."""
-    suffix = "ok" if approved else "no"
+def _button_press(profile_id: str, button_id: str) -> InboundMessage:
+    """Build a canonical button press from ``profile_id``."""
     return InboundMessage(
         channel="whatsapp",
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
-        button_id=f"t{ISSUER_RUC}:{suffix}",
+        button_id=button_id,
         received_at=datetime.now(UTC),
     )
+
+
+def _press(profile_id: str, *, approved: bool, version: int = 1) -> InboundMessage:
+    """Build a BR-S06 decision press from ``profile_id`` (D118, D137)."""
+    suffix = "ok" if approved else "no"
+    return _button_press(profile_id, f"t{ISSUER_RUC}v{version}:{suffix}")
 
 
 async def _insert_gap(conn: AsyncConnection[Any], *, issue_url: str | None = None) -> None:
@@ -420,7 +425,7 @@ async def test_press_approve_marks_the_link_and_the_gap_hint(
 ) -> None:
     """BR-S06: [Aprobar] sets the link approved, stores the gap's hint and answers the admin."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn)
         await handle_press(conn, _press(ADMIN, approved=True), _setup())
         link = await taught_links.get(conn, ISSUER_RUC)
@@ -439,7 +444,7 @@ async def test_press_approve_queues_one_comment_on_the_issue(
 ) -> None:
     """BR-S06: with an issue and GitHub enabled, [Aprobar] queues exactly one comment row."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn, issue_url=ISSUE_URL)
         await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
         rows = await _github_rows(conn)
@@ -464,7 +469,7 @@ async def test_press_approve_sets_the_pending_issue_hint(
         "hint_url": None,
     }
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn)
         await outbox.add(
             conn,
@@ -484,7 +489,7 @@ async def test_press_second_press_changes_nothing(
 ) -> None:
     """BR-S06: a second [Aprobar] finds no proposed link and adds no outbox row."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn)
         setup = _setup()
         await handle_press(conn, _press(ADMIN, approved=True), setup)
@@ -505,7 +510,7 @@ async def test_press_from_a_non_admin_changes_nothing(
 ) -> None:
     """BR-S06: only an admin's press counts; another sender's press changes nothing."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn)
         await handle_press(conn, _press(SENDER, approved=True), _setup())
         link = await taught_links.get(conn, ISSUER_RUC)
@@ -538,12 +543,58 @@ async def test_press_reject_sets_rejected_and_a_later_teach_proposes_again(
     assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
 
 
+async def test_press_current_proposal_version_approves_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: a press on the current proposal's version approves it (D137)."""
+    async with db_pool.connection() as conn:
+        version = await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER)
+        assert version is not None
+        await _insert_gap(conn)
+        await handle_press(conn, _press(ADMIN, approved=True, version=version), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+
+
+async def test_press_older_proposal_version_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: after [Rechazar], a press of the first proposal leaves the new one proposed (D137)."""
+    async with db_pool.connection() as conn:
+        first = await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER)
+        assert first is not None
+        await handle_press(conn, _press(ADMIN, approved=False, version=first), _setup())
+        second = await taught_links.propose(conn, ISSUER_RUC, OTHER_URL, SENDER)
+        assert second is not None
+        assert second != first
+        await conn.execute("DELETE FROM outbox")
+        await handle_press(conn, _press(ADMIN, approved=True, version=first), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        admin_rows = await _outbox(conn, ADMIN)
+
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+    assert admin_rows == []
+
+
+async def test_press_unversioned_button_id_is_not_handled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06: an id in the old ``t<ruc>:ok`` form is not handled (D137)."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await handle_press(conn, _button_press(ADMIN, f"t{ISSUER_RUC}:ok"), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+
+
 async def test_press_through_intake_approves_without_an_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-S06: intake hands a ``t<ruc>:ok`` press to teach and stores it without an invoice."""
+    """BR-S06: intake hands a ``t<ruc>v<version>:ok`` press to teach and stores it without an invoice."""
     async with db_pool.connection() as conn:
-        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is True
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn)
         result = await handle_inbound(
             conn,

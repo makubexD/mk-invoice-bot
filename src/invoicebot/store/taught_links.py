@@ -53,11 +53,12 @@ async def propose(
     ruc_emisor: int,
     url: str,
     profile_id: str,
-) -> bool:
+) -> int | None:
     """Store ``url`` as proposed, or replace a rejected one (BR-S06); does not commit.
 
-    Returns False when a proposed or approved link is already there: the first
-    proposal waits for the owner and an approved link is not replaced.
+    Returns the proposal's version, or None when a proposed or approved link is
+    already there: the first proposal waits for the owner and an approved link is
+    not replaced.
     """
     cur = await conn.execute(
         """
@@ -65,33 +66,36 @@ async def propose(
         VALUES (%s, %s, %s, 'proposed')
         ON CONFLICT (ruc_emisor) DO UPDATE
         SET url = EXCLUDED.url, profile_id = EXCLUDED.profile_id,
-            state = 'proposed', approved_at = NULL, at = now()
+            state = 'proposed', approved_at = NULL,
+            version = taught_links.version + 1, at = now()
         WHERE taught_links.state = 'rejected'
-        RETURNING ruc_emisor
+        RETURNING version
         """,
         (ruc_emisor, url, profile_id),
     )
     row = await cur.fetchone()
-    return row is not None
+    return None if row is None else int(row[0])
 
 
 async def decide(
     conn: AsyncConnection[Any],
     ruc_emisor: int,
+    version: int,
     approved: bool,
 ) -> TaughtLink | None:
-    """Move a proposed link to approved or rejected (BR-S06); does not commit.
+    """Move proposed ``version`` to approved or rejected (BR-S06); does not commit.
 
-    The proposed row is locked first, so two presses cannot both decide it.
-    Returns None when there is no proposed link.
+    The proposed row is locked first, so two presses cannot both decide it, and a
+    press for an older proposal matches nothing. Returns None when there is no
+    proposed link at ``version``.
     """
     cur = await conn.execute(
         """
         SELECT url, profile_id FROM taught_links
-        WHERE ruc_emisor = %s AND state = 'proposed'
+        WHERE ruc_emisor = %s AND version = %s AND state = 'proposed'
         FOR UPDATE
         """,
-        (ruc_emisor,),
+        (ruc_emisor, version),
     )
     row = await cur.fetchone()
     if row is None:
