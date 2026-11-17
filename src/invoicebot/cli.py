@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import base64
+import hmac
 import json
 import secrets
 import sys
@@ -30,7 +31,6 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.auth.google_consent import (
-    ERROR_PARAM,
     STATE_PARAM,
     ConsentError,
     consent_url,
@@ -83,6 +83,15 @@ _CALLBACK_HEADERS = (
 )
 _CALLBACK_RESPONSE = (
     _CALLBACK_HEADERS + str(len(_CALLBACK_BODY)).encode("ascii") + b"\r\n\r\n" + _CALLBACK_BODY
+)
+#: The page a request without this sign-in's ``state`` gets (R-9.9).
+_BAD_REQUEST_BODY = b"Bad request.\n"
+_BAD_REQUEST_RESPONSE = (
+    b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n"
+    b"Connection: close\r\nContent-Length: "
+    + str(len(_BAD_REQUEST_BODY)).encode("ascii")
+    + b"\r\n\r\n"
+    + _BAD_REQUEST_BODY
 )
 #: The random bytes behind the Google sign-in's ``state`` (R-6.5).
 _STATE_BYTES = 32
@@ -377,7 +386,7 @@ async def _google_sign_in(
     scopes = google_scopes_for(cfg, account)
 
     async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _answer_redirect(reader, writer, redirect_path)
+        await _answer_redirect(reader, writer, redirect_path, state)
 
     server = await asyncio.start_server(answer, "127.0.0.1", 0, limit=_REQUEST_LINE_LIMIT)
     async with server:
@@ -514,19 +523,21 @@ async def _answer_redirect(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     redirect_path: asyncio.Future[str],
+    expected_state: str,
 ) -> None:
-    """Read one request line, answer the browser and hand the path to the sign-in (R-6.5).
+    """Read one request line and answer it; only this sign-in's redirect ends the wait (R-6.5, R-9.9).
 
-    A connection that sends no ``GET`` line (a browser preconnect, a probe) is answered
-    and ignored, so it cannot end the sign-in before the real redirect arrives.
+    A request whose ``state`` is missing or differs gets a plain 400 page and is
+    ignored, so a browser preconnect, a probe or another sign-in's redirect cannot end
+    this sign-in before the real redirect arrives.
     """
     try:
         line = await reader.readline()
     except (asyncio.LimitOverrunError, ValueError, asyncio.IncompleteReadError):
         line = b""
-    path = _request_path(line)
+    path = _request_path(line, expected_state)
     try:
-        writer.write(_CALLBACK_RESPONSE)
+        writer.write(_CALLBACK_RESPONSE if path else _BAD_REQUEST_RESPONSE)
         await writer.drain()
     finally:
         writer.close()
@@ -535,18 +546,19 @@ async def _answer_redirect(
         await writer.wait_closed()
 
 
-def _request_path(line: bytes) -> str:
-    """Return the path of Google's redirect request, or "" for any other request (R-6.5).
+def _request_path(line: bytes, expected_state: str) -> str:
+    """Return the redirect's path once its ``state`` matches, or "" for any other request (R-6.5, R-9.9).
 
-    Only a request whose query carries ``state`` or ``error`` can be the redirect; a
-    ``/favicon.ico`` read or a browser preconnect must not end the sign-in.
+    Only a request whose query carries this sign-in's ``state`` can be the redirect; a
+    ``/favicon.ico`` read, a browser preconnect or a redirect for another sign-in must
+    not end this one.
     """
     parts = line.decode("ascii", "replace").split()
     if len(parts) < 2 or parts[0] != "GET":
         return ""
     path = parts[1]
-    query = parse_qs(urlsplit(path).query)
-    if STATE_PARAM not in query and ERROR_PARAM not in query:
+    state = parse_qs(urlsplit(path).query, keep_blank_values=True).get(STATE_PARAM, [""])[0]
+    if not hmac.compare_digest(state.encode(), expected_state.encode()):
         return ""
     return path
 
