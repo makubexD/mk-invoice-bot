@@ -245,7 +245,21 @@ async def _run_helper(
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
     }
-    argv = [
+    argv = helper_argv(path, kind, extraction_cfg, media, rules_path)
+    async with HEAVY:
+        stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
+    return _parse_result(stdout)
+
+
+def helper_argv(
+    path: str, kind: AttachmentKind, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+) -> list[str]:
+    """Return the extract helper's argv for one file (D78, D122).
+
+    The golden-set test and the accuracy report run the helper with this same argv, so they
+    measure what the pipeline reads (R-2.9).
+    """
+    return [
         sys.executable,
         "-P",
         "-m",
@@ -262,9 +276,6 @@ async def _run_helper(
         str(media.max_pdf_pages),
         str(extraction_cfg.pdf_min_text_chars),
     ]
-    async with HEAVY:
-        stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
-    return _parse_result(stdout)
 
 
 def _parse_result(stdout: bytes) -> _HelperResult:

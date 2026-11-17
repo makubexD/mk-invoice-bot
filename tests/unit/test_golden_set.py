@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 from pathlib import Path
 
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.extract.accuracy import Score, load_expected, score, summarize
 from invoicebot.extract.fields import reading_from_json
+from invoicebot.pipeline.extract import helper_argv
 
 ROOT = Path(__file__).resolve().parents[2]
 GOLDEN = ROOT / "tests" / "golden"
@@ -20,33 +20,11 @@ RULES = ROOT / "config" / "parsing_rules.yaml"
 MIN_PAIRS = 10
 
 
-def _helper_argv(image: Path, cfg: Config) -> list[str]:
-    """Return the helper argv the extract step builds for a photo (pipeline/extract.py)."""
-    extraction, media = cfg.extraction, cfg.limits.media
-    return [
-        sys.executable,
-        "-I",
-        "-m",
-        "invoicebot.extract",
-        str(image),
-        str(extraction.max_image_px),
-        str(media.max_bytes.image),
-        extraction.ocr.engine,
-        extraction.ocr.lang,
-        str(extraction.ocr.psm),
-        str(extraction.ocr.timeout_s),
-        str(RULES),
-        "photo",
-        str(media.max_pdf_pages),
-        str(extraction.pdf_min_text_chars),
-    ]
-
-
 def _score_pair(expected_path: Path, cfg: Config) -> Score:
     """Run the helper over the pair's image and score its reading against the expected file."""
     image = expected_path.with_suffix(".jpg")
     completed = subprocess.run(  # noqa: S603 - fixed argv: this interpreter and a repo fixture path
-        _helper_argv(image, cfg),
+        helper_argv(str(image), "photo", cfg.extraction, cfg.limits.media, RULES),
         capture_output=True,
         check=True,
         text=True,
