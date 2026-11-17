@@ -17,6 +17,7 @@ import httpx
 
 from invoicebot.sinks.base import TokenSource
 from invoicebot.sinks.google_api import GoogleError, auth_headers, raise_google_error
+from invoicebot.sinks.google_drive import ID_PATTERN
 from invoicebot.text import escape_formula
 
 #: The Sheets v4 endpoint; the only host this client talks to.
@@ -82,6 +83,14 @@ def _updated_row(body: Mapping[str, object]) -> int:
     return int(found.group(1))
 
 
+def _spreadsheet_id(body: Mapping[str, object]) -> str:
+    """Return the new spreadsheet's id, refusing one Google should never have sent (R-6.2)."""
+    value = body.get("spreadsheetId")
+    if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
+        raise GoogleError()
+    return value
+
+
 def _sheet_id(body: Mapping[str, object], tab: str) -> int:
     """Return the numeric id of ``tab``, or raise when it is missing (R-6.2)."""
     sheets = body.get("sheets")
@@ -122,6 +131,29 @@ class GoogleSheets:
         self._account = account
         self._max_rows = max_rows
         self._sheet_ids: dict[tuple[str, str], int] = {}
+
+    async def create(self, title: str, tab: str, header: list[str]) -> str:
+        """Create a spreadsheet with one tab and write ``header`` to its first row (R-6.2, D129).
+
+        Returns:
+            The new spreadsheet's id.
+
+        Raises:
+            GoogleError: Google refuses, or answers without an id that can be one.
+        """
+        response = await self._http.post(
+            SHEETS_URL,
+            json={
+                "properties": {"title": title},
+                "sheets": [{"properties": {"title": tab}}],
+            },
+            headers=await self._headers(),
+            timeout=self._timeout_s,
+        )
+        raise_google_error(response, self._account)
+        spreadsheet_id = _spreadsheet_id(_json_object(response))
+        await self.update(spreadsheet_id, tab, 1, header)
+        return spreadsheet_id
 
     async def keys(self, spreadsheet_id: str, tab: str) -> dict[str, int]:
         """Return each key in the tab's first column mapped to its row (R-6.3).

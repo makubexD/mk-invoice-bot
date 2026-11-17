@@ -1,5 +1,5 @@
-"""The ``invoicebot`` command line: ``portal-test`` (S10.5), ``auth-microsoft`` (R-7.9)
-and ``auth-google`` (R-6.4, R-6.5).
+"""The ``invoicebot`` command line: ``portal-test`` (S10.5), ``auth-microsoft`` (R-7.9),
+``auth-google`` (R-6.4, R-6.5) and ``google-setup`` (R-6.2, D129).
 
 ``portal-test`` reads one sample invoice from a YAML file and runs the named portal through
 the browser helper into a temporary folder. It prints the reason, each file's kind and
@@ -7,7 +7,9 @@ size, and whether the XML matches; it never prints an invoice field value or a f
 (R-9.16). ``auth-microsoft`` signs one account in with the device-code flow and then resumes
 the invoices that were parked in ``PENDING_AUTH`` (BR-D01). ``auth-google`` runs the
 installed-app sign-in with a loopback redirect and PKCE, stores the account's encrypted
-refresh token and resumes the same waiting invoices (R-6.4, R-6.5, D128).
+refresh token and resumes the same waiting invoices (R-6.4, R-6.5, D128). ``google-setup``
+creates the account's Drive folder and invoices spreadsheet with its header and prints both
+ids for the private config (R-6.2, D129).
 """
 
 from __future__ import annotations
@@ -25,7 +27,7 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.auth.google_consent import ConsentError, consent_url, parse_redirect, pkce_pair
-from invoicebot.auth.google_oauth import TOKEN_URL, save_refresh_token
+from invoicebot.auth.google_oauth import TOKEN_URL, GoogleTokens, save_refresh_token
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.auth.providers import (
     DRIVE_FILE_SCOPE,
@@ -38,13 +40,16 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, Google, StoreDirectory
+from invoicebot.config.models import SHEETS_KEY_COLUMN, Config, Google, GoogleSheetsSink, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.secrets import SecretStore, load_identity
 from invoicebot.settings import Settings
+from invoicebot.sinks.google_api import GoogleError
+from invoicebot.sinks.google_drive import GoogleDrive
+from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
 
@@ -65,6 +70,11 @@ _CALLBACK_RESPONSE = (
 _STATE_BYTES = 32
 #: The age-store secret the Google sign-in reads (D128).
 _CLIENT_SECRET_KEY = "google_client_secret"  # noqa: S105  # the secret's name, not its value (D128)
+
+#: The root folder ``google-setup`` creates for flow A's invoices (D129).
+GOOGLE_SETUP_FOLDER_NAME = "Comprobantes"
+#: The spreadsheet title ``google-setup`` gives the invoices sheet (D129).
+GOOGLE_SETUP_SHEET_TITLE = "Comprobantes"
 
 
 class _SignInError(Exception):
@@ -101,6 +111,8 @@ def main(
         return _auth_microsoft(parser, resolved, cfg, args.account, token_provider_factory)
     if args.command == "auth-google":
         return _auth_google(parser, resolved, cfg, args.account, show, google_transport)
+    if args.command == "google-setup":
+        return _google_setup(parser, resolved, cfg, args, google_transport)
     directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
@@ -127,6 +139,17 @@ def _parser() -> argparse.ArgumentParser:
         help="sign a Google account in and resume the invoices waiting for it",
     )
     google.add_argument("--account", required=True, help="account name, e.g. owner")
+    setup = subparsers.add_parser(
+        "google-setup",
+        help="create the account's Drive folder and invoices spreadsheet",
+    )
+    setup.add_argument("--account", required=True, help="account name, e.g. owner")
+    setup.add_argument(
+        "--folder-name",
+        default=GOOGLE_SETUP_FOLDER_NAME,
+        help="Drive folder to create under the account's root",
+    )
+    setup.add_argument("--sheet-title", default=GOOGLE_SETUP_SHEET_TITLE, help="spreadsheet title")
     return parser
 
 
@@ -201,6 +224,100 @@ def _auth_google(
     count = asyncio.run(_resume_pending_auth(settings.database_url))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0
+
+
+def _sheets_sink_for(cfg: Config, account: str) -> GoogleSheetsSink | None:
+    """Return the first flow's sheets sink that names ``account``, or None (D129)."""
+    for flow in cfg.flows.values():
+        for sink in flow.sinks:
+            if isinstance(sink, GoogleSheetsSink) and sink.account == account:
+                return sink
+    return None
+
+
+def _google_setup(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Create the account's Drive folder and spreadsheet and print both ids (R-6.2, D129).
+
+    The header comes from the first flow whose sheets sink names the account. An account
+    no flow's sheets sink names exits 2 before any request; the command writes no config
+    file, so the ids it prints go into the private config by hand.
+    """
+    sink = _sheets_sink_for(cfg, args.account)
+    if sink is None:
+        parser.error(f"account {args.account!r} has no Google sheets sink in any flow")
+    if cfg.google is None:
+        parser.error("google settings must be configured to run google-setup (D128)")
+    if settings.secrets_path is None or settings.age_identity_path is None:
+        parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to create the sheet")
+    client_secret = (
+        SecretStore.load(settings.secrets_path, settings.age_identity_path)
+        .scoped("google_oauth", {_CLIENT_SECRET_KEY})
+        .get(_CLIENT_SECRET_KEY)
+    )
+    try:
+        folder_id, spreadsheet_id = asyncio.run(
+            _create_google_setup(settings, cfg, args, sink, client_secret, transport)
+        )
+    except AuthRequired:
+        sys.stderr.write(f"sign-in needed: run invoicebot auth-google --account {args.account}\n")
+        return 1
+    except (GoogleError, httpx.HTTPError) as error:
+        sys.stderr.write(f"google-setup failed: {error}\n")
+        return 1
+    sys.stdout.write(f"root_folder_id: {folder_id}\nspreadsheet_id: {spreadsheet_id}\n")
+    return 0
+
+
+async def _create_google_setup(
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+    sink: GoogleSheetsSink,
+    client_secret: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> tuple[str, str]:
+    """Create the Drive folder and the sheet with its header; return both ids (R-6.2, D129).
+
+    Raises:
+        AuthRequired: the account has no usable refresh token.
+        GoogleError: Google refuses a request or answers without a usable id.
+        httpx.HTTPError: a request never reached Google.
+    """
+    identity_path = settings.age_identity_path
+    if identity_path is None:
+        raise _SignInError("AGE_IDENTITY_PATH must be set to create the sheet")
+    google = _google_settings(cfg)
+    async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as http:
+        tokens = GoogleTokens(
+            http,
+            google.client_id,
+            client_secret,
+            args.account,
+            google_token_path(settings.data_dir, args.account),
+            load_identity(identity_path),
+            google.timeout_s,
+        )
+        drive = GoogleDrive(http, tokens, google.timeout_s, account=args.account)
+        sheets = GoogleSheets(
+            http,
+            tokens,
+            google.timeout_s,
+            account=args.account,
+            max_rows=google.max_rows,
+        )
+        folder_id = await drive.ensure_folder("root", args.folder_name)
+        spreadsheet_id = await sheets.create(
+            args.sheet_title,
+            sink.tab,
+            [SHEETS_KEY_COLUMN, *sink.columns],
+        )
+    return folder_id, spreadsheet_id
 
 
 def _google_settings(cfg: Config) -> Google:
