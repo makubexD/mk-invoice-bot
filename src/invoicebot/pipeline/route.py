@@ -43,7 +43,7 @@ from invoicebot.pipeline.questions import (
     flow_question,
     summary_buttons,
 )
-from invoicebot.pipeline.summary import summary_text
+from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
@@ -90,11 +90,6 @@ ROUTING_STATE = "ROUTING"
 ROUTED_STATE = "FETCHING_DOCS"
 #: Where an invoice waits for an answer to one of D92's questions.
 CONFIRMING_STATE = "CONFIRMING"
-
-#: The summary's flow line for a flow the sender picked in the BR-R03 menu (spec 06 §1).
-#: BR-R01 and BR-R02 already carry this same ``➡️ {flow.label}`` line as their rule message,
-#: so the summary reuses that catalog text instead of copying it into this module.
-PICKED_FLOW_LINE = MESSAGES["BR-R02"]
 
 
 @dataclass(frozen=True)
@@ -158,7 +153,7 @@ def make_route_handler(
                 return
             reading = await load_reading(conn, job.invoice_id)
             flow_data = await load_flow_data(conn, job.invoice_id)
-            today = await _today(conn, cfg.owner.timezone)
+            today = await summary_today(conn, cfg.owner.timezone)
         if reading is None:
             raise RuntimeError(f"invoice {job.invoice_id} has no reading")
         profile = cfg.profiles.get(invoice.profile_id)
@@ -216,7 +211,7 @@ def _decide(decision: _Decision) -> _Step:
         return buyer
     summary = summary_text(
         decision.reading,
-        _flow_line(resolved.flow, resolved.rule_id),
+        flow_line(resolved.flow, resolved.rule_id),
         decision.today,
         decision.cfg.extraction,
     )
@@ -463,15 +458,6 @@ def _next_menu(flow_data: Mapping[str, Any]) -> int:
     return (menu + 1) % (MENU_MAX + 1)
 
 
-async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
-    """Return today's date in the owner's timezone, from the database clock."""
-    cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("the database returned no date")
-    return cast(date, row[0])
-
-
 async def _reply(
     conn: AsyncConnection[Any],
     invoice: InvoiceHead,
@@ -516,18 +502,6 @@ def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:
         )
     buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
     return MESSAGES[RULE_UNMATCHED].format(buyer_desc=buyer)
-
-
-def _flow_line(flow: Flow, rule_id: str) -> str:
-    """Return the summary's flow line for a routed invoice (spec 06 §1).
-
-    A rule-matched flow shows that rule's message. A flow the sender picked in the BR-R03
-    menu has no matched rule, so it shows the same ``➡️ {flow.label}`` line BR-R01 and
-    BR-R02 carry.
-    """
-    if rule_id == RULE_ASK:
-        return PICKED_FLOW_LINE.format(flow=flow)
-    return MESSAGES[rule_id].format(flow=flow)
 
 
 def _doubtful_buyer(reading: Reading, threshold: float) -> bool:
