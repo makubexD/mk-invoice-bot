@@ -6,6 +6,7 @@ the configured file kinds. The drive is a port; nothing here talks to HTTP.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,7 +96,7 @@ async def _upload_photos(drive: GoogleDrive, folder_id: str, name: str, photos: 
     for index, photo in enumerate(photos):
         suffix = "" if index == 0 else f"_{index + 1}"
         uploaded: DriveFile = await drive.put_file(
-            folder_id, f"{name}{suffix}.jpg", photo.read_bytes(), PHOTO_MIME
+            folder_id, f"{name}{suffix}.jpg", await asyncio.to_thread(photo.read_bytes), PHOTO_MIME
         )
         if index == 0:
             first_link = uploaded.link

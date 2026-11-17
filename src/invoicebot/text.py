@@ -18,11 +18,16 @@ def replace_unsafe_chars(value: str) -> str:
 
 
 #: Leading characters that make Excel or Sheets read a text cell as a formula (R-6.6, R-7.10).
-FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+#: The full-width forms are what a spreadsheet recognises when a cell is not plain ASCII.
+FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "＝", "＋", "－", "＠")
 
 
 def escape_formula(value: str) -> str:
-    """Return ``value`` with a leading apostrophe when a spreadsheet would read a formula (R-6.6)."""
-    if value.startswith(FORMULA_PREFIXES):
+    """Return ``value`` with a leading apostrophe when a spreadsheet would read a formula (R-6.6, R-7.10).
+
+    Leading whitespace does not stop a spreadsheet reading the cell as a formula, so the
+    check runs on the stripped value; the apostrophe goes before the original text.
+    """
+    if value.startswith(FORMULA_PREFIXES) or value.lstrip().startswith(FORMULA_PREFIXES):
         return "'" + value
     return value

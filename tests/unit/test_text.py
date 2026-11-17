@@ -45,7 +45,13 @@ def test_escape_formula_keeps_a_hyperlink_as_text() -> None:
     assert escape_formula('=HYPERLINK("x")') == '\'=HYPERLINK("x")'
 
 
-@pytest.mark.parametrize("value", ["La Leña", ""])
+@pytest.mark.parametrize("value", [" =1+1", "＝1", "＋1"])
+def test_escape_formula_escapes_a_whitespace_lead_and_full_width_prefixes(value: str) -> None:
+    """R-6.6, R-7.10: a formula lead after whitespace or in full-width form gets the apostrophe."""
+    assert escape_formula(value) == "'" + value
+
+
+@pytest.mark.parametrize("value", ["La Leña", "abc", ""])
 def test_escape_formula_leaves_plain_text(value: str) -> None:
-    """R-6.6: plain text and an empty string are unchanged."""
+    """R-6.6, R-7.10: plain text and an empty string are unchanged."""
     assert escape_formula(value) == value
