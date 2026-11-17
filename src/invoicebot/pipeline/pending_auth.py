@@ -24,7 +24,7 @@ RULE_AUTH_ADMIN = "BR-D01_admin"
 #: Where a missing token leaves the invoice until the account signs in (BR-D01).
 PENDING_AUTH_STATE = "PENDING_AUTH"
 #: The provider names the sender reads, by slug (BR-D01).
-PROVIDER_NAMES: Mapping[str, str] = {"microsoft": "Microsoft"}
+PROVIDER_NAMES: Mapping[str, str] = {"microsoft": "Microsoft", "google": "Google"}
 
 
 async def park_for_auth(
