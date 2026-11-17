@@ -46,6 +46,9 @@ _METADATA_FORMAT = "metadata"
 #: The format ``attachments`` needs: the message's full MIME tree (D135).
 _FULL_FORMAT = "full"
 
+#: How much of a failed response's body is read to see a rate-limit reason (R-6.4).
+_ERROR_BODY_MAX_BYTES = 64 * 1024
+
 
 def _encoded_id(value: str) -> str:
     """Return ``value`` percent-encoded for a URL path; raise if it is not a Gmail id.
@@ -191,6 +194,20 @@ def _decode(body: dict[str, object]) -> bytes:
         raise GoogleError() from err
 
 
+async def _read_error(response: httpx.Response) -> httpx.Response:
+    """Return a failed streamed response with its body read, so the rate-limit check sees it (R-6.4).
+
+    At most :data:`_ERROR_BODY_MAX_BYTES` are read, chunked or not; a longer body
+    is returned unread and so never counts as a rate limit.
+    """
+    body = bytearray()
+    async for chunk in response.aiter_bytes():
+        body += chunk
+        if len(body) > _ERROR_BODY_MAX_BYTES:
+            return response
+    return httpx.Response(response.status_code, content=bytes(body), request=response.request)
+
+
 @contextlib.asynccontextmanager
 async def _mailbox_errors() -> AsyncIterator[None]:
     """Re-raise Google's failures as MailboxError so callers see no provider (R-5.2)."""
@@ -321,7 +338,8 @@ class GmailMailbox:
         async with self._http.stream(
             "GET", url, params=params, headers=headers, timeout=self._timeout_s
         ) as response:
-            raise_google_error(response, self._account)
+            if not response.is_success:
+                raise_google_error(await _read_error(response), self._account)
             async for chunk in response.aiter_bytes():
                 total += len(chunk)
                 if total > cap:

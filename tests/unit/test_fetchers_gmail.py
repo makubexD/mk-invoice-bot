@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import json
 from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 
@@ -14,6 +15,7 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.fetchers.base import MailboxError
 from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
+from invoicebot.sinks.google_api import GoogleError, GoogleTransient
 
 ACCOUNT = "bot"
 BEARER = "synthetic-bearer-value"
@@ -218,6 +220,77 @@ async def test_search_maps_a_500_to_a_mailbox_error() -> None:
     async with _make_mailbox(handler) as mailbox:
         with pytest.raises(MailboxError):
             await mailbox.search("F001-123", 10)
+
+
+def _streamed_response(status: int, body: dict[str, object]) -> httpx.Response:
+    """Return an unread response with no Content-Length, like a chunked transport stream."""
+    return httpx.Response(
+        status,
+        headers={"content-type": "application/json"},
+        stream=httpx.ByteStream(json.dumps(body).encode()),
+    )
+
+
+def _rate_limit_response() -> httpx.Response:
+    """Return a streamed 403 whose body names a Google rate limit."""
+    return _streamed_response(403, {"error": {"errors": [{"reason": "rateLimitExceeded"}]}})
+
+
+async def test_attachments_retries_a_403_rate_limit_on_the_full_message_read() -> None:
+    """R-6.4: a 403 naming a rate limit on the full-message read is transient."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _rate_limit_response()
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError) as raised:
+            await mailbox.attachments("msg_1")
+
+    assert isinstance(raised.value.__cause__, GoogleTransient)
+
+
+async def test_download_retries_a_403_rate_limit_on_the_attachment_read() -> None:
+    """R-6.4: a 403 naming a rate limit on the attachment read is transient."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _rate_limit_response()
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError) as raised:
+            await mailbox.download("msg_1", "att_1", max_bytes=100)
+
+    assert isinstance(raised.value.__cause__, GoogleTransient)
+
+
+async def test_attachments_keeps_a_403_for_another_reason_final() -> None:
+    """R-6.4: a 403 whose body names another reason is a plain Google failure."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _streamed_response(403, {"error": {"errors": [{"reason": "forbidden"}]}})
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError) as raised:
+            await mailbox.attachments("msg_1")
+
+    assert isinstance(raised.value.__cause__, GoogleError)
+    assert not isinstance(raised.value.__cause__, GoogleTransient)
+
+
+async def test_attachments_leaves_an_error_body_over_the_cap_unread() -> None:
+    """R-6.4: a rate-limit 403 whose body passes the error-body cap is not read, so it stays final."""
+    padding = "x" * (64 * 1024)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _streamed_response(
+            403, {"error": {"errors": [{"reason": "rateLimitExceeded"}], "message": padding}}
+        )
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError) as raised:
+            await mailbox.attachments("msg_1")
+
+    assert isinstance(raised.value.__cause__, GoogleError)
+    assert not isinstance(raised.value.__cause__, GoogleTransient)
 
 
 async def test_a_bad_id_is_refused_before_any_request() -> None:
