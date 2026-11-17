@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import signal
+from collections import defaultdict
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -30,6 +31,7 @@ SECRET_VALUES = {
     "whatsapp_verify_token": VERIFY_VALUE,
     "sender_hash_key": "synthetic-hash-value",
     "github_app_private_key": "synthetic-github-app-key",
+    "google_client_secret": "synthetic-google-client-value",
 }
 
 
@@ -111,6 +113,8 @@ def test_lifespan_without_age_identity_disables_the_inbox_fetcher(
     # store and a token source nothing calls keep startup going so the fetch wiring runs.
     monkeypatch.setattr(invoicebot.app, "_load_secrets", lambda _settings: SecretStore(SECRET_VALUES))
     monkeypatch.setattr(invoicebot.app, "build_token_provider", lambda *_args: _NoToken())
+    # Google refresh tokens also need the identity (D128); flow A delivery is not under test here.
+    monkeypatch.setattr(invoicebot.app, "_google_tokens", lambda *_args: defaultdict(_NoToken))
     # configure_logging replaces the root handlers, which would hide the records from caplog.
     monkeypatch.setattr(invoicebot.app, "configure_logging", lambda *_args, **_kwargs: None)
 
