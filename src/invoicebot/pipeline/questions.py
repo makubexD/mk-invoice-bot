@@ -1,4 +1,4 @@
-"""The questions routing asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06).
+"""The questions the pipeline asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06, D125).
 
 Each builder is pure: it returns the es-PE text from the catalog and the buttons that
 carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R-3.5).
@@ -31,6 +31,8 @@ BRAND_ACTION = "brand"
 CONTINUE_ACTION = "continue"
 CANCEL_ACTION = "cancel"
 EDIT_ACTION = "edit"
+#: The [Sí] that accepts a BR-V02/BR-V06 comprobante (D125).
+INVALID_OK_ACTION = "invalid_ok"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
@@ -101,6 +103,15 @@ def cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, li
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
     ]
     return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
+
+
+def invalid_question(invoice_id: int, rule_id: str) -> tuple[str, list[Button]]:
+    """Return BR-V02/BR-V06's question and its [Sí] / [Cancelar] buttons (D125)."""
+    buttons = [
+        Button(id=button_id(invoice_id, INVALID_OK_ACTION), title=BUTTON_YES),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+    return MESSAGES[rule_id], buttons
 
 
 def summary_buttons(invoice_id: int) -> list[Button]:

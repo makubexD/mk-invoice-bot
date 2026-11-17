@@ -27,13 +27,13 @@ from invoicebot.channels.base import Button
 from invoicebot.config.models import Config
 from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.questions import CANCEL_ACTION, summary_buttons
+from invoicebot.pipeline.questions import invalid_question, summary_buttons
 from invoicebot.pipeline.steps import FETCH_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_CANCEL, BUTTON_YES, MESSAGES
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
 from invoicebot.store.db import Pool
@@ -56,8 +56,6 @@ logger = logging.getLogger(__name__)
 
 #: The job step this handler serves; routing enqueues it in ``VALIDATING`` (D124).
 VALIDATE_STEP = "validate"
-#: The [Sí] action that accepts a BR-V02/BR-V06 invoice; step 20's action owns it once it exists (D125).
-INVALID_OK_ACTION = "invalid_ok"
 #: The recheck delay for a comprobante SUNAT does not know yet (BR-V01, D125).
 MISSING_RECHECK_HOURS = 24
 
@@ -210,15 +208,9 @@ async def _ask(conn: AsyncConnection[Any], inputs: _Inputs, verdict: Verdict) ->
     rule_id = verdict.rule_id
     if rule_id is None:
         raise RuntimeError("an ask verdict has no rule")
-    # shortcut: inline ``<invoice_id>:<action>`` button ids stay until step 20 owns the
-    # [Sí] action and its button id (D125). The ``button_id`` codec lives in
-    # channels.whatsapp.payloads, which the pipeline may not import.
-    buttons = [
-        Button(id=f"{inputs.invoice_id}:{INVALID_OK_ACTION}", title=BUTTON_YES),
-        Button(id=f"{inputs.invoice_id}:{CANCEL_ACTION}", title=BUTTON_CANCEL),
-    ]
+    text, buttons = invalid_question(inputs.invoice_id, rule_id)
     await set_state(conn, inputs.invoice_id, CONFIRM_INVALID, rule_id=rule_id, expected=VALIDATING)
-    await _reply(conn, inputs.invoice, inputs.invoice_id, rule_id, MESSAGES[rule_id], buttons)
+    await _reply(conn, inputs.invoice, inputs.invoice_id, rule_id, text, buttons)
 
 
 def _extra_lines(verdict: Verdict) -> tuple[str, ...]:

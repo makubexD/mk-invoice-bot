@@ -15,7 +15,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.actions import send_not_confirmed
+from invoicebot.pipeline.actions import INVALID_OK_ACTION, send_not_confirmed
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
@@ -53,6 +53,7 @@ FLOW = "work_microsoft"
 #: A flow whose modes are [inbox_rule, laptop_outlook] (D109).
 LAPTOP_FLOW = "inbox_rule_laptop"
 CONFIRMING = "CONFIRMING"
+CONFIRM_INVALID = "CONFIRM_INVALID"
 ROUTING = "ROUTING"
 PENDING_USER = "PENDING_USER"
 FETCHING_DOCS = "FETCHING_DOCS"
@@ -68,6 +69,8 @@ RULE_SENT = "BR-D08"
 RULE_DONE = "BR-D10"
 RULE_NOT_CONFIRMED = "BR-D11"
 RULE_INBOX = "BR-D13"
+RULE_ANNULLED = "BR-V02"
+RULE_NOT_AUTHORIZED = "BR-V06"
 FLOW_CHOICES = ("flow_a", "flow_b")
 #: The folder and synthetic serie/numero BR-D10 and BR-D11 name.
 FOLDER = "2026-11-Support_1_LaLena"
@@ -131,6 +134,17 @@ async def _confirming_invoice(
         if flow_data:
             await merge_flow_data(conn, invoice_id, flow_data)
         await set_state(conn, invoice_id, CONFIRMING, rule_id=rule_id)
+    return invoice_id
+
+
+async def _confirm_invalid_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, rule_id: str
+) -> int:
+    """Create a CONFIRM_INVALID invoice waiting on rule_id (BR-V02, BR-V06)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_flow(conn, invoice_id, FLOW)
+        await set_state(conn, invoice_id, CONFIRM_INVALID, rule_id=rule_id)
     return invoice_id
 
 
@@ -1144,4 +1158,90 @@ async def test_self_send_after_br_d10_answers_br_s02(
         (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
         (RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER)),
         ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
+    ]
+
+
+async def test_invalid_ok_on_br_v02_sets_fetching_docs_with_a_fetch_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-V02: [Sí] on the annulled question moves the invoice to FETCHING_DOCS and queues a fetch job."""
+    profile_id = _profile()
+    invoice_id = await _confirm_invalid_invoice(db_pool, profile_id, RULE_ANNULLED)
+    msg = _press(invoice_id, INVALID_OK_ACTION, profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (FETCHING_DOCS, RULE_ANNULLED)
+    assert jobs == ["fetch"]
+    assert texts == []
+
+
+async def test_invalid_ok_on_br_v06_sets_fetching_docs_with_a_fetch_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-V06: [Sí] on the unauthorized question moves the invoice to FETCHING_DOCS and queues a fetch job."""
+    profile_id = _profile()
+    invoice_id = await _confirm_invalid_invoice(db_pool, profile_id, RULE_NOT_AUTHORIZED)
+    msg = _press(invoice_id, INVALID_OK_ACTION, profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (FETCHING_DOCS, RULE_NOT_AUTHORIZED)
+    assert jobs == ["fetch"]
+    assert texts == []
+
+
+async def test_invalid_cancel_on_br_v02_cancels_the_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-V02: [Cancelar] on the annulled question cancels the invoice."""
+    profile_id = _profile()
+    invoice_id = await _confirm_invalid_invoice(db_pool, profile_id, RULE_ANNULLED)
+    msg = _press(invoice_id, "cancel", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == ("CANCELLED", RULE_CAP)
+    assert jobs == []
+    assert texts == [(None, CANCELLED_BY_USER.format(id=invoice_id))]
+
+
+async def test_invalid_ok_on_a_fetching_docs_invoice_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: [Sí] on an invoice already FETCHING_DOCS answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, FETCHING_DOCS)
+    msg = _press(invoice_id, INVALID_OK_ACTION, profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (FETCHING_DOCS, None)
+    assert jobs == []
+    assert texts == [
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(FETCHING_DOCS)))
     ]

@@ -17,7 +17,8 @@ from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ValidezApi
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.validate import INVALID_OK_ACTION, VALIDATE_STEP, make_validate_handler
+from invoicebot.pipeline.questions import INVALID_OK_ACTION
+from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
