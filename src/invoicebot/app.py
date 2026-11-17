@@ -21,7 +21,8 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
-from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, scopes_for
+from invoicebot.auth.google_oauth import GoogleTokens
+from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, google_token_path, scopes_for
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -32,6 +33,7 @@ from invoicebot.config.models import (
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
+    GoogleDriveSink,
     Mail,
     MailerSink,
     OneDriveFolderSink,
@@ -59,6 +61,8 @@ from invoicebot.pipeline.deliver import (
     make_deliver_handler,
     make_resend_handler,
 )
+from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
+from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -79,9 +83,11 @@ from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
-from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
+from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets, load_identity
 from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
+from invoicebot.sinks.google_drive import GoogleDrive
+from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
@@ -113,6 +119,12 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
+#: The adapter and secret the flow A delivery's Google OAuth client signs in with (R-9.10, D128).
+GOOGLE_DELIVERY_ADAPTER = "google_delivery"
+GOOGLE_CLIENT_SECRET = "google_client_secret"  # noqa: S105 - the age-store key's name, not a value
+#: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
+GOOGLE_DRIVE_KIND = "google_drive"
+ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
@@ -263,10 +275,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
-        if deliver is not None:
-            handlers[DELIVER_STEP] = deliver.deliver
-            handlers[FOLDER_STATUS_STEP] = deliver.folder_status
-            handlers.update(deliver.resends)
+        handlers.update(_deliver_registry(settings, cfg, deliver, http, pool, store))
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         transports = {
@@ -420,6 +429,87 @@ def _deliver_handlers(
         resends=make_resend_handler(context),
         laptop=laptop_task,
     )
+
+
+def _deliver_registry(
+    settings: Settings,
+    cfg: Config,
+    deliver: DeliverHandlers | None,
+    http: httpx.AsyncClient,
+    pool: Pool,
+    store: SecretStore,
+) -> dict[str, Handler]:
+    """Return the delivery steps each flow's sink kind selects (D132).
+
+    The ``deliver`` step dispatches to the handler of the invoice's flow. Flow B's folder
+    status and resends stay registered as before, only when a OneDrive sink exists.
+    """
+    by_kind: dict[str, Handler] = {}
+    google = _google_deliver_handler(settings, cfg, http, pool, store)
+    if google is not None:
+        by_kind[GOOGLE_DRIVE_KIND] = google
+    handlers: dict[str, Handler] = {}
+    if deliver is not None:
+        by_kind[ONEDRIVE_FOLDER_KIND] = deliver.deliver
+        handlers[FOLDER_STATUS_STEP] = deliver.folder_status
+        handlers.update(deliver.resends)
+    by_flow = _deliverers_by_flow(cfg, by_kind)
+    if by_flow:
+        handlers[DELIVER_STEP] = make_deliver_dispatch(pool, by_flow)
+    return handlers
+
+
+def _google_deliver_handler(
+    settings: Settings,
+    cfg: Config,
+    http: httpx.AsyncClient,
+    pool: Pool,
+    store: SecretStore,
+) -> Handler | None:
+    """Build flow A's deliver handler, or None when no flow files in Google Drive (R-6.1, D129).
+
+    The client secret comes from the age store's ``google_delivery`` view, so a missing one
+    stops startup (R-9.9). A Google sink without ``google`` config or an age identity is a
+    configuration mistake, so it fails at startup rather than on the first delivery.
+    """
+    account = _google_drive_account(cfg)
+    if account is None:
+        return None
+    if cfg.google is None or settings.age_identity_path is None:
+        raise ValueError("a google_drive sink needs the google config and AGE_IDENTITY_PATH (D128)")
+    secret = store.scoped(GOOGLE_DELIVERY_ADAPTER, {GOOGLE_CLIENT_SECRET}).get(GOOGLE_CLIENT_SECRET)
+    tokens = GoogleTokens(
+        http,
+        cfg.google.client_id,
+        secret,
+        account,
+        google_token_path(settings.data_dir, account),
+        load_identity(settings.age_identity_path),
+        cfg.google.timeout_s,
+    )
+    drive = GoogleDrive(http, tokens, cfg.google.timeout_s, account=account)
+    sheets = GoogleSheets(http, tokens, cfg.google.timeout_s, account=account, max_rows=cfg.google.max_rows)
+    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drive, sheets, cfg.profiles))
+
+
+def _google_drive_account(cfg: Config) -> str | None:
+    """Return the account of the first ``google_drive`` sink, or None when no flow has one (R-6.1)."""
+    for flow in cfg.flows.values():
+        for sink in flow.sinks:
+            if isinstance(sink, GoogleDriveSink):
+                return sink.account
+    return None
+
+
+def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str, Handler]:
+    """Return each flow's deliverer by flow name, chosen from its first sink's kind (D132)."""
+    deliverers: dict[str, Handler] = {}
+    for name, flow in cfg.flows.items():
+        first = next(iter(flow.sinks), None)
+        handler = None if first is None else by_kind.get(first.kind)
+        if handler is not None:
+            deliverers[name] = handler
+    return deliverers
 
 
 def _laptop_flow(cfg: Config) -> Flow | None:

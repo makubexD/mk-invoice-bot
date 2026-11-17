@@ -29,11 +29,11 @@ from invoicebot.auth.google_oauth import TOKEN_URL, save_refresh_token
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.auth.providers import (
     DRIVE_FILE_SCOPE,
-    TOKENS_DIRECTORY,
     build_token_provider,
     delivery_accounts,
     google_accounts,
     google_scopes_for,
+    google_token_path,
     microsoft_accounts,
     scopes_for,
 )
@@ -253,7 +253,7 @@ async def _google_sign_in(
     code = parse_redirect(path, state)
     refresh_token = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
     save_refresh_token(
-        settings.data_dir / TOKENS_DIRECTORY / f"{account}.google.age",
+        google_token_path(settings.data_dir, account),
         load_identity(identity_path),
         refresh_token,
     )

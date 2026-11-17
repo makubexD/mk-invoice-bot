@@ -12,6 +12,7 @@ in asks for no scope the account's flows do not use.
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from invoicebot.auth.msal_cache import TokenProvider
 from invoicebot.config.models import (
@@ -68,6 +69,11 @@ def build_token_provider(
         cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
         identity=load_identity(settings.age_identity_path),
     )
+
+
+def google_token_path(data_dir: Path, account: str) -> Path:
+    """Return the encrypted refresh token file of one Google account (D128)."""
+    return data_dir / TOKENS_DIRECTORY / f"{account}.google.age"
 
 
 def _files_accounts(cfg: Config) -> set[str]:
