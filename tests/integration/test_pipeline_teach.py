@@ -13,10 +13,11 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Profile
+from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.net.guard import Resolver
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, answer, handle_press, teach
@@ -44,6 +45,7 @@ GITHUB_REPO = "owner/mk-invoice-bot-ops"
 #: The synthetic issue the PORTAL_MISSING gap was reported to.
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 GAP_FINGERPRINT = fingerprint("PORTAL_MISSING", str(ISSUER_RUC))
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 
 
 class FakeResolver(Resolver):
@@ -662,7 +664,7 @@ async def test_press_through_intake_approves_without_an_invoice(
             conn,
             _press(ADMIN, approved=True),
             max_queued_per_sender=5,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone="America/Lima",
             roles=IntakeRoles(teach=_setup()),
         )

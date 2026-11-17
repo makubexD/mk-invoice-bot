@@ -24,6 +24,7 @@ from invoicebot.channels.whatsapp.client import WhatsAppError
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeResult, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import ATTACH_STEP
@@ -50,7 +51,7 @@ FLOW = "work_microsoft"
 STORE_RUC = "20000000001"
 SERIE = "F001"
 NUMERO = "15160"
-MEGABYTE = 1024 * 1024
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
 XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
@@ -381,7 +382,7 @@ async def _send_upload(
     )
     async with pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=10, media_max_mb=10, timezone="America/Lima"
+            conn, msg, max_queued_per_sender=10, media_max_bytes=MEDIA_MAX_BYTES, timezone="America/Lima"
         )
     return result, msg
 

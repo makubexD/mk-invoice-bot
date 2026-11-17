@@ -19,10 +19,11 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config, RoutingRule, StoreDirectory
+from invoicebot.config.models import Config, MediaMaxBytes, RoutingRule, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.extract import ROUTE_STEP
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.route import make_route_handler
@@ -41,6 +42,8 @@ from invoicebot.store.taught_links import TaughtLink
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
+MEDIA_MAX_BYTES_7 = MediaMaxBytes(image=7 * MEGABYTE, pdf=7 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 #: The owner's timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
 LEASE_S = 60
@@ -373,7 +376,7 @@ async def test_photo_creates_invoice_job_and_acknowledgement(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         assert result.status == "queued"
         invoice_id = result.invoice_id
@@ -415,10 +418,10 @@ async def test_redelivered_message_is_a_duplicate(
 
     async with db_pool.connection() as conn:
         first = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         second = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         counts = await _counts(conn, profile_id)
 
@@ -435,7 +438,7 @@ async def test_text_message_is_only_stored(db_pool: AsyncConnectionPool[AsyncCon
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         counts = await _counts(conn, profile_id)
         cur = await conn.execute(
@@ -462,7 +465,11 @@ async def test_five_photos_are_claimed_in_arrival_order(
         await conn.execute("DELETE FROM jobs")
         results = [
             await handle_inbound(
-                conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+                conn,
+                msg,
+                max_queued_per_sender=MAX_QUEUED,
+                media_max_bytes=MEDIA_MAX_BYTES,
+                timezone=TIMEZONE,
             )
             for msg in messages
         ]
@@ -486,7 +493,9 @@ async def test_back_pressure_replies_and_keeps_the_message(
 
     async with db_pool.connection() as conn:
         results = [
-            await handle_inbound(conn, msg, max_queued_per_sender=2, media_max_mb=10, timezone=TIMEZONE)
+            await handle_inbound(
+                conn, msg, max_queued_per_sender=2, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+            )
             for msg in messages
         ]
         counts = await _counts(conn, profile_id)
@@ -521,21 +530,21 @@ async def test_back_pressure_is_per_profile(
             conn,
             _message(busy_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         blocked = await handle_inbound(
             conn,
             _message(busy_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         other = await handle_inbound(
             conn,
             _message(other_profile, external_id=_external_id(), attachments=[_photo()]),
             max_queued_per_sender=1,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         busy_counts = await _counts(conn, busy_profile)
@@ -560,7 +569,11 @@ async def test_caller_rollback_leaves_nothing_behind(
         with pytest.raises(_Rollback):
             async with conn.transaction():
                 result = await handle_inbound(
-                    conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+                    conn,
+                    msg,
+                    max_queued_per_sender=MAX_QUEUED,
+                    media_max_bytes=MEDIA_MAX_BYTES,
+                    timezone=TIMEZONE,
                 )
                 assert result.status == "queued"
                 raise _Rollback
@@ -590,7 +603,7 @@ async def test_edit_reroutes_a_confirming_invoice(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -624,7 +637,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
             conn,
             _press(older, "edit", profile_id),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         older_flow = await _flow_data(conn, older)
@@ -637,7 +650,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
     first = _message(profile_id, external_id=_external_id(), text="total=45.50")
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, first, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, first, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         older_total = await _field(conn, older, "total")
         newer_total = await _field(conn, newer, "total")
@@ -651,7 +664,7 @@ async def test_editar_pin_targets_the_pressed_invoice_then_the_newest_again(
     second = _message(profile_id, external_id=_external_id(), text="total=46.00")
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, second, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, second, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         newer_total = await _field(conn, newer, "total")
 
@@ -673,14 +686,14 @@ async def test_editar_pin_is_cleared_by_another_press_on_its_invoice(
             conn,
             _press(invoice_id, "edit", profile_id),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         await handle_inbound(
             conn,
             _press(invoice_id, "cancel", profile_id),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         flow = await _flow_data(conn, invoice_id)
@@ -704,7 +717,7 @@ async def test_editar_pin_is_ignored_once_its_invoice_is_not_editable(
             conn,
             _press(older, "edit", profile_id),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
     async with db_pool.connection() as conn, conn.transaction():
@@ -713,7 +726,7 @@ async def test_editar_pin_is_ignored_once_its_invoice_is_not_editable(
     msg = _message(profile_id, external_id=_external_id(), text="total=45.50")
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         newer_total = await _field(conn, newer, "total")
 
@@ -733,7 +746,7 @@ async def test_editar_pin_stays_while_br_e01_asks_for_more(
             conn,
             _press(older, "edit", profile_id),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
 
@@ -741,10 +754,10 @@ async def test_editar_pin_stays_while_br_e01_asks_for_more(
     second = _message(profile_id, external_id=_external_id(), text=f"ruc={OWNER_RUC}")
     async with db_pool.connection() as conn:
         await handle_inbound(
-            conn, first, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, first, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         result = await handle_inbound(
-            conn, second, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, second, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         ruc = await _field(conn, older, "ruc_emisor")
 
@@ -770,14 +783,14 @@ async def test_editar_pin_leaves_other_profiles_pins_alone(
             conn,
             _press(their_invoice, "edit", theirs),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         await handle_inbound(
             conn,
             _press(my_invoice, "edit", mine),
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
         their_flow = await _flow_data(conn, their_invoice)
@@ -801,7 +814,9 @@ async def test_buyer_edit_drops_the_flow_and_buyer_answers(
     msg = _message(profile_id, external_id=_external_id(), text="cliente=20000000001")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         cur = await conn.execute(
             "SELECT flow_data_json->'answers' FROM invoices WHERE id = %s", (invoice_id,)
         )
@@ -823,7 +838,9 @@ async def test_complete_edit_reroutes_an_extract_failed_invoice(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         cur = await conn.execute(
@@ -853,7 +870,9 @@ async def test_complete_edit_resumes_a_parked_extract_failed_invoice(
     )
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         state_rule = await _state_rule(conn, invoice_id)
         waiting = await _waiting_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -874,7 +893,9 @@ async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(
     msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -894,7 +915,9 @@ async def test_edit_in_delivering_is_refused_as_late(
 
     async with db_pool.connection() as conn:
         before = await _fields_json(conn, invoice_id)
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -919,7 +942,9 @@ async def test_bad_ruc_edit_answers_br_e02_and_changes_nothing(
 
     async with db_pool.connection() as conn:
         before = await _fields_json(conn, invoice_id)
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
@@ -949,7 +974,7 @@ async def test_cliente_edit_reroutes_a_br_r03_invoice(
     async with db_pool.connection() as conn:
         assert await _state_rule(conn, invoice_id) == ("CONFIRMING", "BR-R03")
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -985,7 +1010,7 @@ async def test_press_checks_the_state_under_the_row_lock(
                 conn,
                 _press(invoice_id, "cancel", profile_id),
                 max_queued_per_sender=MAX_QUEUED,
-                media_max_mb=10,
+                media_max_bytes=MEDIA_MAX_BYTES,
                 timezone=TIMEZONE,
             )
 
@@ -1016,7 +1041,7 @@ async def test_xml_upload_links_the_newest_manual_required_invoice(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         cur = await conn.execute(
             "SELECT invoice_id FROM messages WHERE channel = %s AND external_id = %s",
@@ -1051,7 +1076,7 @@ async def test_upload_quoting_an_older_invoice_wins_over_the_newest(
     )
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         older_jobs = await _jobs(conn, older)
         newer_jobs = await _jobs(conn, newer)
@@ -1074,7 +1099,7 @@ async def test_ambiguous_upload_asks_which_invoice(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         replies = await _replies(conn, profile_id)
         older_jobs = await _jobs(conn, older)
@@ -1118,7 +1143,9 @@ async def test_ambiguous_upload_lists_ten_newest_invoices(
     msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         replies = await _replies(conn, profile_id)
 
     assert len(replies) == 1
@@ -1146,7 +1173,9 @@ async def test_ambiguous_upload_lists_both_invoices(
     msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         replies = await _replies(conn, profile_id)
 
     assert len(replies) == 1
@@ -1183,7 +1212,7 @@ async def test_ambiguous_upload_quoting_one_invoice_links_it(
     )
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         replies = await _replies(conn, profile_id)
         older_jobs = await _jobs(conn, older)
@@ -1207,7 +1236,7 @@ async def test_single_open_invoice_still_links_without_a_quote(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         replies = await _replies(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
@@ -1228,7 +1257,7 @@ async def test_another_profiles_invoice_is_never_matched(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         jobs = await _jobs(conn, foreign)
 
@@ -1245,7 +1274,7 @@ async def test_lone_pdf_starts_an_invoice(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         invoice_id = result.invoice_id
         assert invoice_id is not None
@@ -1274,7 +1303,7 @@ async def test_lone_xml_gets_br_e07_and_creates_nothing(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=7, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES_7, timezone=TIMEZONE
         )
         counts = await _counts(conn, profile_id)
         replies = await _replies(conn, profile_id)
@@ -1289,6 +1318,32 @@ async def test_lone_xml_gets_br_e07_and_creates_nothing(
     assert "de hasta 7 MB" in text
 
 
+async def test_lone_xml_refusal_names_the_photo_cap_not_the_pdf_cap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-E07: a lone XML's refusal names the photo cap, never the larger PDF cap."""
+    profile_id = _profile()
+    msg = _message(profile_id, external_id=_external_id(), attachments=[_upload("xml")])
+    media_max_bytes = MediaMaxBytes(image=7 * MEGABYTE, pdf=20 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=media_max_bytes,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert len(replies) == 1
+    text, rule_id = replies[0]
+    assert rule_id == "BR-E07"
+    assert "de hasta 7 MB" in text
+    assert "20 MB" not in text
+
+
 async def test_lone_pdf_over_the_queue_cap_gets_br_s01(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -1298,8 +1353,12 @@ async def test_lone_pdf_over_the_queue_cap_gets_br_s01(
     pdf = _message(profile_id, external_id=_external_id(), attachments=[_upload("pdf")])
 
     async with db_pool.connection() as conn:
-        await handle_inbound(conn, photo, max_queued_per_sender=1, media_max_mb=10, timezone=TIMEZONE)
-        result = await handle_inbound(conn, pdf, max_queued_per_sender=1, media_max_mb=10, timezone=TIMEZONE)
+        await handle_inbound(
+            conn, photo, max_queued_per_sender=1, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        result = await handle_inbound(
+            conn, pdf, max_queued_per_sender=1, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
         counts = await _counts(conn, profile_id)
         replies = await _replies(conn, profile_id)
 
@@ -1321,7 +1380,7 @@ async def test_confirming_invoice_is_not_matched(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         jobs = await _jobs(conn, invoice_id)
 
@@ -1351,7 +1410,7 @@ async def test_br_f02_url_teaches_the_portal(
             conn,
             msg,
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
             roles=_teach_roles(profile_id),
         )
@@ -1386,7 +1445,7 @@ async def test_br_f02_dont_know_answers_and_stores_nothing(
             conn,
             msg,
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
             roles=_teach_roles(profile_id),
         )
@@ -1426,7 +1485,7 @@ async def test_br_f02_url_after_a_newer_question_is_not_taken(
             conn,
             msg,
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
             roles=_teach_roles(profile_id),
         )
@@ -1458,7 +1517,7 @@ async def test_br_f02_command_still_runs(
             conn,
             msg,
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
             roles=_teach_roles(profile_id),
         )
@@ -1493,7 +1552,7 @@ async def test_br_f02_edit_still_edits(
             conn,
             msg,
             max_queued_per_sender=MAX_QUEUED,
-            media_max_mb=10,
+            media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
             roles=_teach_roles(profile_id),
         )
@@ -1524,7 +1583,7 @@ async def test_br_f02_url_without_teach_roles_is_not_taken(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         link = await taught_links.get(conn, int(issuer))
 

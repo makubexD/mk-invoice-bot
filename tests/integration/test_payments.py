@@ -16,8 +16,10 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Button, ChannelName, InboundMessage
 from invoicebot.channels.whatsapp.payloads import buttons_payload
+from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
@@ -43,6 +45,7 @@ CHANNEL: ChannelName = "whatsapp"
 TIMEZONE = "America/Lima"
 #: The queue limit a press goes through intake with; no press reaches back-pressure.
 MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 #: The day a test pays; today is later, so the year is the current one (R-7.12).
 PAID_ON = date(2026, 11, 15)
 #: An invoice id no test creates.
@@ -169,7 +172,9 @@ def _press(profile_id: str, button_id: str) -> InboundMessage:
 
 async def _press_through_intake(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
     """Send one button press through intake, as the webhook would."""
-    await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
+    await handle_inbound(
+        conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+    )
 
 
 async def _proposal_for(

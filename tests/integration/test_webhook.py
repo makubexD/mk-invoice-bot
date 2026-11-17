@@ -27,7 +27,8 @@ from psycopg import AsyncConnection
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.signature import sender_hash
-from invoicebot.config.models import Profile
+from invoicebot.config.models import MediaMaxBytes, Profile
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool, create_pool
@@ -41,6 +42,7 @@ HANDSHAKE = "synthetic-verify-token"
 CHALLENGE = "1158201444"
 EPOCH = "1700000000"
 MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 #: The owner's timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
 
@@ -87,7 +89,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
-        media_max_mb=10,
+        media_max_bytes=MEDIA_MAX_BYTES,
         timezone=TIMEZONE,
     )
 
