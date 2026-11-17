@@ -1,10 +1,10 @@
-"""Job handler that reads one invoice photo in a helper process (S3.11, R-2.1).
+"""Job handler that reads one invoice photo or PDF in a helper process (S3.11, R-2.1, R-2.15).
 
 :func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding and
 OCR run in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
-never loads OpenCV, zxing or Tesseract and their memory returns when the helper exits (D78).
-The helper's one JSON line is validated before use. The outcome's state change, next job and
-outbox message commit in one transaction (CLAUDE.md "Database").
+never loads OpenCV, zxing, Tesseract or pypdfium2 and their memory returns when the helper
+exits (D78, D122). The helper's one JSON line is validated before use. The outcome's state
+change, next job and outbox message commit in one transaction (CLAUDE.md "Database").
 """
 
 from __future__ import annotations
@@ -17,12 +17,13 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Final, Literal
 
 from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind
+from invoicebot.channels.media_limits import max_bytes_for
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
@@ -32,7 +33,12 @@ from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.helper import run_helper
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
-from invoicebot.pipeline.handlers import EXTRACT_STEP
+from invoicebot.pipeline.handlers import (
+    EXTRACT_STEP,
+    RULE_MEDIA_REJECTED,
+    MediaRejection,
+    reject_media,
+)
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
@@ -52,8 +58,10 @@ type RuleId = Literal["BR-E01", "BR-E02", "BR-E05"]
 
 #: Job step that routes a read invoice (S4.1).
 ROUTE_STEP = "route"
-#: Attachment kind the helper reads.
-PHOTO_KIND: AttachmentKind = "photo"
+#: Attachment kinds the helper reads, photo first when an invoice somehow has both (R-2.15).
+READABLE_KINDS: tuple[AttachmentKind, ...] = ("photo", "pdf")
+#: The helper's error when a PDF is over ``limits.media.max_pdf_pages`` (BR-E07, R-2.15).
+TOO_MANY_PAGES: Final = "too_many_pages"
 #: States in which the handler acts; any other state is left untouched (R-9.4).
 ACTIVE_STATES = frozenset({"RECEIVED", "EXTRACTING"})
 #: The state of an invoice the pipeline stops processing.
@@ -89,7 +97,7 @@ class _HelperResult(BaseModel):
     variant: QrVariant | None
     decoder: QrDecoder | None
     ocr: bool
-    error: Literal["unreadable"] | None
+    error: Literal["unreadable", "too_many_pages"] | None
 
 
 def make_extract_handler(
@@ -99,19 +107,20 @@ def make_extract_handler(
     rules_path: Path,
     gaps: GapContext,
 ) -> Handler:
-    """Build the handler that reads an invoice's photo and queues its routing (S3.11).
+    """Build the handler that reads an invoice's photo or PDF and queues its routing (S3.11).
 
     ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
     ``gaps`` is who hears about an issuer whose invoices keep being unreadable (BR-E06).
     The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no
-    photo file — a PDF or XML attachment until read-more ships — ends with BR-E01 and a message
-    asking for a photo or typed data. A photo it cannot read, a required field it does not find,
-    a bad issuer RUC and an unsupported document type end the invoice with BR-E01, BR-E02 or
-    BR-E05 and a message to the sender. A BR-E01 reading that still shows the issuer's 11-digit
-    RUC counts one PARSER_MISS sighting for that issuer. A reading that passes them is stored
-    and the invoice moves to ``ROUTING`` with a ``route`` job. A helper that exits non-zero for
-    any other reason raises, so the queue retries and, after its limit, fails the invoice with
-    BR-S03.
+    photo or PDF file ends with BR-E01 and a message asking for a photo or typed data. A PDF
+    over the page cap ends ``CANCELLED`` with BR-E07 ``too_many_pages`` through
+    :func:`reject_media` (R-2.15). A
+    photo or PDF it cannot read, a required field it does not find, a bad issuer RUC and an
+    unsupported document type end the invoice with BR-E01, BR-E02 or BR-E05 and a message to
+    the sender. A BR-E01 reading that still shows the issuer's 11-digit RUC counts one
+    PARSER_MISS sighting for that issuer. A reading that passes them is stored and the invoice
+    moves to ``ROUTING`` with a ``route`` job. A helper that exits non-zero for any other
+    reason raises, so the queue retries and, after its limit, fails the invoice with BR-S03.
     """
 
     async def handle(job: Job) -> None:
@@ -120,20 +129,10 @@ def make_extract_handler(
             invoice = await load_invoice_head(conn, job.invoice_id)
             if invoice is None or invoice.state not in ACTIVE_STATES:
                 return
-            path = await get_file_path(conn, job.invoice_id, PHOTO_KIND)
-        if path is None:
-            # shortcut: PDF and XML input arrive in read-more; until then a non-photo
-            # file asks for a photo or typed data (BR-E01).
-            await _finish(
-                pool,
-                job.invoice_id,
-                invoice,
-                _Failure(RULE_UNREADABLE, None),
-                gaps,
-                expected=invoice.state,
-            )
-            _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
+        file_to_read = await _file_or_reject(pool, job.invoice_id, invoice, gaps, started)
+        if file_to_read is None:
             return
+        path, kind = file_to_read
 
         async with pool.connection() as conn, conn.transaction():
             try:
@@ -143,7 +142,7 @@ def make_extract_handler(
                 return
 
         try:
-            result = await _run_helper(path, extraction_cfg, media, rules_path)
+            result = await _run_helper(path, kind, extraction_cfg, media, rules_path)
         except TimeoutError:
             await _finish(
                 pool,
@@ -154,6 +153,21 @@ def make_extract_handler(
                 expected=EXTRACTING,
             )
             _log_outcome(job.invoice_id, None, RULE_UNREADABLE, started)
+            return
+
+        if result.error == TOO_MANY_PAGES:
+            await reject_media(
+                pool,
+                MediaRejection(
+                    job.invoice_id,
+                    Addressee(invoice.origin_channel, invoice.profile_id),
+                    kind,
+                    TOO_MANY_PAGES,
+                    media,
+                    expected=EXTRACTING,
+                ),
+            )
+            _log_outcome(job.invoice_id, result, RULE_MEDIA_REJECTED, started)
             return
 
         rule_id, reading = _classify(result, extraction_cfg.supported_tipos)
@@ -176,16 +190,47 @@ def make_extract_handler(
     return handle
 
 
+async def _file_or_reject(
+    pool: Pool,
+    invoice_id: int,
+    invoice: InvoiceHead,
+    gaps: GapContext,
+    started: float,
+) -> tuple[str, AttachmentKind] | None:
+    """Return the photo or PDF to read, or None when the invoice is ended here (R-2.15).
+
+    An invoice with no photo or PDF file ends with BR-E01 and a message asking for a photo or
+    typed data. The download step already refused a file over its byte cap (R-1.11).
+    """
+    async with pool.connection() as conn:
+        file_to_read = await _file_to_read(conn, invoice_id)
+    if file_to_read is None:
+        await _finish(
+            pool, invoice_id, invoice, _Failure(RULE_UNREADABLE, None), gaps, expected=invoice.state
+        )
+        _log_outcome(invoice_id, None, RULE_UNREADABLE, started)
+        return None
+    return file_to_read
+
+
+async def _file_to_read(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, AttachmentKind] | None:
+    """Return the invoice's photo or PDF path and its kind, or None when it has neither (R-2.15)."""
+    for kind in READABLE_KINDS:
+        if (path := await get_file_path(conn, invoice_id, kind)) is not None:
+            return path, kind
+    return None
+
+
 async def _run_helper(
-    path: str, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+    path: str, kind: AttachmentKind, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
 ) -> _HelperResult:
     """Run the extract helper under the heavy slot and return its validated result.
 
-    The helper receives the photo caps, the OCR config and ``rules_path`` as arguments. It
-    runs with a minimal environment and an import path that does not include the working
-    directory, and its whole process group is killed and reaped on every exit — timeout,
-    crash or cancellation — so no decode process or child it started outlives its job
-    (R-9.2).
+    The helper receives the input kind, that kind's byte cap, the PDF caps, the OCR config
+    and ``rules_path`` as arguments. It runs with a minimal environment and an import path
+    that does not include the working directory, and its whole process group is killed and
+    reaped on every exit — timeout, crash or cancellation — so no decode process or child it
+    started outlives its job (R-9.2).
 
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
@@ -207,12 +252,15 @@ async def _run_helper(
         "invoicebot.extract",
         path,
         str(extraction_cfg.max_image_px),
-        str(media.max_bytes.image),
+        str(max_bytes_for(kind, media)),
         extraction_cfg.ocr.engine,
         extraction_cfg.ocr.lang,
         str(extraction_cfg.ocr.psm),
         str(extraction_cfg.ocr.timeout_s),
         str(rules_path),
+        kind,
+        str(media.max_pdf_pages),
+        str(extraction_cfg.pdf_min_text_chars),
     ]
     async with HEAVY:
         stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
@@ -337,7 +385,7 @@ def _message(rule_id: RuleId, reading: Reading | None) -> str:
 def _log_outcome(
     invoice_id: int,
     result: _HelperResult | None,
-    rule_id: RuleId | None,
+    rule_id: str | None,
     started: float,
 ) -> None:
     """Log ids, the decoder, whether OCR ran and the timing; never an extracted value (R-9.16)."""

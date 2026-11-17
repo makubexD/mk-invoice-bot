@@ -7,7 +7,9 @@ recorded, in one transaction, so the state change and the outbox message (or
 the file row and its ``extract`` job) commit together.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
 from invoicebot.channels.media_limits import MediaRejected, RejectionReason, max_bytes_for
@@ -21,13 +23,29 @@ from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
-#: Job step that reads the downloaded photo (S3.11).
+#: Job step that reads the downloaded photo or PDF (S3.11).
 EXTRACT_STEP = "extract"
 #: Rule that cancels media over a cap or of an unsupported type (BR-E07).
 RULE_MEDIA_REJECTED = "BR-E07"
 #: Bytes in a megabyte, for BR-E07's ``{max_mb}``.
 MEGABYTE = 1024 * 1024
 TMP_DIRECTORY = "tmp"
+
+#: Why a file is refused: the media checks' reasons plus a PDF over the page cap (D122).
+type RejectReason = RejectionReason | Literal["too_many_pages"]
+
+
+@dataclass(frozen=True)
+class MediaRejection:
+    """A file the pipeline refuses with BR-E07, and who to tell why (R-1.11, BR-E07)."""
+
+    invoice_id: int
+    addressee: Addressee
+    kind: AttachmentKind
+    reason: RejectReason
+    limits: MediaLimits
+    #: The state the invoice must still be in, or None to cancel it whatever its state (D95).
+    expected: str | None = None
 
 
 def make_download_handler(
@@ -62,7 +80,16 @@ def make_download_handler(
                 limits,
             )
         except MediaRejected as rejected:
-            await _reject(pool, job.invoice_id, msg, attachment.kind, rejected.reason, limits)
+            await reject_media(
+                pool,
+                MediaRejection(
+                    job.invoice_id,
+                    Addressee(msg.channel, msg.profile_id),
+                    attachment.kind,
+                    rejected.reason,
+                    limits,
+                ),
+            )
             return
         record = FileRecord(
             kind=attachment.kind,
@@ -104,28 +131,37 @@ def _first_attachment(msg: InboundMessage) -> Attachment:
     return msg.attachments[0]
 
 
-async def _reject(
-    pool: Pool,
-    invoice_id: int,
-    msg: InboundMessage,
-    kind: AttachmentKind,
-    reason: RejectionReason,
-    limits: MediaLimits,
-) -> None:
-    """Cancel the invoice with BR-E07 and tell its sender why (R-1.11)."""
+async def reject_media(pool: Pool, rejection: MediaRejection) -> None:
+    """Cancel the invoice with BR-E07 and tell its sender why (R-1.11, BR-E07).
+
+    Shared by the download step, which refuses an oversized or malformed file, and the
+    extract step, which refuses a PDF over the page cap (D122). With ``expected`` set, an
+    invoice moved on by ``/cancelar`` raises :class:`StateMoved` and nothing is stored.
+    """
     text = MESSAGES[RULE_MEDIA_REJECTED].format(
-        reason_desc=REJECTION_DESC[reason],
-        max_mb=_max_mb(kind, limits),
+        reason_desc=_reason_desc(rejection.reason, rejection.limits),
+        max_mb=_max_mb(rejection.kind, rejection.limits),
     )
     async with pool.connection() as conn, conn.transaction():
-        await set_state(conn, invoice_id, "CANCELLED", rule_id=RULE_MEDIA_REJECTED)
+        await set_state(
+            conn,
+            rejection.invoice_id,
+            "CANCELLED",
+            rule_id=RULE_MEDIA_REJECTED,
+            expected=rejection.expected,
+        )
         await queue_message(
             conn,
-            Addressee(msg.channel, msg.profile_id),
-            invoice_id=invoice_id,
+            rejection.addressee,
+            invoice_id=rejection.invoice_id,
             rule_id=RULE_MEDIA_REJECTED,
             text=text,
         )
+
+
+def _reason_desc(reason: RejectReason, limits: MediaLimits) -> str:
+    """Return BR-E07's reason text, naming the page cap when that is the reason (D122)."""
+    return REJECTION_DESC[reason].format(max_pages=limits.max_pdf_pages)
 
 
 def _max_mb(kind: AttachmentKind, limits: MediaLimits) -> int:
