@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    PositiveInt,
     StringConstraints,
     field_validator,
     model_validator,
@@ -268,24 +269,49 @@ class Microsoft(BaseModel):
     timeout_s: float = Field(gt=0)
 
 
+class Google(BaseModel):
+    """The OAuth client the bot signs in with for Drive and Gmail (R-6.5, D128, D129)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A desktop app's public client id, so it is config and not a secret (D128).
+    client_id: str
+    timeout_s: PositiveInt = 30
+    #: D130: the most rows the sheets sink reads to find the invoice's key.
+    max_rows: PositiveInt = 20000
+
+
 class GoogleDriveSink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_drive"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
     root_folder_id: str
     path: str
     filename: str
     upload: list[str]
 
 
+#: D130: the sheets column that always holds the invoice's natural key.
+SHEETS_KEY_COLUMN = "Clave"
+
+
 class GoogleSheetsSink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_sheets"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
     spreadsheet_id: str
     tab: str
-    upsert_key: str
-    columns: dict[str, str]
+    columns: dict[str, str] = Field(min_length=1)
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_skip_the_key_header(cls, value: dict[str, str]) -> dict[str, str]:
+        """R-6.3, D130: column A is always the key, so config must not add it again."""
+        if SHEETS_KEY_COLUMN in value:
+            raise ValueError(f"columns must not contain the header {SHEETS_KEY_COLUMN!r}")
+        return value
 
 
 class SinkFiles(BaseModel):
@@ -441,6 +467,19 @@ class Flow(BaseModel):
         """D98, R-5.2: a flow that lists the email_inbox fetcher configures that inbox."""
         if EMAIL_INBOX_FETCHER in self.fetchers and self.email_inbox is None:
             raise ValueError(f"flow fetchers lists '{EMAIL_INBOX_FETCHER}' without flow.email_inbox settings")
+        return self
+
+    @model_validator(mode="after")
+    def _sheets_sink_follows_a_drive_sink(self) -> Self:
+        """R-6.1, D131: the sheets sink renders the drive links, so a drive sink comes first."""
+        has_drive = False
+        for index, sink in enumerate(self.sinks):
+            if isinstance(sink, GoogleDriveSink):
+                has_drive = True
+            elif isinstance(sink, GoogleSheetsSink) and not has_drive:
+                raise ValueError(
+                    f"sinks[{index}] is a 'google_sheets' sink without a 'google_drive' sink before it"
+                )
         return self
 
 
@@ -619,6 +658,7 @@ class Config(BaseModel):
     env: Literal["development", "production"]
     mail: Mail
     microsoft: Microsoft
+    google: Google | None = None
     profiles: dict[Annotated[str, StringConstraints(pattern=PROFILE_ID_PATTERN)], Profile]
     channels: list[Channel]
     sunat: Sunat
@@ -667,6 +707,18 @@ class Config(BaseModel):
                 raise ValueError(
                     f"flow '{name}' lists mail mode 'inbox_rule' without mail.owner_work_address"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _google_usage_needs_google_settings(self) -> Self:
+        """R-6.5, D129: a Google sink or a gmail inbox needs the bot's OAuth client."""
+        if self.google is not None:
+            return self
+        for name, flow in self.flows.items():
+            if any(isinstance(sink, (GoogleDriveSink, GoogleSheetsSink)) for sink in flow.sinks):
+                raise ValueError(f"flow '{name}' has a Google sink without google settings")
+            if flow.email_inbox is not None and flow.email_inbox.provider == "gmail":
+                raise ValueError(f"flow '{name}' has a gmail inbox without google settings")
         return self
 
     @model_validator(mode="after")

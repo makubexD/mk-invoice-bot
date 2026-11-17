@@ -17,6 +17,8 @@ from invoicebot.config.models import (
     ChannelTemplates,
     Config,
     FlowInbox,
+    GoogleDriveSink,
+    GoogleSheetsSink,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -66,6 +68,61 @@ def test_example_config_loads() -> None:
 
     assert isinstance(cfg, Config)
     assert cfg.owner.ruc == "20XXXXXXXXX"
+
+
+def test_example_config_has_google_settings() -> None:
+    """R-6.2: the example config names the OAuth client and each Google sink's account."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.google is not None
+    assert cfg.google.client_id.endswith(".apps.googleusercontent.com")
+    assert cfg.google.timeout_s == 30
+    assert cfg.google.max_rows == 20000
+    drive, sheets = cfg.flows["personal_google"].sinks
+    assert isinstance(drive, GoogleDriveSink)
+    assert isinstance(sheets, GoogleSheetsSink)
+    assert (drive.account, sheets.account) == ("owner", "owner")
+
+
+def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
+    """R-6.3: column A is the natural key, so a configured Clave column is refused."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["columns"]["Clave"] = "{serie}-{numero}"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="Clave"):
+        load_config(path)
+
+
+def test_sheets_sink_before_a_drive_sink_fails(tmp_path: Path) -> None:
+    """R-6.1: a sheets sink renders the drive links, so it needs a drive sink before it."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["sinks"][0]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="google_drive"):
+        load_config(path)
+
+
+def test_gmail_inbox_without_google_settings_fails(tmp_path: Path) -> None:
+    """R-6.5: a gmail inbox uses the bot's Google OAuth client, so google is required."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"] = []
+    del document["google"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="gmail"):
+        load_config(path)
+
+
+def test_leftover_upsert_key_is_refused(tmp_path: Path) -> None:
+    """R-6.3: the sheets key is always the natural key, so upsert_key is refused."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["upsert_key"] = "natural_key"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="upsert_key"):
+        load_config(path)
 
 
 def test_example_config_has_daily_times_and_ops_defaults() -> None:
