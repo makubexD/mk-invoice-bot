@@ -1,5 +1,6 @@
 """Integration tests for gap persistence (R-11.2, R-11.8, R-11.11, BR-F02, BR-E06, BR-R06)."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -27,6 +28,7 @@ UNROUTED_BUYER = GAP_KINDS["UNROUTED_BUYER"]
 PORTAL_FP = f"portal_missing:{ISSUER_RUC}"
 PARSER_FP = f"parser_miss:{ISSUER_RUC}"
 UNROUTED_FP = f"unrouted:{BUYER_RUC}"
+CONCURRENT_FP = "portal_missing:20000000008"
 OLD_FP = "portal_missing:20000000003"
 RECENT_FP = "portal_missing:20000000004"
 DUE_FP = "portal_missing:20000000005"
@@ -89,6 +91,23 @@ async def test_parser_miss_is_raised_on_the_second_upsert(
     assert first.raised_at is None
     assert second.raised_now is True
     assert second.count == 2
+
+
+async def test_concurrent_first_upserts_raise_exactly_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.2: two concurrent first upserts of a new fingerprint report exactly one raise."""
+
+    async def upsert_and_commit() -> bool:
+        async with db_pool.connection() as conn:
+            gap = await upsert_gap(conn, PORTAL_MISSING, CONCURRENT_FP, SUBJECT, None)
+            await conn.commit()
+            return gap.raised_now
+
+    async with asyncio.timeout(10):
+        results = await asyncio.gather(upsert_and_commit(), upsert_and_commit())
+
+    assert sorted(results) == [False, True]
 
 
 async def test_unrouted_buyer_raises_on_the_third_and_restarts_after_31_days(
