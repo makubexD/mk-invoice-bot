@@ -24,6 +24,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.extract.fields import Field, Reading
@@ -35,6 +36,7 @@ from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.sinks.google_api import GoogleTransient
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
+from invoicebot.states import CANCELLED, StateMoved
 from invoicebot.store.invoices import (
     FileRecord,
     add_file,
@@ -341,6 +343,13 @@ async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[s
     return str(row[0]), row[1]
 
 
+async def _invoice_error(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
+    cur = await conn.execute("SELECT error FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return row[0]
+
+
 async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None, Any]]:
     cur = await conn.execute(
         """
@@ -477,10 +486,12 @@ async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
 
     async with db_pool.connection() as conn:
         state = await _invoice_state(conn, seeded.invoice_id)
+        error = await _invoice_error(conn, seeded.invoice_id)
         user = await _outbox(conn, profile_id)
         admins = [await _outbox(conn, admin_id) for admin_id in admin_ids]
 
     assert state == ("PENDING_AUTH", "BR-D01")
+    assert error == "google:owner"
     assert user == [(MESSAGES["BR-D01"].format(provider="Google"), "BR-D01", [])]
     assert admins == [
         [
@@ -492,6 +503,40 @@ async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
         ]
         for _ in admin_ids
     ]
+
+
+async def test_a_cancel_during_the_google_call_is_not_overwritten_by_the_park(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D01, R-9.4: a cancel before the park keeps CANCELLED and queues no BR-D01."""
+    profile_id = f"google-cancel-{uuid4().hex}"
+    cfg = _config(profile_id)
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    fake = FakeGoogle()
+    calls = 0
+
+    async def cancel_then_require_auth(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            async with db_pool.connection() as conn, conn.transaction():
+                await set_state(conn, seeded.invoice_id, CANCELLED, rule_id="BR-D06")
+            raise AuthRequired(ACCOUNT)
+        return fake.handler(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(cancel_then_require_auth)) as http:
+        drive = GoogleDrive(http, _Tokens(), TIMEOUT_S, account=ACCOUNT)
+        sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
+        handler = make_google_deliver_handler(GoogleDeliverContext(db_pool, cfg, drive, sheets, cfg.profiles))
+        with pytest.raises(StateMoved):
+            await handler(_job(seeded.invoice_id))
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_state(conn, seeded.invoice_id)
+        outbox = await _outbox(conn, profile_id)
+
+    assert state == ("CANCELLED", "BR-D06")
+    assert [rule for _, rule, _ in outbox] == []
 
 
 async def test_a_503_raises_and_leaves_the_invoice_delivering(

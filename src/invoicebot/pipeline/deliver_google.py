@@ -17,9 +17,6 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
-
-from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.models import (
@@ -210,8 +207,6 @@ async def _run_sinks(context: GoogleDeliverContext, invoice: _Invoice, sinks: _S
 async def _park_auth(context: GoogleDeliverContext, invoice: _Invoice, required: AuthRequired) -> None:
     """Park the invoice until the Google account signs in and alert its sender and admins (BR-D01)."""
     async with context.pool.connection() as conn, conn.transaction():
-        if not await _still_delivering(conn, invoice.job.invoice_id):
-            return
         await park_for_auth(
             conn,
             invoice.head,
@@ -254,9 +249,3 @@ async def _complete(context: GoogleDeliverContext, invoice: _Invoice, values: di
     documents = [path for path in (invoice.pdf_path, invoice.xml_path) if path is not None]
     for path in [*photos, *documents]:
         await asyncio.to_thread(path.unlink, missing_ok=True)
-
-
-async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool:
-    """Return True when the invoice is still ``DELIVERING`` inside the caller's transaction."""
-    head = await load_invoice_head(conn, invoice_id)
-    return head is not None and head.state == DELIVERING

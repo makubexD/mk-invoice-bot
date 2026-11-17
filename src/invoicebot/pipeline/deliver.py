@@ -60,9 +60,6 @@ from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_no
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.pending_auth import (
-    PENDING_AUTH_STATE as PENDING_AUTH_STATE,
-)
-from invoicebot.pipeline.pending_auth import (
     RULE_AUTH as RULE_AUTH,
 )
 from invoicebot.pipeline.pending_auth import (
@@ -84,6 +81,7 @@ from invoicebot.sinks.folders import comercio_for
 from invoicebot.sinks.mailer import Completion, MailMode, build_mail
 from invoicebot.sinks.onedrive import GraphError
 from invoicebot.sinks.onedrive_folder import file_folder
+from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     claim_seq,
@@ -295,9 +293,14 @@ def _resend_handler(
             )
             return
         prepared = await _prepare_values(context, invoice)
-        delivery = await _handled(
-            context, invoice, _resend(context, invoice, sinks, prepared, run), sinks.excel.kind
-        )
+        try:
+            delivery = await _handled(
+                context, invoice, _resend(context, invoice, sinks, prepared, run), sinks.excel.kind
+            )
+        except StateMoved:
+            # D95: a resend runs on a DONE or BATCHED invoice, so a sign-in failure's park
+            # (guarded on DELIVERING) is refused and rolled back; the invoice keeps its state.
+            return
         if delivery is None:
             return
         logger.info(
@@ -818,8 +821,6 @@ def _send_failed_admin_text(prepared: _Values, invoice_id: int) -> str:
 async def _pending_auth(context: DeliverContext, invoice: _Invoice, account: str) -> None:
     """Park the invoice until the account signs in and alert its sender and admins (BR-D01)."""
     async with context.pool.connection() as conn, conn.transaction():
-        if not await _still_delivering(conn, invoice.job.invoice_id):
-            return
         await park_for_auth(
             conn,
             invoice.head,

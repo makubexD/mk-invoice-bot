@@ -15,14 +15,13 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import Profile
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.states import DELIVERING, PENDING_AUTH
 from invoicebot.store.invoices import InvoiceHead, set_state
 
 #: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
 RULE_AUTH = "BR-D01"
 #: BR-D01's admin-only alert, with the script the admin runs (BR-D01).
 RULE_AUTH_ADMIN = "BR-D01_admin"
-#: Where a missing token leaves the invoice until the account signs in (BR-D01).
-PENDING_AUTH_STATE = "PENDING_AUTH"
 #: The provider names the sender reads, by slug (BR-D01).
 PROVIDER_NAMES: Mapping[str, str] = {"microsoft": "Microsoft", "google": "Google"}
 
@@ -37,9 +36,18 @@ async def park_for_auth(
 ) -> None:
     """Move the invoice to ``PENDING_AUTH`` and alert its sender and admins (BR-D01).
 
-    Runs in the caller's transaction and never commits.
+    Runs in the caller's transaction and never commits. With ``expected=DELIVERING``, a
+    ``StateMoved`` (the invoice was cancelled or moved on) rolls the caller's transaction back
+    and the queue worker handles it; nothing is queued.
     """
-    await set_state(conn, invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
+    await set_state(
+        conn,
+        invoice_id,
+        PENDING_AUTH,
+        rule_id=RULE_AUTH,
+        error=f"{provider}:{account}",
+        expected=DELIVERING,
+    )
     await queue_message(
         conn,
         Addressee(head.origin_channel, head.profile_id),
