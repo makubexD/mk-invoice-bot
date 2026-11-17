@@ -87,6 +87,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
+        media_max_mb=10,
         timezone=TIMEZONE,
     )
 

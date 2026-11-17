@@ -380,7 +380,9 @@ async def _send_upload(
         received_at=datetime.now(UTC),
     )
     async with pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=10, timezone="America/Lima")
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=10, media_max_mb=10, timezone="America/Lima"
+        )
     return result, msg
 
 

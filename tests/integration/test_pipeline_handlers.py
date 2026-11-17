@@ -139,7 +139,9 @@ async def _queue_photo(
     """Store a photo through intake and return the invoice it created."""
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo(media_ref)])
     async with pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
     assert result.invoice_id is not None
     return result.invoice_id
 

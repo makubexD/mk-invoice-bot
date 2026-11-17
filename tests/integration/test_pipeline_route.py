@@ -377,7 +377,7 @@ async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[Asy
         received_at=datetime.now(UTC),
     )
     async with db_pool.connection() as conn:
-        intake = await handle_inbound(conn, msg, max_queued_per_sender=5, timezone=TIMEZONE)
+        intake = await handle_inbound(conn, msg, max_queued_per_sender=5, media_max_mb=10, timezone=TIMEZONE)
     assert intake.invoice_id is not None
     await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)), intake.invoice_id)
 
@@ -1199,7 +1199,11 @@ async def test_confirm_mode_always_asks_once_then_confirm_routes(
 
     async with db_pool.connection() as conn:
         await handle_inbound(
-            conn, _press(invoice_id, "confirm", profile_id), max_queued_per_sender=5, timezone=TIMEZONE
+            conn,
+            _press(invoice_id, "confirm", profile_id),
+            max_queued_per_sender=5,
+            media_max_mb=10,
+            timezone=TIMEZONE,
         )
 
     await _run(db_pool, cfg, invoice_id, job=_job(await _latest_job_id(db_pool, invoice_id), invoice_id))
@@ -1263,13 +1267,18 @@ async def test_edit_of_the_bad_date_routes_on(
 
     async with db_pool.connection() as conn:
         await handle_inbound(
-            conn, _press(invoice_id, "edit", profile_id), max_queued_per_sender=5, timezone=TIMEZONE
+            conn,
+            _press(invoice_id, "edit", profile_id),
+            max_queued_per_sender=5,
+            media_max_mb=10,
+            timezone=TIMEZONE,
         )
     async with db_pool.connection() as conn:
         await handle_inbound(
             conn,
             _text_message(profile_id, f"fecha={today:%d/%m/%Y}"),
             max_queued_per_sender=5,
+            media_max_mb=10,
             timezone=TIMEZONE,
         )
     async with db_pool.connection() as conn:

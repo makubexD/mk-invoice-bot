@@ -229,7 +229,9 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
         )
         async with db_pool.connection() as conn:
             await conn.execute("DELETE FROM outbox")
-            intake = await handle_inbound(conn, msg, max_queued_per_sender=_MAX_QUEUED, timezone=_TIMEZONE)
+            intake = await handle_inbound(
+                conn, msg, max_queued_per_sender=_MAX_QUEUED, media_max_mb=10, timezone=_TIMEZONE
+            )
         assert intake.invoice_id is not None
         invoice_id = intake.invoice_id
         photo = _write_photo(tmp_path / f"{invoice_id}.png", payload if with_qr else None, printed_lines)

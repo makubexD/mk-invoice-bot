@@ -113,7 +113,9 @@ async def test_photo_caption_override_lands_in_the_new_invoice(
     msg = _message(profile_id, external_id=_external_id(), text="motivo=Viaje", attachments=[_photo()])
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
         assert result.invoice_id is not None
         overrides = await _overrides(conn, result.invoice_id)
         state = await _invoice_state(conn, result.invoice_id)
@@ -139,7 +141,9 @@ async def test_late_override_reopens_a_prepared_batch(
     msg = _message(profile_id, external_id=_external_id(), text="descripcion=Almuerzo")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -177,7 +181,9 @@ async def test_override_on_a_done_invoice_gets_br_s02(
     )
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -205,7 +211,9 @@ async def test_text_without_equals_is_only_stored(
     msg = _message(profile_id, external_id=_external_id(), text="gracias, ya lo reviso")
 
     async with db_pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
