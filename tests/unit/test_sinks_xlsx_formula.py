@@ -109,3 +109,25 @@ def test_65_nested_parentheses_raise_unsupported_formula() -> None:
         parse(formula)
 
     assert not isinstance(raised.value, RecursionError)
+
+
+def test_1000_leading_minus_signs_raise_unsupported_formula() -> None:
+    """R-7.4: 1000 leading minus signs raise UnsupportedFormula, never RecursionError."""
+    formula = "=" + "-" * 1000 + "1"
+
+    with pytest.raises(UnsupportedFormula, match="nested deeper than 64") as raised:
+        parse(formula)
+
+    assert not isinstance(raised.value, RecursionError)
+
+
+@pytest.mark.parametrize(
+    ("formula", "expected"),
+    [
+        ("=--1", Decimal("1")),
+        ("=+-+1", Decimal("-1")),
+    ],
+)
+def test_leading_signs_still_evaluate(formula: str, expected: Decimal) -> None:
+    """R-7.4: combinations of leading plus and minus signs evaluate as before."""
+    assert parse(formula).evaluate({}) == expected

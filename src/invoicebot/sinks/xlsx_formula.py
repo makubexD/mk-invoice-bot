@@ -257,12 +257,23 @@ class _Parser:
         return node
 
     def _unary(self) -> Node:
-        """Parse ``("+"|"-") unary | primary``; a unary plus leaves its operand unchanged."""
-        if self._accept("+"):
-            return self._unary()
-        if self._accept("-"):
-            return Unary(self._unary())
-        return self._primary()
+        """Parse leading ``"+"``/``"-"`` signs then a primary; a unary plus leaves its operand unchanged."""
+        signs = 0
+        negations = 0
+        while True:
+            if self._accept("+"):
+                signs += 1
+            elif self._accept("-"):
+                signs += 1
+                negations += 1
+            else:
+                break
+            if signs > MAX_NESTING:
+                raise UnsupportedFormula(f"nested deeper than {MAX_NESTING} levels")
+        node = self._primary()
+        for _ in range(negations):
+            node = Unary(node)
+        return node
 
     def _primary(self) -> Node:
         """Parse a number, a reference, a function call or a parenthesized expression."""

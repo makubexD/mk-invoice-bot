@@ -129,6 +129,36 @@ def test_listed_binary_file_passes(tmp_path: Path) -> None:
     assert check_fixtures.find_problems(tmp_path) == []
 
 
+def test_listed_binary_file_is_still_scanned_for_rucs(tmp_path: Path) -> None:
+    """R-9.17: tests/binary_fixtures.txt allows the binary type but never skips its RUC scan."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    value = _synthetic_ruc(9)
+    (tests_dir / "invoice.pdf").write_bytes(b"%PDF-1.7\x00binary RUC: " + value.encode("ascii"))
+    (tests_dir / "binary_fixtures.txt").write_text("tests/*.pdf\n", encoding="utf-8")
+    _git_tree(tmp_path, "tests/invoice.pdf")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "tests/invoice.pdf" in problems[0]
+    assert value in problems[0]
+
+
+def test_latin_1_file_is_scanned_for_rucs(tmp_path: Path) -> None:
+    """R-9.17: a non-UTF-8 file is decoded as latin-1 and still scanned for a RUC."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    value = _synthetic_ruc(10)
+    body = b"<raz\xf1on>RUC: " + value.encode("ascii") + b"</raz\xf1on>"
+    (tests_dir / "invoice.xml").write_bytes(body)
+    (tests_dir / "binary_fixtures.txt").write_text("tests/*.xml\n", encoding="utf-8")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "tests/invoice.xml" in problems[0]
+    assert value in problems[0]
+
+
 def test_image_with_exif_uses_image_check_not_binary_list(tmp_path: Path) -> None:
     """R-9.17: an image is checked for EXIF metadata, never against tests/binary_fixtures.txt."""
     _, tests_dir = _fixture_tree(tmp_path)

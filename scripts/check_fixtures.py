@@ -7,7 +7,8 @@ Images must not contain EXIF metadata. Any standalone 11-digit number in a track
 text file whose SUNAT check digit is valid must be listed in
 ``tests/synthetic_rucs.txt``; that allowlist is the only place synthetic RUC-like
 values may appear. A binary file that is not an image must be listed as an
-``fnmatch`` glob in ``tests/binary_fixtures.txt``; ``uv.lock`` is skipped. The one
+``fnmatch`` glob in ``tests/binary_fixtures.txt``, but it is still scanned for
+RUCs (decoded as latin-1 when it is not UTF-8); ``uv.lock`` is skipped. The one
 exception is the store directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may
 contain its own RUC, and only that one. Files come from ``git ls-files``; outside
 a git checkout the root is walked instead. Exits 1 and prints one line per
@@ -130,14 +131,23 @@ def _load_binary_allowlist(path: Path) -> list[str]:
     return patterns
 
 
-def _decode_text(data: bytes) -> str | None:
-    """Return the UTF-8 text, or ``None`` when the bytes look binary (NUL probe or bad UTF-8)."""
+def _looks_binary(data: bytes) -> bool:
+    """Return whether the bytes look binary (NUL probe or bytes that are not UTF-8)."""
     if b"\x00" in data[:BINARY_PROBE_BYTES]:
-        return None
+        return True
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _scan_text(data: bytes) -> str:
+    """Return the bytes as text for the RUC scan, falling back to latin-1 when they are not UTF-8."""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
-        return None
+        return data.decode("latin-1")
 
 
 def _unlisted_binary_problem(relative: str, patterns: list[str]) -> str | None:
@@ -206,12 +216,12 @@ def find_problems(root: Path) -> list[str]:
             continue
         if path in {allowlist_path, binary_allowlist_path}:
             continue
-        text = _decode_text(path.read_bytes())
-        if text is None:
+        data = path.read_bytes()
+        if _looks_binary(data):
             problem = _unlisted_binary_problem(relative, binary_patterns)
             if problem is not None:
                 problems.append(problem)
-            continue
+        text = _scan_text(data)
         own_ruc = _own_store_ruc(path, stores_dir)
         for match in RUC_RE.finditer(text):
             value = match.group()
