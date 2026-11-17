@@ -39,6 +39,7 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.auth.providers import GMAIL_PROVIDER, GRAPH_MODE
 from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.models import (
@@ -139,6 +140,8 @@ TEMPLATE_INVALID = "TEMPLATE_INVALID"
 MANUAL_REQUIRED_STATE = "MANUAL_REQUIRED"
 #: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
 AUTH_PROVIDER_SLUG = "microsoft"
+#: Each inbox provider's slug in BR-D01's admin text, naming ``scripts/auth_<slug>.py``.
+AUTH_PROVIDER_SLUGS: dict[str, str] = {GRAPH_MODE: "microsoft", GMAIL_PROVIDER: "google"}
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
 #: The laptop mode's name, the one a flow lists as ``laptop_outlook`` (R-7.14).

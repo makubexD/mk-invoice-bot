@@ -1057,6 +1057,41 @@ async def test_inbox_auth_required_alerts_admins_once_and_retries(
     assert row[0].total_seconds() > 0
 
 
+async def test_gmail_inbox_auth_required_alerts_with_google_slug(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D01: a Gmail inbox auth_required names auth_google and the account in the admin text."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.AUTH_REQUIRED)
+    cfg = _config(("email_inbox",))
+    flow = cfg.flows[FLOW]
+    inbox = flow.email_inbox
+    assert inbox is not None
+    gmail = inbox.model_copy(update={"provider": "gmail", "account": "invoices_a"})
+    flow = flow.model_copy(update={"email_inbox": gmail})
+    cfg = cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
+    handler = make_fetch_handler(db_pool, cfg, _directory(), {FLOW: {"email_inbox": fetcher}}, tmp_path)
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, retry_job_id))
+
+    async with db_pool.connection() as conn:
+        alerts = {
+            admin_id: [
+                text
+                for text, rule_id in await _outbox(conn, admin_id)
+                if rule_id == "BR-D01_admin" and "auth_google" in text
+            ]
+            for admin_id, profile in cfg.profiles.items()
+            if profile.admin
+        }
+    assert {admin_id: len(texts) for admin_id, texts in alerts.items()} == {"yo": 1}
+    assert "invoices_a" in alerts["yo"][0]
+
+
 async def test_reading_document_url_reaches_the_fetcher(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
