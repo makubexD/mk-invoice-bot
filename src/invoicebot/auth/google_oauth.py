@@ -66,6 +66,7 @@ class GoogleTokens:
         self._lock = asyncio.Lock()
         self._access_token: str | None = None
         self._expires_at = 0.0
+        self._token_mtime_ns: int | None = None
 
     async def token(self) -> str:
         """Return a current access token, refreshing it when it is near expiry (D128).
@@ -77,13 +78,18 @@ class GoogleTokens:
             GoogleError: the refresh was refused with another status.
         """
         async with self._lock:
-            if self._access_token is not None and self._clock() < self._expires_at - EXPIRY_SKEW_S:
+            if (
+                self._access_token is not None
+                and self._clock() < self._expires_at - EXPIRY_SKEW_S
+                and self._token_file_unchanged()
+            ):
                 return self._access_token
             return await self._refresh()
 
     async def _refresh(self) -> str:
         """Exchange the stored refresh token for a new access token and cache it."""
         refresh_token = self._load_refresh_token()
+        self._token_mtime_ns = self._token_path.stat().st_mtime_ns
         try:
             response = await self._http.post(
                 TOKEN_URL,
@@ -103,6 +109,17 @@ class GoogleTokens:
         self._access_token = access_token
         self._expires_at = self._clock() + min(lifetime_s, MAX_TOKEN_LIFETIME_S)
         return access_token
+
+    def _token_file_unchanged(self) -> bool:
+        """Return whether the token file is the one the cached token was bought with.
+
+        A ``stat`` that fails counts as changed: the file is gone or unreadable, so
+        the next refresh raises :class:`AuthRequired` as a missing file does.
+        """
+        try:
+            return self._token_path.stat().st_mtime_ns == self._token_mtime_ns
+        except OSError:
+            return False
 
     def _load_refresh_token(self) -> str:
         """Decrypt the account's refresh token; a missing or unreadable file needs a sign-in."""

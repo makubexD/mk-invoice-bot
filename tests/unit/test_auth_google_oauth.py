@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import urllib.parse
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -122,6 +123,56 @@ async def test_token_within_sixty_seconds_of_expiry_is_refreshed(tmp_path: Path)
         assert await tokens.token() == ACCESS_TOKEN
 
     assert len(calls) == 2
+
+
+async def test_unchanged_token_file_reuses_the_cached_token(tmp_path: Path) -> None:
+    """BR-D01: a token file nobody rewrote buys no second access token."""
+    calls: list[httpx.Request] = []
+    clock = Clock(0.0)
+    token_path, identity = _account(tmp_path)
+
+    async with _make_tokens(token_path, identity, clock, _refresh_handler(calls)) as tokens:
+        assert await tokens.token() == ACCESS_TOKEN
+        clock.now += 3000
+        assert await tokens.token() == ACCESS_TOKEN
+
+    assert len(calls) == 1
+
+
+async def test_rewritten_token_file_refreshes_with_the_new_token(tmp_path: Path) -> None:
+    """BR-D01: a token file saved again invalidates the cached access token."""
+    calls: list[httpx.Request] = []
+    access_tokens = iter(["first-access-token", "second-access-token"])
+    clock = Clock(0.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"access_token": next(access_tokens), "expires_in": 3600})
+
+    token_path, identity = _account(tmp_path)
+    async with _make_tokens(token_path, identity, clock, handler) as tokens:
+        assert await tokens.token() == "first-access-token"
+        save_refresh_token(token_path, identity, "rotated-refresh-token")
+        rewritten_at = token_path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(token_path, ns=(rewritten_at, rewritten_at))
+        assert await tokens.token() == "second-access-token"
+
+    assert len(calls) == 2
+
+
+async def test_deleted_token_file_requires_sign_in(tmp_path: Path) -> None:
+    """BR-D01: an account whose token file disappeared after a refresh has to sign in."""
+    calls: list[httpx.Request] = []
+    token_path, identity = _account(tmp_path)
+
+    async with _make_tokens(token_path, identity, Clock(), _refresh_handler(calls)) as tokens:
+        await tokens.token()
+        token_path.unlink()
+        with pytest.raises(AuthRequired) as caught:
+            await tokens.token()
+
+    assert caught.value.account == ACCOUNT
+    assert len(calls) == 1
 
 
 async def test_invalid_grant_requires_sign_in(tmp_path: Path) -> None:
