@@ -1,47 +1,86 @@
-"""The ``invoicebot`` command line: ``portal-test`` (S10.5) and ``auth-microsoft`` (R-7.9).
+"""The ``invoicebot`` command line: ``portal-test`` (S10.5), ``auth-microsoft`` (R-7.9)
+and ``auth-google`` (R-6.4, R-6.5).
 
 ``portal-test`` reads one sample invoice from a YAML file and runs the named portal through
 the browser helper into a temporary folder. It prints the reason, each file's kind and
 size, and whether the XML matches; it never prints an invoice field value or a file path
 (R-9.16). ``auth-microsoft`` signs one account in with the device-code flow and then resumes
-the invoices that were parked in ``PENDING_AUTH`` (BR-D01).
+the invoices that were parked in ``PENDING_AUTH`` (BR-D01). ``auth-google`` runs the
+installed-app sign-in with a loopback redirect and PKCE, stores the account's encrypted
+refresh token and resumes the same waiting invoices (R-6.4, R-6.5, D128).
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import secrets
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
+import httpx
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
+from invoicebot.auth.google_consent import ConsentError, consent_url, parse_redirect, pkce_pair
+from invoicebot.auth.google_oauth import TOKEN_URL, save_refresh_token
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.auth.providers import (
+    DRIVE_FILE_SCOPE,
+    TOKENS_DIRECTORY,
     build_token_provider,
     delivery_accounts,
+    google_accounts,
+    google_scopes_for,
     microsoft_accounts,
     scopes_for,
 )
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import Config, StoreDirectory
+from invoicebot.config.models import Config, Google, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.queue.jobs import enqueue
+from invoicebot.secrets import SecretStore, load_identity
 from invoicebot.settings import Settings
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
 
 _SAMPLE = TypeAdapter(FetchInvoice)
+#: How long the Google sign-in waits for the browser's redirect (D128).
+SIGN_IN_TIMEOUT_S = 300
+#: The request-line cap of the one-request loopback listener (R-6.5).
+_REQUEST_LINE_LIMIT = 8192
+#: The page the browser shows once the redirect arrives (R-6.5).
+_CALLBACK_BODY = b"Sign-in received; you can close this tab.\n"
+_CALLBACK_HEADERS = (
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nConnection: close\r\nContent-Length: "
+)
+_CALLBACK_RESPONSE = (
+    _CALLBACK_HEADERS + str(len(_CALLBACK_BODY)).encode("ascii") + b"\r\n\r\n" + _CALLBACK_BODY
+)
+#: The random bytes behind the Google sign-in's ``state`` (R-6.5).
+_STATE_BYTES = 32
+#: The age-store secret the Google sign-in reads (D128).
+_CLIENT_SECRET_KEY = "google_client_secret"  # noqa: S105  # the secret's name, not its value (D128)
+
+
+class _SignInError(Exception):
+    """The token endpoint did not hand back a usable refresh token (R-6.4)."""
+
+
 #: The verdict line for each reason that says something about the XML itself.
 _XML_VERDICT = {FetchReason.OK: "yes", FetchReason.XML_MISMATCH: "no"}
 
 #: Builds the account's provider from settings, config, the account and its scopes (R-7.9).
 type TokenProviderFactory = Callable[[Settings, Config, str, Sequence[str]], TokenProvider]
+
+
+def _show(message: str) -> None:
+    """Write the sign-in URL or instruction the command built for the person (R-7.9)."""
+    sys.stdout.write(message + "\n")
 
 
 def main(
@@ -50,6 +89,8 @@ def main(
     helper_command: Sequence[str] = DEFAULT_HELPER_COMMAND,
     token_provider_factory: TokenProviderFactory = build_token_provider,
     settings: Settings | None = None,
+    show: Callable[[str], None] = _show,
+    google_transport: httpx.AsyncBaseTransport | None = None,
 ) -> int:
     """Parse ``argv`` and run the chosen command, returning its exit status (S10.5)."""
     parser = _parser()
@@ -58,6 +99,8 @@ def main(
     cfg = load_config(resolved.config_path)
     if args.command == "auth-microsoft":
         return _auth_microsoft(parser, resolved, cfg, args.account, token_provider_factory)
+    if args.command == "auth-google":
+        return _auth_google(parser, resolved, cfg, args.account, show, google_transport)
     directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
@@ -79,6 +122,11 @@ def _parser() -> argparse.ArgumentParser:
         help="sign a Microsoft account in and resume the invoices waiting for it",
     )
     auth.add_argument("--account", required=True, help="account name, e.g. personal")
+    google = subparsers.add_parser(
+        "auth-google",
+        help="sign a Google account in and resume the invoices waiting for it",
+    )
+    google.add_argument("--account", required=True, help="account name, e.g. owner")
     return parser
 
 
@@ -115,9 +163,185 @@ def _auth_microsoft(
     return 0
 
 
-def _show(message: str) -> None:
-    """Write the device-code instruction the provider built for the person (R-7.9)."""
-    sys.stdout.write(message + "\n")
+def _auth_google(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    account: str,
+    show: Callable[[str], None],
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Sign the account in over the loopback flow, then resume its waiting invoices (R-6.4, BR-D01).
+
+    An account no Google sink or ``gmail`` inbox names exits 2 before signing in. A failed
+    sign-in exits 1, writes no token and resumes nothing, so no invoice leaves
+    ``PENDING_AUTH`` without a working token.
+    """
+    accounts = google_accounts(cfg)
+    if account not in accounts:
+        configured = ", ".join(sorted(accounts)) or "none"
+        parser.error(f"account {account!r} is not configured; configured accounts: {configured}")
+    if settings.database_url is None:
+        parser.error("DATABASE_URL must be set to resume waiting invoices")
+    if settings.secrets_path is None or settings.age_identity_path is None:
+        parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to sign in")
+    client_secret = (
+        SecretStore.load(settings.secrets_path, settings.age_identity_path)
+        .scoped("auth_google", {_CLIENT_SECRET_KEY})
+        .get(_CLIENT_SECRET_KEY)
+    )
+    try:
+        asyncio.run(_google_sign_in(settings, cfg, account, client_secret, show, transport))
+    except (ConsentError, TimeoutError, _SignInError, httpx.HTTPError) as error:
+        sys.stderr.write(f"sign-in failed: {error}\n")
+        return 1
+    if DRIVE_FILE_SCOPE not in google_scopes_for(cfg, account):
+        sys.stdout.write("resumed 0 invoice(s)\n")
+        return 0
+    count = asyncio.run(_resume_pending_auth(settings.database_url))
+    sys.stdout.write(f"resumed {count} invoice(s)\n")
+    return 0
+
+
+def _google_settings(cfg: Config) -> Google:
+    """Return the Google OAuth client settings, or fail when config has none (D128).
+
+    Raises:
+        _SignInError: no ``google`` block is configured, so no client id or timeout exists.
+    """
+    if cfg.google is None:
+        raise _SignInError("google settings must be configured to sign in (D128)")
+    return cfg.google
+
+
+async def _google_sign_in(
+    settings: Settings,
+    cfg: Config,
+    account: str,
+    client_secret: str,
+    show: Callable[[str], None],
+    transport: httpx.AsyncBaseTransport | None,
+) -> None:
+    """Run one loopback sign-in and save the account's refresh token (R-6.4, R-6.5, D128).
+
+    Raises:
+        ConsentError: the redirect's state does not match or carries no code.
+        TimeoutError: no redirect arrives within ``SIGN_IN_TIMEOUT_S``.
+        _SignInError: the token endpoint refuses the code or returns no refresh token.
+    """
+    identity_path = settings.age_identity_path
+    if identity_path is None:
+        raise _SignInError("AGE_IDENTITY_PATH must be set to sign in")
+    google = _google_settings(cfg)
+    verifier, challenge = pkce_pair()
+    state = secrets.token_urlsafe(_STATE_BYTES)
+    redirect_path: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        await _answer_redirect(reader, writer, redirect_path)
+
+    server = await asyncio.start_server(answer, "127.0.0.1", 0, limit=_REQUEST_LINE_LIMIT)
+    async with server:
+        sockets = server.sockets
+        if not sockets:
+            raise _SignInError("the sign-in listener did not bind")
+        redirect_uri = f"http://127.0.0.1:{sockets[0].getsockname()[1]}"
+        scopes = google_scopes_for(cfg, account)
+        show(consent_url(google.client_id, redirect_uri, scopes, state, challenge))
+        async with asyncio.timeout(SIGN_IN_TIMEOUT_S):
+            path = await redirect_path
+    code = parse_redirect(path, state)
+    refresh_token = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
+    save_refresh_token(
+        settings.data_dir / TOKENS_DIRECTORY / f"{account}.google.age",
+        load_identity(identity_path),
+        refresh_token,
+    )
+
+
+async def _exchange_code(
+    cfg: Config,
+    client_secret: str,
+    code: str,
+    verifier: str,
+    redirect_uri: str,
+    transport: httpx.AsyncBaseTransport | None,
+) -> str:
+    """Swap the authorization code for a refresh token at Google's token endpoint (R-6.4).
+
+    Raises:
+        _SignInError: the endpoint answers non-200 or omits the refresh token.
+        httpx.HTTPError: the request never reached Google.
+    """
+    google = _google_settings(cfg)
+    async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as client:
+        response = await client.post(
+            TOKEN_URL,
+            data={
+                "client_id": google.client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "code_verifier": verifier,
+                "grant_type": "authorization_code",
+                "redirect_uri": redirect_uri,
+            },
+        )
+    if response.status_code != httpx.codes.OK:
+        raise _SignInError(f"the token endpoint answered {response.status_code} (R-6.4)")
+    return _refresh_token(response)
+
+
+def _refresh_token(response: httpx.Response) -> str:
+    """Return the refresh token in a token response, or say how to make Google issue one (R-6.4).
+
+    Raises:
+        _SignInError: the body is not a token response or carries no refresh token. The
+            message never echoes a token or the body (R-9.9).
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    refresh_token = payload.get("refresh_token") if isinstance(payload, dict) else None
+    if not isinstance(refresh_token, str) or not refresh_token:
+        raise _SignInError(
+            "the token response has no refresh_token; remove this app's access at "
+            "https://myaccount.google.com/permissions and sign in again"
+        )
+    return refresh_token
+
+
+async def _answer_redirect(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    redirect_path: asyncio.Future[str],
+) -> None:
+    """Read one request line, answer the browser and hand the path to the sign-in (R-6.5).
+
+    A connection that sends no ``GET`` line (a browser preconnect, a probe) is answered
+    and ignored, so it cannot end the sign-in before the real redirect arrives.
+    """
+    try:
+        line = await reader.readline()
+    except (asyncio.LimitOverrunError, ValueError, asyncio.IncompleteReadError):
+        line = b""
+    path = _request_path(line)
+    try:
+        writer.write(_CALLBACK_RESPONSE)
+        await writer.drain()
+    finally:
+        writer.close()
+        if path and not redirect_path.done():
+            redirect_path.set_result(path)
+        await writer.wait_closed()
+
+
+def _request_path(line: bytes) -> str:
+    """Return the path of a ``GET <path> HTTP/1.1`` line, or "" for any other request (R-6.5)."""
+    parts = line.decode("ascii", "replace").split()
+    if len(parts) < 2 or parts[0] != "GET":
+        return ""
+    return parts[1]
 
 
 async def _resume_pending_auth(database_url: str) -> int:
