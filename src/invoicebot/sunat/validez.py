@@ -28,7 +28,7 @@ _FECHA_FORMAT = "%d/%m/%Y"
 
 
 class SunatUnauthorized(SunatUnavailable):
-    """SUNAT rejected the bearer token, so the caller must fetch another (R-5.4)."""
+    """SUNAT rejected the bearer token, so the caller must fetch another (R-4.3)."""
 
 
 async def validate(
@@ -42,7 +42,7 @@ async def validate(
 
     Raises:
         ValueError: the reading lacks a value the request needs.
-        SunatUnauthorized: SUNAT rejected the token; its text carries only the status (R-5.4).
+        SunatUnauthorized: SUNAT rejected the token; its text carries only the status (R-4.3).
         SunatUnavailable: the API timed out, failed or answered unusably (R-4.1).
     """
     body = _request_json(reading)

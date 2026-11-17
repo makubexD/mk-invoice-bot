@@ -59,7 +59,7 @@ logger = logging.getLogger(__name__)
 VALIDATE_STEP = "validate"
 #: The recheck delay for a comprobante SUNAT does not know yet (BR-V01, D125).
 MISSING_RECHECK_HOURS = 24
-#: Validez calls per answer: the first, and one retry after a 401 drops the token (R-5.4).
+#: Validez calls per answer: the first, and one retry after a 401 drops the token (R-4.3).
 VALIDEZ_ATTEMPTS = 2
 
 
@@ -166,11 +166,11 @@ async def ask_sunat(
     cfg: Config,
     reading: Reading,
 ) -> CpStatus | None:
-    """Return SUNAT's answer, or None when it could not be asked (R-4.1, R-5.4, D125).
+    """Return SUNAT's answer, or None when it could not be asked (R-4.1, R-4.3, D125).
 
     The token's cache read and write each use their own short connection; the fetch and
     the validez call run with no connection held. A validez 401 drops the cached token
-    and retries once with a freshly fetched one (R-5.4); a second 401, like a token
+    and retries once with a freshly fetched one (R-4.3); a second 401, like a token
     failure or any other ``SunatUnavailable``, reads as no answer, which ``decide``
     turns into BR-V04.
     """

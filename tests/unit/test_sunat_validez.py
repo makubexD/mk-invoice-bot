@@ -158,7 +158,7 @@ async def test_unusable_answer_raises_sunat_unavailable(handler: Handler) -> Non
 
 
 async def test_unauthorized_raises_sunat_unauthorized_without_the_token() -> None:
-    """R-5.4: a 401 raises SunatUnauthorized whose message holds the status and no token."""
+    """R-4.3: a 401 raises SunatUnauthorized whose message holds the status and no token."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(401, json={"error": "invalid_token", "echo": BEARER})

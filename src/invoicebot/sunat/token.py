@@ -75,7 +75,7 @@ async def token(
 
 
 async def forget(pool: Pool) -> None:
-    """Drop the cached token so the next :func:`token` call fetches a fresh one (R-5.4).
+    """Drop the cached token so the next :func:`token` call fetches a fresh one (R-4.3).
 
     Uses a short connection and transaction of its own, so no connection is held
     across the caller's HTTP calls.

@@ -327,7 +327,7 @@ async def test_short_expires_in_returns_the_token_without_caching_it(
 async def test_validez_401_fetches_a_new_token_and_retries_once(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-5.4: a validez 401 drops the cached token, fetches another and returns the retried answer."""
+    """R-4.3: a validez 401 drops the cached token, fetches another and returns the retried answer."""
     token_calls = 0
     validez_requests: list[httpx.Request] = []
 
@@ -355,7 +355,7 @@ async def test_validez_401_fetches_a_new_token_and_retries_once(
 async def test_two_validez_401s_are_unavailable_and_leave_no_token_cached(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-5.4: a second 401 reads as unavailable and leaves no token cached."""
+    """R-4.3: a second 401 reads as unavailable and leaves no token cached."""
     token_calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
