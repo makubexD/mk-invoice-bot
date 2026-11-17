@@ -157,24 +157,35 @@ def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_sheets_sink_before_a_drive_sink_fails(tmp_path: Path) -> None:
-    """R-6.1: a sheets sink renders the drive links, so it needs a drive sink before it."""
+def test_sheets_sink_without_a_drive_sink_loads(tmp_path: Path) -> None:
+    """D144: a sheets sink alone writes the row, so a flow without a drive sink loads."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["flows"]["personal_google"]["sinks"][0]
     path = _write_yaml(tmp_path / "example.yaml", document)
 
-    with pytest.raises(ValidationError, match="google_drive"):
-        load_config(path)
+    cfg = load_config(path)
+
+    kinds = [sink.kind for sink in cfg.flows["personal_google"].sinks]
+    assert kinds == ["google_sheets"]
 
 
 def test_drive_sink_without_a_sheets_sink_fails(tmp_path: Path) -> None:
-    """R-6.1, R-6.2: the two Google sinks come in pairs, so a drive sink alone is refused."""
+    """D144: a drive sink renders links the sheets sink holds, so a drive sink alone is refused."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["flows"]["personal_google"]["sinks"][1]
     path = _write_yaml(tmp_path / "example.yaml", document)
 
-    with pytest.raises(ValidationError, match="google_sheets"):
+    with pytest.raises(ValidationError, match="needs a 'google_sheets' sink"):
         load_config(path)
+
+
+def test_drive_sink_before_a_sheets_sink_loads() -> None:
+    """D144: a drive sink followed by a sheets sink loads with both."""
+
+    cfg = load_config(EXAMPLE)
+
+    kinds = [sink.kind for sink in cfg.flows["personal_google"].sinks]
+    assert kinds == ["google_drive", "google_sheets"]
 
 
 def test_drive_root_folder_id_that_is_not_a_google_id_fails(tmp_path: Path) -> None:

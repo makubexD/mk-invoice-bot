@@ -529,20 +529,13 @@ class Flow(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _google_sinks_come_in_pairs(self) -> Self:
-        """R-6.1, D131: the sheets sink renders the drive links, so the two come together."""
-        has_drive = False
-        has_sheets = False
-        for index, sink in enumerate(self.sinks):
-            if isinstance(sink, GoogleDriveSink):
-                has_drive = True
-            elif isinstance(sink, GoogleSheetsSink):
-                if not has_drive:
-                    raise ValueError(
-                        f"sinks[{index}] is a 'google_sheets' sink without a 'google_drive' sink before it"
-                    )
-                has_sheets = True
-        if has_drive and not has_sheets:
+    def _google_drive_needs_sheets(self) -> Self:
+        """D144: a drive sink renders links the sheets sink holds, so drive needs sheets.
+
+        A sheets sink alone is allowed: the flow writes its row without uploading files.
+        """
+        kinds = {sink.kind for sink in self.sinks}
+        if "google_drive" in kinds and "google_sheets" not in kinds:
             raise ValueError("a flow with a 'google_drive' sink needs a 'google_sheets' sink")
         return self
 
