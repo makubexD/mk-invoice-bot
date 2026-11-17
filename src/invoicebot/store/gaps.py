@@ -144,6 +144,18 @@ async def set_hint(conn: AsyncConnection[Any], fingerprint: str, url: str) -> No
     await conn.execute("UPDATE gaps SET hint_url = %s WHERE fingerprint = %s", (url, fingerprint))
 
 
+async def ignore_gap(conn: AsyncConnection[Any], fingerprint: str) -> bool:
+    """Move a not-yet-ignored gap to ignored, reporting whether a row changed (S8.9, D139).
+
+    Does not commit.
+    """
+    cur = await conn.execute(
+        "UPDATE gaps SET state = 'ignored' WHERE fingerprint = %s AND state <> 'ignored'",
+        (fingerprint,),
+    )
+    return cur.rowcount == 1
+
+
 async def get_gap(conn: AsyncConnection[Any], fingerprint: str) -> GapRow | None:
     """Return the gap, or None when its fingerprint is unknown; does not commit."""
     cur = await conn.execute(
@@ -157,6 +169,22 @@ async def get_gap(conn: AsyncConnection[Any], fingerprint: str) -> GapRow | None
     )
     row = await cur.fetchone()
     return None if row is None else _gap_row(row)
+
+
+async def open_gaps(conn: AsyncConnection[Any], limit: int) -> list[GapRow]:
+    """Return the open or reported gaps, most recently seen first (S8.9, D139); does not commit."""
+    cur = await conn.execute(
+        """
+        SELECT fingerprint, kind, subject, state, count,
+               raised_at, last_alert_at, issue_url, hint_url
+        FROM gaps
+        WHERE state IN ('open', 'reported')
+        ORDER BY last_seen DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    return [_gap_row(row) for row in await cur.fetchall()]
 
 
 async def linked_gap(conn: AsyncConnection[Any], invoice_id: int, kind: str) -> GapRow | None:
