@@ -15,7 +15,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 6c  | `widen-b-fetch` (done 2026-11-14)    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
 | 6d  | `widen-b-deliver` (done 2026-11-16)  | S11.11, S11.12, S11.14, S11.15, S11.17; review leftovers (`widen-b-fetch`) (D105)                                                                               | part of M4 | S0.11; the bot's Outlook.com mailbox; M3 run (all for the live check only)       |
 | 6e  | `widen-b-gaps-ops` (done 2026-11-16) | E8 (S8.1–S8.3, S8.5, S8.8, S8.10, S8.11; D112); E15 (S12.3, S15.1, S15.2); gap leftovers (`shortcut:` logs, BR-E06, BR-R06, BR-F03) (D105)                      | M4         | S0.10; an `age` recipient and the backup target                                  |
-| 7   | `read-more`                          | S3.4, S3.8–S3.10; E6 (D121–D127)                                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
+| 7   | `read-more` (done 2026-11-16)        | S3.4, S3.8–S3.10; E6 (D121–D127)                                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
 | 8   | `flow-a`                             | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
 | 9   | `ops`                                | E12, S8.7, S8.9 (D112), then S12.7 (repo private), then S16.2                                                                                                   | M7         | VPS chosen (D42)                                                                 |
 | –   | v1.1 `contract`                      | E13, E14                                                                                                                                                        | M8         | —                                                                                |
@@ -156,6 +156,16 @@ Each item goes into the named phase's plan.
 - **`ops`:** the BR-S06 [Aprobar] id carries only the RUC (D118), so a stale button from a rejected proposal approves the next one. Put a proposal version in the id and match it in `taught_links.decide` (a D118 change).
 - **`ops`:** `scripts/restore_drill.sh` passes the database URL, password included, on the `psql`/`pg_restore` command line; use `PG*` variables or a `.pgpass`. `ops/backup.py` `_pg_environment` drops URL query keys such as `sslmode`; pass them through or refuse them.
 - **`ops`:** an approval during the GitHub issue creation can lose the hint (`set_pending_issue_hint` updates 0 rows once the row is sent); queue a `comment` row when it does. `upsert_gap`'s `raised_now` can be true twice under concurrent raises; lock the row first if workers run in parallel.
+
+## Carried over from the `read-more` review
+
+Each item goes into the named phase's plan.
+
+- **`read-more` live check (`docs/plan-mvp-read-more.md` § "Deferred: live check"):** S0.5, S0.1, the padrón RSS and disk measurement and a WhatsApp PDF; it records M5.
+- **`ops`:** a 401 from validez keeps the cached SUNAT token until its TTL (at most a day); delete `kv['sunat_token']` on a 401.
+- **`ops`:** a recheck that gets no answer overwrites the stored `estado_cp` with null; keep the last answer and bump only the count.
+- **`ops`:** the lone-XML refusal (BR-E07) quotes the image byte cap as "the photo and PDF limit"; pick the cap per kind, as `handlers._max_mb` does.
+- **Known, accepted:** `scripts/import_padron.py` reads a padrón line with no length cap; the ZIP is downloaded by the owner by hand, and `check_zip` caps entries and ratio.
 
 ## Known drift between code and specs
 
