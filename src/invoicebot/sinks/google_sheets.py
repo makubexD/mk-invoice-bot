@@ -42,6 +42,12 @@ ROW_LINK_TEMPLATE = (
 #: The fields that carry a tab's title and its numeric id.
 _PROPERTIES_FIELDS = "sheets.properties"
 
+#: The fields that carry only a tab's title (D145).
+_TITLES_FIELDS = "sheets.properties.title"
+
+#: The A1 range of a tab's first row (D145).
+_HEADER_ROW = "1:1"
+
 #: The first row number in an A1 range such as ``A7:K7``.
 _ROW_IN_RANGE = re.compile(r"(\d+)")
 
@@ -103,6 +109,49 @@ def _sheet_id(body: Mapping[str, object], tab: str) -> int:
     raise GoogleError()
 
 
+def _titles(body: Mapping[str, object]) -> list[str]:
+    """Return every tab's title, refusing a body that is not shaped like one (D145)."""
+    sheets = body.get("sheets")
+    if not isinstance(sheets, list):
+        raise GoogleError()
+    titles: list[str] = []
+    for sheet in sheets:
+        if not isinstance(sheet, dict):
+            raise GoogleError()
+        properties = sheet.get("properties")
+        if not isinstance(properties, dict):
+            raise GoogleError()
+        title = properties.get("title")
+        if not isinstance(title, str):
+            raise GoogleError()
+        titles.append(title)
+    return titles
+
+
+def _text_row(body: Mapping[str, object]) -> list[str]:
+    """Return the first values row's text cells, or an empty row when it has none (D145)."""
+    values = body.get("values", [])
+    if not isinstance(values, list):
+        raise GoogleError()
+    if not values:
+        return []
+    row = values[0]
+    if not isinstance(row, list) or any(not isinstance(cell, str) for cell in row):
+        raise GoogleError()
+    return row
+
+
+class SheetHeaderMismatch(GoogleError):
+    """The tab's first row is not the expected header, so nothing is written (D145)."""
+
+    def __init__(self, tab: str, expected: list[str], found: list[str]) -> None:
+        super().__init__()
+        self.tab = tab
+        self.expected = expected
+        self.found = found
+        self.args = (f"tab {tab!r} row 1 is {found}, expected header {expected}",)
+
+
 class GoogleSheets:
     """One Google account's spreadsheets, over an injected HTTP client (D129).
 
@@ -148,6 +197,27 @@ class GoogleSheets:
         spreadsheet_id = _spreadsheet_id(json_object(response))
         await self.update(spreadsheet_id, tab, 1, header)
         return spreadsheet_id
+
+    async def ensure_tab(self, spreadsheet_id: str, tab: str, header: list[str]) -> None:
+        """Add ``tab`` with ``header``, or check the header of an existing tab (D145).
+
+        A missing tab is added and gets ``header`` written to row 1; an existing
+        tab whose first row is empty gets the same header; a first row equal to
+        ``header`` is left alone. No other tab is touched.
+
+        Raises:
+            SheetHeaderMismatch: The tab's first row differs from ``header``.
+            GoogleError: Google refuses, or answers with a malformed body.
+        """
+        if tab not in await self._tab_titles(spreadsheet_id):
+            await self._add_tab(spreadsheet_id, tab)
+            await self.update(spreadsheet_id, tab, 1, header)
+            return
+        found = await self._read_first_row(spreadsheet_id, tab)
+        if not found:
+            await self.update(spreadsheet_id, tab, 1, header)
+        elif found != header:
+            raise SheetHeaderMismatch(tab, header, found)
 
     async def keys(self, spreadsheet_id: str, tab: str) -> dict[str, int]:
         """Return each key in the tab's first column mapped to its row (R-6.3).
@@ -236,6 +306,37 @@ class GoogleSheets:
     def _values_url(self, spreadsheet_id: str, a1: str) -> str:
         """Return the ``values`` URL for ``a1`` with the range path-encoded."""
         return f"{SHEETS_URL}/{spreadsheet_id}/values/{quote(a1, safe='')}"
+
+    async def _get(self, url: str, *, params: Mapping[str, str] | None = None) -> dict[str, object]:
+        """GET ``url`` and return its JSON object, mapping a failure (R-6.4, D145)."""
+        response = await self._http.get(
+            url,
+            params=params,
+            headers=await self._headers(),
+            timeout=self._timeout_s,
+        )
+        raise_google_error(response, self._account)
+        return json_object(response)
+
+    async def _tab_titles(self, spreadsheet_id: str) -> list[str]:
+        """Return the spreadsheet's tab titles (D145)."""
+        body = await self._get(f"{SHEETS_URL}/{spreadsheet_id}", params={"fields": _TITLES_FIELDS})
+        return _titles(body)
+
+    async def _read_first_row(self, spreadsheet_id: str, tab: str) -> list[str]:
+        """Return the text cells of ``tab``'s first row, empty when it has none (D145)."""
+        body = await self._get(self._values_url(spreadsheet_id, _a1(tab, _HEADER_ROW)))
+        return _text_row(body)
+
+    async def _add_tab(self, spreadsheet_id: str, tab: str) -> None:
+        """Add an empty tab to the spreadsheet (D145)."""
+        response = await self._http.post(
+            f"{SHEETS_URL}/{spreadsheet_id}:batchUpdate",
+            json={"requests": [{"addSheet": {"properties": {"title": tab}}}]},
+            headers=await self._headers(),
+            timeout=self._timeout_s,
+        )
+        raise_google_error(response, self._account)
 
     async def _headers(self) -> dict[str, str]:
         return auth_headers(await self._tokens.token())

@@ -15,6 +15,7 @@ from invoicebot.sinks.google_sheets import (
     RAW,
     SHEETS_URL,
     GoogleSheets,
+    SheetHeaderMismatch,
 )
 
 ACCOUNT = "google"
@@ -24,6 +25,7 @@ MAX_ROWS = 1000
 SPREADSHEET_ID = "1" + "a" * 30
 TAB = "Facturas"
 SHEET_ID = 42
+HEADER = ["Clave", "Fecha", "Total"]
 
 Handler = Callable[[httpx.Request], httpx.Response]
 
@@ -241,3 +243,97 @@ async def test_a_429_maps_to_google_transient() -> None:
 
     assert raised.value.status == 429
     assert SPREADSHEET_ID not in str(raised.value)
+
+
+def _ensure_handler(
+    *, titles: list[str], values_body: dict[str, object]
+) -> tuple[Handler, list[httpx.Request]]:
+    """Return a handler for the ensure_tab calls and the requests it received."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "/values/" in request.url.path:
+            return httpx.Response(200, json=values_body)
+        if request.method == "POST":
+            return httpx.Response(200, json={})
+        sheets = [{"properties": {"title": title}} for title in titles]
+        return httpx.Response(200, json={"sheets": sheets})
+
+    requests: list[httpx.Request] = []
+
+    def recording_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    return recording_handler, requests
+
+
+async def test_ensure_tab_adds_a_missing_tab_and_writes_the_header() -> None:
+    """D145: a missing tab is added with one addSheet, then row 1 gets the header."""
+    handler, requests = _ensure_handler(titles=["Otra"], values_body={})
+
+    async with _make_sheets(handler) as sheets:
+        await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
+    assert [request.method for request in requests] == ["GET", "POST", "PUT"]
+    lookup = requests[0]
+    assert lookup.url.params["fields"] == "sheets.properties.title"
+    assert lookup.headers["Authorization"] == f"Bearer {BEARER}"
+    added = requests[1]
+    assert added.url.path == f"/v4/spreadsheets/{SPREADSHEET_ID}:batchUpdate"
+    assert json.loads(added.content) == {"requests": [{"addSheet": {"properties": {"title": TAB}}}]}
+    written = requests[2]
+    assert written.url.path == _values_path("'Facturas'!A1")
+    assert json.loads(written.content) == {"values": [HEADER]}
+
+
+async def test_ensure_tab_writes_the_header_to_an_empty_tab() -> None:
+    """D145: an existing tab with an empty first row gets the header and no addSheet."""
+    handler, requests = _ensure_handler(titles=[TAB], values_body={})
+
+    async with _make_sheets(handler) as sheets:
+        await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
+    assert [request.method for request in requests] == ["GET", "GET", "PUT"]
+    assert requests[1].url.path == _values_path("'Facturas'!1:1")
+    assert json.loads(requests[2].content) == {"values": [HEADER]}
+
+
+async def test_ensure_tab_leaves_a_matching_header_alone() -> None:
+    """D145: a tab whose row 1 equals the header gets no write."""
+    handler, requests = _ensure_handler(titles=[TAB], values_body={"values": [HEADER]})
+
+    async with _make_sheets(handler) as sheets:
+        await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
+    assert [request.method for request in requests] == ["GET", "GET"]
+
+
+async def test_ensure_tab_raises_when_the_header_differs() -> None:
+    """D145: a different row 1 raises SheetHeaderMismatch and writes nothing."""
+    found = ["Otra", "cosa"]
+    handler, requests = _ensure_handler(titles=[TAB], values_body={"values": [found]})
+
+    async with _make_sheets(handler) as sheets:
+        with pytest.raises(SheetHeaderMismatch, match="Facturas") as raised:
+            await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
+    message = str(raised.value)
+    assert str(HEADER) in message
+    assert str(found) in message
+    assert [request.method for request in requests] == ["GET", "GET"]
+
+
+async def test_ensure_tab_maps_a_403_on_the_first_read_to_google_error() -> None:
+    """D145: a 403 on the spreadsheet read follows the existing GoogleError path."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(403, json={"error": {"status": "PERMISSION_DENIED"}})
+
+    async with _make_sheets(handler) as sheets:
+        with pytest.raises(GoogleError) as raised:
+            await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
+    assert raised.value.status == 403
+    assert len(requests) == 1
