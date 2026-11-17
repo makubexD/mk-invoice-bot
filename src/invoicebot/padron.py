@@ -1,8 +1,9 @@
-"""Reading SUNAT's padrón text, one line at a time (R-2.5, D123).
+"""Reading SUNAT's padrón and importing it into the database (R-2.5, D123).
 
 The padrón ZIP holds one ``|``-separated text file in ISO-8859-1 with a header
 row. Its first four columns are RUC, razón social, estado and condición; the
-address columns after them are ignored. Nothing here touches the database.
+address columns after them are ignored. ``import_padron`` streams those lines
+into a staging table and swaps it in without holding them in memory.
 """
 
 from __future__ import annotations
@@ -14,7 +15,9 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TextIO
+from typing import Any, TextIO
+
+from psycopg import AsyncConnection
 
 from invoicebot.channels.media_limits import check_zip
 
@@ -32,6 +35,14 @@ class Skipped:
     """Mutable count of the malformed padrón lines ``rows`` skipped (R-2.5)."""
 
     count: int = 0
+
+
+@dataclass(frozen=True)
+class ImportResult:
+    """The padrón rows written and the malformed lines skipped (R-2.5)."""
+
+    rows: int
+    skipped: int
 
 
 def parse_line(line: str) -> tuple[str, str, str, str] | None:
@@ -80,3 +91,29 @@ def open_member(zip_path: Path) -> Iterator[TextIO]:
             raise ValueError(f"the padrón ZIP must hold one .txt member, found {len(members)}")
         with archive.open(members[0]) as raw, io.TextIOWrapper(raw, encoding=_ENCODING, newline="") as text:
             yield text
+
+
+async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportResult:
+    """Stream ``zip_path`` into ``padron`` through a staging table (R-2.5).
+
+    The staging table is dropped and recreated from ``padron``, so this replaces
+    every row. The caller's connection must be in autocommit: the COPY commits on
+    its own, and the swap runs in one transaction. A failure while copying leaves
+    the old padrón in place.
+    """
+    skipped = Skipped()
+    imported = 0
+    await conn.execute("DROP TABLE IF EXISTS padron_staging")
+    await conn.execute("CREATE TABLE padron_staging (LIKE padron INCLUDING ALL)")
+    async with conn.cursor().copy(
+        "COPY padron_staging (ruc, razon_social, estado, condicion) FROM STDIN"
+    ) as copy:
+        with open_member(zip_path) as lines:
+            for ruc, razon_social, estado, condicion in rows(lines, skipped):
+                await copy.write_row((int(ruc), razon_social, estado, condicion))
+                imported += 1
+    async with conn.transaction():
+        await conn.execute("DROP TABLE padron")
+        await conn.execute("ALTER TABLE padron_staging RENAME TO padron")
+        await conn.execute("ALTER INDEX padron_staging_pkey RENAME TO padron_pkey")
+    return ImportResult(rows=imported, skipped=skipped.count)
