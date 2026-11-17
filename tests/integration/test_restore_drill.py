@@ -1,10 +1,13 @@
 """Integration tests for the restore drill (R-9.11)."""
 
 import asyncio
+import os
+import shlex
 import subprocess
 from collections.abc import AsyncIterator
 from datetime import date
 from pathlib import Path
+from urllib.parse import quote
 from uuid import uuid4
 
 import pyrage
@@ -108,16 +111,40 @@ async def _write_backup(
     return identity_file, dump_file
 
 
+def _as_url(dsn: str) -> str:
+    """Return ``dsn`` as the ``postgresql://`` URL the drill parses."""
+    params = conninfo.conninfo_to_dict(dsn)
+    host = params.get("host", "localhost")
+    port = params.get("port", "5432")
+    return (
+        f"postgresql://{quote(params['user'], safe='')}:{quote(params['password'], safe='')}"
+        f"@{host}:{port}/{quote(params['dbname'], safe='')}"
+    )
+
+
 async def _run_drill(
-    identity_file: Path, dump_file: Path, database_url: str
+    identity_file: Path, dump_file: Path, database_url: str, path: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run the drill script as the operator would and collect its output."""
+    env = {**os.environ, "RESTORE_DATABASE_URL": _as_url(database_url)}
+    if path is not None:
+        env["PATH"] = path
     return await asyncio.to_thread(
         subprocess.run,
-        ["bash", str(SCRIPT), str(identity_file), str(dump_file), database_url],
+        ["bash", str(SCRIPT), str(identity_file), str(dump_file)],
         capture_output=True,
         text=True,
+        env=env,
     )
+
+
+def _place_fake_tool(bin_dir: Path, name: str, record_file: Path) -> None:
+    """Put a fake ``name`` first on PATH that records its argv and succeeds."""
+    script = bin_dir / name
+    script.write_text(
+        f"#!/usr/bin/env bash\nprintf '%s\\n' \"$@\" >> {shlex.quote(str(record_file))}\nexit 0\n"
+    )
+    script.chmod(0o755)
 
 
 async def _invoice_count(database_url: str) -> int:
@@ -154,3 +181,30 @@ async def test_restore_drill_refuses_a_target_that_already_has_invoices(
     assert completed.returncode == 1
     assert "already has an invoices table" in completed.stderr
     assert await _invoice_count(test_database_url) == before
+
+
+async def test_restore_drill_keeps_the_password_off_the_command_line(
+    job: BackupJob, identity: pyrage.x25519.Identity, tmp_path: Path
+) -> None:
+    """R-9.15: psql and pg_restore read the password from the environment, not argv."""
+    identity_file, dump_file = await _write_backup(job, identity, tmp_path)
+    credential = "drill-password-5f8c1d"
+    database_url = f"postgresql://drilluser:{credential}@127.0.0.1:5432/drilldb"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    records = {}
+    for tool in ("psql", "pg_restore"):
+        records[tool] = tmp_path / f"{tool}-argv.txt"
+        _place_fake_tool(bin_dir, tool, records[tool])
+
+    completed = await _run_drill(
+        identity_file,
+        dump_file,
+        database_url,
+        path=f"{bin_dir}:{os.environ['PATH']}",
+    )
+
+    for tool, record in records.items():
+        assert record.is_file(), f"{tool} was not called: {completed.stderr}"
+    recorded = "\n".join(record.read_text() for record in records.values())
+    assert credential not in recorded

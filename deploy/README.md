@@ -158,8 +158,8 @@ database:
 
 ```sh
 createdb -U invoicebot invoicebot_drill
-./scripts/restore_drill.sh ~/age-backup-identity.txt /path/to/db-2026-11-16.dump.age \
-    "postgresql://invoicebot:invoicebot@localhost:5432/invoicebot_drill"
+RESTORE_DATABASE_URL="postgresql://invoicebot:invoicebot@localhost:5432/invoicebot_drill" \
+    ./scripts/restore_drill.sh ~/age-backup-identity.txt /path/to/db-2026-11-16.dump.age
 ```
 
 The age CLI is not installed on the development host or in CI, so the script

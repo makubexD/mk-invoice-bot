@@ -1,23 +1,30 @@
 #!/usr/bin/env bash
 # Restore a nightly encrypted dump into an empty database and run smoke queries (R-9.11).
 #
-# Usage: restore_drill.sh <identity-file> <dump.age> <empty-database-url>
+# Usage: RESTORE_DATABASE_URL=postgresql://... restore_drill.sh <identity-file> <dump.age>
 #
+# The empty target database comes from RESTORE_DATABASE_URL, which is split into the
+# libpq environment variables, so the password never appears on a command line (R-9.15).
 # The age CLI is not installed on the dev host or in CI, so decryption goes through
 # pyrage in this repository's environment (D119). Run the drill before go-live and
 # after every schema change; deploy/README.md has the steps.
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 <identity-file> <dump.age> <empty-database-url>" >&2
+    echo "usage: RESTORE_DATABASE_URL=postgresql://... $0 <identity-file> <dump.age>" >&2
     exit 2
 }
 
-[[ $# -eq 3 ]] || usage
+[[ $# -eq 2 ]] || usage
 
 identity_file=$1
 dump_file=$2
-database_url=$3
+
+database_url=${RESTORE_DATABASE_URL:-}
+if [[ -z $database_url ]]; then
+    echo "restore drill: RESTORE_DATABASE_URL is not set" >&2
+    exit 2
+fi
 
 for path in "$identity_file" "$dump_file"; do
     if [[ ! -r $path ]]; then
@@ -25,6 +32,31 @@ for path in "$identity_file" "$dump_file"; do
         exit 1
     fi
 done
+
+# The URL arrives on stdin, so neither the URL nor the password is ever an argv entry.
+mapfile -d '' -t pg_fields < <(python3 -c '
+import sys
+from urllib.parse import unquote, urlsplit
+
+parts = urlsplit(sys.stdin.read().strip())
+fields = (
+    parts.hostname or "",
+    str(parts.port) if parts.port else "5432",
+    unquote(parts.username or ""),
+    unquote(parts.password or ""),
+    unquote(parts.path.lstrip("/")),
+)
+sys.stdout.buffer.write(b"".join(field.encode() + b"\0" for field in fields))
+' <<<"$database_url")
+if [[ ${#pg_fields[@]} -ne 5 ]]; then
+    echo "restore drill: cannot parse RESTORE_DATABASE_URL" >&2
+    exit 1
+fi
+export PGHOST="${pg_fields[0]}"
+export PGPORT="${pg_fields[1]}"
+export PGUSER="${pg_fields[2]}"
+export PGPASSWORD="${pg_fields[3]}"
+export PGDATABASE="${pg_fields[4]}"
 
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(dirname -- "$script_dir")
@@ -50,13 +82,13 @@ then
     exit 1
 fi
 
-existing=$(psql --dbname "$database_url" -tAc "SELECT to_regclass('public.invoices')")
+existing=$(psql -tAc "SELECT to_regclass('public.invoices')")
 if [[ -n $existing ]]; then
     echo "restore drill: target already has an invoices table; refusing to restore" >&2
     exit 1
 fi
 
-if ! pg_restore --no-owner --dbname "$database_url" "$plain_dump" 2>"$restore_log"; then
+if ! pg_restore --no-owner --dbname "$PGDATABASE" "$plain_dump" 2>"$restore_log"; then
     # A pg_restore newer than the server (17+ against 16) always sets
     # transaction_timeout, which Postgres 16 rejects. That one error is harmless;
     # any other restore error fails the drill.
@@ -70,7 +102,7 @@ fi
 
 missing=()
 for table in invoices outbox gaps; do
-    if [[ -z $(psql --dbname "$database_url" -tAc "SELECT to_regclass('public.$table')") ]]; then
+    if [[ -z $(psql -tAc "SELECT to_regclass('public.$table')") ]]; then
         missing+=("$table")
     fi
 done
@@ -79,4 +111,4 @@ if (( ${#missing[@]} > 0 )); then
     exit 1
 fi
 
-echo "invoices: $(psql --dbname "$database_url" -tAc 'SELECT count(*) FROM invoices')"
+echo "invoices: $(psql -tAc 'SELECT count(*) FROM invoices')"
