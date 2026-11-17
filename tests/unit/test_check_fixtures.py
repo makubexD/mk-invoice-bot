@@ -104,6 +104,55 @@ def test_clean_image_passes(tmp_path: Path) -> None:
     assert check_fixtures.main([str(tmp_path)]) == 0
 
 
+def test_unlisted_binary_file_fails(tmp_path: Path) -> None:
+    """R-9.17: a tracked binary file absent from tests/binary_fixtures.txt is reported."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    (tests_dir / "invoice.pdf").write_bytes(b"%PDF-1.7\x00binary")
+    _git_tree(tmp_path, "tests/invoice.pdf")
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "tests/invoice.pdf" in problems[0]
+    assert "binary file is not listed" in problems[0]
+
+
+def test_listed_binary_file_passes(tmp_path: Path) -> None:
+    """R-9.17: a binary fixture matching a glob in tests/binary_fixtures.txt is accepted."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    (tests_dir / "invoice.pdf").write_bytes(b"%PDF-1.7\x00binary")
+    (tests_dir / "binary_fixtures.txt").write_text(
+        "# a synthetic invoice with no real RUC, names or photos\ntests/*.pdf\n", encoding="utf-8"
+    )
+    _git_tree(tmp_path, "tests/invoice.pdf")
+
+    assert check_fixtures.find_problems(tmp_path) == []
+
+
+def test_image_with_exif_uses_image_check_not_binary_list(tmp_path: Path) -> None:
+    """R-9.17: an image is checked for EXIF metadata, never against tests/binary_fixtures.txt."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    (tests_dir / "scan.png").write_bytes(_png(exif=True))
+
+    problems = check_fixtures.find_problems(tmp_path)
+
+    assert len(problems) == 1
+    assert "EXIF" in problems[0]
+    assert "binary file is not listed" not in problems[0]
+
+
+def test_binary_allowlist_file_is_not_scanned_for_rucs(tmp_path: Path) -> None:
+    """R-9.17: tests/binary_fixtures.txt is skipped, so a RUC in it does not fail the check."""
+    _, tests_dir = _fixture_tree(tmp_path)
+    value = _synthetic_ruc(8)
+    (tests_dir / "binary_fixtures.txt").write_text(
+        f"# {value} is synthetic, never a real RUC\ntests/*.pdf\n", encoding="utf-8"
+    )
+    _git_tree(tmp_path, "tests/binary_fixtures.txt")
+
+    assert check_fixtures.find_problems(tmp_path) == []
+
+
 def test_valid_non_allowlisted_ruc_fails(tmp_path: Path) -> None:
     """R-9.17: a valid-check-digit RUC absent from the allowlist is a failure."""
     _, tests_dir = _fixture_tree(tmp_path)

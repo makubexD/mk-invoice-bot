@@ -1,0 +1,6 @@
+# Binary fixtures allowed by scripts/check_fixtures.py (R-9.17).
+#
+# Each entry must be a binary fixture with no real RUC, names or photos.
+# Put a comment line above each entry saying why that entry is safe.
+# One fnmatch glob per line, relative to the repository root; blank lines and
+# lines starting with # are ignored.
