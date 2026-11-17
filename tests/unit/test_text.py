@@ -1,10 +1,10 @@
-"""Tests for the unsafe-character check (R-12.8)."""
+"""Tests for the unsafe-character check and the formula escape (R-12.8, R-6.6)."""
 
 from __future__ import annotations
 
 import pytest
 
-from invoicebot.text import has_unsafe_char, replace_unsafe_chars
+from invoicebot.text import FORMULA_PREFIXES, escape_formula, has_unsafe_char, replace_unsafe_chars
 
 
 @pytest.mark.parametrize(
@@ -32,3 +32,20 @@ def test_safe_text_is_accepted_and_unchanged() -> None:
 def test_replace_unsafe_chars_strips_the_edges() -> None:
     """R-12.8: a replaced character at either edge is stripped rather than left as a space."""
     assert replace_unsafe_chars(" \x00x\x07 ") == "x"
+
+
+@pytest.mark.parametrize("prefix", FORMULA_PREFIXES)
+def test_escape_formula_prefixes_each_formula_lead(prefix: str) -> None:
+    """R-6.6: a value starting with a formula character gets a leading apostrophe."""
+    assert escape_formula(prefix + "1") == "'" + prefix + "1"
+
+
+def test_escape_formula_keeps_a_hyperlink_as_text() -> None:
+    """R-6.6: a business name like =HYPERLINK(...) is stored as text."""
+    assert escape_formula('=HYPERLINK("x")') == '\'=HYPERLINK("x")'
+
+
+@pytest.mark.parametrize("value", ["La Leña", ""])
+def test_escape_formula_leaves_plain_text(value: str) -> None:
+    """R-6.6: plain text and an empty string are unchanged."""
+    assert escape_formula(value) == value
