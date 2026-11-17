@@ -24,6 +24,8 @@ from pydantic import (
     model_validator,
 )
 
+from invoicebot.sunat_origins import is_sunat_origin
+
 
 class Owner(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -848,3 +850,32 @@ class StoreDirectory(BaseModel):
 
     stores: dict[str, Store]
     portals: dict[str, Portal]
+
+
+class SolLogin(BaseModel):
+    """The SOL sign-in form: the page and the selectors that receive the credentials (D134)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    ruc: str
+    user: str
+    password: str
+    submit: str
+
+
+class SunatSolSite(BaseModel):
+    """The SOL site in ``config/sunat_sol.yaml``: sign-in and the invoice query (D134)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["active", "todo", "broken"]
+    login: SolLogin
+    query: Portal
+
+    @model_validator(mode="after")
+    def _login_url_is_a_sunat_origin(self) -> Self:
+        """R-9.10: the credentials are typed only on a hard-coded SUNAT origin."""
+        if not is_sunat_origin(self.login.url):
+            raise ValueError(f"sunat_sol.login.url {self.login.url!r} is not a hard-coded SUNAT origin")
+        return self
