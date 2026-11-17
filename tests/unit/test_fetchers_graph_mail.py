@@ -12,7 +12,7 @@ import pytest
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.fetchers.base import MailboxError
 from invoicebot.fetchers.graph_mail import GraphMailbox, MailAttachment, MailMessage
-from invoicebot.sinks.onedrive import GRAPH_BASE_URL, NOT_SENT_STATUS
+from invoicebot.sinks.onedrive import GRAPH_BASE_URL, NOT_SENT_STATUS, GraphError
 
 ACCOUNT = "bot"
 BEARER = "synthetic-bearer-value"
@@ -107,7 +107,8 @@ async def test_search_refuses_an_id_graph_returns_that_is_not_a_graph_id() -> No
         with pytest.raises(MailboxError) as raised:
             await mailbox.search("serie", 10)
 
-    assert str(raised.value) == f"Microsoft Graph request failed with status {NOT_SENT_STATUS}"
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
 
 
 @pytest.mark.parametrize(
@@ -128,7 +129,8 @@ async def test_search_maps_a_malformed_body_to_mailbox_error(body: object) -> No
         with pytest.raises(MailboxError) as raised:
             await mailbox.search("serie", 10)
 
-    assert str(raised.value) == f"Microsoft Graph request failed with status {NOT_SENT_STATUS}"
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
 
 
 async def test_attachments_lists_only_file_attachments() -> None:
@@ -230,5 +232,6 @@ async def test_a_bad_id_is_refused_before_any_request() -> None:
         with pytest.raises(MailboxError) as raised:
             await mailbox.attachments("../x")
 
-    assert str(raised.value) == f"Microsoft Graph request failed with status {NOT_SENT_STATUS}"
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
     assert requests == []
