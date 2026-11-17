@@ -84,6 +84,16 @@ def test_example_config_has_google_settings() -> None:
     assert (drive.account, sheets.account) == ("owner", "owner")
 
 
+def test_google_max_message_bytes_must_be_positive(tmp_path: Path) -> None:
+    """R-5.2: the full-message read cap is a positive size, so zero fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["google"]["max_message_bytes"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="max_message_bytes"):
+        load_config(path)
+
+
 def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
     """R-6.3: column A is the natural key, so a configured Clave column is refused."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

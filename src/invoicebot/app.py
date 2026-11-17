@@ -893,7 +893,7 @@ def _gmail_mailbox(
     tokens = google_tokens.get(inbox.account)
     if tokens is None:
         return None, f"the account {inbox.account} has no Google token source"
-    return GmailMailbox(http, tokens, inbox.account, google.timeout_s), ""
+    return GmailMailbox(http, tokens, inbox.account, google.timeout_s, google.max_message_bytes), ""
 
 
 async def _send_forever(sender: OutboxSender) -> None:

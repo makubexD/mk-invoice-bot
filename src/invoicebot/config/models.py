@@ -281,6 +281,8 @@ class Google(BaseModel):
     timeout_s: PositiveInt = 30
     #: D130: the most rows the sheets sink reads to find the invoice's key.
     max_rows: PositiveInt = 20000
+    #: R-5.2: the most bytes one full-message read may stream before it is refused.
+    max_message_bytes: PositiveInt = 8_388_608
 
 
 #: An id Google may return; anything else is refused before it is used.

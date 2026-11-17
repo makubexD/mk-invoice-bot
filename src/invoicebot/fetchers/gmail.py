@@ -200,6 +200,10 @@ async def _mailbox_errors() -> AsyncIterator[None]:
         raise MailboxError(str(err)) from err
 
 
+class _BodyTooLarge(Exception):
+    """A streamed response passed the caller's byte cap."""
+
+
 class GmailMailbox:
     """One Google account's mailbox, over Gmail and an injected client (R-5.2, D135).
 
@@ -212,11 +216,13 @@ class GmailMailbox:
         tokens: TokenSource,
         account: str,
         timeout_s: float,
+        max_message_bytes: int,
     ) -> None:
         self._http = http
         self._tokens = tokens
         self._account = account
         self._timeout_s = timeout_s
+        self._max_message_bytes = max_message_bytes
 
     async def search(self, term: str, top: int) -> list[MailMessage]:
         """Return the ``top`` newest messages with attachments matching ``term`` (R-5.2).
@@ -244,20 +250,27 @@ class GmailMailbox:
     async def attachments(self, message_id: str) -> list[MailAttachment]:
         """Return the file attachments of ``message_id`` (R-5.2).
 
+        The full-message response is streamed and refused once its body passes
+        :attr:`_max_message_bytes`, before any JSON is decoded.
+
         Raises:
             MailboxError: ``message_id`` is not a Gmail id (before any request),
-                or Gmail answers with an error or a malformed body.
+                the message is larger than the configured cap, or Gmail answers
+                with an error or a malformed body.
         """
         async with _mailbox_errors():
             message_path = _encoded_id(message_id)
-            response = await self._http.get(
-                f"{GMAIL_URL}/messages/{message_path}",
-                params={"format": _FULL_FORMAT},
-                headers=auth_headers(await self._tokens.token()),
-                timeout=self._timeout_s,
-            )
-            raise_google_error(response, self._account)
-            payload = _json_dict(response).get("payload")
+            headers = auth_headers(await self._tokens.token())
+            try:
+                body = await self._read_capped(
+                    f"{GMAIL_URL}/messages/{message_path}",
+                    {"format": _FULL_FORMAT},
+                    headers,
+                    self._max_message_bytes,
+                )
+            except _BodyTooLarge as err:
+                raise MailboxError(f"message exceeds {self._max_message_bytes} bytes") from err
+            payload = _json_object(body).get("payload")
             if not isinstance(payload, dict):
                 raise GoogleError()
             return _parts(payload, 0)
@@ -281,19 +294,40 @@ class GmailMailbox:
             url = f"{GMAIL_URL}/messages/{message_path}/attachments/{attachment_path}"
             headers = auth_headers(await self._tokens.token())
             raw_cap = max_bytes * 4 // 3 + _JSON_OVERHEAD_BYTES
-            chunks: list[bytes] = []
-            total = 0
-            async with self._http.stream("GET", url, headers=headers, timeout=self._timeout_s) as response:
-                raise_google_error(response, self._account)
-                async for chunk in response.aiter_bytes():
-                    total += len(chunk)
-                    if total > raw_cap:
-                        raise ValueError(f"attachment exceeds {max_bytes} bytes")
-                    chunks.append(chunk)
-            data = _decode(_json_object(b"".join(chunks)))
+            try:
+                body = await self._read_capped(url, None, headers, raw_cap)
+            except _BodyTooLarge as err:
+                raise ValueError(f"attachment exceeds {max_bytes} bytes") from err
+            data = _decode(_json_object(body))
             if len(data) > max_bytes:
                 raise ValueError(f"attachment exceeds {max_bytes} bytes")
             return data
+
+    async def _read_capped(
+        self,
+        url: str,
+        params: dict[str, str] | None,
+        headers: dict[str, str],
+        cap: int,
+    ) -> bytes:
+        """Stream the GET response and return its body, refusing one over ``cap`` bytes.
+
+        Raises:
+            GoogleError: Gmail answers with an error.
+            _BodyTooLarge: the received body passed ``cap`` bytes.
+        """
+        chunks: list[bytes] = []
+        total = 0
+        async with self._http.stream(
+            "GET", url, params=params, headers=headers, timeout=self._timeout_s
+        ) as response:
+            raise_google_error(response, self._account)
+            async for chunk in response.aiter_bytes():
+                total += len(chunk)
+                if total > cap:
+                    raise _BodyTooLarge()
+                chunks.append(chunk)
+        return b"".join(chunks)
 
     async def _message(self, item: object, headers: dict[str, str]) -> MailMessage:
         """Return one list hit with its arrival time, asking for metadata only.

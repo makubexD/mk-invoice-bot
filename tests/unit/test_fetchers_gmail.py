@@ -18,6 +18,7 @@ from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
 ACCOUNT = "bot"
 BEARER = "synthetic-bearer-value"
 TIMEOUT_S = 5.0
+MAX_MESSAGE_BYTES = 1024
 MESSAGES_PATH = "/gmail/v1/users/me/messages"
 INTERNAL_DATE_MS = "1763200000000"
 RECEIVED_AT = datetime.fromtimestamp(int(INTERNAL_DATE_MS) / 1000, tz=UTC)
@@ -35,7 +36,7 @@ class FakeTokens:
 @contextlib.asynccontextmanager
 async def _make_mailbox(handler: Handler) -> AsyncIterator[GmailMailbox]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        yield GmailMailbox(http, FakeTokens(), ACCOUNT, TIMEOUT_S)
+        yield GmailMailbox(http, FakeTokens(), ACCOUNT, TIMEOUT_S, MAX_MESSAGE_BYTES)
 
 
 def _part(name: str, attachment_id: str, size: int) -> dict[str, object]:
@@ -113,6 +114,17 @@ async def test_attachments_finds_a_nested_part() -> None:
     assert attachments == [MailAttachment(id="att_1", name="factura.xml", size=123)]
     assert requests[0].url.path == f"{MESSAGES_PATH}/msg_1"
     assert requests[0].url.params["format"] == "full"
+
+
+async def test_attachments_refuses_a_full_message_over_the_cap() -> None:
+    """R-5.2: a full-message body over max_message_bytes raises MailboxError before decoding."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (MAX_MESSAGE_BYTES + 1))
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError, match=f"exceeds {MAX_MESSAGE_BYTES} bytes"):
+            await mailbox.attachments("msg_1")
 
 
 async def test_download_accepts_a_600_character_attachment_id() -> None:
