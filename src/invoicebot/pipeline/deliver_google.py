@@ -36,9 +36,8 @@ from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.sinks.base import FolderDrive, RowSheet
 from invoicebot.sinks.drive_files import LINK_FOLDER, DriveInput, file_to_drive
-from invoicebot.sinks.google_drive import GoogleDrive
-from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.sinks.sheet_rows import LINK_ROW, upsert_row
 from invoicebot.states import DELIVERING, DONE
 from invoicebot.store.db import Pool
@@ -70,8 +69,8 @@ class GoogleDeliverContext:
 
     pool: Pool
     cfg: Config
-    drives: Mapping[str, GoogleDrive]
-    sheets: Mapping[str, GoogleSheets]
+    drives: Mapping[str, FolderDrive]
+    sheets: Mapping[str, RowSheet]
     admins: Mapping[str, Profile]
 
 
