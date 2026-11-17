@@ -22,7 +22,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
-from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, GoogleTokens
+from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_ADAPTER, GoogleTokens
 from invoicebot.auth.providers import (
     GMAIL_PROVIDER,
     GRAPH_MODE,
@@ -133,7 +133,6 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
-GOOGLE_CLIENT_SECRET = "google_client_secret"  # noqa: S105 - the age-store key's name, not a value
 #: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
 GOOGLE_DRIVE_KIND = "google_drive"
 ONEDRIVE_FOLDER_KIND = "onedrive_folder"

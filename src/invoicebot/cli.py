@@ -36,6 +36,7 @@ from invoicebot.auth.google_consent import (
     pkce_pair,
 )
 from invoicebot.auth.google_oauth import (
+    GOOGLE_CLIENT_SECRET,
     GOOGLE_OAUTH_ADAPTER,
     TOKEN_URL,
     GoogleTokens,
@@ -83,7 +84,6 @@ _CALLBACK_RESPONSE = (
 #: The random bytes behind the Google sign-in's ``state`` (R-6.5).
 _STATE_BYTES = 32
 #: The age-store secret the Google sign-in reads (D128).
-_CLIENT_SECRET_KEY = "google_client_secret"  # noqa: S105  # the secret's name, not its value (D128)
 
 #: The root folder ``google-setup`` creates for flow A's invoices (D129).
 GOOGLE_SETUP_FOLDER_NAME = "Comprobantes"
@@ -224,8 +224,8 @@ def _auth_google(
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to sign in")
     client_secret = (
         SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped(GOOGLE_OAUTH_ADAPTER, {_CLIENT_SECRET_KEY})
-        .get(_CLIENT_SECRET_KEY)
+        .scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+        .get(GOOGLE_CLIENT_SECRET)
     )
     try:
         asyncio.run(_google_sign_in(settings, cfg, account, client_secret, show, transport))
@@ -271,8 +271,8 @@ def _google_setup(
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to create the sheet")
     client_secret = (
         SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped(GOOGLE_OAUTH_ADAPTER, {_CLIENT_SECRET_KEY})
-        .get(_CLIENT_SECRET_KEY)
+        .scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+        .get(GOOGLE_CLIENT_SECRET)
     )
     try:
         folder_id, spreadsheet_id = asyncio.run(

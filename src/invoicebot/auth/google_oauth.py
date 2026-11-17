@@ -26,9 +26,11 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.google_api import GoogleError, GoogleTransient
 
 #: The token endpoint every Google OAuth client refreshes against (D128).
-TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105  # public endpoint, not a secret
+TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105  # nosec B105  # public endpoint, not a secret
 #: The adapter and secret the Google OAuth clients sign in with (R-9.10, D128).
 GOOGLE_OAUTH_ADAPTER = "google_oauth"
+#: The age-store key that holds the OAuth client secret (D128).
+GOOGLE_CLIENT_SECRET = "google_client_secret"  # noqa: S105  # nosec B105  # the key's name, not a secret
 
 #: A cached token is refreshed this long before it expires (R-4.3).
 EXPIRY_SKEW_S = 60
