@@ -12,7 +12,14 @@ import yaml
 
 from invoicebot.config.checks import Problem, flow_problems, label_problems, run_checks
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import ExcelTemplateSink, OneDriveFolderSink, Portal, Store, StoreDirectory
+from invoicebot.config.models import (
+    ExcelTemplateSink,
+    Flow,
+    OneDriveFolderSink,
+    Portal,
+    Store,
+    StoreDirectory,
+)
 from invoicebot.sinks.expr import field_names
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -552,3 +559,65 @@ def test_mail_attach_without_excel_sink_is_reported() -> None:
         ("FLOW_MAIL_ATTACH", "flows.work_microsoft.sinks[1].attach")
     ]
     assert problems[0].blocking
+
+
+_DRIVE_SINK: dict[str, object] = {
+    "kind": "google_drive",
+    "account": "owner",
+    "root_folder_id": "DRIVE_FOLDER_ID",
+    "path": "{fecha:%Y}/{fecha:%m}",
+    "filename": "{fecha:%Y-%m-%d}_{serie}-{numero}",
+    "upload": ["photo"],
+}
+
+_SHEETS_SINK: dict[str, object] = {
+    "kind": "google_sheets",
+    "account": "owner",
+    "spreadsheet_id": "SPREADSHEET_ID",
+    "tab": "Compras",
+    "columns": {"Total": "{total}"},
+}
+
+
+def _flow_with_columns(columns: dict[str, str], *, drive: bool) -> Flow:
+    sheets = dict(_SHEETS_SINK, columns=columns)
+    sinks = [_DRIVE_SINK, sheets] if drive else [sheets]
+    return Flow.model_validate(
+        {
+            "label": "Boletas",
+            "accepted_tipos": ["03"],
+            "fetchers": [],
+            "required_docs": [],
+            "deliver_without_docs": False,
+            "sinks": sinks,
+        }
+    )
+
+
+def test_sheets_only_flow_column_with_drive_link_is_blocking() -> None:
+    """D144: a Sheets-only flow may not use {link_photo} in a column."""
+    cfg = load_config(EXAMPLE)
+    cfg.flows = {"personal_dni": _flow_with_columns({"Foto": "{link_photo}"}, drive=False)}
+
+    problems = flow_problems(cfg, field_names=field_names)
+
+    assert _codes(problems) == ["SHEETS_LINK_WITHOUT_DRIVE"]
+    assert problems[0].path == "flows.personal_dni.sinks[0].columns.Foto"
+    assert "Foto" in problems[0].message
+    assert problems[0].blocking
+
+
+def test_sheets_column_with_drive_link_and_drive_sink_is_accepted() -> None:
+    """D144: the same column is accepted when the flow also has a Drive sink."""
+    cfg = load_config(EXAMPLE)
+    cfg.flows = {"personal_google": _flow_with_columns({"Foto": "{link_photo}"}, drive=True)}
+
+    assert flow_problems(cfg, field_names=field_names) == []
+
+
+def test_sheets_only_flow_column_without_drive_link_is_accepted() -> None:
+    """D144: a Sheets-only flow may use an ordinary name such as {total}."""
+    cfg = load_config(EXAMPLE)
+    cfg.flows = {"personal_dni": _flow_with_columns({"Total": "{total}"}, drive=False)}
+
+    assert flow_problems(cfg, field_names=field_names) == []
