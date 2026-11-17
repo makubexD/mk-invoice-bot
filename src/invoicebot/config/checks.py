@@ -316,32 +316,31 @@ def _portal_problems(
     portal: Portal,
     *,
     changed: bool,
-    path_prefix: str | None = None,
-    field_separator: str = ":",
+    field_prefix: str | None = None,
 ) -> list[Problem]:
     """R-5.8: one portal's status, adapter, URL and form completeness.
 
-    Paths point at ``portals/<key>.yaml:<field>`` unless ``path_prefix`` names
-    another source, such as the SOL site's ``sunat_sol.yaml:query``.
+    ``field_prefix`` is where the portal's fields live, ending in its separator,
+    such as ``portals/<key>.yaml:`` or the SOL site's ``sunat_sol.yaml:query.``.
     """
-    base_path = path_prefix or f"portals/{key}.yaml"
+    prefix = field_prefix or f"portals/{key}.yaml:"
     problems: list[Problem] = []
     if portal.status != "active":
         problems.append(
             Problem(
                 code="PORTAL_NOT_ACTIVE",
-                path=f"{base_path}{field_separator}status",
+                path=f"{prefix}status",
                 message=f"portal '{portal.key}' has status '{portal.status}'; only active portals are used",
                 blocking=changed,
             )
         )
-    adapter_problem = _adapter_problem(portal, base_path=base_path, field_separator=field_separator)
+    adapter_problem = _adapter_problem(portal, field_prefix=prefix)
     if adapter_problem is not None:
         problems.append(adapter_problem)
-    template_problem = _url_template_problem(portal, base_path=base_path, field_separator=field_separator)
+    template_problem = _url_template_problem(portal, field_prefix=prefix)
     if template_problem is not None:
         problems.append(template_problem)
-    incomplete_problem = _form_incomplete_problem(portal, path=base_path)
+    incomplete_problem = _form_incomplete_problem(portal, path=prefix[:-1])
     if incomplete_problem is not None:
         problems.append(incomplete_problem)
     return problems
@@ -359,8 +358,7 @@ def _sol_problems(cfg: Config, directory: StoreDirectory) -> list[Problem]:
                 SUNAT_SOL,
                 query,
                 changed=False,
-                path_prefix="sunat_sol.yaml:query",
-                field_separator=".",
+                field_prefix="sunat_sol.yaml:query.",
             )
         )
     if not cfg.sunat.sol.enabled:
@@ -385,14 +383,14 @@ def _sol_disabled_problems(cfg: Config) -> list[Problem]:
     ]
 
 
-def _url_template_problem(portal: Portal, *, base_path: str, field_separator: str) -> Problem | None:
+def _url_template_problem(portal: Portal, *, field_prefix: str) -> Problem | None:
     """R-5.8: an active portal must carry a real URL, not a template the fetcher cannot fill."""
     # shortcut: URL templates such as {ruc_emisor} come with the first portal that needs one.
     if portal.status != "active" or portal.url is None or _URL_TEMPLATE_MARKER not in portal.url:
         return None
     return Problem(
         code="PORTAL_URL_TEMPLATE",
-        path=f"{base_path}{field_separator}url",
+        path=f"{field_prefix}url",
         message=(
             f"portal '{portal.key}' is active but its url is a template; "
             "URL templates are not supported yet (R-5.8)"
@@ -401,8 +399,8 @@ def _url_template_problem(portal: Portal, *, base_path: str, field_separator: st
     )
 
 
-def _adapter_problem(portal: Portal, *, base_path: str, field_separator: str) -> Problem | None:
-    path = f"{base_path}{field_separator}adapter"
+def _adapter_problem(portal: Portal, *, field_prefix: str) -> Problem | None:
+    path = f"{field_prefix}adapter"
     adapter = portal.adapter
     if adapter == _GENERIC_FORM_ADAPTER:
         return None
