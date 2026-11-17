@@ -264,6 +264,11 @@ async def claim_natural_key(conn: AsyncConnection[Any], invoice_id: int, key: st
     return None
 
 
+def pending_auth_key(provider: str, account: str) -> str:
+    """Return the ``error`` value that names a parked invoice's account (BR-D01)."""
+    return f"{provider}:{account}"
+
+
 async def resume_pending_auth(conn: AsyncConnection[Any], provider: str, account: str) -> list[int]:
     """Move the ``PENDING_AUTH`` invoices parked for ``provider``'s ``account`` to ``DELIVERING`` (BR-D01).
 
@@ -282,7 +287,7 @@ async def resume_pending_auth(conn: AsyncConnection[Any], provider: str, account
           AND error = %s
         RETURNING id
         """,
-        (f"{provider}:{account}",),
+        (pending_auth_key(provider, account),),
     )
     return [int(row[0]) for row in await cur.fetchall()]
 

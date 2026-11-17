@@ -16,7 +16,7 @@ from invoicebot.config.models import Profile
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.states import DELIVERING, PENDING_AUTH
-from invoicebot.store.invoices import InvoiceHead, set_state
+from invoicebot.store.invoices import InvoiceHead, pending_auth_key, set_state
 
 #: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
 RULE_AUTH = "BR-D01"
@@ -48,7 +48,7 @@ async def park_for_auth(
         invoice_id,
         PENDING_AUTH,
         rule_id=RULE_AUTH,
-        error=f"{provider}:{account}",
+        error=pending_auth_key(provider, account),
         expected=DELIVERING,
     )
     await queue_message(
