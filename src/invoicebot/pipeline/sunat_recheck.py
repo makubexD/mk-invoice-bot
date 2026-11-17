@@ -6,7 +6,9 @@ The validate step and each earlier recheck enqueue it after a BR-V01 (missing) o
 incremented ``rechecks`` count, schedules another recheck while the count is below
 :data:`MAX_RECHECKS`, and — when a later answer turns into BR-V02 or BR-V06 — tells the
 admins without moving the invoice: the sender already accepted or answered it (D125).
-A cancelled invoice, or one with no reading, makes the job end quietly.
+A cancelled invoice, one with no reading, an incomplete reading or one another check
+superseded meanwhile writes nothing and makes the job end quietly. With validation off,
+:func:`skip_recheck` serves the step so a queued recheck never fails its invoice.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
     load_invoice_head,
     load_reading,
+    lock_sunat_rechecks,
     set_sunat_status,
     sunat_rechecks,
 )
@@ -61,6 +64,14 @@ class _Recheck:
     rechecks: int
 
 
+async def skip_recheck(job: Job) -> None:
+    """End a queued recheck quietly because validation is off (D125)."""
+    logger.info(
+        "sunat recheck skipped: validation is off",
+        extra={"step": SUNAT_RECHECK_STEP, "invoice_id": job.invoice_id},
+    )
+
+
 def make_sunat_recheck_handler(pool: Pool, http: httpx.AsyncClient, secrets: Secrets, cfg: Config) -> Handler:
     """Build the handler that asks SUNAT again in ``sunat_recheck`` (BR-V01, D125).
 
@@ -68,7 +79,8 @@ def make_sunat_recheck_handler(pool: Pool, http: httpx.AsyncClient, secrets: Sec
     transaction stores the answer with the count incremented and, depending on the
     verdict, schedules the next recheck or alerts the admins. It never changes the
     invoice's state, so a state change another handler committed meanwhile is harmless.
-    A cancelled invoice, or one with no reading, ends the job quietly.
+    A cancelled invoice, one with no reading, or an incomplete reading ends the job
+    quietly; so does another check that committed a new count first.
     """
 
     async def handle(job: Job) -> None:
@@ -76,7 +88,14 @@ def make_sunat_recheck_handler(pool: Pool, http: httpx.AsyncClient, secrets: Sec
         recheck = await _read(pool, job.invoice_id)
         if recheck is None:
             return
-        status = await ask_sunat(pool, http, secrets, cfg, recheck.reading)
+        try:
+            status = await ask_sunat(pool, http, secrets, cfg, recheck.reading)
+        except ValueError:
+            logger.warning(
+                "sunat recheck skipped: incomplete reading",
+                extra={"step": SUNAT_RECHECK_STEP, "invoice_id": job.invoice_id},
+            )
+            return
         verdict = decide(status, None)
         async with pool.connection() as conn, conn.transaction():
             await _record(conn, recheck, cfg, status, verdict)
@@ -118,13 +137,23 @@ async def _record(
     status: CpStatus | None,
     verdict: Verdict,
 ) -> None:
-    """Store the answer and act on the verdict in the caller's transaction (D125)."""
-    count = recheck.rechecks + 1
+    """Store the answer and act on the verdict in the caller's transaction (D125).
+
+    It locks the row first: a cancelled invoice, or one whose count another check
+    changed after :func:`_read`, is left untouched and nothing is enqueued.
+    """
+    locked = await lock_sunat_rechecks(conn, recheck.invoice_id)
+    if locked is None:
+        return
+    state, stored_rechecks = locked
+    if state == CANCELLED or stored_rechecks != recheck.rechecks:
+        return
+    count = stored_rechecks + 1
     await set_sunat_status(conn, recheck.invoice_id, status, rechecks=count)
     if verdict.ask:
         await _alert(conn, cfg, recheck, verdict.rule_id)
     elif verdict.recheck and count < MAX_RECHECKS:
-        run_after = await recheck_run_after(conn, verdict)
+        run_after = await recheck_run_after(conn, verdict, count + 1)
         await enqueue(conn, recheck.invoice_id, SUNAT_RECHECK_STEP, run_after)
 
 

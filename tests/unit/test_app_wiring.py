@@ -15,6 +15,7 @@ from invoicebot.app import _daily_tasks, _validation_handlers, _validation_secre
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
+from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.sunat import token as sunat
@@ -119,13 +120,14 @@ def test_sunat_validation_on_with_missing_secret_fails_closed(tmp_path: Path) ->
     assert secrets.missing == set(sunat.SECRETS)
 
 
-def test_sunat_validation_off_registers_only_the_validate_step(tmp_path: Path) -> None:
-    """D124: with validation off only the validate step runs, with no secrets."""
+def test_sunat_validation_off_registers_the_skipping_recheck_step(tmp_path: Path) -> None:
+    """D125: with validation off the recheck step is registered and only skips, so no recheck job fails."""
     cfg = _sunat_config(tmp_path, enabled=False)
 
     handlers = _validation_handlers(cfg, cast(Any, None), cast(Any, None), None)
 
-    assert set(handlers) == {VALIDATE_STEP}
+    assert set(handlers) == {VALIDATE_STEP, SUNAT_RECHECK_STEP}
+    assert handlers[SUNAT_RECHECK_STEP] is skip_recheck
 
 
 def test_sunat_validation_on_with_secrets_registers_the_recheck_step(tmp_path: Path) -> None:

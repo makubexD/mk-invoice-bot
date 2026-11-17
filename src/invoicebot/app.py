@@ -71,7 +71,7 @@ from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_e
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
-from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler
+from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
 from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
@@ -369,16 +369,16 @@ def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:
 def _validation_handlers(
     cfg: Config, pool: Pool, http: httpx.AsyncClient, secrets: Secrets | None
 ) -> dict[str, Handler]:
-    """Return the validation handlers, the recheck one only when SUNAT can be asked (D124).
+    """Return the validation handlers for both steps, asking SUNAT only with secrets (D124).
 
     ``secrets is None`` means validation is off: the validate step only sends the routed
-    summary and moves the invoice on. A recheck needs the API's credentials, so it is
-    registered only when they are present.
+    summary and moves the invoice on. A recheck needs the API's credentials, so with
+    validation off the step is still registered but ends quietly with
+    :func:`skip_recheck`, rather than a queued recheck dying as an unknown step and
+    failing the invoice (D125).
     """
-    handlers = {VALIDATE_STEP: make_validate_handler(pool, http, secrets, cfg)}
-    if secrets is not None:
-        handlers[SUNAT_RECHECK_STEP] = make_sunat_recheck_handler(pool, http, secrets, cfg)
-    return handlers
+    recheck = skip_recheck if secrets is None else make_sunat_recheck_handler(pool, http, secrets, cfg)
+    return {VALIDATE_STEP: make_validate_handler(pool, http, secrets, cfg), SUNAT_RECHECK_STEP: recheck}
 
 
 def _deliver_handlers(

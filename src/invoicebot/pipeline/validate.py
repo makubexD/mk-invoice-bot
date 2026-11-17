@@ -194,7 +194,7 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, _extra_lines(verdict))
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
-    run_after = await recheck_run_after(conn, verdict)
+    run_after = await recheck_run_after(conn, verdict, 1)
     if run_after is not None:
         await enqueue(conn, inputs.invoice_id, SUNAT_RECHECK_STEP, run_after)
     await _reply(
@@ -223,17 +223,18 @@ def _extra_lines(verdict: Verdict) -> tuple[str, ...]:
     return tuple(lines)
 
 
-async def recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict) -> datetime | None:
+async def recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict, attempt: int) -> datetime | None:
     """Return when a recheck job runs, or None when the verdict schedules none (D125).
 
-    BR-V01 rechecks tomorrow; BR-V04 rechecks on the queue's backoff. The time is the
-    database clock's, never Python's.
+    ``attempt`` is the 1-based number of the recheck being scheduled. BR-V01 rechecks
+    tomorrow; BR-V04 rechecks on the queue's backoff for that attempt, so each recheck
+    waits longer than the one before. The time is the database clock's, never Python's.
     """
     if not verdict.recheck:
         return None
     if verdict.rule_id == RULE_MISSING:
         return await _now_plus(conn, hours=MISSING_RECHECK_HOURS, minutes=0)
-    return await _now_plus(conn, hours=0, minutes=backoff_minutes(1))
+    return await _now_plus(conn, hours=0, minutes=backoff_minutes(attempt))
 
 
 async def _now_plus(conn: AsyncConnection[Any], *, hours: int, minutes: int) -> datetime:

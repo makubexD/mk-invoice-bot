@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -13,12 +14,14 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.app import _validation_handlers
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ValidezApi
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
-from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler
+from invoicebot.pipeline.sunat_recheck import _read, _record, make_sunat_recheck_handler
 from invoicebot.queue.jobs import Job
+from invoicebot.queue.retry import backoff_minutes
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.invoices import (
     create_invoice,
@@ -29,6 +32,7 @@ from invoicebot.store.invoices import (
 )
 from invoicebot.sunat.token import ADAPTER, SECRETS
 from invoicebot.sunat.validez import CpStatus
+from invoicebot.sunat.verdict import decide
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -89,6 +93,20 @@ def _reading(fecha: date) -> Reading:
             "numero": _field(str(next(_NEXT_NUMERO))),
             "igv": _field("7.61"),
             "total": _field(TOTAL),
+            "fecha_emision": _field(fecha.isoformat()),
+        },
+        document_url=None,
+    )
+
+
+def _incomplete_reading(fecha: date) -> Reading:
+    """Build a reading without its total, which SUNAT cannot validate (R-4.1)."""
+    return Reading(
+        fields={
+            "ruc_emisor": _field(ISSUER_RUC),
+            "tipo": _field(FACTURA),
+            "serie": _field("F001"),
+            "numero": _field(str(next(_NEXT_NUMERO))),
             "fecha_emision": _field(fecha.isoformat()),
         },
         document_url=None,
@@ -309,7 +327,7 @@ async def test_annulled_answer_alerts_the_admin_and_leaves_the_state(
 async def test_outage_reschedules_on_the_backoff(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-V04: an outage stores no answer, increments rechecks and reschedules on the backoff."""
+    """BR-V04: an outage stores no answer, increments rechecks and reschedules for the next attempt."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id)
     invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=1)
@@ -326,9 +344,29 @@ async def test_outage_reschedules_on_the_backoff(
     assert status["estado_cp"] is None
     assert status["rechecks"] == 2
     assert jobs == ["sunat_recheck"]
-    assert minutes is not None
-    assert 1 <= minutes <= 3
+    # It stored recheck 2, so the one it schedules is recheck 3.
+    assert minutes == pytest.approx(backoff_minutes(3), abs=0.1)
     assert outbox == []
+
+
+async def test_each_backoff_recheck_is_scheduled_further_out(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-V04: the second BR-V04 recheck waits longer than the first."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    first = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=0)
+    second = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=1)
+
+    await _run(db_pool, cfg, first, transport=_sunat_handler(1, validez_status=500), job_id=1)
+    await _run(db_pool, cfg, second, transport=_sunat_handler(1, validez_status=500), job_id=2)
+
+    async with db_pool.connection() as conn:
+        first_minutes = await _run_after_minutes(conn, first)
+        second_minutes = await _run_after_minutes(conn, second)
+    assert first_minutes == pytest.approx(backoff_minutes(2), abs=0.1)
+    assert second_minutes == pytest.approx(backoff_minutes(3), abs=0.1)
+    assert second_minutes > first_minutes
 
 
 async def test_cancelled_invoice_is_skipped(
@@ -352,3 +390,108 @@ async def test_cancelled_invoice_is_skipped(
     assert status["rechecks"] == 1
     assert jobs == []
     assert outbox == []
+
+
+async def test_validation_off_skips_a_queued_recheck(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D125: with validation off the app's recheck handler returns and leaves the invoice untouched."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=0)
+    handler = _validation_handlers(cfg, db_pool, cast(Any, None), None)[SUNAT_RECHECK_STEP]
+
+    await handler(_job(1, invoice_id))
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        status = await _sunat_json(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert row == ("FETCHING_DOCS", None)
+    assert status["rechecks"] == 0
+    assert jobs == []
+    assert outbox == []
+
+
+async def test_cancelled_between_read_and_record_writes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D125: a cancellation after the read leaves the stored answer and the admins alone."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=1)
+    recheck = await _read(db_pool, invoice_id)
+    assert recheck is not None
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, "CANCELLED", rule_id="BR-D06")
+
+    status = CpStatus(estado_cp=2, estado_ruc="00", cond_domi_ruc="00")
+    async with db_pool.connection() as conn, conn.transaction():
+        await _record(conn, recheck, cfg, status, decide(status, None))
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        stored = await _sunat_json(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert row == ("CANCELLED", "BR-D06")
+    assert stored["estado_cp"] == 0
+    assert stored["rechecks"] == 1
+    assert jobs == []
+    assert outbox == []
+
+
+async def test_a_recheck_superseded_by_a_newer_count_writes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D125: a count another check changed after the read leaves the invoice and the queue alone."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=0)
+    recheck = await _read(db_pool, invoice_id)
+    assert recheck is not None
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_sunat_status(
+            conn,
+            invoice_id,
+            CpStatus(estado_cp=3, estado_ruc="00", cond_domi_ruc="00"),
+            rechecks=1,
+        )
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _record(conn, recheck, cfg, None, decide(None, None))
+
+    async with db_pool.connection() as conn:
+        stored = await _sunat_json(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert stored["estado_cp"] == 3
+    assert stored["rechecks"] == 1
+    assert jobs == []
+    assert outbox == []
+
+
+async def test_incomplete_reading_ends_the_recheck_quietly(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D125: a recheck of a reading SUNAT cannot validate logs a warning and leaves the invoice alone."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    reading = _incomplete_reading(await _today(db_pool))
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading, rechecks=1)
+
+    with caplog.at_level(logging.WARNING):
+        await _run(db_pool, cfg, invoice_id, transport=_sunat_handler(1))
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        stored = await _sunat_json(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert row == ("FETCHING_DOCS", None)
+    assert stored["rechecks"] == 1
+    assert jobs == []
+    assert outbox == []
+    assert "sunat recheck skipped: incomplete reading" in caplog.text

@@ -671,6 +671,27 @@ async def sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> int:
     return 0 if row is None else int(row[0])
 
 
+async def lock_sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, int] | None:
+    """Lock invoice_id's row and return its state and recheck count, or None when missing (D125).
+
+    The caller compares the count it started with, so a revalidation or another recheck
+    that committed first wins. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT state, COALESCE((sunat_status_json->>'rechecks')::int, 0)
+        FROM invoices
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0]), int(row[1])
+
+
 async def record_upload_rejection(
     conn: AsyncConnection[Any], invoice_id: int, media_ref: str, rule_id: str
 ) -> bool:

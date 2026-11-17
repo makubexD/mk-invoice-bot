@@ -37,6 +37,7 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    lock_sunat_rechecks,
     park_stale,
     record_upload_rejection,
     save_reading,
@@ -617,6 +618,28 @@ async def test_sunat_rechecks_reads_zero_before_a_status_and_the_count_after(
         after = await sunat_rechecks(conn, invoice_id)
 
     assert (before, after) == (0, 2)
+
+
+async def test_lock_sunat_rechecks_returns_the_state_and_count_or_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D125: lock_sunat_rechecks reads the state and recheck count, and None for an unknown id."""
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        before = await lock_sunat_rechecks(conn, invoice_id)
+        await set_state(conn, invoice_id, "FETCHING_DOCS")
+        await set_sunat_status(
+            conn,
+            invoice_id,
+            CpStatus(estado_cp=0, estado_ruc=None, cond_domi_ruc=None),
+            2,
+        )
+        after = await lock_sunat_rechecks(conn, invoice_id)
+        missing = await lock_sunat_rechecks(conn, UNKNOWN_INVOICE_ID)
+
+    assert before == ("RECEIVED", 0)
+    assert after == ("FETCHING_DOCS", 2)
+    assert missing is None
 
 
 async def test_get_file_path_returns_the_first_path_of_a_kind(
