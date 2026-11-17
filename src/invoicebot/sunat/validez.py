@@ -8,13 +8,13 @@ token or the body.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
 from decimal import Decimal
 
 import httpx
 
 from invoicebot.config.models import ValidezApi
 from invoicebot.extract.fields import Reading
+from invoicebot.store.invoices import CpStatus
 from invoicebot.sunat.token import BodyTooLarge, SunatUnavailable, read_capped
 
 #: The ``estadoCp`` digits this client understands, as the strings SUNAT sends (R-4.1).
@@ -25,15 +25,6 @@ _CENT = Decimal("0.01")
 
 #: The date shape the validez API expects (R-4.1).
 _FECHA_FORMAT = "%d/%m/%Y"
-
-
-@dataclass(frozen=True)
-class CpStatus:
-    """The ``estadoCp`` SUNAT answered, with the issuer's RUC state (R-4.1)."""
-
-    estado_cp: int
-    estado_ruc: str | None
-    cond_domi_ruc: str | None
 
 
 async def validate(

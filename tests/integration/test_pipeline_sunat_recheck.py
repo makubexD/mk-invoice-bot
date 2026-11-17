@@ -24,6 +24,7 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.invoices import (
+    CpStatus,
     create_invoice,
     save_reading,
     set_flow,
@@ -31,7 +32,6 @@ from invoicebot.store.invoices import (
     set_sunat_status,
 )
 from invoicebot.sunat.token import ADAPTER, SECRETS
-from invoicebot.sunat.validez import CpStatus
 from invoicebot.sunat.verdict import decide
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from invoicebot.store.invoices import CpStatus
 from invoicebot.store.padron import PadronRow
-from invoicebot.sunat.validez import CpStatus
 from invoicebot.sunat.verdict import decide
 
 # From tests/synthetic_rucs.txt; no real RUC appears in this file.

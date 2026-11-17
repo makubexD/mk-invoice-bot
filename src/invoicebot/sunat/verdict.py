@@ -12,8 +12,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from invoicebot.store.invoices import CpStatus
 from invoicebot.store.padron import PadronRow
-from invoicebot.sunat.validez import CpStatus
 
 #: The invoice's comprobante does not exist yet in SUNAT (R-4.2).
 RULE_MISSING = "BR-V01"

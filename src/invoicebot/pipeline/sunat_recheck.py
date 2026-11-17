@@ -35,13 +35,13 @@ from invoicebot.secrets import Secrets
 from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
+    CpStatus,
     load_invoice_head,
     load_reading,
     lock_sunat_rechecks,
     set_sunat_status,
     sunat_rechecks,
 )
-from invoicebot.sunat.validez import CpStatus
 from invoicebot.sunat.verdict import RULE_ANNULLED, RULE_NOT_AUTHORIZED, Verdict, decide
 
 logger = logging.getLogger(__name__)

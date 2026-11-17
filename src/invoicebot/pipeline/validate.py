@@ -38,6 +38,7 @@ from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
+    CpStatus,
     InvoiceHead,
     get_state_rule,
     load_flow,
@@ -48,7 +49,6 @@ from invoicebot.store.invoices import (
 )
 from invoicebot.store.padron import PadronRow, lookup
 from invoicebot.sunat.token import SunatUnavailable, token
-from invoicebot.sunat.validez import CpStatus
 from invoicebot.sunat.validez import validate as sunat_validate
 from invoicebot.sunat.verdict import RULE_ISSUER_STATE, RULE_MISSING, Verdict, decide
 

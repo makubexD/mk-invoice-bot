@@ -27,7 +27,6 @@ from invoicebot.states import (
     WAITING_FOR_USER,
     StateMoved,
 )
-from invoicebot.sunat.validez import CpStatus
 
 #: Length of the WhatsApp customer-service window, in hours (R-1.10).
 WINDOW_HOURS = 24
@@ -627,6 +626,15 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     if row is None or row[0] is None:
         return None
     return reading_from_json(row[0])
+
+
+@dataclass(frozen=True)
+class CpStatus:
+    """The ``estadoCp`` SUNAT answered, with the issuer's RUC state (R-4.1)."""
+
+    estado_cp: int
+    estado_ruc: str | None
+    cond_domi_ruc: str | None
 
 
 async def set_sunat_status(

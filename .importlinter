@@ -104,6 +104,14 @@ forbidden_modules =
     invoicebot.pipeline
     invoicebot.queue
 
+[importlinter:contract:store-no-adapters]
+name = The store imports no SUNAT adapter
+type = forbidden
+source_modules =
+    invoicebot.store
+forbidden_modules =
+    invoicebot.sunat
+
 [importlinter:contract:sunat-is-low]
 name = SUNAT never imports the layers that use it (D124)
 type = forbidden

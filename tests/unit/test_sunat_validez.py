@@ -10,8 +10,9 @@ import pytest
 
 from invoicebot.config.models import ValidezApi
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.store.invoices import CpStatus
 from invoicebot.sunat.token import MAX_RESPONSE_BYTES, SunatUnavailable
-from invoicebot.sunat.validez import CpStatus, validate
+from invoicebot.sunat.validez import validate
 
 # Both values come from tests/synthetic_rucs.txt; no real RUC appears in this file.
 OWNER_RUC = "20000000001"

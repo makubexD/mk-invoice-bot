@@ -20,6 +20,7 @@ from invoicebot.queue.jobs import enqueue
 from invoicebot.states import BATCHED, CANCELLED, FAILED, StateMoved
 from invoicebot.store.flow_b import open_batch
 from invoicebot.store.invoices import (
+    CpStatus,
     Duplicate,
     FileRecord,
     InvoiceHead,
@@ -50,7 +51,6 @@ from invoicebot.store.invoices import (
     window_open,
 )
 from invoicebot.store.messages import link_message_to_invoice, store_inbound
-from invoicebot.sunat.validez import CpStatus
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
