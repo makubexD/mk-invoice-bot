@@ -23,6 +23,7 @@ from invoicebot.gaps.kinds import fingerprint
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.routing.router import CompiledRule
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
@@ -132,12 +133,12 @@ async def _routing_invoice(
     return invoice_id
 
 
-def _job(job_id: int, invoice_id: int) -> Job:
-    """Build the leased job row the route handler receives."""
+def _job(job_id: int, invoice_id: int, step: str = ROUTE_STEP) -> Job:
+    """Build the leased job row a handler receives."""
     return Job(
         id=job_id,
         invoice_id=invoice_id,
-        step=ROUTE_STEP,
+        step=step,
         attempts=0,
         crashes=0,
         lease_until=datetime.now(UTC),
@@ -154,6 +155,13 @@ async def _run(
     await make_route_handler(pool, cfg, directory or StoreDirectory(stores={}, portals={}), RULES)(
         job or _job(1, invoice_id)
     )
+
+
+async def _run_validate(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, invoice_id: int
+) -> None:
+    """Run the validate step with validation off, as the app wires it (D124)."""
+    await make_validate_handler(pool, cast(Any, None), None, cfg)(_job(1, invoice_id, VALIDATE_STEP))
 
 
 def _store(ruc: str, *comercios: str) -> Store:
@@ -246,25 +254,73 @@ async def _route_one(
         return await _invoice(conn, invoice_id), await _texts(conn, profile_id)
 
 
-async def test_work_factura_is_routed_with_one_summary(
+async def _route_and_validate_one(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    reading: Reading,
+    template: str = FULL_PROFILE,
+) -> tuple[tuple[str, str | None, str | None], list[str]]:
+    """Route one invoice of a fresh profile then validate it with validation off (D124)."""
+    profile_id = f"{template}-{uuid4().hex}"
+    cfg = _config(profile_id, template)
+    invoice_id = await _routing_invoice(pool, profile_id, reading)
+    await _run(pool, cfg, invoice_id)
+    await _run_validate(pool, cfg, invoice_id)
+    async with pool.connection() as conn:
+        return await _invoice(conn, invoice_id), await _texts(conn, profile_id)
+
+
+async def test_work_factura_is_routed_to_validating(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.1, R-3.4: a factura to the work RUC is routed, waits in FETCHING_DOCS, and gets one summary."""
+    """R-3.1, R-3.4, D124: a factura to the work RUC waits in VALIDATING with no message yet."""
     today = await _today(db_pool)
     reading = _reading(today)
 
     row, texts = await _route_one(db_pool, reading)
 
+    assert row == ("VALIDATING", "BR-R02", WORK_FLOW)
+    assert texts == []
+
+
+async def test_validate_off_sends_the_routed_summary(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.1, D124: route then validate (off) gives the old summary, buttons and one fetch job."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    today = await _today(db_pool)
+    reading = _reading(today)
+    invoice_id = await _routing_invoice(db_pool, profile_id, reading)
+
+    await _run(db_pool, cfg, invoice_id)
+    async with db_pool.connection() as conn:
+        assert await _invoice(conn, invoice_id) == ("VALIDATING", "BR-R02", WORK_FLOW)
+        assert await _jobs(conn, invoice_id) == [VALIDATE_STEP]
+        assert await _outbox(conn, profile_id) == []
+
+    await _run_validate(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert len(texts) == 1
-    assert "Trabajo (Microsoft)" in texts[0]
-    assert texts[0].startswith(f"🧾 Factura F001-{reading.value('numero')} · {today:%d/%m/%Y}")
-    assert "Revisa" not in texts[0]
-    assert "Deducido" not in texts[0]
+    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-R02"
+    assert text.startswith(f"🧾 Factura F001-{reading.value('numero')} · {today:%d/%m/%Y}")
+    assert "Trabajo (Microsoft)" in text
+    assert "Revisa" not in text
+    assert "Deducido" not in text
+    assert buttons == [
+        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
+        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+    ]
 
 
 async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
-    """R-3.4, BR-S09: a photo routed end to end leaves exactly the ack and the summary in the outbox."""
+    """R-3.4, BR-S09, D124: a photo routed end to end leaves exactly the ack and the summary."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
     msg = InboundMessage(
@@ -281,6 +337,10 @@ async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[Asy
     await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)), intake.invoice_id)
 
     await _run(db_pool, cfg, intake.invoice_id)
+    async with db_pool.connection() as conn:
+        assert len(await _texts(conn, profile_id)) == 1
+
+    await _run_validate(db_pool, cfg, intake.invoice_id)
 
     async with db_pool.connection() as conn:
         texts = await _texts(conn, profile_id)
@@ -381,7 +441,7 @@ async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     """D80: a date 400 days old still routes, and the summary's warning line names the date."""
     old = await _today(db_pool) - timedelta(days=OLD_INVOICE_DAYS)
 
-    row, texts = await _route_one(db_pool, _reading(old))
+    row, texts = await _route_and_validate_one(db_pool, _reading(old))
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert texts[0].splitlines()[-1] == "⚠️ Revisa: fecha"
@@ -395,7 +455,7 @@ async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
         document_url=None,
     )
 
-    row, texts = await _route_one(db_pool, reading)
+    row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert texts[0].splitlines()[-1] == "⚠️ Revisa: número"
@@ -405,7 +465,7 @@ async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnecti
     """D79: a tipo repaired from the serie letter is named on the summary's "Deducido" line."""
     reading = _reading(await _today(db_pool), tipo_flag="inferred")
 
-    row, texts = await _route_one(db_pool, reading)
+    row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert texts[0].splitlines()[-1] == "ℹ️ Deducido del comprobante: tipo de comprobante"
@@ -421,16 +481,16 @@ async def test_low_confidence_without_flag_is_not_named(
         document_url=None,
     )
 
-    row, texts = await _route_one(db_pool, reading)
+    row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
     assert "Deducido" not in texts[0]
 
 
-async def test_routed_invoice_enqueues_one_fetch_job(
+async def test_routed_invoice_enqueues_one_validate_job(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """S4.2, R-5.1: a routed invoice leaves exactly one queued job, the ``fetch`` step for it."""
+    """S4.2, R-4.1, D124: a routed invoice leaves exactly one queued job, the ``validate`` step."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
     invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
@@ -438,7 +498,7 @@ async def test_routed_invoice_enqueues_one_fetch_job(
     await _run(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
-        assert await _jobs(conn, invoice_id) == ["fetch"]
+        assert await _jobs(conn, invoice_id) == [VALIDATE_STEP]
 
 
 async def test_refused_invoice_enqueues_no_fetch_job(
@@ -465,8 +525,8 @@ async def test_second_run_changes_nothing(db_pool: AsyncConnectionPool[AsyncConn
     await _run(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
-        assert await _invoice(conn, invoice_id) == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-        assert len(await _texts(conn, profile_id)) == 1
+        assert await _invoice(conn, invoice_id) == ("VALIDATING", "BR-R02", WORK_FLOW)
+        assert await _texts(conn, profile_id) == []
 
 
 async def test_total_above_cap_waits_for_confirmation(
@@ -508,13 +568,14 @@ async def test_total_at_cap_routes_without_a_question(
     invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool), total="50.00"))
 
     await _run(db_pool, cfg, invoice_id)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == [
@@ -534,13 +595,14 @@ async def test_flow_without_reimbursement_is_not_asked(
     )
 
     await _run(db_pool, cfg, invoice_id)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R01", OWNER_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == [
@@ -558,6 +620,7 @@ async def test_routed_summary_has_edit_and_cancel_buttons(
     invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
 
     await _run(db_pool, cfg, invoice_id)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
@@ -614,6 +677,7 @@ async def test_answered_flow_is_routed_to_summary(
     )
 
     await _run(db_pool, cfg, invoice_id)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
@@ -621,7 +685,7 @@ async def test_answered_flow_is_routed_to_summary(
         jobs = await _jobs(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(texts) == 1
     assert "➡️ Trabajo (Microsoft)" in texts[0]
     assert "choices" not in flow_data
@@ -688,13 +752,14 @@ async def test_buyer_ok_true_continues_to_summary(
     )
 
     await _run(db_pool, cfg, invoice_id)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(texts) == 1
     assert "¿Correcto?" not in texts[0]
 
@@ -724,7 +789,7 @@ async def test_buyer_ok_false_asks_which_flow(
     assert len(buttons) == 3
 
 
-async def test_flow_picked_after_buyer_refused_continues_to_summary(
+async def test_flow_picked_after_buyer_refused_routes_on(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """BR-R03, D92: a flow picked after [Cambiar] routes on; neither question is asked again."""
@@ -742,8 +807,8 @@ async def test_flow_picked_after_buyer_refused_continues_to_summary(
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
-    assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert row == ("VALIDATING", "BR-R03", WORK_FLOW)
+    assert jobs == [VALIDATE_STEP]
 
 
 async def test_two_brand_store_with_unknown_serie_asks_brand(
@@ -792,13 +857,14 @@ async def test_answered_comercio_skips_the_brand_question(
     )
 
     await _run(db_pool, cfg, invoice_id, directory)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(texts) == 1
     assert "¿De qué local" not in texts[0]
 
@@ -813,13 +879,14 @@ async def test_one_brand_store_is_not_asked(
     invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
 
     await _run(db_pool, cfg, invoice_id, directory)
+    await _run_validate(db_pool, cfg, invoice_id)
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == ["fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(texts) == 1
     assert "¿De qué local" not in texts[0]
 
@@ -928,7 +995,7 @@ async def test_same_reading_from_two_profiles_is_not_a_duplicate(
         second_duplicates = await _texts(conn, second_profile, "BR-E04")
         first_key = await _stored_key(conn, first)
         second_key = await _stored_key(conn, second)
-    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert row == ("VALIDATING", "BR-R02", WORK_FLOW)
     assert first_duplicates == []
     assert second_duplicates == []
     assert first_key is not None
@@ -957,7 +1024,7 @@ async def test_failed_holder_gives_the_key_up(
         row = await _invoice(conn, second)
         first_key = await _stored_key(conn, first)
         second_key = await _stored_key(conn, second)
-    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert row == ("VALIDATING", "BR-R02", WORK_FLOW)
     assert first_key is None
     assert second_key == key
 
@@ -981,7 +1048,7 @@ async def test_rerouted_invoice_is_not_its_own_duplicate(
         row = await _invoice(conn, invoice_id)
         duplicates = await _texts(conn, profile_id, "BR-E04")
         stored = await _stored_key(conn, invoice_id)
-    assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
+    assert row == ("VALIDATING", "BR-R03", WORK_FLOW)
     assert duplicates == []
     assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{reading.value('numero')}"
 
@@ -1002,7 +1069,7 @@ async def test_edited_numero_changes_the_stored_key(
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         stored = await _stored_key(conn, invoice_id)
-    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert row == ("VALIDATING", "BR-R02", WORK_FLOW)
     assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
 
 
@@ -1032,7 +1099,7 @@ async def test_edit_during_routing_wins(
     async with db_pool.connection() as conn:
         row = await _invoice(conn, invoice_id)
         stored = await _stored_key(conn, invoice_id)
-    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert row == ("VALIDATING", "BR-R02", WORK_FLOW)
     assert stored == f"{profile_id}|{OWNER_RUC}|{FACTURA}|F001|{edited.value('numero')}"
 
 

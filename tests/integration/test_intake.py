@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
 
+import httpx
 import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
@@ -27,6 +28,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.teach import TeachSetup
+from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
@@ -217,7 +219,7 @@ def _config(profile_id: str) -> Config:
 
 
 async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, invoice_id: int) -> None:
-    """Run the route handler on ``invoice_id``'s newest route job, as the queue would (D95)."""
+    """Run the route and validate (SUNAT off) handlers on ``invoice_id``, as the queue would (D95, D124)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             "SELECT max(id) FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, ROUTE_STEP)
@@ -234,6 +236,18 @@ async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Confi
     )
     handler = make_route_handler(pool, cfg, StoreDirectory(stores={}, portals={}), compile_rules(cfg.routing))
     await handler(job)
+    async with httpx.AsyncClient() as http:
+        validate = make_validate_handler(pool, http, None, cfg)
+        await validate(
+            Job(
+                id=job_id,
+                invoice_id=invoice_id,
+                step=VALIDATE_STEP,
+                attempts=0,
+                crashes=0,
+                lease_until=datetime.now(UTC),
+            )
+        )
 
 
 async def _state_rule(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:

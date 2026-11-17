@@ -11,6 +11,7 @@ from typing import Any
 from uuid import uuid4
 
 import cv2
+import httpx
 import numpy as np
 import pytest
 import pytest_asyncio
@@ -29,6 +30,7 @@ from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.routing.router import compile_rules
@@ -260,6 +262,15 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             await make_route_handler(db_pool, cfg, StoreDirectory(stores={}, portals={}), rules)(
                 _job(job_id, invoice_id, ROUTE_STEP)
             )
+        async with db_pool.connection() as conn:
+            cur = await conn.execute(
+                "SELECT id FROM jobs WHERE invoice_id = %s AND step = %s", (invoice_id, VALIDATE_STEP)
+            )
+            validate_jobs = [int(row[0]) for row in await cur.fetchall()]
+        async with httpx.AsyncClient() as http:
+            validate = make_validate_handler(db_pool, http, None, cfg)
+            for job_id in validate_jobs:
+                await validate(_job(job_id, invoice_id, VALIDATE_STEP))
 
         fake = FakeChannel()
         await OutboxSender(db_pool, {"whatsapp": fake.transport()}).send_pending()

@@ -70,9 +70,11 @@ from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP
+from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler
 from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.uploads import make_attach_handler
+from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
@@ -85,6 +87,7 @@ from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
 from invoicebot.store.retention import prune
+from invoicebot.sunat import token as sunat
 
 logger = logging.getLogger(__name__)
 
@@ -204,6 +207,13 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing) or ["channel config"])
         yield
         return
+    sunat_secrets = _validation_secrets(cfg, store)
+    if sunat_secrets is not None and not sunat_secrets.enabled:
+        # Fail closed (D124): an enabled API without its secrets must not start, rather
+        # than answer every invoice BR-V04 for a configuration mistake.
+        logger.error("sunat validation disabled: missing %s", sorted(sunat_secrets.missing))
+        yield
+        return
     async with (
         httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http,
         httpx.AsyncClient(
@@ -251,6 +261,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
             ),
         }
+        handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
         if deliver is not None:
             handlers[DELIVER_STEP] = deliver.deliver
@@ -340,6 +351,33 @@ def _load_secrets(settings: Settings) -> SecretStore:
 def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
     """Return the configured WhatsApp channel, if any."""
     return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
+
+
+def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:
+    """Return the SUNAT validez secrets, or None when validation is off (D124).
+
+    A disabled API never reads the secrets. An enabled one still returns its view when
+    keys are missing, so the runtime can refuse to start instead of asking SUNAT with
+    nothing (D124).
+    """
+    if not cfg.sunat.validez_api.enabled:
+        return None
+    return store.scoped(sunat.ADAPTER, set(sunat.SECRETS))
+
+
+def _validation_handlers(
+    cfg: Config, pool: Pool, http: httpx.AsyncClient, secrets: Secrets | None
+) -> dict[str, Handler]:
+    """Return the validation handlers, the recheck one only when SUNAT can be asked (D124).
+
+    ``secrets is None`` means validation is off: the validate step only sends the routed
+    summary and moves the invoice on. A recheck needs the API's credentials, so it is
+    registered only when they are present.
+    """
+    handlers = {VALIDATE_STEP: make_validate_handler(pool, http, secrets, cfg)}
+    if secrets is not None:
+        handlers[SUNAT_RECHECK_STEP] = make_sunat_recheck_handler(pool, http, secrets, cfg)
+    return handlers
 
 
 def _deliver_handlers(

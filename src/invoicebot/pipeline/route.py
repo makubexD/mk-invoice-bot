@@ -1,14 +1,15 @@
-"""Job handler that routes a read invoice through its questions and sends its summary.
+"""Job handler that routes a read invoice through its questions and hands it to validation.
 
 :func:`make_route_handler` builds the handler of the ``route`` job step. In ``ROUTING`` it
 first claims the invoice's natural key (BR-E04, D93), then runs D92's ordered, resumable
 checks over the stored answers: flow (rule match, else BR-R03),
 buyer confidence (BR-R04), reimbursement cap (BR-D06) and brand (BR-R09). The first
 unanswered check moves the invoice to ``CONFIRMING`` with its rule and its question; when
-every check passes the invoice stores its flow, gets one summary, queues its ``fetch`` job
-and waits in ``FETCHING_DOCS`` (S11.13). A refused invoice is cancelled with the rule's
-message. When no routing rule matches the buyer, BR-R03's question is asked and BR-R06's
-gap is raised. The state change, the next job and the outbox row commit together.
+every check passes the invoice stores its flow, queues its ``validate`` job and waits in
+``VALIDATING`` (D124), where that job sends the summary and asks SUNAT. A refused invoice
+is cancelled with the rule's message. When no routing rule matches the buyer, BR-R03's
+question is asked and BR-R06's gap is raised. The state change, the next job and the
+outbox row commit together.
 """
 
 from __future__ import annotations
@@ -29,7 +30,6 @@ from invoicebot.extract.fields import Reading
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
-from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import (
@@ -41,9 +41,9 @@ from invoicebot.pipeline.questions import (
     candidate_flows,
     cap_question,
     flow_question,
-    summary_buttons,
 )
 from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
+from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import (
@@ -63,6 +63,7 @@ from invoicebot.rules.messages_es import (
     tipos_desc,
 )
 from invoicebot.sinks.folders import comercio_for
+from invoicebot.states import VALIDATING
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import (
@@ -86,8 +87,8 @@ UNROUTED_BUYER = "UNROUTED_BUYER"
 NATURAL_KEY_FIELDS = ("ruc_emisor", "tipo", "serie", "numero")
 #: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
 ROUTING_STATE = "ROUTING"
-#: Where a routed invoice waits; its ``fetch`` job is queued with this state change.
-ROUTED_STATE = "FETCHING_DOCS"
+#: Where a routed invoice waits; its ``validate`` job is queued with this state change (D124).
+ROUTED_STATE = VALIDATING
 #: Where an invoice waits for an answer to one of D92's questions.
 CONFIRMING_STATE = "CONFIRMING"
 
@@ -393,7 +394,7 @@ async def _write(
         await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text)
     elif step.kind == "route":
-        await _routed(conn, invoice, invoice_id, step.rule_id, step.text)
+        await _routed(conn, invoice_id, step.rule_id)
     else:
         if step.choices:
             await merge_flow_data(conn, invoice_id, {"choices": list(step.choices), "menu": step.menu})
@@ -477,17 +478,14 @@ async def _reply(
     )
 
 
-async def _routed(
-    conn: AsyncConnection[Any],
-    invoice: InvoiceHead,
-    invoice_id: int,
-    rule_id: str,
-    text: str,
-) -> None:
-    """Queue the fetch job and move the invoice to ``FETCHING_DOCS`` with its summary (R-3.4)."""
+async def _routed(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> None:
+    """Queue the validate job and move the invoice to ``VALIDATING`` (D124).
+
+    The validate step sends the routed summary and asks SUNAT, so routing no longer
+    writes an outbox row of its own.
+    """
     await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING_STATE)
-    await enqueue(conn, invoice_id, FETCH_STEP)
-    await _reply(conn, invoice, invoice_id, rule_id, text, summary_buttons(invoice_id))
+    await enqueue(conn, invoice_id, VALIDATE_STEP)
 
 
 def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:

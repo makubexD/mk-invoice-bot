@@ -104,6 +104,17 @@ forbidden_modules =
     invoicebot.pipeline
     invoicebot.queue
 
+[importlinter:contract:sunat-is-low]
+name = SUNAT never imports the layers that use it (D124)
+type = forbidden
+source_modules =
+    invoicebot.sunat
+forbidden_modules =
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.api
+    invoicebot.events
+
 [importlinter:contract:pipeline-is-channel-neutral]
 name = The pipeline never names the WhatsApp adapter
 type = forbidden
