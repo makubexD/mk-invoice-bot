@@ -36,9 +36,9 @@ class FakeTokens:
 
 
 @contextlib.asynccontextmanager
-async def _make_sheets(handler: Handler) -> AsyncIterator[GoogleSheets]:
+async def _make_sheets(handler: Handler, *, max_rows: int = MAX_ROWS) -> AsyncIterator[GoogleSheets]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        yield GoogleSheets(http, FakeTokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
+        yield GoogleSheets(http, FakeTokens(), TIMEOUT_S, account=ACCOUNT, max_rows=max_rows)
 
 
 def _values_path(a1: str) -> str:
@@ -78,6 +78,29 @@ async def test_keys_keeps_the_first_row_of_a_repeated_key() -> None:
     values = [["Clave"], ["F001-1"], ["F001-1"]]
 
     async with _make_sheets(lambda request: httpx.Response(200, json={"values": values})) as sheets:
+        keys = await sheets.keys(SPREADSHEET_ID, TAB)
+
+    assert keys == {"F001-1": 2}
+
+
+async def test_keys_raises_when_the_read_fills_the_max_rows_range() -> None:
+    """R-6.3: a read that fills max_rows means a key below it would be missed, so it is an error."""
+    values = [["Clave"], ["F001-1"], ["F001-2"]]
+
+    async with _make_sheets(
+        lambda request: httpx.Response(200, json={"values": values}), max_rows=3
+    ) as sheets:
+        with pytest.raises(GoogleError):
+            await sheets.keys(SPREADSHEET_ID, TAB)
+
+
+async def test_keys_reads_a_sheet_short_of_the_max_rows_range() -> None:
+    """R-6.3: a read that returns fewer rows than max_rows still yields its keys."""
+    values = [["Clave"], ["F001-1"]]
+
+    async with _make_sheets(
+        lambda request: httpx.Response(200, json={"values": values}), max_rows=3
+    ) as sheets:
         keys = await sheets.keys(SPREADSHEET_ID, TAB)
 
     assert keys == {"F001-1": 2}

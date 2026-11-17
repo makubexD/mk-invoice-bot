@@ -154,6 +154,11 @@ class GoogleSheets:
 
         Row 1 is the header and is skipped, an empty or non-text cell is skipped,
         and the first row a key appears in wins.
+
+        Raises:
+            GoogleError: The read fills the whole range (``max_rows`` rows or
+                more), so a key below the last row would be missed and appended
+                again.
         """
         response = await self._http.get(
             self._values_url(spreadsheet_id, _a1(tab, f"A1:A{self._max_rows}")),
@@ -163,6 +168,8 @@ class GoogleSheets:
         raise_google_error(response, self._account)
         values = json_object(response).get("values", [])
         if not isinstance(values, list):
+            raise GoogleError()
+        if len(values) >= self._max_rows:
             raise GoogleError()
         keys: dict[str, int] = {}
         for row_number, row in enumerate(values[1:], start=2):
