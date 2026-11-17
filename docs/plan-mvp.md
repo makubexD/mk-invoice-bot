@@ -170,6 +170,7 @@ Each item goes into the named phase's plan.
 ## Carried over from `flow-a`
 
 - **`flow-a` live check (`docs/plan-mvp-flow-a.md` § "Deferred: live check"):** Google OAuth client in production, `auth-google` and `google-setup`, an M6 run through Drive and Sheets, a Gmail `email_inbox` fetch, S0.4 (`config/sunat_sol.yaml` stays `todo` and out of the default chain if SOL gives no XML) and BR-D01; it records M6.
+- **`ops`:** `auth-google` saves the token of whichever Google user signed in; request `openid email`, compare the address with one set per account in config and refuse a mismatch (py-security-auditor, 2026-11-17).
 
 ## Known drift between code and specs
 
