@@ -349,10 +349,12 @@ class OutboxSender:
                 """,
                 {"attempts": attempts, "error": failure.error, "id": row.id},
             )
+            permanent = " (permanent)" if failure.permanent else ""
             logger.error(
-                "outbox row %d on channel %s is dead after %d attempts: %s",
+                "outbox row %d on channel %s is dead%s after %d attempts: %s",
                 row.id,
                 row.channel,
+                permanent,
                 attempts,
                 failure.error,
             )

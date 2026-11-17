@@ -1,5 +1,6 @@
 """Integration tests for the outbox: transactional writes and delivery (R-1.8, R-11.5)."""
 
+import logging
 from datetime import timedelta
 from typing import Any
 
@@ -222,8 +223,10 @@ async def test_failure_doubles_the_retry_delay(
 
 async def test_row_becomes_dead_after_max_attempts(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """R-11.5: the row is marked dead at max_attempts and is never picked again."""
+    caplog.set_level(logging.ERROR)
     calls = 0
 
     async def transport(row: OutboxRow) -> None:
@@ -253,6 +256,7 @@ async def test_row_becomes_dead_after_max_attempts(
     assert row is not None
     assert row[0] == "dead"
     assert row[1] == 3
+    assert "(permanent)" not in caplog.text
 
     assert await sender.send_pending() == 0
     assert calls == 3
@@ -352,6 +356,26 @@ async def test_permanent_failure_marks_the_row_dead_on_the_first_attempt(
 
     assert await sender.send_pending() == 0
     assert calls == 1
+
+
+async def test_a_permanent_dead_row_logs_as_permanent(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-9.16: a permanent failure logs its dead-row line marked as permanent."""
+    caplog.set_level(logging.ERROR)
+
+    async def transport(row: OutboxRow) -> None:
+        raise PermanentSendError("no number")
+
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        await add(conn, "whatsapp", "+51900000006", {"text": "hola"})
+
+    sender = OutboxSender(db_pool, {"whatsapp": transport}, max_attempts=3)
+    assert await sender.send_pending() == 0
+
+    assert "is dead (permanent) after 1 attempts" in caplog.text
 
 
 async def test_transient_failure_still_reschedules_the_row(
