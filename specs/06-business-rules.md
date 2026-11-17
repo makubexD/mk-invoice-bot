@@ -19,13 +19,14 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 |---|---|---|---|
 | BR-R01 | Buyer RUC = `owner.ruc` | Flow A (`personal_google`), silently | *(shown inside the summary)* `➡️ {flow.label}` |
 | BR-R02 | Buyer RUC = `work.ruc` | Flow B (`work_microsoft`), silently | *(inside the summary)* `➡️ {flow.label}` |
-| BR-R03 | Buyer is missing, is a DNI, or is a RUC that matches no rule, and `routing.unmatched: ask` | `CONFIRMING`; ask with one button per candidate flow (its `label`) plus **Cancelar** (WhatsApp's maximum of 3; a third flow needs a list message) | `Este comprobante está a nombre {buyer_desc}. ¿En qué flujo lo registro?` |
+| BR-R03 | Buyer is missing, is a DNI that matches no rule, or is a RUC that matches no rule (D143), and `routing.unmatched: ask` | `CONFIRMING`; ask with one button per candidate flow (its `label`) plus **Cancelar** (WhatsApp's maximum of 3; a third flow needs a list message) | `Este comprobante está a nombre {buyer_desc}. ¿En qué flujo lo registro?` |
 | BR-R04 | The buyer was read by OCR with confidence below `review_threshold` | `CONFIRMING`, with the detected flow pre-selected | `No pude leer bien el RUC del cliente ({num_doc_adq}?). Lo registro en {flow.label}. ¿Correcto?` [Sí] [Cambiar] [Cancelar] |
 | BR-R05 | The routed flow isn't allowed for the sender's profile | `CANCELLED` | `No tienes permiso para registrar comprobantes de {flow.label}. Pídele al administrador que te habilite.` |
 | BR-R06 | The same unknown buyer RUC is seen 3 or more times in 30 days | Raises gap `UNROUTED_BUYER`, then continues as BR-R03 | *(no extra chat message; the admin is alerted)* |
 | BR-R07 | No rule matches and `routing.unmatched: reject` | `CANCELLED` | `Este comprobante está a nombre {buyer_desc}, que no corresponde a ninguno de tus flujos, así que no lo proceso.` |
 | BR-R08 | The routed flow doesn't accept the invoice's `tipo` (`accepted_tipos`, D53) | `CANCELLED` | `Este comprobante es {tipo_desc}, y {flow.label} solo acepta {accepted_desc}. No lo proceso.` |
 | BR-R09 | The store has several brands and no serie prefix matches (R-7.1) | `CONFIRMING`; one button per brand, or a list message above 3 brands | `¿De qué local es esta factura de {razon_social}?` |
+| BR-R10 | Buyer DNI = `owner.dni` (`tipo_doc_adq` 1) (D143) | Flow `personal_dni`, silently | *(inside the summary)* `➡️ {flow.label}` |
 
 `{buyer_desc}`: `del RUC 20… (Razón social)`, `del DNI 4…`, or `de ningún cliente (boleta sin datos)`.
 
@@ -114,6 +115,7 @@ BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sen
 | BR-D15 | An uploaded pdf does not start with `%PDF-`, after an optional UTF-8 BOM and leading whitespace (D103) | Not stored; recorded as rejected | `El archivo que enviaste no es un PDF válido; no lo guardé.` |
 | BR-D16 | Flow A: Drive and Sheets are written and the flow's documents are all there (the flow A completion message, R-8.1, D133) | The invoice is `DONE`; the `completion` template outside the window | `✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.` `Fila: {link_row}` `Carpeta: {link_folder}` |
 | BR-D17 | Flow A: Drive and Sheets are written, but the desired PDF is still missing (R-8.1 "docs pending", D133) | The invoice is `DONE`; the `completion` template outside the window | `⚠️ Guardado {serie}-{numero} de {razon_social}, S/ {total}, pero aún sin PDF; lo agrego cuando llegue.` `Fila: {link_row}` `Carpeta: {link_folder}` |
+| BR-D18 | A Sheets-only flow: the row is written (no Drive sink, D144) | The invoice is `DONE`; the `completion` template outside the window | `✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.` `Fila: {link_row}` |
 
 - BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, newest first, joined by `, `; at most 10 items, then `, …` when there are more (D140).
 
