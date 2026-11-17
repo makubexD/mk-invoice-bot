@@ -66,10 +66,14 @@ MINUTES_42 = 42
 _FILE_BYTES: dict[Literal["pdf", "xml"], bytes] = {"pdf": PDF_BYTES, "xml": XML_BYTES}
 
 
-def _config(fetchers: Sequence[str] = ("portal_registry",)) -> Config:
-    """Return the example config with the work flow using ``fetchers`` and requiring both documents."""
+def _config(
+    fetchers: Sequence[str] = ("portal_registry",), *, required_docs: Sequence[str] = ("pdf", "xml")
+) -> Config:
+    """Return the example config with the work flow using ``fetchers`` and requiring ``required_docs``."""
     cfg = load_config(EXAMPLE)
-    flow = cfg.flows[FLOW].model_copy(update={"fetchers": list(fetchers), "required_docs": ["pdf", "xml"]})
+    flow = cfg.flows[FLOW].model_copy(
+        update={"fetchers": list(fetchers), "required_docs": list(required_docs)}
+    )
     return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
@@ -932,6 +936,80 @@ async def test_invoice_outside_fetching_docs_is_left_alone(
     assert attempts == []
     assert jobs == []
     assert outbox == []
+
+
+async def test_flow_with_nothing_to_fetch_moves_to_delivering(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D144: a flow with no fetchers and no required documents moves to DELIVERING with one deliver job."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.OK)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path, cfg=_config((), required_docs=()))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        files = await _files(conn, invoice_id)
+        fetch_jobs = await _fetch_jobs(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert invoice == ("DELIVERING", None, FLOW)
+    assert fetcher.calls == 0
+    assert attempts == []
+    assert files == []
+    assert fetch_jobs == []
+    assert len(deliver_jobs) == 1
+
+
+async def test_flow_with_nothing_to_fetch_but_a_required_document_ends_manual_required(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D144: a flow with no fetchers but a required document still ends in MANUAL_REQUIRED with BR-F07."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.OK)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path, cfg=_config((), required_docs=("pdf",)))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
+    assert fetcher.calls == 0
+    assert attempts == []
+    assert deliver_jobs == []
+    assert len(outbox) == 1
+    text, rule_id = outbox[0]
+    assert rule_id == "BR-F07"
+    assert text.startswith(f"❗ No pude obtener el XML/PDF de {SERIE}-{NUMERO}.")
+
+
+async def test_superseded_nothing_to_fetch_job_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D144: a superseded job on a nothing-to-fetch flow moves no invoice and enqueues nothing."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        job_id = await enqueue(conn, invoice_id, FETCH_STEP)
+        await enqueue(conn, invoice_id, FETCH_STEP)
+    fetcher = FakeFetcher(FetchReason.OK)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path, job_id=job_id, cfg=_config((), required_docs=()))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        fetch_jobs = await _fetch_jobs(conn, invoice_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert invoice == ("FETCHING_DOCS", None, FLOW)
+    assert fetcher.calls == 0
+    assert attempts == []
+    assert len(fetch_jobs) == 2  # the two queued jobs are untouched
+    assert deliver_jobs == []
 
 
 async def test_flow_registry_missing_a_listed_fetcher_skips_it(

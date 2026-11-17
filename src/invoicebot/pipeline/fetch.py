@@ -6,6 +6,7 @@ handler runs the chosen fetcher and, in one transaction, records the attempt and
 stores the files with the deliver job, schedules the next try, or moves the invoice on.
 Each fetcher retries on the flow's schedule: the inbox's, its portal's, or the default.
 A chain with nothing left moves the invoice to ``MANUAL_REQUIRED`` with BR-F07's message.
+A flow with no fetchers and no required documents goes straight to ``DELIVERING`` (D144).
 """
 
 from __future__ import annotations
@@ -151,6 +152,21 @@ def make_fetch_handler(
         if flow is None:
             raise RuntimeError(f"invoice {job.invoice_id} has unknown flow {flow_name!r}")
         registry = registries.get(flow_name, {})
+        if _needs_no_fetch(flow):
+            await _nothing_to_fetch(pool, job)
+            logger.info(
+                "step done",
+                extra={
+                    "step": FETCH_STEP,
+                    "invoice_id": job.invoice_id,
+                    "fetcher": None,
+                    "portal_key": None,
+                    "reason": None,
+                    "outcome": "nothing_to_fetch",
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                },
+            )
+            return
 
         inputs = _Inputs(
             pool=pool,
@@ -188,6 +204,18 @@ def make_fetch_handler(
         )
 
     return handle
+
+
+def _needs_no_fetch(flow: Flow) -> bool:
+    """Return True when the flow lists no fetchers and requires no documents (D144)."""
+    return not flow.fetchers and not flow.required_docs
+
+
+async def _nothing_to_fetch(pool: Pool, job: Job) -> None:
+    """Move an invoice whose flow has nothing to fetch to ``DELIVERING`` with its deliver job (D144)."""
+    async with pool.connection() as conn, conn.transaction():
+        await set_state(conn, job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
+        await enqueue(conn, job.invoice_id, DELIVER_STEP)
 
 
 async def _run(
