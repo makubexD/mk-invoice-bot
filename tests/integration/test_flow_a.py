@@ -44,7 +44,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 FLOW = "personal_google"
 ACCOUNT = "owner"
-SPREADSHEET_ID = "SHEET_ID"
+SPREADSHEET_ID = "SPREADSHEET_ID"
 TAB = "Compras"
 SHEET_ID = 123
 TIMEOUT_S = 5.0
@@ -208,7 +208,9 @@ async def _dispatch(
     async with httpx.AsyncClient(transport=httpx.MockTransport(google.handler)) as http:
         drive = GoogleDrive(http, tokens, TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, tokens, TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
-        deliver = make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drive, sheets, cfg.profiles))
+        deliver = make_google_deliver_handler(
+            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+        )
         yield make_deliver_dispatch(pool, {FLOW: deliver})
 
 

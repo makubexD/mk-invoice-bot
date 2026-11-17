@@ -43,7 +43,6 @@ from invoicebot.config.models import (
     Flow,
     FlowInbox,
     GoogleDriveSink,
-    GoogleSheetsSink,
     Mail,
     MailerSink,
     OneDriveFolderSink,
@@ -538,34 +537,24 @@ def _google_deliver_handler(
     ``google`` config is a configuration mistake, so it fails at startup rather than on
     the first delivery (D128).
     """
-    sinks = _google_sinks(cfg)
-    if sinks is None:
+    has_drive_sink = any(
+        isinstance(sink, GoogleDriveSink) for flow in cfg.flows.values() for sink in flow.sinks
+    )
+    if not has_drive_sink:
         return None
     if cfg.google is None:
         raise ValueError("a google_drive sink needs the google config (D128)")
-    drive_sink, sheets_sink = sinks
-    drive = GoogleDrive(http, tokens[drive_sink.account], cfg.google.timeout_s, account=drive_sink.account)
-    sheets = GoogleSheets(
-        http,
-        tokens[sheets_sink.account],
-        cfg.google.timeout_s,
-        account=sheets_sink.account,
-        max_rows=cfg.google.max_rows,
-    )
-    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drive, sheets, cfg.profiles))
-
-
-def _google_sinks(cfg: Config) -> tuple[GoogleDriveSink, GoogleSheetsSink] | None:
-    """Return the first flow's Drive sink and its Sheets sink, or None without a Drive sink (R-6.1)."""
-    for flow in cfg.flows.values():
-        drive = next((sink for sink in flow.sinks if isinstance(sink, GoogleDriveSink)), None)
-        if drive is None:
-            continue
-        sheets = next((sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink)), None)
-        if sheets is None:
-            raise ValueError("a flow with a google_drive sink needs a google_sheets sink (R-6.2)")
-        return drive, sheets
-    return None
+    drives = {
+        account: GoogleDrive(http, tokens[account], cfg.google.timeout_s, account=account)
+        for account in tokens
+    }
+    sheets = {
+        account: GoogleSheets(
+            http, tokens[account], cfg.google.timeout_s, account=account, max_rows=cfg.google.max_rows
+        )
+        for account in tokens
+    }
+    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles))
 
 
 def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str, Handler]:

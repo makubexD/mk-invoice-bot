@@ -66,12 +66,12 @@ AUTH_PROVIDER_SLUG = GOOGLE
 
 @dataclass(frozen=True)
 class GoogleDeliverContext:
-    """The flow A delivery handler's dependencies (D129)."""
+    """The flow A delivery handler's dependencies, one Drive and Sheets per account (D129)."""
 
     pool: Pool
     cfg: Config
-    drive: GoogleDrive
-    sheets: GoogleSheets
+    drives: Mapping[str, GoogleDrive]
+    sheets: Mapping[str, GoogleSheets]
     admins: Mapping[str, Profile]
 
 
@@ -112,12 +112,6 @@ def make_google_deliver_handler(context: GoogleDeliverContext) -> Handler:
         if invoice is None:
             return
         sinks = _sinks(invoice.flow)
-        if sinks is None:
-            logger.info(
-                "step skipped",
-                extra={"step": DELIVER_STEP, "invoice_id": job.invoice_id, "reason": "no_drive_sink"},
-            )
-            return
         try:
             values = await _run_sinks(context, invoice, sinks)
         except AuthRequired as required:
@@ -172,19 +166,10 @@ async def _load(context: GoogleDeliverContext, job: Job) -> _Invoice | None:
     )
 
 
-def _sinks(flow: Flow) -> _Sinks | None:
-    """Return the flow's Drive and Sheets sinks, or None without a Drive sink (R-6.1, R-6.2)."""
-    drive: GoogleDriveSink | None = None
-    sheets: GoogleSheetsSink | None = None
-    for sink in flow.sinks:
-        if isinstance(sink, GoogleDriveSink):
-            drive = sink
-        elif isinstance(sink, GoogleSheetsSink):
-            sheets = sink
-    if drive is None:
-        return None
-    if sheets is None:
-        raise RuntimeError("a flow with a google_drive sink needs a google_sheets sink")
+def _sinks(flow: Flow) -> _Sinks:
+    """Return the flow's Drive and Sheets sinks (R-6.1, R-6.2)."""
+    drive = next(sink for sink in flow.sinks if isinstance(sink, GoogleDriveSink))
+    sheets = next(sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink))
     return _Sinks(drive=drive, sheets=sheets)
 
 
@@ -199,8 +184,10 @@ async def _run_sinks(context: GoogleDeliverContext, invoice: _Invoice, sinks: _S
     if key is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has no natural key")
     values = dict(invoice.base)
-    values.update(await file_to_drive(sinks.drive, context.drive, invoice.files, values))
-    values.update(await upsert_row(sinks.sheets, context.sheets, key, values))
+    values.update(
+        await file_to_drive(sinks.drive, context.drives[sinks.drive.account], invoice.files, values)
+    )
+    values.update(await upsert_row(sinks.sheets, context.sheets[sinks.sheets.account], key, values))
     return values
 
 

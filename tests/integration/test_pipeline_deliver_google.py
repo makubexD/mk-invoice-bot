@@ -50,9 +50,11 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 FLOW = "personal_google"
+SECOND_FLOW = "invoices_google"
 PROFILE = "yo"
 ACCOUNT = "owner"
-SPREADSHEET_ID = "SHEET_ID"
+INVOICES_ACCOUNT = "invoices_a"
+SPREADSHEET_ID = "SPREADSHEET_ID"
 TAB = "Compras"
 SHEET_ID = 123
 TIMEOUT_S = 5.0
@@ -265,6 +267,24 @@ def _config(profile_id: str) -> Config:
     return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles[PROFILE]}})
 
 
+def _two_account_flows(profile_id: str) -> Config:
+    """Return two flow A flows whose Drive and Sheets sinks file on different accounts (D128)."""
+    cfg = load_config(EXAMPLE)
+    first = cfg.flows[FLOW]
+    second = first.model_copy(
+        update={
+            "label": "Facturas (Google) — segunda cuenta",
+            "sinks": [sink.model_copy(update={"account": INVOICES_ACCOUNT}) for sink in first.sinks],
+        }
+    )
+    return cfg.model_copy(
+        update={
+            "flows": {FLOW: first, SECOND_FLOW: second},
+            "profiles": {profile_id: cfg.profiles[PROFILE]},
+        }
+    )
+
+
 def _config_with_admins(cfg: Config, profile_id: str, admin_ids: list[str]) -> Config:
     """Return cfg whose sender is not an admin and which has one admin profile per id (BR-D01)."""
     sender = cfg.profiles[profile_id].model_copy(update={"admin": False})
@@ -293,6 +313,7 @@ async def _delivering_invoice(
     *,
     state: str = "DELIVERING",
     pdf: bool = True,
+    flow: str = FLOW,
 ) -> _Seeded:
     """Create a flow A invoice with a reading, a photo, an XML and (unless ``pdf=False``) a PDF."""
     photo_path = tmp_path / f"{uuid4().hex}.jpg"
@@ -305,7 +326,7 @@ async def _delivering_invoice(
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await save_reading(conn, invoice_id, _reading())
-        await set_flow(conn, invoice_id, FLOW)
+        await set_flow(conn, invoice_id, flow)
         await set_state(conn, invoice_id, state)
         for kind, path in (("photo", photo_path), ("pdf", pdf_path), ("xml", xml_path)):
             if path is None:
@@ -333,7 +354,9 @@ async def _handler(
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
         drive = GoogleDrive(http, _Tokens(), TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
-        yield make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drive, sheets, cfg.profiles))
+        yield make_google_deliver_handler(
+            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+        )
 
 
 async def _invoice_state(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -404,6 +427,47 @@ async def test_delivering_invoice_files_drive_and_appends_its_row(
     assert len(fake.appended) == 1
     assert fake.appended[0][0] == key
     assert outbox == [(expected, "BR-D16", [])]
+
+
+async def test_each_flow_files_through_its_own_account(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-6.1, D128: an invoice files through its own account's Drive and Sheets only."""
+    profile_id = f"google-own-account-{uuid4().hex}"
+    cfg = _two_account_flows(profile_id)
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id, flow=SECOND_FLOW)
+    owner_fake = FakeGoogle()
+    invoices_fake = FakeGoogle()
+
+    async with (
+        httpx.AsyncClient(transport=httpx.MockTransport(owner_fake.handler)) as owner_http,
+        httpx.AsyncClient(transport=httpx.MockTransport(invoices_fake.handler)) as invoices_http,
+    ):
+        drives = {
+            ACCOUNT: GoogleDrive(owner_http, _Tokens(), TIMEOUT_S, account=ACCOUNT),
+            INVOICES_ACCOUNT: GoogleDrive(invoices_http, _Tokens(), TIMEOUT_S, account=INVOICES_ACCOUNT),
+        }
+        sheets = {
+            ACCOUNT: GoogleSheets(owner_http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS),
+            INVOICES_ACCOUNT: GoogleSheets(
+                invoices_http, _Tokens(), TIMEOUT_S, account=INVOICES_ACCOUNT, max_rows=MAX_ROWS
+            ),
+        }
+        handler = make_google_deliver_handler(
+            GoogleDeliverContext(db_pool, cfg, drives, sheets, cfg.profiles)
+        )
+        await handler(_job(seeded.invoice_id))
+
+    assert [uploaded[1] for uploaded in invoices_fake.uploaded] == [
+        f"{FILE_NAME}.jpg",
+        f"{FILE_NAME}.pdf",
+        f"{FILE_NAME}.xml",
+    ]
+    assert len(invoices_fake.appended) == 1
+    assert owner_fake.created_folders == []
+    assert owner_fake.uploaded == []
+    assert owner_fake.appended == []
+    assert owner_fake.updated == []
 
 
 async def test_a_retry_reuses_drive_files_and_updates_the_row(
@@ -527,7 +591,9 @@ async def test_a_cancel_during_the_google_call_is_not_overwritten_by_the_park(
     async with httpx.AsyncClient(transport=httpx.MockTransport(cancel_then_require_auth)) as http:
         drive = GoogleDrive(http, _Tokens(), TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
-        handler = make_google_deliver_handler(GoogleDeliverContext(db_pool, cfg, drive, sheets, cfg.profiles))
+        handler = make_google_deliver_handler(
+            GoogleDeliverContext(db_pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+        )
         with pytest.raises(StateMoved):
             await handler(_job(seeded.invoice_id))
 
