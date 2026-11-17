@@ -25,7 +25,7 @@ Out of scope here: the Telegram media port (waits for a second channel), everyth
 Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `specs/04-tasks.md`, `docs/plan-mvp.md`, `src/invoicebot/rules/messages_es.py`.
 
 - Spec 05: rows D136 to D140 with the text from "Design choices"; D118 notes "amended by D137".
-- Spec 06 and `messages_es.py` together: BR-D14's `{invoices}` note says at most 10 items, newest first, then `…`; BR-E07's text uses `{image_mb}` and `{pdf_mb}` (D140); the admin command texts of D139: `GAPS_EMPTY` `No hay brechas abiertas.`, `GAPS_HEADER` `Brechas abiertas:`, a line `{fingerprint} · {kind} · {subject} · {count}×{issue}` (`{issue}` is ` · <url>` or empty), `GAP_IGNORED` `Listo, ignoro la brecha {fingerprint}.`, `GAP_UNKNOWN` `No encuentro la brecha {fingerprint}.`, and the help lines `HELP_GAPS`, `HELP_GAP`.
+- Spec 06 and `messages_es.py` together: BR-D14's `{invoices}` note says at most 10 items, newest first, then `…` (D140; BR-E07's new text lands with its callers in step 20); the admin command texts of D139: `GAPS_EMPTY` `No hay brechas abiertas.`, `GAPS_HEADER` `Brechas abiertas:`, a line `{fingerprint} · {kind} · {subject} · {count}×{issue}` (`{issue}` is ` · <url>` or empty), `GAP_IGNORED` `Listo, ignoro la brecha {fingerprint}.`, `GAP_UNKNOWN` `No encuentro la brecha {fingerprint}.`, and the help lines `HELP_GAPS`, `HELP_GAP`.
 - Spec 04: S8.9 cites D139.
 - Roadmap: row 9 is replaced by rows 9a to 9d (D136) with their backlog and owner needs; the `ops` leftovers are tagged with the sub-phase that takes them (9a for the ones in this plan; 9c for the helper user and network, cgroup caps, Chromium sandbox, helper disk cap, browser kill test and the Compose password; the Telegram item stays open).
 
@@ -186,16 +186,25 @@ Files: `src/invoicebot/store/invoices.py`, `src/invoicebot/pipeline/sunat_rechec
 
 Test: `uv run pytest -q tests/integration/test_pipeline_sunat_recheck.py`.
 
-## Step 19: BR-E07 quotes each cap `[worker]`
+## Step 19: BR-E07's callers know both caps `[worker]`
 
-Files: `src/invoicebot/pipeline/intake.py`, `src/invoicebot/app.py`, `tests/integration/test_intake.py`.
+Files: `src/invoicebot/pipeline/intake.py`, `src/invoicebot/pipeline/handlers.py`, `src/invoicebot/app.py`.
 
-- Replace the single `media_max_mb` int passed to intake with the media limits (`limits.media.max_bytes`); `_refuse_lone_xml` renders `image_mb` and `pdf_mb` (D140). Follow the value through the webhook deps (grep `media_max_mb`); if that touches a fourth file, it is the deps dataclass only.
-- Tests: BR-E07 with image cap 10 MB and PDF cap 20 MB the refusal says `hasta 10 MB` for the photo and `hasta 20 MB` for the PDF.
+- Replace the single `media_max_mb` int passed to intake with the media byte limits (`limits.media.max_bytes`); follow it through the webhook deps (grep `media_max_mb`; the deps dataclass may be a fourth file). Both BR-E07 callers (`intake._refuse_lone_xml` and the media-rejection path in `handlers.py`) pass `image_mb` and `pdf_mb` (each cap `// MEGABYTE`) besides today's `max_mb`, so the current text still renders and step 20's text can switch over. The text does not change here.
+- Tests in `tests/integration/test_intake.py`: BR-E07 the lone-XML refusal still renders today's text with the image cap. Existing handler and webhook tests still pass.
 
-Test: `uv run pytest -q tests/integration/test_intake.py tests/integration/test_webhook.py`.
+Test: `uv run pytest -q tests/integration/test_intake.py tests/integration/test_webhook.py tests/integration/test_pipeline_handlers.py`.
 
-## Step 20: Google account emails in config `[worker]`
+## Step 20: BR-E07 quotes each cap `[worker:low]`
+
+Files: `specs/06-business-rules.md`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/intake.py`, `src/invoicebot/pipeline/handlers.py`, `tests/integration/test_intake.py`.
+
+- Spec 06 and `messages_es.py` together: BR-E07 becomes `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG, hasta {image_mb} MB) o el PDF del comprobante (hasta {pdf_mb} MB).` (D140). Drop the `max_mb` argument from both callers; `handlers._max_mb` goes if nothing else uses it.
+- Tests: BR-E07 with image cap 10 MB and PDF cap 20 MB the lone-XML refusal says `hasta 10 MB` for the photo and `hasta 20 MB` for the PDF; the handler rejection tests assert the new text (update their expected strings, not what they check).
+
+Test: `uv run pytest -q tests/unit/test_rules_parity.py tests/integration/test_intake.py tests/integration/test_pipeline_handlers.py`.
+
+## Step 21: Google account emails in config `[worker]`
 
 Files: `src/invoicebot/config/models.py`, `config/example.yaml`, `tests/unit/test_config_models.py`.
 
@@ -205,7 +214,7 @@ Files: `src/invoicebot/config/models.py`, `config/example.yaml`, `tests/unit/tes
 
 Test: `uv run pytest -q tests/unit/test_config_models.py && uv run python scripts/check_config.py config/example.yaml`.
 
-## Step 21: `auth-google` refuses the wrong Google user `[worker]`
+## Step 22: `auth-google` refuses the wrong Google user `[worker]`
 
 Files: `src/invoicebot/auth/providers.py`, `src/invoicebot/cli.py`, `tests/integration/test_cli_auth_google.py`.
 
@@ -215,7 +224,7 @@ Files: `src/invoicebot/auth/providers.py`, `src/invoicebot/cli.py`, `tests/integ
 
 Test: `uv run pytest -q tests/integration/test_cli_auth_google.py tests/unit/test_auth_google_consent.py`.
 
-## Step 22: The loopback listener waits for its own `state` `[worker]`
+## Step 23: The loopback listener waits for its own `state` `[worker]`
 
 Files: `src/invoicebot/cli.py`, `tests/integration/test_cli_auth_google.py`.
 
@@ -224,7 +233,7 @@ Files: `src/invoicebot/cli.py`, `tests/integration/test_cli_auth_google.py`.
 
 Test: `uv run pytest -q tests/integration/test_cli_auth_google.py`.
 
-## Step 23: Detect a rewritten Google token file by more than its mtime `[worker:low]`
+## Step 24: Detect a rewritten Google token file by more than its mtime `[worker:low]`
 
 Files: `src/invoicebot/auth/google_oauth.py`, `tests/unit/test_auth_google_oauth.py`.
 
@@ -233,7 +242,7 @@ Files: `src/invoicebot/auth/google_oauth.py`, `tests/unit/test_auth_google_oauth
 
 Test: `uv run pytest -q tests/unit/test_auth_google_oauth.py`.
 
-## Step 24: Test that Chromium sends loopback through the guard `[worker]`
+## Step 25: Test that Chromium sends loopback through the guard `[worker]`
 
 Files: `tests/integration/test_browser_proxy.py`.
 
@@ -241,7 +250,7 @@ Files: `tests/integration/test_browser_proxy.py`.
 
 Test: `uv run pytest -q tests/integration/test_browser_proxy.py`.
 
-## Step 25: Store queries for the gap commands `[worker]`
+## Step 26: Store queries for the gap commands `[worker]`
 
 Files: `src/invoicebot/store/gaps.py`, `tests/integration/test_store_gaps.py`.
 
@@ -250,7 +259,7 @@ Files: `src/invoicebot/store/gaps.py`, `tests/integration/test_store_gaps.py`.
 
 Test: `uv run pytest -q tests/integration/test_store_gaps.py`.
 
-## Step 26: `/gaps` and `/gap ignorar` `[worker]`
+## Step 27: `/gaps` and `/gap ignorar` `[worker]`
 
 Files: `src/invoicebot/pipeline/commands.py`, `tests/integration/test_commands.py`.
 
@@ -260,7 +269,7 @@ Files: `src/invoicebot/pipeline/commands.py`, `tests/integration/test_commands.p
 
 Test: `uv run pytest -q tests/integration/test_commands.py`.
 
-## Step 27: Daily GitHub App health check `[worker]`
+## Step 28: Daily GitHub App health check `[worker]`
 
 Files: `src/invoicebot/app.py`, `tests/unit/test_app_wiring.py`, `tests/integration/test_ops_daily.py`.
 
@@ -269,7 +278,7 @@ Files: `src/invoicebot/app.py`, `tests/unit/test_app_wiring.py`, `tests/integrat
 
 Test: `uv run pytest -q tests/unit/test_app_wiring.py tests/integration/test_ops_daily.py`.
 
-## Step 28: Close the leftovers `[inline: roadmap text]`
+## Step 29: Close the leftovers `[inline: roadmap text]`
 
 Files: `docs/plan-mvp.md`.
 
