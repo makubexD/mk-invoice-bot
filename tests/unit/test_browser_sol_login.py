@@ -41,7 +41,7 @@ class FakeRequest:
 
 
 class FakeRoute:
-    """A routed request that records whether the guard aborted or continued it."""
+    """A routed request that records whether the guard aborted it or passed it on."""
 
     def __init__(self, url: str) -> None:
         self.request = FakeRequest(url)
@@ -50,8 +50,8 @@ class FakeRoute:
     async def abort(self) -> None:
         self.actions.append("abort")
 
-    async def continue_(self) -> None:
-        self.actions.append("continue")
+    async def fallback(self) -> None:
+        self.actions.append("fallback")
 
 
 class FakePage:
@@ -150,14 +150,14 @@ async def test_the_route_guard_is_registered_before_the_first_fill() -> None:
     ("url", "expected_action"),
     [
         ("https://evil.example/x", "abort"),
-        (f"{SUNAT_ORIGIN}/x", "continue"),
+        (f"{SUNAT_ORIGIN}/x", "fallback"),
     ],
 )
-async def test_the_route_guard_aborts_away_from_sunat_and_continues_sunat(
+async def test_the_route_guard_aborts_away_from_sunat_and_passes_sunat_to_the_context_guard(
     url: str,
     expected_action: str,
 ) -> None:
-    """R-9.10, R-9.16: a request off SUNAT is aborted, one on SUNAT continues."""
+    """R-9.10, R-9.16: a request off SUNAT is aborted, one on SUNAT goes on to the context guard."""
     page = FakePage(SUNAT_URL)
     assert await log_in(page, LOGIN, CREDS)
     route = FakeRoute(url)

@@ -31,7 +31,7 @@ class Route(Protocol):
 
     async def abort(self) -> None: ...
 
-    async def continue_(self) -> None: ...
+    async def fallback(self) -> None: ...
 
 
 class LoginPage(Protocol):
@@ -50,9 +50,13 @@ class LoginPage(Protocol):
 
 
 async def _allow_only_sunat(route: Route) -> None:
-    """Continue a request to a SUNAT origin and abort any other (R-9.10)."""
+    """Pass a request to a SUNAT origin on to the context guard and abort any other (R-9.10).
+
+    ``fallback``, not ``continue_``, so the context's ``RouteGuard`` still drops the
+    resource kinds it refuses (R-9.1).
+    """
     if is_sunat_origin(route.request.url):
-        await route.continue_()
+        await route.fallback()
     else:
         await route.abort()
 
