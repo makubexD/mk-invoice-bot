@@ -26,6 +26,7 @@ dependencies = [
     "playwright==1.64.1",
     "msal==1.39.0",
     "pyjwt[crypto]==2.15.1",
+    "pypdfium2==5.14.0",
 ]
 
 [project.scripts]
@@ -89,6 +90,11 @@ files = ["src"]
 [[tool.mypy.overrides]]
 # msal ships no py.typed and has no stub package; only auth/msal_cache.py imports it (D84).
 module = ["msal", "msal.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# pypdfium2 ships no py.typed and has no stub package; only extract/pdf.py imports it (D122).
+module = ["pypdfium2", "pypdfium2.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

@@ -15,7 +15,7 @@ from typing import Any, Literal, cast, get_args
 
 from invoicebot.text import replace_unsafe_chars
 
-Source = Literal["qr", "xml", "ocr", "padron", "llm", "user"]
+Source = Literal["qr", "xml", "ocr", "pdf", "padron", "llm", "user"]
 Flag = Literal["inferred", "conflict"]
 
 REQUIRED = ("ruc_emisor", "tipo", "serie", "numero", "fecha_emision", "total")

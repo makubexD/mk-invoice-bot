@@ -1,0 +1,15 @@
+{
+  "fields": {
+    "base": "22861.97",
+    "fecha_emision": "2026-05-17",
+    "igv": "2400.51",
+    "num_doc_adq": "20000000036",
+    "numero": "45066",
+    "ruc_emisor": "20000000044",
+    "serie": "F527",
+    "service_charge": "2286.20",
+    "tipo": "01",
+    "total": "27548.68"
+  },
+  "has_qr": false
+}

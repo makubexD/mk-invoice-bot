@@ -59,6 +59,7 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
+        media_max_mb=10,
         timezone=TIMEZONE,
     )
     app = FastAPI()

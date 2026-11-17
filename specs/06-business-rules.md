@@ -49,11 +49,11 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 |---|---|---|---|
 | BR-E01 | No QR, and OCR is missing required fields | `EXTRACT_FAILED` (waits for the user) | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` |
 | BR-E02 | The issuer RUC fails the check digit | Same as E01, with the field highlighted | `El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…` |
-| BR-E03 | The date is in the future or older than `max_invoice_age_days` | `CONFIRMING` | `La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa` |
+| BR-E03 | The date is in the future or older than `max_invoice_age_days` | `CONFIRMING` | `La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa`, then the routed summary and [Confirmar] [Editar] [Cancelar] (D126) |
 | BR-E04 | The natural key already exists in the same profile and isn't failed or cancelled; another profile's invoice is never matched (D93, R-10.1) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}.` |
 | BR-E05 | Not a supported CPE (`tipo` ∉ config) | `CANCELLED` | `Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.` |
 | BR-E06 | OCR fails 2 or more times on photos from the same issuer | Raises gap `PARSER_MISS` | *(no extra message; E01 already asked the user)* |
-| BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported, or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) o el PDF del comprobante, de hasta {max_mb} MB.` |
+| BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported (an XML on its own, D121), a PDF has more than `max_pdf_pages` pages (D122; `{reason_desc}` is "tiene más de {max_pages} páginas"), or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG) o el PDF del comprobante, de hasta {max_mb} MB.` |
 | BR-E08 | Deterministic extraction failed, and the LLM fallback reached its monthly cap | `EXTRACT_FAILED` (as E01); admin alert once per month | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` Admin: `🤖 Se alcanzó el tope mensual de lectura con IA ({cap}). Se reactiva el {date}.` |
 | BR-E09 | A required field is `needs_review` (low confidence, or a failed R-2.4 check) | `CONFIRMING` | `Revisa estos datos antes de seguir: {fields_desc}. Si están bien, confírmalos; si no, corrígelos así: campo=valor.` [Confirmar] [Cancelar] |
 
@@ -61,11 +61,11 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-V01 | `estadoCp = 0` (doesn't exist yet) | Continue; re-check in 24 h, max 3 times | *(one line in the summary)* `⏳ SUNAT aún no lo registra; vuelvo a revisar mañana.` |
-| BR-V02 | `estadoCp = 2` (annulled) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante está ANULADO. ¿Lo registro igual?` [Sí] [Cancelar] |
+| BR-V02 | `estadoCp = 2` (annulled) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante está ANULADO. ¿Lo registro igual?` [Sí] (button action invalid_ok, D125) [Cancelar]. A later recheck that finds it (D125) changes no state; Admin: `⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) está ANULADO.` |
 | BR-V03 | Issuer RUC isn't `ACTIVO`/`HABIDO` | Continue; warn | *(one line in the summary)* `⚠️ El emisor figura {estado}/{condicion} en SUNAT.` |
 | BR-V04 | The SUNAT API is down or credentials are missing | Continue as "not validated"; retry later | *(one line in the summary)* `ℹ️ No pude validar con SUNAT ahora; lo intento luego.` |
 | BR-V05 | `estadoCp = 3` (authorized; only for some CPE types, e.g. pre-printed receipts authorized by SUNAT) | Continue | *(one line in the summary)* `ℹ️ SUNAT lo registra como AUTORIZADO (comprobante autorizado, no electrónico).` |
-| BR-V06 | `estadoCp = 4` (not authorized) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante NO está AUTORIZADO. ¿Lo registro igual?` [Sí] [Cancelar] |
+| BR-V06 | `estadoCp = 4` (not authorized) | `CONFIRM_INVALID` | `⚠️ SUNAT dice que este comprobante NO está AUTORIZADO. ¿Lo registro igual?` [Sí] (button action invalid_ok, D125) [Cancelar]. A later recheck that finds it (D125) changes no state; Admin: `⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) NO está AUTORIZADO.` |
 
 `estadoCp = 1` (accepted) continues with no message.
 
@@ -137,6 +137,7 @@ BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sen
 | BR-S07 | A command names an invoice id that doesn't exist or belongs to another profile (sender not admin) | No change | `No encontré el comprobante #{id}.` |
 | BR-S08 | A question isn't answered within `limits.question_timeout_h` (default 24 h) in `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID` | `PENDING_USER`; answering resumes the waiting state | `Dejé el comprobante #{id} en pendientes porque no tuve respuesta. Retómalo cuando quieras con /pendientes.` |
 | BR-S09 | An allowlisted sender sends a photo and it is queued (R-1.1) | Invoice created in `RECEIVED`; job enqueued | `📥 Recibido. Estoy leyendo tu comprobante #{id}.` |
+| BR-S10 | Routing asks for confirmation: `confirm_mode: always`, or a field with source `llm` (D126); [Confirmar] lets routing go on | `CONFIRMING` | The routed summary, then `¿Está todo bien?` [Confirmar] [Editar] [Cancelar] |
 
 BR-S06's owner answers (D118), outside the catalog: [Aprobar] sets the link `approved` and the PORTAL_MISSING gap's `hint_url`, then answers `✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.` (`BR-S06_approved`). [Rechazar] sets it `rejected` and answers `Descarté el portal propuesto para RUC {ruc_emisor}.` (`BR-S06_rejected`). Only an admin's press counts.
 

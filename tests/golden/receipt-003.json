@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "36117.52",
+    "fecha_emision": "2025-11-11",
+    "igv": "6501.15",
+    "num_doc_adq": "20000000036",
+    "numero": "54305",
+    "ruc_emisor": "20000000044",
+    "serie": "F414",
+    "tipo": "01",
+    "total": "42618.67"
+  },
+  "has_qr": true
+}

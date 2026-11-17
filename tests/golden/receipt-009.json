@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "13029.43",
+    "fecha_emision": "2024-04-26",
+    "igv": "1302.94",
+    "num_doc_adq": "20000000001",
+    "numero": "62099",
+    "ruc_emisor": "20000000028",
+    "serie": "F509",
+    "tipo": "01",
+    "total": "14332.37"
+  },
+  "has_qr": true
+}

@@ -47,6 +47,8 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-D03_admin": "admin_alert",
     "BR-E08_admin": "admin_alert",
     "BR-S03_admin": "admin_alert",
+    "BR-V02_admin": "admin_alert",
+    "BR-V06_admin": "admin_alert",
     "GAP_admin": "admin_alert",
     "GAP_DIGEST_admin": "admin_alert",
     "BR-O02": "admin_alert",

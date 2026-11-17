@@ -45,14 +45,14 @@ def _merged_field(name: str, ocr_field: Field, qr_field: Field) -> Field:
     When both readers inferred the field, their agreement is not independent evidence: it stays
     ``inferred`` at the OCR confidence rather than reaching full confidence.
     """
-    if _same_value(name, ocr_field.value, qr_field.value):
+    if same_value(name, ocr_field.value, qr_field.value):
         if ocr_field.flag == "inferred" and qr_field.flag == "inferred":
             return ocr_field
         return replace(ocr_field, confidence=FULL_CONFIDENCE, flag=None)
     return replace(ocr_field, flag="conflict")
 
 
-def _same_value(name: str, ocr_value: str, qr_value: str) -> bool:
+def same_value(name: str, ocr_value: str, qr_value: str) -> bool:
     """Return whether both values are equal after the field's own normalisation (D81).
 
     An amount compares as a ``Decimal`` and a date as a ``date``; when either value does not

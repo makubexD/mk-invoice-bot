@@ -47,7 +47,11 @@ channels:
     # secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET (redacted in logs, R-9.16)
 
 sunat:
-  validez_api: { enabled: true }        # secrets: SUNAT_CLIENT_ID / SUNAT_CLIENT_SECRET
+  validez_api:                          # secrets: SUNAT_CLIENT_ID / SUNAT_CLIENT_SECRET
+    enabled: false                      # true calls the validez API in VALIDATING (D124)
+    token_url: "https://api-seguridad.sunat.gob.pe/v1/clientesextranet/{client_id}/oauth2/token/"
+    api_url: "https://api.sunat.gob.pe/v1/contribuyente/contribuyentes/{ruc}/validarcomprobante"
+    timeout_s: 10
   sol: { enabled: true }                # secrets: SOL_RUC / SOL_USER / SOL_PASSWORD (secondary user; sunat_sol only)
   padron: { refresh_cron: "0 4 * * 0" } # weekly Sunday 04:00 (ZIP ~395 MB, updated daily by SUNAT)
 
@@ -59,6 +63,7 @@ extraction:
   igv_rates: ["0.18", "0.105", "0.10"]   # strings, so no float rounding reaches Decimal (Ley 31556 reduced rates)
   supported_tipos: ["01", "03", "07", "08"]
   helper_timeout_s: 50                   # covers OCR (30 s) plus the QR cascade within R-9.2's 60 s
+  pdf_min_text_chars: 40                 # non-space characters a PDF page-1 text layer needs (R-2.15)
 
 # Vision-LLM fallback (R-2.11, D43). Runs only after QR, XML and OCR fail, only for flows
 # set to true here. Output is re-checked by the R-2.4 validators and always needs confirmation.
@@ -232,6 +237,7 @@ limits:
   question_timeout_h: 24        # BR-S08 → PENDING_USER
   media:                        # R-1.11, BR-E07 (never above the channel's own limit; Telegram getFile ≤ 20 MB)
     max_megapixels: 40
+    max_pdf_pages: 5            # a PDF with more pages gets BR-E07 (R-2.15)
     max_bytes: { image: 10485760, pdf: 10485760, xml: 2097152, zip: 20971520 }
     zip_max_entries: 20
     zip_max_ratio: 50

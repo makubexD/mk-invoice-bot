@@ -8,8 +8,10 @@ answers a stale or foreign press with BR-S02 (BR-S02).
 A routing question's answer is stored in the invoice's flow data under ``answers``; the
 action puts the invoice back in ``ROUTING`` and enqueues the route step, which validates
 the answer again on its next run (D92). [Continuar] answers BR-D06's cap question,
-[Cancelar] cancels the invoice from any cancellable state (R-3.4), and [Ya lo envié]
-closes a prepared batch as sent (R-7.8, BR-D08). A press that answers the question a
+[Confirmar] accepts the routed summary before validation (D126), [Cancelar] cancels the
+invoice from any cancellable state (R-3.4), [Sí] accepts a
+BR-V02/BR-V06 comprobante and fetches its documents (D125), and [Ya lo envié] closes a
+prepared batch as sent (R-7.8, BR-D08). A press that answers the question a
 ``PENDING_USER`` invoice was parked on resumes the waiting state before its action runs:
 :data:`ASKED_RULES` names the rule each action answers for ``resolve_reply`` to check (D94).
 
@@ -28,22 +30,26 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.extract.validate import RULE_BAD_DATE
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
     BRAND_ACTION,
     CANCEL_ACTION,
     CHANGE_ACTION,
+    CONFIRM_ACTION,
     CONTINUE_ACTION,
     EDIT_ACTION,
+    INVALID_OK_ACTION,
     PICK_ACTION,
     RULE_BRAND,
     RULE_BUYER,
     RULE_CAP,
+    RULE_CONFIRM,
     YES_ACTION,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
-from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
+from invoicebot.pipeline.steps import FETCH_STEP, FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.queue.outbox import last_rule
 from invoicebot.routing.router import RULE_ASK
@@ -55,7 +61,7 @@ from invoicebot.rules.messages_es import (
     EDIT_PROMPT,
     MESSAGES,
 )
-from invoicebot.states import CANCELLABLE, EDITABLE
+from invoicebot.states import CANCELLABLE, CONFIRM_INVALID, EDITABLE, FETCHING_DOCS
 from invoicebot.store.flow_b import (
     get_batch_state,
     load_flow_data,
@@ -73,6 +79,7 @@ from invoicebot.store.invoices import (
     mark_editing,
     set_state,
 )
+from invoicebot.sunat.verdict import RULE_ANNULLED, RULE_NOT_AUTHORIZED
 
 #: The button action only this module applies; questions own the ones they show (R-3.5).
 SENT_ACTION = "sent"
@@ -106,8 +113,10 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     CHANGE_ACTION: frozenset({CONFIRMING_STATE}),
     BRAND_ACTION: frozenset({CONFIRMING_STATE}),
     CONTINUE_ACTION: frozenset({CONFIRMING_STATE}),
+    CONFIRM_ACTION: frozenset({CONFIRMING_STATE}),
     CANCEL_ACTION: CANCELLABLE,
     EDIT_ACTION: EDITABLE,
+    INVALID_OK_ACTION: frozenset({CONFIRM_INVALID}),
     SENT_ACTION: frozenset({BATCHED_STATE}),
     NOT_ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
     ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
@@ -115,13 +124,15 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     SELF_SEND_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
 }
 
-#: The rule each question action answers; a parked invoice resumes only for its own (D94).
-ASKED_RULES: Mapping[str, str] = {
-    PICK_ACTION: RULE_ASK,
-    YES_ACTION: RULE_BUYER,
-    CHANGE_ACTION: RULE_BUYER,
-    BRAND_ACTION: RULE_BRAND,
-    CONTINUE_ACTION: RULE_CAP,
+#: The rules each question action answers; a parked invoice resumes only for its own (D94).
+ASKED_RULES: Mapping[str, frozenset[str]] = {
+    PICK_ACTION: frozenset({RULE_ASK}),
+    YES_ACTION: frozenset({RULE_BUYER}),
+    CHANGE_ACTION: frozenset({RULE_BUYER}),
+    BRAND_ACTION: frozenset({RULE_BRAND}),
+    CONTINUE_ACTION: frozenset({RULE_CAP}),
+    CONFIRM_ACTION: frozenset({RULE_BAD_DATE, RULE_CONFIRM}),
+    INVALID_OK_ACTION: frozenset({RULE_ANNULLED, RULE_NOT_AUTHORIZED}),
 }
 
 #: An action applied to its invoice in the caller's transaction; the resolved press carries
@@ -172,7 +183,7 @@ async def _pick(
     A missing menu, a choice from an older menu or an out-of-range choice is a stale
     button: BR-S02, no change.
     """
-    if not await _still_asks(conn, invoice_id, msg, RULE_ASK):
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[PICK_ACTION]):
         return ()
     picked = await choice_at(conn, invoice_id, press.choice, press.menu)
     if picked is None:
@@ -190,7 +201,7 @@ async def _yes(
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the buyer is right, so routing skips BR-R04 (BR-R04)."""
-    if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[YES_ACTION]):
         return ()
     await _record_answer(conn, invoice_id, RULE_BUYER, {"buyer_ok": True})
     return ()
@@ -204,7 +215,7 @@ async def _change(
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the buyer is wrong, so routing asks BR-R03 again (BR-R04)."""
-    if not await _still_asks(conn, invoice_id, msg, RULE_BUYER):
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[CHANGE_ACTION]):
         return ()
     await _record_answer(conn, invoice_id, RULE_BUYER, {"buyer_ok": False})
     return ()
@@ -222,7 +233,7 @@ async def _brand(
     A missing menu, a choice from an older menu or an out-of-range choice is a stale
     button: BR-S02, no change.
     """
-    if not await _still_asks(conn, invoice_id, msg, RULE_BRAND):
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[BRAND_ACTION]):
         return ()
     comercio = await choice_at(conn, invoice_id, press.choice, press.menu)
     if comercio is None:
@@ -240,9 +251,43 @@ async def _continue(
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
     """Record that the sender accepted BR-D06's cap and re-run routing (BR-D06)."""
-    if not await _still_asks(conn, invoice_id, msg, RULE_CAP):
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[CONTINUE_ACTION]):
         return ()
     await _record_answer(conn, invoice_id, RULE_CAP, {"cap_ok": True})
+    return ()
+
+
+async def _confirm(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Record that the sender confirmed the summary and re-run routing (D126)."""
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[CONFIRM_ACTION]):
+        return ()
+    await _record_answer(conn, invoice_id, RULE_CONFIRM, {"confirmed": True})
+    return ()
+
+
+async def _invalid_ok(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Accept an annulled or unauthorized comprobante and fetch its documents (BR-V02, BR-V06, D125).
+
+    The asking rule stays on the invoice, so its record names the SUNAT verdict the
+    sender accepted.
+    """
+    if not await _still_asks(conn, invoice_id, msg, ASKED_RULES[INVALID_OK_ACTION]):
+        return ()
+    _, rule_id = await _invoice_state(conn, invoice_id)
+    await set_state(conn, invoice_id, FETCHING_DOCS, rule_id=rule_id, expected=CONFIRM_INVALID)
+    await enqueue(conn, invoice_id, FETCH_STEP)
     return ()
 
 
@@ -405,13 +450,15 @@ async def _asks_not_confirmed(conn: AsyncConnection[Any], invoice_id: int) -> bo
     return await last_rule(conn, invoice_id, RULE_STALE_BUTTON) == RULE_NOT_CONFIRMED
 
 
-async def _still_asks(conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rule_id: str) -> bool:
-    """Return whether the invoice still waits on rule_id's question (BR-S02).
+async def _still_asks(
+    conn: AsyncConnection[Any], invoice_id: int, msg: InboundMessage, rules: frozenset[str]
+) -> bool:
+    """Return whether the invoice still waits on one of rules' questions (BR-S02).
 
     A button from another question is stale: it is answered BR-S02 and changes nothing.
     """
     _, current_rule = await _invoice_state(conn, invoice_id)
-    if current_rule == rule_id:
+    if current_rule in rules:
         return True
     await send_stale(conn, msg, invoice_id)
     return False
@@ -512,6 +559,8 @@ ACTIONS: Mapping[str, Action] = {
     CHANGE_ACTION: _change,
     BRAND_ACTION: _brand,
     CONTINUE_ACTION: _continue,
+    CONFIRM_ACTION: _confirm,
+    INVALID_OK_ACTION: _invalid_ok,
     CANCEL_ACTION: _cancel,
     EDIT_ACTION: _edit,
     SENT_ACTION: _sent,

@@ -14,6 +14,7 @@ from decimal import Decimal
 
 _MAX_RANGE_CELLS = 1000
 _MAX_COLUMN = 16384  # XFD, the last column Excel supports
+MAX_NESTING = 64  # the deepest parentheses or function calls Excel accepts
 _FUNCTIONS = frozenset({"MAX", "MIN", "SUM"})
 
 _TOKEN_RE = re.compile(
@@ -227,6 +228,7 @@ class _Parser:
     def __init__(self, tokens: Sequence[_Token]) -> None:
         self._tokens = tokens
         self._position = 0
+        self._depth = 0
 
     def parse(self) -> Node:
         """Return the expression, refusing trailing tokens."""
@@ -255,10 +257,23 @@ class _Parser:
         return node
 
     def _unary(self) -> Node:
-        """Parse ``"-" unary | primary``."""
-        if self._accept("-"):
-            return Unary(self._unary())
-        return self._primary()
+        """Parse leading ``"+"``/``"-"`` signs then a primary; a unary plus leaves its operand unchanged."""
+        signs = 0
+        negations = 0
+        while True:
+            if self._accept("+"):
+                signs += 1
+            elif self._accept("-"):
+                signs += 1
+                negations += 1
+            else:
+                break
+            if signs > MAX_NESTING:
+                raise UnsupportedFormula(f"nested deeper than {MAX_NESTING} levels")
+        node = self._primary()
+        for _ in range(negations):
+            node = Unary(node)
+        return node
 
     def _primary(self) -> Node:
         """Parse a number, a reference, a function call or a parenthesized expression."""
@@ -272,8 +287,10 @@ class _Parser:
         if token.kind == "name":
             return self._call(token)
         if token.text == "(":
+            self._enter_nesting()
             node = self._expression()
             self._expect(")")
+            self._depth -= 1
             return node
         if token.text == ":":
             raise UnsupportedFormula("a range is only allowed inside a function argument")
@@ -286,8 +303,10 @@ class _Parser:
             raise UnsupportedFormula(f"function {token.text!r} is not supported")
         if not self._accept("("):
             raise UnsupportedFormula(f"function {token.text!r} must be called with arguments")
+        self._enter_nesting()
         args = self._arguments()
         self._expect(")")
+        self._depth -= 1
         return Call(name, tuple(args))
 
     def _arguments(self) -> list[Node]:
@@ -310,6 +329,12 @@ class _Parser:
                 raise UnsupportedFormula("a range needs a cell reference after ':'")
             return _range(first.text, end.text)
         return self._expression()
+
+    def _enter_nesting(self) -> None:
+        """Count one level of parentheses or call arguments, refusing more than Excel accepts."""
+        self._depth += 1
+        if self._depth > MAX_NESTING:
+            raise UnsupportedFormula(f"nested deeper than {MAX_NESTING} levels")
 
     def _peek(self, offset: int = 0) -> _Token | None:
         """Return the token ``offset`` places ahead, or ``None`` past the end."""

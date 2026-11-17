@@ -6,16 +6,19 @@ Usage: ``check_fixtures.py [root]`` (default root: the current directory).
 Images must not contain EXIF metadata. Any standalone 11-digit number in a tracked
 text file whose SUNAT check digit is valid must be listed in
 ``tests/synthetic_rucs.txt``; that allowlist is the only place synthetic RUC-like
-values may appear. ``uv.lock`` and binary files are skipped. The one exception is
-the store directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may contain its own
-RUC, and only that one. Files come from ``git ls-files``; outside a git checkout
-the root is walked instead. Exits 1 and prints one line per problem, 0 when the
-fixtures are clean.
+values may appear. A binary file that is not an image must be listed as an
+``fnmatch`` glob in ``tests/binary_fixtures.txt``, but it is still scanned for
+RUCs (decoded as latin-1 when it is not UTF-8); ``uv.lock`` is skipped. The one
+exception is the store directory (R-5.8, D47): ``config/stores/<ruc>.yaml`` may
+contain its own RUC, and only that one. Files come from ``git ls-files``; outside
+a git checkout the root is walked instead. Exits 1 and prints one line per
+problem, 0 when the fixtures are clean.
 """
 
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import re
 import shutil
@@ -32,6 +35,7 @@ SKIP_NAMES = frozenset({"uv.lock"})
 BINARY_PROBE_BYTES = 8192
 RUC_RE = re.compile(r"(?<![0-9])[0-9]{11}(?![0-9])")
 ALLOWLIST_RELATIVE = Path("tests") / "synthetic_rucs.txt"
+BINARY_ALLOWLIST_RELATIVE = Path("tests") / "binary_fixtures.txt"
 STORES_RELATIVE = Path("config") / "stores"
 
 
@@ -115,6 +119,44 @@ def _load_allowlist(path: Path) -> set[str]:
     return allowed
 
 
+def _load_binary_allowlist(path: Path) -> list[str]:
+    """Read the binary fixture globs, ignoring blank lines and ``#`` comments."""
+    if not path.is_file():
+        return []
+    patterns: list[str] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        value = line.strip()
+        if value and not value.startswith("#"):
+            patterns.append(value)
+    return patterns
+
+
+def _looks_binary(data: bytes) -> bool:
+    """Return whether the bytes look binary (NUL probe or bytes that are not UTF-8)."""
+    if b"\x00" in data[:BINARY_PROBE_BYTES]:
+        return True
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
+
+
+def _scan_text(data: bytes) -> str:
+    """Return the bytes as text for the RUC scan, falling back to latin-1 when they are not UTF-8."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data.decode("latin-1")
+
+
+def _unlisted_binary_problem(relative: str, patterns: list[str]) -> str | None:
+    """Return the problem line for a binary fixture that matches no listed glob."""
+    if any(fnmatch.fnmatch(relative, pattern) for pattern in patterns):
+        return None
+    return f"{relative}: binary file is not listed in {BINARY_ALLOWLIST_RELATIVE.as_posix()}"
+
+
 def _own_store_ruc(path: Path, stores_dir: Path) -> str | None:
     """Return the RUC a store directory file is named after, or ``None`` for any other file."""
     if path.parent == stores_dir and path.suffix == ".yaml" and is_valid_ruc(path.stem):
@@ -157,9 +199,11 @@ def _iter_scanned_files(root: Path) -> Iterator[Path]:
 
 
 def find_problems(root: Path) -> list[str]:
-    """Return one message per EXIF-bearing image or non-allowlisted RUC (R-9.17)."""
+    """Return one message per EXIF image, unlisted binary file or non-allowlisted RUC (R-9.17)."""
     allowlist_path = root / ALLOWLIST_RELATIVE
     allowed = _load_allowlist(allowlist_path)
+    binary_allowlist_path = root / BINARY_ALLOWLIST_RELATIVE
+    binary_patterns = _load_binary_allowlist(binary_allowlist_path)
     stores_dir = root / STORES_RELATIVE
     problems: list[str] = []
     for path in _iter_scanned_files(root):
@@ -170,15 +214,14 @@ def find_problems(root: Path) -> list[str]:
             if has_exif(path):
                 problems.append(f"{relative}: image contains EXIF metadata")
             continue
-        if path == allowlist_path:
+        if path in {allowlist_path, binary_allowlist_path}:
             continue
         data = path.read_bytes()
-        if b"\x00" in data[:BINARY_PROBE_BYTES]:
-            continue
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
+        if _looks_binary(data):
+            problem = _unlisted_binary_problem(relative, binary_patterns)
+            if problem is not None:
+                problems.append(problem)
+        text = _scan_text(data)
         own_ruc = _own_store_ruc(path, stores_dir)
         for match in RUC_RE.finditer(text):
             value = match.group()

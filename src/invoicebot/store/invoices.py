@@ -628,6 +628,78 @@ async def load_reading(conn: AsyncConnection[Any], invoice_id: int) -> Reading |
     return reading_from_json(row[0])
 
 
+@dataclass(frozen=True)
+class CpStatus:
+    """The ``estadoCp`` SUNAT answered, with the issuer's RUC state (R-4.1)."""
+
+    estado_cp: int
+    estado_ruc: str | None
+    cond_domi_ruc: str | None
+
+
+async def set_sunat_status(
+    conn: AsyncConnection[Any], invoice_id: int, status: CpStatus | None, rechecks: int
+) -> None:
+    """Store the SUNAT answer for invoice_id and count its rechecks (R-4.1).
+
+    The three status fields are JSON null when SUNAT gave no answer, and the database
+    clock stamps ``checked_at``. Does not commit.
+    """
+    if status is None:
+        estado_cp, estado_ruc, cond_domi_ruc = None, None, None
+    else:
+        estado_cp, estado_ruc, cond_domi_ruc = status.estado_cp, status.estado_ruc, status.cond_domi_ruc
+    await conn.execute(
+        """
+        UPDATE invoices
+        SET sunat_status_json = jsonb_build_object(
+                'estado_cp', %s::int,
+                'estado_ruc', %s::text,
+                'cond_domi_ruc', %s::text,
+                'checked_at', now(),
+                'rechecks', %s::int
+            )
+        WHERE id = %s
+        """,
+        (estado_cp, estado_ruc, cond_domi_ruc, rechecks, invoice_id),
+    )
+
+
+async def sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> int:
+    """Return how many SUNAT checks invoice_id recorded, or 0 when it has none (R-4.1)."""
+    cur = await conn.execute(
+        """
+        SELECT COALESCE((sunat_status_json->>'rechecks')::int, 0)
+        FROM invoices
+        WHERE id = %s
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    return 0 if row is None else int(row[0])
+
+
+async def lock_sunat_rechecks(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, int] | None:
+    """Lock invoice_id's row and return its state and recheck count, or None when missing (D125).
+
+    The caller compares the count it started with, so a revalidation or another recheck
+    that committed first wins. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT state, COALESCE((sunat_status_json->>'rechecks')::int, 0)
+        FROM invoices
+        WHERE id = %s
+        FOR UPDATE
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return str(row[0]), int(row[1])
+
+
 async def record_upload_rejection(
     conn: AsyncConnection[Any], invoice_id: int, media_ref: str, rule_id: str
 ) -> bool:

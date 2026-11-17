@@ -1,4 +1,4 @@
-"""The questions routing asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06).
+"""The questions the pipeline asks and their buttons (BR-R03, BR-R04, BR-R09, BR-D06, D125).
 
 Each builder is pure: it returns the es-PE text from the catalog and the buttons that
 carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R-3.5).
@@ -16,6 +16,7 @@ from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
     BUTTON_CHANGE,
+    BUTTON_CONFIRM,
     BUTTON_CONTINUE,
     BUTTON_EDIT,
     BUTTON_YES,
@@ -31,10 +32,16 @@ BRAND_ACTION = "brand"
 CONTINUE_ACTION = "continue"
 CANCEL_ACTION = "cancel"
 EDIT_ACTION = "edit"
+#: The [Sí] that accepts a BR-V02/BR-V06 comprobante (D125).
+INVALID_OK_ACTION = "invalid_ok"
+#: D126's [Confirmar]: the sender accepts the routed summary before validation.
+CONFIRM_ACTION = "confirm"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
 RULE_CAP = "BR-D06"
+#: The confirmation question's rule when BR-E03's date check did not ask it (D126).
+RULE_CONFIRM = "BR-S10"
 
 
 def candidate_flows(
@@ -103,9 +110,26 @@ def cap_question(reading: Reading, flow: Flow, invoice_id: int) -> tuple[str, li
     return MESSAGES[RULE_CAP].format(total=f"{total:.2f}", cap=cap), buttons
 
 
+def invalid_question(invoice_id: int, rule_id: str) -> tuple[str, list[Button]]:
+    """Return BR-V02/BR-V06's question and its [Sí] / [Cancelar] buttons (D125)."""
+    buttons = [
+        Button(id=button_id(invoice_id, INVALID_OK_ACTION), title=BUTTON_YES),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+    return MESSAGES[rule_id], buttons
+
+
 def summary_buttons(invoice_id: int) -> list[Button]:
     """Return the routed summary's [Editar] and [Cancelar] buttons (R-3.4)."""
     return [
         Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+
+
+def confirm_buttons(invoice_id: int) -> list[Button]:
+    """Return the confirmation's [Confirmar], [Editar] and [Cancelar] buttons (D126, R-3.4)."""
+    return [
+        Button(id=button_id(invoice_id, CONFIRM_ACTION), title=BUTTON_CONFIRM),
+        *summary_buttons(invoice_id),
     ]

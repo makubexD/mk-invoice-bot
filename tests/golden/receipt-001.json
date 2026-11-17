@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "33987.89",
+    "fecha_emision": "2025-12-03",
+    "igv": "3568.73",
+    "num_doc_adq": "20000000001",
+    "numero": "49966",
+    "ruc_emisor": "20000000044",
+    "serie": "B962",
+    "tipo": "03",
+    "total": "37556.62"
+  },
+  "has_qr": true
+}

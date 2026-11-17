@@ -169,7 +169,7 @@ def _press(profile_id: str, button_id: str) -> InboundMessage:
 
 async def _press_through_intake(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
     """Send one button press through intake, as the webhook would."""
-    await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+    await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE)
 
 
 async def _proposal_for(

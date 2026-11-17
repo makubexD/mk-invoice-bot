@@ -40,6 +40,7 @@ BEARER = "synthetic-bearer-value"
 MEDIA_URL = "https://mmg.whatsapp.net/v/t62/media"
 GRAPH_HOST = "graph.facebook.com"
 PNG_MIME = "image/png"
+PDF_MIME = "application/pdf"
 MAX_QUEUED = 10
 #: The owner timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
@@ -139,7 +140,9 @@ async def _queue_photo(
     """Store a photo through intake and return the invoice it created."""
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo(media_ref)])
     async with pool.connection() as conn:
-        result = await handle_inbound(conn, msg, max_queued_per_sender=MAX_QUEUED, timezone=TIMEZONE)
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
     assert result.invoice_id is not None
     return result.invoice_id
 
@@ -347,6 +350,40 @@ async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(
     assert (state, rule_id) == ("CANCELLED", "BR-E07")
     assert len(outbox_rows) == 1
     assert "la imagen es demasiado grande" in outbox_rows[0][1]
+
+
+async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.11: a PDF over max_bytes.pdf cancels its invoice with BR-E07 too_large and stores no file."""
+    oversized = _limits().max_bytes.pdf + 1
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == GRAPH_HOST:
+            return httpx.Response(200, json={"url": MEDIA_URL, "mime_type": PDF_MIME, "file_size": oversized})
+        return httpx.Response(200, content=b"%PDF-")
+
+    profile_id = _profile()
+    pdf = Attachment(kind="pdf", media_ref=f"ref-{uuid4().hex}", mime=PDF_MIME, size=oversized)
+    msg = _message(profile_id, external_id=_external_id(), attachments=[pdf])
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+        )
+    assert result.invoice_id is not None
+    async with _make_client(handler) as client:
+        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        await download(_job(result.invoice_id))
+
+    async with db_pool.connection() as conn:
+        files = await _files(conn, result.invoice_id)
+        state, rule_id = await _invoice_row(conn, result.invoice_id)
+        outbox_rows = await _outbox_rows(conn, profile_id, "BR-E07")
+
+    assert files == []
+    assert (state, rule_id) == ("CANCELLED", "BR-E07")
+    assert len(outbox_rows) == 1
+    assert "es demasiado grande" in outbox_rows[0][1]
 
 
 async def test_media_info_failure_raises_and_changes_nothing(

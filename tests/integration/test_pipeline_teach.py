@@ -549,6 +549,7 @@ async def test_press_through_intake_approves_without_an_invoice(
             conn,
             _press(ADMIN, approved=True),
             max_queued_per_sender=5,
+            media_max_mb=10,
             timezone="America/Lima",
             roles=IntakeRoles(teach=_setup()),
         )

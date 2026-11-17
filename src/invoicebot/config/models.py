@@ -83,9 +83,31 @@ type Channel = Annotated[WhatsAppChannel | TelegramChannel, Field(discriminator=
 
 
 class ValidezApi(BaseModel):
+    """The SUNAT validez API: the endpoints to call and how long to wait (R-4.1)."""
+
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
+    token_url: str = Field(
+        default="https://api-seguridad.sunat.gob.pe/v1/clientesextranet/{client_id}/oauth2/token/",
+        pattern=r"^https://",
+    )
+    api_url: str = Field(
+        default="https://api.sunat.gob.pe/v1/contribuyente/contribuyentes/{ruc}/validarcomprobante",
+        pattern=r"^https://",
+    )
+    timeout_s: float = Field(10, gt=0)
+
+    @model_validator(mode="after")
+    def _urls_carry_their_placeholders(self) -> Self:
+        """R-4.1: a URL that lost its placeholder cannot name the client or the RUC."""
+        if "{client_id}" not in self.token_url:
+            raise ValueError(
+                f"sunat.validez_api.token_url must contain '{{client_id}}', got {self.token_url!r}"
+            )
+        if "{ruc}" not in self.api_url:
+            raise ValueError(f"sunat.validez_api.api_url must contain '{{ruc}}', got {self.api_url!r}")
+        return self
 
 
 class Sol(BaseModel):
@@ -132,6 +154,8 @@ class Extraction(BaseModel):
     igv_rates: list[Decimal] = Field(min_length=1)
     supported_tipos: list[str] = Field(min_length=1)
     helper_timeout_s: float = Field(gt=0)
+    #: R-2.15: the non-space characters a page-1 text layer needs before it is read as text.
+    pdf_min_text_chars: int = Field(40, ge=0)
 
     @model_validator(mode="after")
     def _ocr_finishes_before_helper_timeout(self) -> Self:
@@ -553,6 +577,8 @@ class MediaLimits(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_megapixels: int = Field(gt=0)
+    #: R-2.15: a PDF with more pages is refused before any page is rendered.
+    max_pdf_pages: int = Field(5, gt=0)
     max_bytes: MediaMaxBytes
     zip_max_entries: int
     zip_max_ratio: int

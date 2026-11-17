@@ -60,10 +60,12 @@ MESSAGES: dict[str, str] = {
     "BR-E08_admin": ("🤖 Se alcanzó el tope mensual de lectura con IA ({cap}). Se reactiva el {date}."),
     "BR-V01": "⏳ SUNAT aún no lo registra; vuelvo a revisar mañana.",
     "BR-V02": "⚠️ SUNAT dice que este comprobante está ANULADO. ¿Lo registro igual?",
+    "BR-V02_admin": "⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) está ANULADO.",
     "BR-V03": "⚠️ El emisor figura {estado}/{condicion} en SUNAT.",
     "BR-V04": "ℹ️ No pude validar con SUNAT ahora; lo intento luego.",
     "BR-V05": "ℹ️ SUNAT lo registra como AUTORIZADO (comprobante autorizado, no electrónico).",
     "BR-V06": "⚠️ SUNAT dice que este comprobante NO está AUTORIZADO. ¿Lo registro igual?",
+    "BR-V06_admin": "⚠️ SUNAT ahora dice que el comprobante #{id} ({serie}-{numero}) NO está AUTORIZADO.",
     "BR-F01": "• SUNAT: no aplica (solo para facturas de tu empresa)",
     "BR-F02": (
         "No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). "
@@ -153,6 +155,7 @@ MESSAGES: dict[str, str] = {
         "Retómalo cuando quieras con /pendientes."
     ),
     "BR-S09": "📥 Recibido. Estoy leyendo tu comprobante #{id}.",
+    "BR-S10": "¿Está todo bien?",
     "BR-O01": "📮 Hay {n} mensajes sin enviar (el más antiguo de hace {age}).",
     "BR-O02": "💾 El disco está al {pct}%.",
     "BR-O03": "🔑 El token de {channel} no funciona. Renuévalo.",
@@ -234,6 +237,7 @@ REJECTION_DESC: dict[str, str] = {
     "unsupported_type": "el tipo de archivo no es compatible",
     "zip_entries": "el archivo comprimido no es válido",
     "zip_ratio": "el archivo comprimido no es válido",
+    "too_many_pages": "tiene más de {max_pages} páginas",
 }
 
 
@@ -391,6 +395,8 @@ BUTTON_ARRIVED = "Ya llegó"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
+#: BR-S10 and BR-E03: the sender confirms the routed summary (D126).
+BUTTON_CONFIRM = "Confirmar"
 #: The routed summary's [Editar] button (R-3.4).
 BUTTON_EDIT = "Editar"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).

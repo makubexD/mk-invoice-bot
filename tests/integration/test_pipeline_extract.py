@@ -1,18 +1,21 @@
 """Integration tests for the extract handler and its helper process.
 
-Every test runs the real ``python -m invoicebot.extract`` helper on an image built in the
-test (R-2.1, R-2.13, BR-E01, BR-E02, BR-E05, R-9.4). The database is real Postgres.
+Every test runs the real ``python -m invoicebot.extract`` helper on an image or PDF built in
+the test (R-2.1, R-2.13, R-2.15, BR-E01, BR-E02, BR-E05, R-9.4). The database is real Postgres.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import ctypes
 import hashlib
+import logging
 import os
 import signal
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -21,13 +24,17 @@ from uuid import uuid4
 
 import cv2
 import numpy as np
+import pypdfium2 as pdfium
+import pypdfium2.raw as raw
 import pytest
+import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.channels.base import AttachmentKind
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading, reading_to_json
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
 from invoicebot.gaps.kinds import fingerprint
@@ -35,6 +42,7 @@ from invoicebot.pipeline import extract as extract_module
 from invoicebot.pipeline.extract import (
     MAX_HELPER_OUTPUT_BYTES,
     ROUTE_STEP,
+    _HelperResult,
     _parse_result,
     make_extract_handler,
 )
@@ -68,6 +76,14 @@ QR_SCALE = 6
 QR_TOP = 100
 QR_LEFT = 100
 PNG = ".png"
+PDF_TEXT_LEFT = 40
+PDF_FIRST_LINE_TOP = 700
+PDF_LINE_HEIGHT = 50
+PDF_FONT_SIZE = 14
+PDF_TEXT_PAGE = (600, 800)  # width, height
+PDF_BLANK_PAGE = (200, 200)
+#: A PDF byte cap small enough that a padded invoice exceeds it (R-1.11).
+PDF_BYTE_CAP = 2 * 1024 * 1024
 OCR_TIMEOUT_S = 30
 HELPER_TIMEOUT_S = 50
 #: A recent date, so an invoice read from the photo still routes (BR-E03).
@@ -80,8 +96,19 @@ PRINTED_LINES = (
     f"Fecha de emision: {PRINTED_DATE:%d/%m/%Y}",
     f"IMPORTE TOTAL S/ {TOTAL}",
 )
+#: A page-1 text layer carrying the six required fields (R-2.15, D122).
+PDF_TEXT_LINES = (
+    f"RUC: {SYNTHETIC_RUC}",
+    f"FACTURA ELECTRONICA {SERIE}-{NUMERO}",
+    f"Fecha de emision: {PRINTED_DATE:%d/%m/%Y}",
+    f"IMPORTE TOTAL S/ {TOTAL}",
+)
 #: The OCR total when the printed value disagrees with the QR (D81).
 CONFLICT_TOTAL = "12.50"
+#: The synthetic razón social the seeded padrón row carries (R-2.5).
+PADRON_RAZON_SOCIAL = "EMPRESA DE PRUEBA"
+#: The synthetic razón social the fake OCR reading carries, which the padrón replaces (R-2.5).
+OCR_RAZON_SOCIAL = "EMPRESA LEIDA"
 #: The gap two unreadable invoices from SYNTHETIC_RUC share (BR-E06, D115).
 PARSER_MISS_FINGERPRINT = fingerprint("PARSER_MISS", SYNTHETIC_RUC)
 #: A QR payload carrying the same values as PRINTED_LINES (D81).
@@ -113,6 +140,16 @@ GRANDCHILD_GONE_TIMEOUT_S = 3.0
 GRANDCHILD_POLL_S = 0.05
 CHILD_START_TIMEOUT_S = 10
 SIGKILL_EXIT_CODE = -9
+
+
+@pytest_asyncio.fixture(autouse=True, loop_scope="session")
+async def _empty_padron(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> AsyncIterator[None]:
+    """Start each test from an empty padrón, so no row from another test fills a reading (R-2.5)."""
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute("DELETE FROM padron")
+    yield
 
 
 #: The media limits of config/example.yaml (R-1.11).
@@ -198,6 +235,38 @@ def _write_image(canvas: np.ndarray, path: Path) -> Path:
     return path
 
 
+def _add_pdf_text(page: pdfium.PdfPage, document: pdfium.PdfDocument, text: str, top: int) -> None:
+    """Draw ``text`` on ``page`` as real PDF text, so it lands in the page's text layer (R-2.15)."""
+    font = raw.FPDFText_LoadStandardFont(document.raw, b"Helvetica")
+    text_object = raw.FPDFPageObj_CreateTextObj(document.raw, font, PDF_FONT_SIZE)
+    encoded = (text + "\x00").encode("utf-16-le")
+    raw.FPDFText_SetText(text_object, ctypes.cast(encoded, raw.FPDF_WIDESTRING))
+    raw.FPDFPageObj_Transform(text_object, 1, 0, 0, 1, PDF_TEXT_LEFT, top)
+    raw.FPDFPage_InsertObject(page.raw, text_object)
+
+
+def _write_text_pdf(path: Path) -> Path:
+    """Write a one-page PDF whose lines are drawn with pdfium's text API (R-2.15)."""
+    document = pdfium.PdfDocument.new()
+    page = document.new_page(width=PDF_TEXT_PAGE[0], height=PDF_TEXT_PAGE[1])
+    for index, line in enumerate(PDF_TEXT_LINES):
+        _add_pdf_text(page, document, line, PDF_FIRST_LINE_TOP - index * PDF_LINE_HEIGHT)
+    page.gen_content()
+    document.save(str(path))
+    document.close()
+    return path
+
+
+def _write_blank_pdf(path: Path, pages: int) -> Path:
+    """Write a PDF with ``pages`` blank pages (R-2.15)."""
+    document = pdfium.PdfDocument.new()
+    for _ in range(pages):
+        document.new_page(width=PDF_BLANK_PAGE[0], height=PDF_BLANK_PAGE[1])
+    document.save(str(path))
+    document.close()
+    return path
+
+
 def _job(invoice_id: int) -> Job:
     """Build the extract job of invoice_id; the handler only uses its invoice id."""
     return Job(
@@ -210,16 +279,17 @@ def _job(invoice_id: int) -> Job:
     )
 
 
-async def _invoice_with_photo(
+async def _invoice_with_file(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
-    photo_path: Path,
+    path: Path,
+    kind: AttachmentKind,
 ) -> tuple[int, str]:
-    """Create a RECEIVED invoice with one photo file row and return it with its profile."""
+    """Create a RECEIVED invoice with one file row of ``kind`` and return it with its profile."""
     profile_id = f"profile-{uuid4().hex}"
-    data = await asyncio.to_thread(photo_path.read_bytes)
+    data = await asyncio.to_thread(path.read_bytes)
     record = FileRecord(
-        kind="photo",
-        local_path=str(photo_path),
+        kind=kind,
+        local_path=str(path),
         remote_ref=None,
         sha256=hashlib.sha256(data).hexdigest(),
         size=len(data),
@@ -230,20 +300,80 @@ async def _invoice_with_photo(
     return invoice_id, profile_id
 
 
+async def _invoice_with_photo(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    photo_path: Path,
+) -> tuple[int, str]:
+    """Create a RECEIVED invoice with one photo file row and return it with its profile."""
+    return await _invoice_with_file(pool, photo_path, "photo")
+
+
+def _media_with_pdf_cap(pdf_cap: int) -> MediaLimits:
+    """Return the media limits with ``max_bytes.pdf`` set to ``pdf_cap`` (R-1.11)."""
+    return MEDIA.model_copy(update={"max_bytes": MEDIA.max_bytes.model_copy(update={"pdf": pdf_cap})})
+
+
 async def _run_handler(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     invoice_id: int,
     *,
     helper_timeout_s: float = HELPER_TIMEOUT_S,
+    media: MediaLimits = MEDIA,
 ) -> None:
     """Run the extract handler once for invoice_id."""
     await make_extract_handler(
         pool,
         _config(helper_timeout_s=helper_timeout_s),
-        MEDIA,
+        media,
         RULES_PATH,
         _gap_context(),
     )(_job(invoice_id))
+
+
+def _ocr_reading() -> Reading:
+    """Return a valid reading with an OCR razón social the padrón can replace (R-2.5)."""
+    reading = parse_qr_payload(VALID_PAYLOAD)
+    assert reading is not None
+    return replace(
+        reading,
+        fields={**reading.fields, "razon_social": Field(OCR_RAZON_SOCIAL, "ocr", FULL_CONFIDENCE)},
+    )
+
+
+async def _run_handler_with_reading(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    reading: Reading,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Run the extract handler once with ``reading`` in place of the helper's output (R-2.5)."""
+    result = _HelperResult(
+        reading=reading_to_json(reading),
+        variant=None,
+        decoder=None,
+        ocr=True,
+        error=None,
+    )
+
+    async def _fake_run_helper(*_args: Any, **_kwargs: Any) -> _HelperResult:
+        return result
+
+    monkeypatch.setattr(extract_module, "_run_helper", _fake_run_helper)
+    await _run_handler(pool, invoice_id)
+
+
+async def _seed_padron_row(pool: AsyncConnectionPool[AsyncConnection[Any]], razon_social: str) -> None:
+    """Seed the fake reading's issuer in the padrón with ``razon_social`` (R-2.5)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO padron (ruc, razon_social, estado, condicion) VALUES (%s, %s, %s, %s)",
+            (int(SYNTHETIC_RUC), razon_social, "ACTIVO", "HABIDO"),
+        )
+
+
+def _record_text(record: logging.LogRecord) -> str:
+    """Return the record's message and every attribute, extras included, as one string."""
+    return " ".join([record.getMessage(), *(str(value) for value in vars(record).values())])
 
 
 async def _invoice_row(conn: AsyncConnection[Any], invoice_id: int) -> tuple[str, str | None]:
@@ -359,6 +489,70 @@ async def test_text_only_photo_routes_with_ocr_fields(
     assert reading.value("ruc_emisor") == SYNTHETIC_RUC
     assert reading.value("fecha_emision") == PRINTED_DATE.isoformat()
     assert reading.value("total") == TOTAL
+
+
+async def test_seeded_padron_replaces_the_ocr_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-2.5: a seeded padrón row replaces the OCR razón social with source ``padron``."""
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"padron{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+
+    assert reading is not None
+    razon_social = reading.fields["razon_social"]
+    assert (razon_social.value, razon_social.source, razon_social.confidence) == (
+        PADRON_RAZON_SOCIAL,
+        "padron",
+        FULL_CONFIDENCE,
+    )
+
+
+async def test_empty_padron_keeps_the_ocr_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-2.5: an empty padrón keeps the OCR razón social as the fallback."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"no-padron{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+
+    assert reading is not None
+    razon_social = reading.fields["razon_social"]
+    assert (razon_social.value, razon_social.source) == (OCR_RAZON_SOCIAL, "ocr")
+
+
+async def test_extraction_logs_carry_no_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-9.16: the extraction log lines carry neither the OCR nor the padrón razón social."""
+    caplog.set_level(logging.DEBUG)
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"secret{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    assert any(getattr(record, "step", None) == EXTRACT_STEP for record in caplog.records)
+    leaks = [
+        (record.name, value)
+        for record in caplog.records
+        for value in (PADRON_RAZON_SOCIAL, OCR_RAZON_SOCIAL)
+        if value in _record_text(record)
+    ]
+    assert leaks == []
 
 
 async def test_qr_and_printed_text_confirm_each_other(
@@ -624,10 +818,10 @@ async def _outbox_count(pool: AsyncConnectionPool[AsyncConnection[Any]], profile
     return int(row[0])
 
 
-async def test_pdf_only_invoice_fails_with_br_e01_without_raising(
+async def test_unreadable_pdf_fails_with_br_e01_without_raising(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-1.11, BR-E01: an invoice whose only file is a PDF ends in EXTRACT_FAILED with BR-E01."""
+    """R-2.15, BR-E01: an invoice whose PDF is not readable ends in EXTRACT_FAILED with BR-E01."""
     profile_id = f"profile-{uuid4().hex}"
     pdf_path = tmp_path / "invoice.pdf"
     data = b"%PDF-1.4 synthetic"
@@ -654,6 +848,51 @@ async def test_pdf_only_invoice_fails_with_br_e01_without_raising(
     assert route_jobs == 0
     assert len(messages) == 1
     assert "No pude leer este comprobante" in messages[0]
+
+
+async def test_text_pdf_is_read_and_routes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-2.15: a text PDF ends in ROUTING with a reading taken from its text layer."""
+    invoice_id, _ = await _invoice_with_file(db_pool, _write_text_pdf(tmp_path / "invoice.pdf"), "pdf")
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+
+    assert (state, rule_id) == ("ROUTING", None)
+    assert route_jobs == 1
+    assert reading is not None
+    assert reading.missing_required() == ()
+    assert reading.value("ruc_emisor") == SYNTHETIC_RUC
+    assert reading.value("serie") == SERIE
+    assert reading.value("numero") == NUMERO
+    assert reading.value("fecha_emision") == PRINTED_DATE.isoformat()
+    assert reading.value("total") == TOTAL
+    assert reading.fields["ruc_emisor"].source == "pdf"
+
+
+async def test_pdf_over_the_page_cap_cancels_with_br_e07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-2.15: a PDF over max_pdf_pages ends CANCELLED with BR-E07 naming the page cap."""
+    pdf = _write_blank_pdf(tmp_path / "long.pdf", MEDIA.max_pdf_pages + 1)
+    invoice_id, profile_id = await _invoice_with_file(db_pool, pdf, "pdf")
+
+    await _run_handler(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+        messages = await _outbox_rows(conn, profile_id, "BR-E07")
+
+    assert (state, rule_id) == ("CANCELLED", "BR-E07")
+    assert route_jobs == 0
+    assert len(messages) == 1
+    assert f"tiene más de {MEDIA.max_pdf_pages} páginas" in messages[0]
 
 
 async def test_cancel_between_read_and_extracting_wins(

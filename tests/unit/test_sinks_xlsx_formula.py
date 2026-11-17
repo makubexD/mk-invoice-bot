@@ -82,3 +82,52 @@ def test_division_by_zero_raises() -> None:
     """R-7.4: division by zero is refused."""
     with pytest.raises(UnsupportedFormula, match="division by zero"):
         parse("A1/B1").evaluate({"B1": Decimal("0")})
+
+
+def test_unary_plus_returns_its_operand_unchanged() -> None:
+    """R-7.4: a unary plus is accepted and leaves the value as it is."""
+    assert parse("=+A1+B1").evaluate({"A1": Decimal("2"), "B1": Decimal("3")}) == Decimal("5")
+
+
+def test_double_unary_minus_still_negates_twice() -> None:
+    """R-7.4: a double unary minus cancels out and yields the operand."""
+    assert parse("=--A1").evaluate({"A1": Decimal("7")}) == Decimal("7")
+
+
+def test_64_nested_parentheses_parse_and_evaluate() -> None:
+    """R-7.4: 64 levels of parentheses are the deepest nesting accepted, and they evaluate."""
+    formula = "=" + "(" * 64 + "1" + ")" * 64
+
+    assert parse(formula).evaluate({}) == Decimal("1")
+
+
+def test_65_nested_parentheses_raise_unsupported_formula() -> None:
+    """R-7.4: 65 levels of parentheses raise UnsupportedFormula, never RecursionError."""
+    formula = "=" + "(" * 65 + "1" + ")" * 65
+
+    with pytest.raises(UnsupportedFormula, match="nested deeper than 64") as raised:
+        parse(formula)
+
+    assert not isinstance(raised.value, RecursionError)
+
+
+def test_1000_leading_minus_signs_raise_unsupported_formula() -> None:
+    """R-7.4: 1000 leading minus signs raise UnsupportedFormula, never RecursionError."""
+    formula = "=" + "-" * 1000 + "1"
+
+    with pytest.raises(UnsupportedFormula, match="nested deeper than 64") as raised:
+        parse(formula)
+
+    assert not isinstance(raised.value, RecursionError)
+
+
+@pytest.mark.parametrize(
+    ("formula", "expected"),
+    [
+        ("=--1", Decimal("1")),
+        ("=+-+1", Decimal("-1")),
+    ],
+)
+def test_leading_signs_still_evaluate(formula: str, expected: Decimal) -> None:
+    """R-7.4: combinations of leading plus and minus signs evaluate as before."""
+    assert parse(formula).evaluate({}) == expected

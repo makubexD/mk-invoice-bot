@@ -15,7 +15,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 6c  | `widen-b-fetch` (done 2026-11-14)    | S7.2 (+ `document_url` allowlist, `printed_urls`), S7.4, S7.5, S10.10, S11.9; portal config checks; S10.3, S10.4, S10.7 wait for a portal that needs them (D99) | part of M4 | S0.6 (remaining store pages); Q5                                                 |
 | 6d  | `widen-b-deliver` (done 2026-11-16)  | S11.11, S11.12, S11.14, S11.15, S11.17; review leftovers (`widen-b-fetch`) (D105)                                                                               | part of M4 | S0.11; the bot's Outlook.com mailbox; M3 run (all for the live check only)       |
 | 6e  | `widen-b-gaps-ops` (done 2026-11-16) | E8 (S8.1–S8.3, S8.5, S8.8, S8.10, S8.11; D112); E15 (S12.3, S15.1, S15.2); gap leftovers (`shortcut:` logs, BR-E06, BR-R06, BR-F03) (D105)                      | M4         | S0.10; an `age` recipient and the backup target                                  |
-| 7   | `read-more`                          | S3.4, S3.8–S3.10; E6                                                                                                                                            | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
+| 7   | `read-more` (done 2026-11-16)        | S3.4, S3.8–S3.10; E6 (D121–D127)                                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
 | 8   | `flow-a`                             | E9, S10.6                                                                                                                                                       | M6         | S0.4, Google OAuth app in production status                                      |
 | 9   | `ops`                                | E12, S8.7, S8.9 (D112), then S12.7 (repo private), then S16.2                                                                                                   | M7         | VPS chosen (D42)                                                                 |
 | –   | v1.1 `contract`                      | E13, E14                                                                                                                                                        | M8         | —                                                                                |
@@ -58,7 +58,7 @@ Each item goes into the named phase's plan.
 - **`ocr` (step 4):** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
 - **`widen-b` (with S7.2 `qr_url`, moved from `fetch`; widen-b-fetch):** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
 - **`ops` (moved from `fetch`, a host setting):** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared. The browser helper (D82) needs network, so it gets its own user with internet-only egress instead.
-- **`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.
+- ~~**`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.~~ Done in `read-more`.
 
 ## Carried over from the `ocr` review
 
@@ -70,8 +70,8 @@ Each item goes into the named phase's plan.
 - **`fetch` step 17:** the helper's `variant` and `decoder` strings are logged unchecked. Move the QR variant and decoder names to a module without cv2 and make the result fields `Literal`s of them (R-9.16).
 - **`widen-b-fetch` (widen-b-fetch, D101):** drop `printed_urls` until a step reads them, or put them to use.
 - **`fetch` step 12 (moved from `read-more`: a fetched XML is the first caller):** `parse_invoice_xml` relies on the hardened parser plus the docinfo check, not on its byte scan for `<!doctype` (a UTF-16 document without a BOM passes the scan). Before a caller lands, refuse input that does not start with `<` after an optional UTF-8 BOM and whitespace.
-- **`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.
-- **`read-more`:** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
+- ~~**`read-more`:** `tests/unit/test_extract_ocr.py` monkeypatches `subprocess.run`, which is not a port the project owns. Make the Tesseract command an argument that tests point at a fake script.~~ Done in `read-more`.
+- **`read-more` live check (`docs/plan-mvp-read-more.md` § "Deferred: live check", item 2):** `_fix_serie` reads O, Q and D as 0 and I and L as 1 in the serie's last three characters (S0.3), so a real serie such as `FD01` is stored as `F001` when there is no QR. Revisit once the private set holds such a serie.
 - **Known, accepted:** the helper's process group is killed once more after the helper exits, by the old process ID; a reused ID could be hit in that window, which is very small.
 
 ## Carried over from the `fetch` review
@@ -111,7 +111,7 @@ Each item goes into the named phase's plan.
 - ~~**`widen-b` (widen-b-harden):** cap the pages `Drive.list_names` follows through `@odata.nextLink` (e.g. 50) and raise `GraphError` past it.~~ Done in `widen-b-harden`.
 - ~~**`widen-b` (with the work account, S11.1):** `auth-microsoft --account` becomes a choice of the configured accounts, and a sign-in resumes only that account's `PENDING_AUTH` invoices.~~ Dropped by D91.
 - ~~**`widen-b` (widen-b-harden):** a control character in a reading's text (`razon_social`, `serie`) makes lxml, the `.eml` builder or the drive path raise `ValueError`; map it to BR-D02 or strip it when the reading is stored.~~ Done in `widen-b-harden`.
-- **`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.
+- ~~**`read-more` or later:** `sinks/xlsx_formula.py` recurses without a depth limit (Excel caps nesting at 64) and refuses a leading `+` (`=+A1+B1`). The template is hash-pinned, so both only show up when a template is set up.~~ Done in `read-more`.
 - **Known, accepted (D89):** a transient Graph error during an automatic send leaves the batch `sending`, so the retry ends with BR-D03 instead of resending, even for a 429 that sent nothing.
 
 ## Carried over from the `widen-b-harden` review
@@ -157,14 +157,22 @@ Each item goes into the named phase's plan.
 - **`ops`:** `scripts/restore_drill.sh` passes the database URL, password included, on the `psql`/`pg_restore` command line; use `PG*` variables or a `.pgpass`. `ops/backup.py` `_pg_environment` drops URL query keys such as `sslmode`; pass them through or refuse them.
 - **`ops`:** an approval during the GitHub issue creation can lose the hint (`set_pending_issue_hint` updates 0 rows once the row is sent); queue a `comment` row when it does. `upsert_gap`'s `raised_now` can be true twice under concurrent raises; lock the row first if workers run in parallel.
 
+## Carried over from the `read-more` review
+
+Each item goes into the named phase's plan.
+
+- **`read-more` live check (`docs/plan-mvp-read-more.md` § "Deferred: live check"):** S0.5, S0.1, the padrón RSS and disk measurement and a WhatsApp PDF; it records M5.
+- **`ops`:** a 401 from validez keeps the cached SUNAT token until its TTL (at most a day); delete `kv['sunat_token']` on a 401.
+- **`ops`:** a recheck that gets no answer overwrites the stored `estado_cp` with null; keep the last answer and bump only the count.
+- **`ops`:** the lone-XML refusal (BR-E07) quotes the image byte cap as "the photo and PDF limit"; pick the cap per kind, as `handlers._max_mb` does.
+- **Known, accepted:** `scripts/import_padron.py` reads a padrón line with no length cap; the ZIP is downloaded by the owner by hand, and `check_zip` caps entries and ratio.
+
 ## Known drift between code and specs
 
 The specs run ahead of the code in these places; each has a named story that closes it.
 
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
-- `pipeline/intake.py` starts an invoice only from a photo: S3.10 adds PDFs in `read-more` (an XML on its own gets BR-E07).
-- `confirm_mode: always`, the `VALIDATING` state and asking in `CONFIRMING` for BR-E03 or a `source=llm` field (spec 03 §4) are not built; routing goes straight to `FETCHING_DOCS`. `read-more` builds them with BR-E03.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
 ## Notes for later phase plans

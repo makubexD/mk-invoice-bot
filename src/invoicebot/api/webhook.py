@@ -53,6 +53,8 @@ class WebhookDeps:
     verify_token: str
     sender_hash_key: str
     max_queued_per_sender: int
+    #: The photo and PDF size limit BR-E07 names, in whole megabytes (D121).
+    media_max_mb: int
     #: The flow that tracks payments (R-7.12), when one opts in.
     payment_flow: PaymentFlow | None = None
     #: The profiles and resolver a /portal or BR-F02 answer teaches with (R-11.4).
@@ -156,6 +158,7 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
                     conn,
                     msg,
                     max_queued_per_sender=deps.max_queued_per_sender,
+                    media_max_mb=deps.media_max_mb,
                     timezone=deps.timezone,
                     roles=IntakeRoles(
                         admins=deps.admin_profiles,

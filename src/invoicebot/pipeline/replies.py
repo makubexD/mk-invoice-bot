@@ -24,7 +24,7 @@ async def resolve_reply(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
     valid_states: Mapping[str, frozenset[str]],
-    asked_rules: Mapping[str, str],
+    asked_rules: Mapping[str, frozenset[str]],
 ) -> ButtonPress | None:
     """Resolve a button press to its :class:`ButtonPress`, choice included, or None.
 
@@ -32,7 +32,7 @@ async def resolve_reply(
     profile's invoice resolves to None with nothing sent. A press valid in the
     invoice's current state resolves at once. A press on a ``PENDING_USER`` invoice
     resumes it first when the stored ``waiting_state`` accepts the action and the
-    stored ``waiting_rule_id`` is ``asked_rules``' rule for it, so the action then runs
+    stored ``waiting_rule_id`` is one of ``asked_rules``' rules for it, so the action then runs
     against the restored state (D94). A press that carries a choice the invoice no longer
     offers, because it came from another menu or an out-of-range option, does not resume
     the parked invoice either (D94, BR-S02). Any other press sends BR-S02 and resolves to
@@ -72,7 +72,7 @@ async def _resumes_parked(
     state: str,
     action: str,
     valid_states: frozenset[str],
-    asked_rules: Mapping[str, str],
+    asked_rules: Mapping[str, frozenset[str]],
 ) -> bool:
     """Unpark invoice_id when the press answers its parked question, and say whether it did (D94)."""
     if state != PENDING_USER:
@@ -82,7 +82,7 @@ async def _resumes_parked(
         return False
     waiting_state, waiting_rule_id = waiting
     asked_rule = asked_rules.get(action)
-    if waiting_state not in valid_states or asked_rule is None or waiting_rule_id != asked_rule:
+    if waiting_state not in valid_states or asked_rule is None or waiting_rule_id not in asked_rule:
         return False
     return await unpark(conn, invoice_id)
 
