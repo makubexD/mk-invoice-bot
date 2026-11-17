@@ -139,7 +139,8 @@ class RowSheet(Protocol):
 
     Invariants every implementation keeps:
 
-    - ``keys`` maps each column-A value to its 1-based row number;
+    - ``keys`` maps each column-A value to its 1-based row number, and raises
+      rather than return a partial map when the tab is too long to read whole;
     - ``append`` returns the new row number.
     """
 

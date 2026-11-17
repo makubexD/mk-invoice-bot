@@ -23,7 +23,7 @@ class GoogleError(Exception):
 
     def __init__(self, status: int | None = None) -> None:
         self.status = status
-        reason = "on the network" if status is None else f"with status {status}"
+        reason = "with an unusable answer" if status is None else f"with status {status}"
         super().__init__(f"Google request failed {reason}")
 
 
