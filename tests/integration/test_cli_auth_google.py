@@ -19,6 +19,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.auth.providers import TOKENS_DIRECTORY
 from invoicebot.cli import main
 from invoicebot.pipeline.deliver import DELIVER_STEP
+from invoicebot.pipeline.pending_auth import GOOGLE
 from invoicebot.settings import Settings
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -112,15 +113,15 @@ async def _run_cli(
 
 
 async def _seed_invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], state: str) -> int:
-    """Insert one invoice in ``state`` and return its id."""
+    """Insert one invoice in ``state``, parked for this file's account, and return its id."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
-            INSERT INTO invoices (profile_id, origin_channel, state)
-            VALUES (%s, 'whatsapp', %s)
+            INSERT INTO invoices (profile_id, origin_channel, state, error)
+            VALUES (%s, 'whatsapp', %s, %s)
             RETURNING id
             """,
-            (f"profile-{uuid4().hex}", state),
+            (f"profile-{uuid4().hex}", state, f"{GOOGLE}:{ACCOUNT}"),
         )
         row = await cur.fetchone()
     assert row is not None

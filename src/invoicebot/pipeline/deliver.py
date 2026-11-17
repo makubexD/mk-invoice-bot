@@ -60,13 +60,15 @@ from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_no
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.pending_auth import (
+    GOOGLE,
+    MICROSOFT,
+    park_for_auth,
+)
+from invoicebot.pipeline.pending_auth import (
     RULE_AUTH as RULE_AUTH,
 )
 from invoicebot.pipeline.pending_auth import (
     RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
-)
-from invoicebot.pipeline.pending_auth import (
-    park_for_auth,
 )
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
@@ -137,9 +139,9 @@ TEMPLATE_INVALID = "TEMPLATE_INVALID"
 #: Where a broken Excel template leaves the invoice (BR-D02).
 MANUAL_REQUIRED_STATE = "MANUAL_REQUIRED"
 #: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
-AUTH_PROVIDER_SLUG = "microsoft"
+AUTH_PROVIDER_SLUG = MICROSOFT
 #: Each inbox provider's slug in BR-D01's admin text, naming ``scripts/auth_<slug>.py``.
-AUTH_PROVIDER_SLUGS: dict[str, str] = {GRAPH_MODE: "microsoft", GMAIL_PROVIDER: "google"}
+AUTH_PROVIDER_SLUGS: dict[str, str] = {GRAPH_MODE: MICROSOFT, GMAIL_PROVIDER: GOOGLE}
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
 #: The laptop mode's name, the one a flow lists as ``laptop_outlook`` (R-7.14).

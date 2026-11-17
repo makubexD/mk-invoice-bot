@@ -264,11 +264,12 @@ async def claim_natural_key(conn: AsyncConnection[Any], invoice_id: int, key: st
     return None
 
 
-async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
-    """Move every ``PENDING_AUTH`` invoice to ``DELIVERING`` and return their ids (BR-D01).
+async def resume_pending_auth(conn: AsyncConnection[Any], provider: str, account: str) -> list[int]:
+    """Move the ``PENDING_AUTH`` invoices parked for ``provider``'s ``account`` to ``DELIVERING`` (BR-D01).
 
-    The caller adds each invoice's ``deliver`` job in the same transaction, so a
-    crash never leaves an invoice ``DELIVERING`` without its job.
+    Only the invoices whose ``error`` is ``<provider>:<account>`` resume, so a sign-in never
+    moves another account's parked invoice. The caller adds each invoice's ``deliver`` job in
+    the same transaction, so a crash never leaves an invoice ``DELIVERING`` without its job.
     """
     cur = await conn.execute(
         """
@@ -278,8 +279,10 @@ async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
             error = NULL,
             updated_at = now()
         WHERE state = 'PENDING_AUTH'
+          AND error = %s
         RETURNING id
-        """
+        """,
+        (f"{provider}:{account}",),
     )
     return [int(row[0]) for row in await cur.fetchall()]
 

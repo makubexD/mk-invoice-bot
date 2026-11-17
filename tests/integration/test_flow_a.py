@@ -31,6 +31,7 @@ from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, Fet
 from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
+from invoicebot.pipeline.pending_auth import GOOGLE
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
@@ -298,7 +299,7 @@ async def test_a_revoked_google_token_parks_and_resume_finishes_the_delivery(
         assert await _state(db_pool, invoice_id) == ("PENDING_AUTH", "BR-D01")
 
         async with db_pool.connection() as conn, conn.transaction():
-            resumed = await resume_pending_auth(conn)
+            resumed = await resume_pending_auth(conn, GOOGLE, ACCOUNT)
             await enqueue(conn, invoice_id, DELIVER_STEP)
         assert invoice_id in resumed
 

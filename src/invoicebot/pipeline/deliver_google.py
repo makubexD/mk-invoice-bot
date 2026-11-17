@@ -29,7 +29,7 @@ from invoicebot.config.models import (
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.pending_auth import park_for_auth
+from invoicebot.pipeline.pending_auth import GOOGLE, park_for_auth
 from invoicebot.pipeline.route import natural_key
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.values import invoice_values
@@ -61,7 +61,7 @@ RULE_DONE = "BR-D16"
 #: BR-D17: the rule that reports a delivered invoice that still has no PDF (R-8.1).
 RULE_DONE_NO_PDF = "BR-D17"
 #: The provider slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
-AUTH_PROVIDER_SLUG = "google"
+AUTH_PROVIDER_SLUG = GOOGLE
 
 
 @dataclass(frozen=True)

@@ -44,6 +44,7 @@ from invoicebot.config.models import SHEETS_KEY_COLUMN, Config, Google, GoogleSh
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
+from invoicebot.pipeline.pending_auth import GOOGLE, MICROSOFT
 from invoicebot.queue.jobs import enqueue
 from invoicebot.secrets import SecretStore, load_identity
 from invoicebot.settings import Settings
@@ -181,7 +182,7 @@ def _auth_microsoft(
     if account not in delivery_accounts(cfg):
         sys.stdout.write("resumed 0 invoice(s)\n")
         return 0
-    count = asyncio.run(_resume_pending_auth(settings.database_url))
+    count = asyncio.run(_resume_pending_auth(settings.database_url, MICROSOFT, account))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0
 
@@ -221,7 +222,7 @@ def _auth_google(
     if DRIVE_FILE_SCOPE not in google_scopes_for(cfg, account):
         sys.stdout.write("resumed 0 invoice(s)\n")
         return 0
-    count = asyncio.run(_resume_pending_auth(settings.database_url))
+    count = asyncio.run(_resume_pending_auth(settings.database_url, GOOGLE, account))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0
 
@@ -461,14 +462,18 @@ def _request_path(line: bytes) -> str:
     return parts[1]
 
 
-async def _resume_pending_auth(database_url: str) -> int:
-    """Move every waiting invoice to ``DELIVERING`` with a deliver job, in one transaction (BR-D01)."""
+async def _resume_pending_auth(database_url: str, provider: str, account: str) -> int:
+    """Move the account's waiting invoices to ``DELIVERING`` with a deliver job (BR-D01).
+
+    The move and each invoice's deliver job share one transaction, so a crash never leaves an
+    invoice ``DELIVERING`` without its job.
+    """
     pool = create_pool(database_url)
     await pool.open(wait=True)
     invoice_ids: list[int] = []
     try:
         async with pool.connection() as conn, conn.transaction():
-            invoice_ids = await resume_pending_auth(conn)
+            invoice_ids = await resume_pending_auth(conn, provider, account)
             for invoice_id in invoice_ids:
                 await enqueue(conn, invoice_id, DELIVER_STEP)
     finally:

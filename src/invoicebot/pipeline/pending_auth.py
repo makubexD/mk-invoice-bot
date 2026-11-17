@@ -22,8 +22,11 @@ from invoicebot.store.invoices import InvoiceHead, set_state
 RULE_AUTH = "BR-D01"
 #: BR-D01's admin-only alert, with the script the admin runs (BR-D01).
 RULE_AUTH_ADMIN = "BR-D01_admin"
+#: The provider slugs, recorded in ``invoices.error`` as ``<slug>:<account>`` (BR-D01).
+MICROSOFT = "microsoft"
+GOOGLE = "google"
 #: The provider names the sender reads, by slug (BR-D01).
-PROVIDER_NAMES: Mapping[str, str] = {"microsoft": "Microsoft", "google": "Google"}
+PROVIDER_NAMES: Mapping[str, str] = {MICROSOFT: "Microsoft", GOOGLE: "Google"}
 
 
 async def park_for_auth(
