@@ -28,7 +28,7 @@ from invoicebot.config.models import Config
 from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import CANCEL_ACTION, summary_buttons
-from invoicebot.pipeline.steps import FETCH_STEP
+from invoicebot.pipeline.steps import FETCH_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
@@ -56,8 +56,6 @@ logger = logging.getLogger(__name__)
 
 #: The job step this handler serves; routing enqueues it in ``VALIDATING`` (D124).
 VALIDATE_STEP = "validate"
-#: The job step a BR-V01/BR-V04 verdict schedules; step 19's module owns it once it exists (D125).
-SUNAT_RECHECK_STEP = "sunat_recheck"
 #: The [Sí] action that accepts a BR-V02/BR-V06 invoice; step 20's action owns it once it exists (D125).
 INVALID_OK_ACTION = "invalid_ok"
 #: The recheck delay for a comprobante SUNAT does not know yet (BR-V01, D125).
@@ -106,7 +104,7 @@ def make_validate_handler(
                 # D95: a cancel or edit after the read above wins; nothing was written.
                 return
         else:
-            status = await _ask_sunat(pool, http, secrets, cfg, inputs.reading)
+            status = await ask_sunat(pool, http, secrets, cfg, inputs.reading)
             verdict = decide(status, inputs.padron)
             try:
                 async with pool.connection() as conn, conn.transaction():
@@ -160,7 +158,7 @@ async def _read(conn: AsyncConnection[Any], invoice_id: int, cfg: Config) -> _In
     )
 
 
-async def _ask_sunat(
+async def ask_sunat(
     pool: Pool,
     http: httpx.AsyncClient,
     secrets: Secrets,
@@ -199,7 +197,7 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, _extra_lines(verdict))
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
-    run_after = await _recheck_run_after(conn, verdict)
+    run_after = await recheck_run_after(conn, verdict)
     if run_after is not None:
         await enqueue(conn, inputs.invoice_id, SUNAT_RECHECK_STEP, run_after)
     await _reply(
@@ -234,7 +232,7 @@ def _extra_lines(verdict: Verdict) -> tuple[str, ...]:
     return tuple(lines)
 
 
-async def _recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict) -> datetime | None:
+async def recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict) -> datetime | None:
     """Return when a recheck job runs, or None when the verdict schedules none (D125).
 
     BR-V01 rechecks tomorrow; BR-V04 rechecks on the queue's backoff. The time is the

@@ -6,6 +6,8 @@ module through the button actions; naming both steps here keeps the import graph
 
 FETCH_STEP = "fetch"
 DELIVER_STEP = "deliver"
+#: Job step that asks SUNAT again after a BR-V01/BR-V04 answer (BR-V01, D125).
+SUNAT_RECHECK_STEP = "sunat_recheck"
 #: Job step that attaches a sender's uploaded document to a stuck invoice (R-1.5, S7.5).
 ATTACH_STEP = "attach_upload"
 #: Job step that converges an invoice's folder name to its sent and paid status (R-7.11).
