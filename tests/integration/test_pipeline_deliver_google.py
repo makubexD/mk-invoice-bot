@@ -1,5 +1,5 @@
-"""Integration tests for the flow A deliver handler (R-6.1 to R-6.3, R-8.1, R-9.4, R-9.7,
-BR-D01, BR-D16, BR-D17).
+"""Integration tests for the Google deliver handler (R-6.1 to R-6.3, R-8.1, R-9.4, R-9.7,
+BR-D01, BR-D16 to BR-D18, D144).
 
 Drive and Sheets are one stateful ``httpx.MockTransport`` that really remembers folders, files
 and rows, so a retried delivery reuses and updates instead of duplicating (R-6.3). Postgres is
@@ -26,13 +26,14 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, GoogleSheetsSink
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.sinks.drive_files import LINK_PDF, LINK_PHOTO, LINK_XML
 from invoicebot.sinks.google_api import GoogleTransient
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
@@ -59,6 +60,7 @@ TAB = "Compras"
 SHEET_ID = 123
 TIMEOUT_S = 5.0
 MAX_ROWS = 100
+DRIVE_HOST = "www.googleapis.com"
 # From tests/synthetic_rucs.txt; no real RUC appears here.
 STORE_RUC = "20000000001"
 RAZON_SOCIAL = "Restaurante La Lena S.A.C."
@@ -102,6 +104,7 @@ class FakeGoogle:
         self.files: dict[tuple[str, str], tuple[str, str]] = {}
         self.created_folders: list[tuple[str, str, str]] = []
         self.uploaded: list[tuple[str, str, str, str]] = []
+        self.requests: list[httpx.Request] = []
         self.keys: dict[str, int] = {}
         self.rows: dict[int, list[str]] = {}
         self.appended: list[list[str]] = []
@@ -121,8 +124,14 @@ class FakeGoogle:
         """Return the row number the last append landed on (R-6.2)."""
         return self._next_row - 1
 
+    @property
+    def drive_requests(self) -> list[httpx.Request]:
+        """Return the requests routed to Drive, so a test can prove a flow made none (D144)."""
+        return [request for request in self.requests if request.url.host == DRIVE_HOST]
+
     def handler(self, request: httpx.Request) -> httpx.Response:
         """Route one request to the fake Drive or Sheets backend."""
+        self.requests.append(request)
         if self.fail_once is not None:
             predicate, status = self.fail_once
             if predicate(request):
@@ -130,7 +139,7 @@ class FakeGoogle:
                 return httpx.Response(status)
         if self.fail is not None:
             return httpx.Response(self.fail)
-        if request.url.host == "www.googleapis.com":
+        if request.url.host == DRIVE_HOST:
             return self._drive(request)
         return self._sheets(request)
 
@@ -282,6 +291,23 @@ def _two_account_flows(profile_id: str) -> Config:
             "flows": {FLOW: first, SECOND_FLOW: second},
             "profiles": {profile_id: cfg.profiles[PROFILE]},
         }
+    )
+
+
+def _sheets_only_config(profile_id: str) -> Config:
+    """Return example.yaml's flow A as a Sheets-only flow with no Drive link columns (D144)."""
+    cfg = load_config(EXAMPLE)
+    flow = cfg.flows[FLOW]
+    sheets = next(sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink))
+    drive_links = (LINK_PHOTO, LINK_PDF, LINK_XML)
+    columns = {
+        header: expression
+        for header, expression in sheets.columns.items()
+        if not any(name in expression for name in drive_links)
+    }
+    sheets_only = flow.model_copy(update={"sinks": [sheets.model_copy(update={"columns": columns})]})
+    return cfg.model_copy(
+        update={"flows": {FLOW: sheets_only}, "profiles": {profile_id: cfg.profiles[PROFILE]}}
     )
 
 
@@ -533,6 +559,68 @@ async def test_no_pdf_reports_br_d17(
 
     assert state == ("DONE", "BR-D17")
     assert outbox == [(expected, "BR-D17", [])]
+
+
+async def test_a_sheets_only_flow_appends_one_row_and_reports_br_d18(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D144: a flow with no Drive sink writes one row, sends no Drive request, ends DONE with BR-D18."""
+    profile_id = f"google-sheets-only-{uuid4().hex}"
+    cfg = _sheets_only_config(profile_id)
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    fake = FakeGoogle()
+
+    async with _handler(db_pool, cfg, fake) as handler:
+        await handler(_job(seeded.invoice_id))
+
+    key = f"{profile_id}|{STORE_RUC}|{TIPO}|{SERIE}|{NUMERO}"
+    row_link = (
+        f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit"
+        f"#gid={SHEET_ID}&range=A{fake.last_row_number}"
+    )
+    expected = MESSAGES["BR-D18"].format(
+        serie=SERIE,
+        numero=NUMERO,
+        razon_social=RAZON_SOCIAL,
+        total=TOTAL,
+        link_row=row_link,
+    )
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_state(conn, seeded.invoice_id)
+        outbox = await _outbox(conn, profile_id)
+
+    assert state == ("DONE", "BR-D18")
+    assert fake.drive_requests == []
+    assert len(fake.appended) == 1
+    assert fake.appended[0][0] == key
+    assert outbox == [(expected, "BR-D18", [])]
+
+
+async def test_a_sheets_only_retry_updates_the_same_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D144: a re-run after a failure upserts the same row instead of appending a second one."""
+    profile_id = f"google-sheets-only-retry-{uuid4().hex}"
+    cfg = _sheets_only_config(profile_id)
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    fake = FakeGoogle()
+    fake.fail_once = (
+        lambda request: request.method == "GET" and request.url.path == f"/v4/spreadsheets/{SPREADSHEET_ID}",
+        503,
+    )
+
+    async with _handler(db_pool, cfg, fake) as handler:
+        with pytest.raises(GoogleTransient, match="status 503"):
+            await handler(_job(seeded.invoice_id))
+        await handler(_job(seeded.invoice_id))
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_state(conn, seeded.invoice_id)
+
+    assert state == ("DONE", "BR-D18")
+    assert len(fake.appended) == 1
+    assert len(fake.updated) == 1
 
 
 async def test_auth_required_parks_the_invoice_and_alerts_every_admin(

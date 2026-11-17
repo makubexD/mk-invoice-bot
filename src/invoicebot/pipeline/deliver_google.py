@@ -1,12 +1,13 @@
-"""Job handler that files a flow A invoice in Google Drive and its row in Sheets (S9.2 to S9.4).
+"""Job handler that files an invoice in Google Drive and its row in Sheets (S9.2 to S9.4).
 
-:func:`make_google_deliver_handler` builds the handler of the ``deliver`` job step for the
-``personal_google`` flow. It acts only on an invoice in ``DELIVERING`` (R-9.4): it reads the
-invoice and its local files in one short connection, runs the flow's Drive and Sheets sinks in
-config order with no connection held, then in one transaction moves the invoice to ``DONE``,
-queues its completion message and clears the photo paths. Only after that transaction commits
-are the photo, PDF and XML files deleted (R-9.7). A revoked Google token parks the invoice in
-``PENDING_AUTH`` with BR-D01; a Google failure propagates so the queue retries it.
+:func:`make_google_deliver_handler` builds the handler of the ``deliver`` job step for a
+Google flow. It acts only on an invoice in ``DELIVERING`` (R-9.4): it reads the invoice and
+its local files in one short connection, runs the flow's Drive and Sheets sinks in config
+order with no connection held, then in one transaction moves the invoice to ``DONE``, queues
+its completion message and clears the photo paths. A flow with no Drive sink writes only its
+row and completes with BR-D18 (D144). Only after that transaction commits are the photo, PDF
+and XML files deleted (R-9.7). A revoked Google token parks the invoice in ``PENDING_AUTH``
+with BR-D01; a Google failure propagates so the queue retries it.
 """
 
 from __future__ import annotations
@@ -59,6 +60,8 @@ logger = logging.getLogger(__name__)
 RULE_DONE = "BR-D16"
 #: BR-D17: the rule that reports a delivered invoice that still has no PDF (R-8.1).
 RULE_DONE_NO_PDF = "BR-D17"
+#: BR-D18: the rule that reports a Sheets-only flow's delivered row (D144).
+RULE_ROW_ONLY = "BR-D18"
 #: The provider slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
 AUTH_PROVIDER_SLUG = GOOGLE
 
@@ -90,19 +93,19 @@ class _Invoice:
 
 @dataclass(frozen=True)
 class _Sinks:
-    """The flow A sinks a delivery needs, in configuration order (R-6.1, R-6.2)."""
+    """The sinks a delivery needs: Sheets always, Drive when the flow has one (R-6.1, R-6.2, D144)."""
 
-    drive: GoogleDriveSink
+    drive: GoogleDriveSink | None
     sheets: GoogleSheetsSink
 
 
 def make_google_deliver_handler(context: GoogleDeliverContext) -> Handler:
-    """Build the handler that files a flow A invoice and writes its Sheets row (S9.2 to S9.4).
+    """Build the handler that files a Google flow's invoice and writes its Sheets row (S9.2 to S9.4).
 
     An invoice outside ``DELIVERING`` is left untouched (R-9.4). The Drive and Sheets sinks
     run with no database connection held; a retry repeats both, which is safe because Drive
-    reuses names and Sheets upserts by key (R-6.3). A revoked token parks the invoice until
-    the account signs in (BR-D01).
+    reuses names and Sheets upserts by key (R-6.3). A flow with no Drive sink writes only its
+    row (D144). A revoked token parks the invoice until the account signs in (BR-D01).
     """
 
     async def handle(job: Job) -> None:
@@ -116,7 +119,7 @@ def make_google_deliver_handler(context: GoogleDeliverContext) -> Handler:
         except AuthRequired as required:
             await _park_auth(context, invoice, required)
             return
-        await _complete(context, invoice, values)
+        await _complete(context, invoice, values, sinks)
         logger.info(
             "step done",
             extra={
@@ -166,26 +169,34 @@ async def _load(context: GoogleDeliverContext, job: Job) -> _Invoice | None:
 
 
 def _sinks(flow: Flow) -> _Sinks:
-    """Return the flow's Drive and Sheets sinks (R-6.1, R-6.2)."""
-    drive = next(sink for sink in flow.sinks if isinstance(sink, GoogleDriveSink))
-    sheets = next(sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink))
+    """Return the flow's Sheets sink and its Drive sink when it has one (R-6.1, R-6.2, D144).
+
+    Raises:
+        RuntimeError: The flow has no ``google_sheets`` sink, so there is nowhere to write.
+    """
+    drive = next((sink for sink in flow.sinks if isinstance(sink, GoogleDriveSink)), None)
+    sheets = next((sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink)), None)
+    if sheets is None:
+        raise RuntimeError(f"flow {flow.label!r} has no 'google_sheets' sink")
     return _Sinks(drive=drive, sheets=sheets)
 
 
 async def _run_sinks(context: GoogleDeliverContext, invoice: _Invoice, sinks: _Sinks) -> dict[str, object]:
-    """Run the Drive and Sheets sinks in order, merging each one's links into the values (R-6.1, R-6.2).
+    """Run the flow's sinks in order, merging each one's links into the values (R-6.1, R-6.2).
 
     The natural key is claimed from the reading before the first call; a missing part is a
     ``RuntimeError``, like any other missing delivery input. A retry repeats both sinks, which
-    is safe because Drive reuses names and Sheets upserts by key (R-6.3).
+    is safe because Drive reuses names and Sheets upserts by key (R-6.3). A flow with no Drive
+    sink skips the upload, so its row has no Drive links (D144).
     """
     key = natural_key(invoice.head.profile_id, invoice.reading)
     if key is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has no natural key")
     values = dict(invoice.base)
-    values.update(
-        await file_to_drive(sinks.drive, context.drives[sinks.drive.account], invoice.files, values)
-    )
+    if sinks.drive is not None:
+        values.update(
+            await file_to_drive(sinks.drive, context.drives[sinks.drive.account], invoice.files, values)
+        )
     values.update(await upsert_row(sinks.sheets, context.sheets[sinks.sheets.account], key, values))
     return values
 
@@ -203,21 +214,29 @@ async def _park_auth(context: GoogleDeliverContext, invoice: _Invoice, required:
         )
 
 
-async def _complete(context: GoogleDeliverContext, invoice: _Invoice, values: dict[str, object]) -> None:
-    """Close the delivery and, after the commit, delete the local files (R-9.7, BR-D16, BR-D17).
+async def _complete(
+    context: GoogleDeliverContext, invoice: _Invoice, values: dict[str, object], sinks: _Sinks
+) -> None:
+    """Close the delivery and, after the commit, delete the local files (R-9.7, BR-D16 to BR-D18).
 
-    The state change, the completion message and the photo-path clearing commit together; only
-    once they have does the handler unlink the photo, PDF and XML files. A cancellation before
-    the commit deletes nothing, and a ``StateMoved`` rolls the transaction back.
+    A flow with no Drive sink reports BR-D18, its row without a folder link (D144); otherwise
+    the rule reports whether the PDF is there (BR-D16, BR-D17). The state change, the
+    completion message and the photo-path clearing commit together; only once they have does
+    the handler unlink the photo, PDF and XML files. A cancellation before the commit deletes
+    nothing, and a ``StateMoved`` rolls the transaction back.
     """
-    rule = RULE_DONE_NO_PDF if invoice.files.pdf is None else RULE_DONE
+    if sinks.drive is None:
+        rule = RULE_ROW_ONLY
+    else:
+        rule = RULE_DONE_NO_PDF if invoice.files.pdf is None else RULE_DONE
+    # BR-D18's text has no folder, and ``format`` ignores the unused keyword.
     text = MESSAGES[rule].format(
         serie=values["serie"],
         numero=values["numero"],
         razon_social=values["razon_social"],
         total=values["total"],
         link_row=values[LINK_ROW],
-        link_folder=values[LINK_FOLDER],
+        link_folder=values.get(LINK_FOLDER, ""),
     )
     async with context.pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice.job.invoice_id, DONE, rule_id=rule, expected=DELIVERING)
