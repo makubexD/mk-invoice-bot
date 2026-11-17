@@ -15,9 +15,9 @@ from urllib.parse import quote
 
 import httpx
 
+from invoicebot.config.models import GOOGLE_ID_PATTERN
 from invoicebot.sinks.base import TokenSource
 from invoicebot.sinks.google_api import GoogleError, auth_headers, raise_google_error
-from invoicebot.sinks.google_drive import ID_PATTERN
 from invoicebot.text import escape_formula
 
 #: The Sheets v4 endpoint; the only host this client talks to.
@@ -86,7 +86,7 @@ def _updated_row(body: Mapping[str, object]) -> int:
 def _spreadsheet_id(body: Mapping[str, object]) -> str:
     """Return the new spreadsheet's id, refusing one Google should never have sent (R-6.2)."""
     value = body.get("spreadsheetId")
-    if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
+    if not isinstance(value, str) or GOOGLE_ID_PATTERN.fullmatch(value) is None:
         raise GoogleError()
     return value
 

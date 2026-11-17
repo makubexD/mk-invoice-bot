@@ -126,7 +126,7 @@ flows:
         upload: [photo, pdf, xml]
       - kind: google_sheets
         account: owner                   # the account `invoicebot auth-google` signs in (D128)
-        spreadsheet_id: "SHEET_ID"
+        spreadsheet_id: "SPREADSHEET_ID"
         tab: "Compras"
         columns:                        # header -> expression; column A is always Clave (D130)
           Fecha: "{fecha:%d/%m/%Y}"

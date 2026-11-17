@@ -4,20 +4,20 @@ The client is plain ``httpx``; tokens come from an injected :class:`TokenSource`
 and are fetched per call. Every request has the configured timeout and a bearer
 header. Folders and files are found by name before anything is created, so a
 retried delivery reuses what it already uploaded (R-6.3). Ids that come back
-from Google are checked against :data:`ID_PATTERN` before they are used. Errors
-carry the HTTP status only, never a URL, a path or a body (R-9.16).
+from Google are checked against :data:`GOOGLE_ID_PATTERN` before they are used.
+Errors carry the HTTP status only, never a URL, a path or a body (R-9.16).
 """
 
 from __future__ import annotations
 
 import json
-import re
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import httpx
 
+from invoicebot.config.models import GOOGLE_ID_PATTERN
 from invoicebot.sinks.base import TokenSource
 from invoicebot.sinks.google_api import GoogleError, auth_headers, raise_google_error
 
@@ -29,9 +29,6 @@ UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files"
 
 #: The MIME type of a Drive folder.
 FOLDER_MIME = "application/vnd.google-apps.folder"
-
-#: An id Google may return; anything else is refused before it is used.
-ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 
 #: The fields a lookup needs: the id to reuse and the link to report.
 _LOOKUP_FIELDS = "files(id,webViewLink)"
@@ -71,7 +68,7 @@ def _json_object(response: httpx.Response) -> dict[str, object]:
 def _read_id(item: Mapping[str, object]) -> str:
     """Return the item's id, refusing one Google should never have sent."""
     value = item.get("id")
-    if not isinstance(value, str) or ID_PATTERN.fullmatch(value) is None:
+    if not isinstance(value, str) or GOOGLE_ID_PATTERN.fullmatch(value) is None:
         raise GoogleError()
     return value
 
