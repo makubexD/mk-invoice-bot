@@ -43,7 +43,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import KIND_SUBJECT, MESSAGES, tipo_phrase
-from invoicebot.states import EXTRACTING, StateMoved
+from invoicebot.states import CANCELLED, EXTRACT_FAILED, EXTRACTING, RECEIVED, ROUTING, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import InvoiceHead, get_file_path, load_invoice_head, save_reading, set_state
 from invoicebot.store.padron import lookup
@@ -63,9 +63,7 @@ READABLE_KINDS: tuple[AttachmentKind, ...] = ("photo", "pdf")
 #: The helper's error when a PDF is over ``limits.media.max_pdf_pages`` (BR-E07, R-2.15).
 TOO_MANY_PAGES: Final = "too_many_pages"
 #: States in which the handler acts; any other state is left untouched (R-9.4).
-ACTIVE_STATES = frozenset({"RECEIVED", "EXTRACTING"})
-#: The state of an invoice the pipeline stops processing.
-CANCELLED_STATE = "CANCELLED"
+ACTIVE_STATES = frozenset({RECEIVED, EXTRACTING})
 #: No QR, an unreadable photo or a required field missing (BR-E01).
 RULE_UNREADABLE: RuleId = "BR-E01"
 #: The gap a repeating unreadable invoice from one issuer raises (BR-E06).
@@ -74,9 +72,9 @@ PARSER_MISS = "PARSER_MISS"
 _RUC_DIGITS = re.compile(r"[0-9]{11}")
 #: State each failure rule leaves the invoice in (spec 06).
 FAILURE_STATE: dict[RuleId, str] = {
-    RULE_UNREADABLE: "EXTRACT_FAILED",
-    RULE_BAD_RUC: "EXTRACT_FAILED",
-    RULE_UNSUPPORTED_TIPO: CANCELLED_STATE,
+    RULE_UNREADABLE: EXTRACT_FAILED,
+    RULE_BAD_RUC: EXTRACT_FAILED,
+    RULE_UNSUPPORTED_TIPO: CANCELLED,
 }
 
 
@@ -136,7 +134,7 @@ def make_extract_handler(
 
         async with pool.connection() as conn, conn.transaction():
             try:
-                await set_state(conn, job.invoice_id, "EXTRACTING", expected=invoice.state)
+                await set_state(conn, job.invoice_id, EXTRACTING, expected=invoice.state)
             except StateMoved:
                 # D95: a /cancelar between the read above and here wins; do not run the helper.
                 return
@@ -183,7 +181,7 @@ def make_extract_handler(
         async with pool.connection() as conn, conn.transaction():
             reading = await _with_padron(conn, reading)
             await save_reading(conn, job.invoice_id, reading)
-            await set_state(conn, job.invoice_id, "ROUTING", expected=EXTRACTING)
+            await set_state(conn, job.invoice_id, ROUTING, expected=EXTRACTING)
             await enqueue(conn, job.invoice_id, ROUTE_STEP)
         _log_outcome(job.invoice_id, result, None, started)
 

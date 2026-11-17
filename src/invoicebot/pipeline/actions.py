@@ -61,7 +61,17 @@ from invoicebot.rules.messages_es import (
     EDIT_PROMPT,
     MESSAGES,
 )
-from invoicebot.states import CANCELLABLE, CONFIRM_INVALID, EDITABLE, FETCHING_DOCS
+from invoicebot.states import (
+    BATCHED,
+    CANCELLABLE,
+    CANCELLED,
+    CONFIRM_INVALID,
+    CONFIRMING,
+    DONE,
+    EDITABLE,
+    FETCHING_DOCS,
+    ROUTING,
+)
 from invoicebot.store.flow_b import (
     get_batch_state,
     load_flow_data,
@@ -91,12 +101,6 @@ ARRIVED_ACTION = "arrived"
 VIA_LAPTOP_ACTION = "via_laptop"
 SELF_SEND_ACTION = "self_send"
 
-CONFIRMING_STATE = "CONFIRMING"
-ROUTING_STATE = "ROUTING"
-BATCHED_STATE = "BATCHED"
-CANCELLED_STATE = "CANCELLED"
-DONE_STATE = "DONE"
-
 RULE_SENT = "BR-D08"
 #: BR-D10: the invoice is filed and its mail was sent (spec 06).
 RULE_DONE = "BR-D10"
@@ -108,20 +112,20 @@ SENT_BATCH_STATE = "sent"
 
 #: The invoice states each action applies to; another state gets BR-S02 (R-3.5, BR-S02).
 VALID_STATES: Mapping[str, frozenset[str]] = {
-    PICK_ACTION: frozenset({CONFIRMING_STATE}),
-    YES_ACTION: frozenset({CONFIRMING_STATE}),
-    CHANGE_ACTION: frozenset({CONFIRMING_STATE}),
-    BRAND_ACTION: frozenset({CONFIRMING_STATE}),
-    CONTINUE_ACTION: frozenset({CONFIRMING_STATE}),
-    CONFIRM_ACTION: frozenset({CONFIRMING_STATE}),
+    PICK_ACTION: frozenset({CONFIRMING}),
+    YES_ACTION: frozenset({CONFIRMING}),
+    CHANGE_ACTION: frozenset({CONFIRMING}),
+    BRAND_ACTION: frozenset({CONFIRMING}),
+    CONTINUE_ACTION: frozenset({CONFIRMING}),
+    CONFIRM_ACTION: frozenset({CONFIRMING}),
     CANCEL_ACTION: CANCELLABLE,
     EDIT_ACTION: EDITABLE,
     INVALID_OK_ACTION: frozenset({CONFIRM_INVALID}),
-    SENT_ACTION: frozenset({BATCHED_STATE}),
-    NOT_ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
-    ARRIVED_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
-    VIA_LAPTOP_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
-    SELF_SEND_ACTION: frozenset({DONE_STATE, BATCHED_STATE}),
+    SENT_ACTION: frozenset({BATCHED}),
+    NOT_ARRIVED_ACTION: frozenset({DONE, BATCHED}),
+    ARRIVED_ACTION: frozenset({DONE, BATCHED}),
+    VIA_LAPTOP_ACTION: frozenset({DONE, BATCHED}),
+    SELF_SEND_ACTION: frozenset({DONE, BATCHED}),
 }
 
 #: The rules each question action answers; a parked invoice resumes only for its own (D94).
@@ -303,7 +307,7 @@ async def cancel_invoice(
     """
     # shortcut: spec 06 has no sender-cancel rule, so a cancel outside BR-D06 still records
     # BR-D06; it needs its own catalogued rule before reports read rule_id.
-    await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_CAP, expected=expected)
+    await set_state(conn, invoice_id, CANCELLED, rule_id=RULE_CAP, expected=expected)
     await _reply(conn, msg, invoice_id, None, CANCELLED_BY_USER.format(id=invoice_id))
 
 
@@ -359,7 +363,7 @@ async def _sent(
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
-    await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_SENT)
+    await set_state(conn, invoice_id, DONE, rule_id=RULE_SENT)
     await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
     return tuple(await take_photo_paths(conn, invoice_id))
 
@@ -397,7 +401,7 @@ async def _arrived(
         batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
         await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
         await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
-        await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_DONE)
+        await set_state(conn, invoice_id, DONE, rule_id=RULE_DONE)
         photos = tuple(await take_photo_paths(conn, invoice_id))
     folder = (await load_flow_data(conn, invoice_id))["folder"]
     await _reply(conn, msg, invoice_id, RULE_DONE, MESSAGES[RULE_DONE].format(folder=folder))
@@ -477,7 +481,7 @@ async def _record_answer(
     answers: dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
     answers.update(answer)
     await merge_flow_data(conn, invoice_id, {"answers": answers})
-    await set_state(conn, invoice_id, ROUTING_STATE, rule_id=rule_id, expected=CONFIRMING_STATE)
+    await set_state(conn, invoice_id, ROUTING, rule_id=rule_id, expected=CONFIRMING)
     await enqueue(conn, invoice_id, ROUTE_STEP)
 
 
