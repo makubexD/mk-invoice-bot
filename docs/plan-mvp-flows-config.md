@@ -272,6 +272,17 @@ Files: `docs/plan-mvp.md` (the note only). `config/config.yaml` is gitignored an
 
 Test: `uv run python scripts/check_config.py config/config.yaml` exits 0.
 
+## Step 15: No `None` in a Google completion without a business name `[worker]`
+
+Files: `src/invoicebot/pipeline/deliver_google.py`, `tests/integration/test_flow_dni.py`.
+
+Found by step 12: a QR-only boleta has no `razon_social` (no XML, no OCR name), so BR-D18 reads `✅ Registrado B001-81001 de None, S/ 49.90.`
+
+- In `_complete`, a missing or empty `razon_social` is replaced by `RUC {ruc_emisor}`; BR-D16 and BR-D17 get the same fallback. The fallback lives in one small helper with a docstring citing BR-D18. Message texts are unchanged.
+- Test (docstring starts `BR-D18:`): the QR-only case in `test_flow_dni.py` asserts the BR-D18 text contains `de RUC <ruc_emisor>` and never `None`.
+
+Test: `uv run pytest -q tests/integration/test_flow_dni.py tests/integration/test_pipeline_deliver_google.py`.
+
 ## Deferred: live check (in 9d `ops-live`)
 
 - `auth-google` with the `spreadsheets` scope when a sink is `existing`, and `google-setup --flow personal_dni`.
