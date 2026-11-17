@@ -83,7 +83,7 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
          natural_key TEXT UNIQUE NULL /*<profile_id>|ruc_emisor|tipo|serie|numero: unique per profile (D93)*/,
          ruc_emisor, tipo, serie, numero, fecha, moneda, base, igv, total,
          ruc_adq, razon_social, fields_json /*value+source+confidence*/,
-         sunat_status_json, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,
+         sunat_status_json /*estado_cp, estado_ruc, cond_domi_ruc, checked_at, rechecks (D125)*/, batch_id NULL, rule_id NULL, waiting_state NULL /*for PENDING_USER*/,
          flow_data_json /*data only this invoice's flow uses: folder ref and seq, comercio, claimed amount, reason overrides (D75)*/,
          payment_id NULL /*R-7.12, D107*/,
          error, created_at, updated_at)
@@ -142,10 +142,12 @@ Side states and exits (each row names the rule that causes it):
 | EXTRACTING | QR, XML and OCR miss required fields, and the LLM is off for the flow, fails, or hit its cap (BR-E01, BR-E08) | EXTRACT_FAILED |
 | EXTRACTING | Unsupported or oversized media (BR-E07) | CANCELLED |
 | EXTRACT_FAILED | The user sends a better photo, or the data as `campo=valor` | EXTRACTING / ROUTING |
-| ROUTING | BR-R03, BR-R04, BR-E03, any `source=llm` field, or `confirm_mode: always` | CONFIRMING |
+| ROUTING | BR-R03, BR-R04, BR-E03, any `source=llm` field, or `confirm_mode: always` (BR-S10, D126) | CONFIRMING |
+| ROUTING | The flow is decided and nothing needs asking (D124) | VALIDATING (a `validate` job sends the routed summary) |
 | ROUTING | `unmatched: reject` (BR-R07), or the flow isn't allowed for the profile (BR-R05) | CANCELLED |
 | CONFIRMING | The user confirms / edits | VALIDATING / ROUTING |
 | VALIDATING | `estadoCp` 2 or 4 (BR-V02, BR-V06) | CONFIRM_INVALID |
+| VALIDATING | Any other answer, an outage (BR-V04) or validation off (D124, D125) | FETCHING_DOCS |
 | CONFIRM_INVALID | The user continues / cancels | FETCHING_DOCS / CANCELLED |
 | EXTRACT_FAILED, CONFIRMING, CONFIRM_INVALID | No answer within `question_timeout` (BR-S08) | PENDING_USER (the waiting state is stored in `waiting_state`) |
 | PENDING_USER | The user answers the pending question, directly or from `/pendientes` | the stored waiting state |
@@ -204,7 +206,7 @@ The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 
    - `document_url` comes from the QR.
 6. **XML and PDF:**
    - **XML** (the downloaded file, and the golden set's expected values): a light, hardened UBL read (`extract/ubl.py`, R-2.12) of the match fields and the amounts (R-2.7, D57). No signature checks in the MVP. Built in phase 3 (S7.3, S7.7 moved, D55).
-   - **PDF input** (D58): the text layer and QR first (`extract/pdf.py`); a PDF without text is rendered (page 1) and goes through steps 2–5.
+   - **PDF input** (D58, D122): opened only in the extract helper with `pypdfium2` (`extract/pdf.py`); more than `limits.media.max_pdf_pages` pages → BR-E07. Page 1 is rendered at 200 dpi for the QR; a text layer with at least `extraction.pdf_min_text_chars` characters is read by the OCR rule parser (source `pdf`); a PDF without text goes through steps 2–5 on the render.
 7. **Enrich:**
    - Padrón lookup gives `razon_social`, `estado` and `condicion`.
    - `comercio` is not resolved here: a flow that needs it (flow B's folder name) looks it up in the store directory after routing, and asks BR-R09 then if the brand is ambiguous (R-7.1).
@@ -328,7 +330,7 @@ microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 - **Bounded queues:** at most 20 queued jobs per sender profile. Over the limit, the new message is stored but not enqueued, and the sender gets BR-S01.
 - **Postgres:** small footprint (`shared_buffers=64MB`, `max_connections=20`, app pool of 5), indices on `invoices(state)`, `jobs(run_after)`, `invoices(natural_key)`. The worker sleeps on `LISTEN jobs` instead of polling.
 - **Files:** stream downloads to `/data/tmp/{invoice_id}/`, using SHA-256 for dedup of identical photos. Purge after `DONE` (flow B: only once the batch is `sent`, never while `BATCHED`), plus a nightly housekeeping cron.
-- **Padrón import:** stream-unzip, parse line by line, and stream into `COPY padron_staging`, then swap tables in one transaction. Peak RAM stays under 50 MB. The ZIP is ~395 MB (updated daily by SUNAT; we refresh weekly): keep ≥ 1 GB free disk for the download plus the staging table, and delete the ZIP after the swap.
+- **Padrón import:** stream-unzip, parse line by line, and stream into `COPY padron_staging`, then swap tables in one transaction (drop `padron`, rename the staging table and its primary key; D123). `scripts/import_padron.py <zip>` reads a ZIP the owner downloaded; the download comes with S12.4. Peak RAM stays under 50 MB. The ZIP is ~395 MB (updated daily by SUNAT; we refresh weekly): keep ≥ 1 GB free disk for the download plus the staging table, and delete the ZIP after the swap.
 - **Measure, don't guess:** a `scripts/memprofile.py` runs the golden set and records peak RSS per step (`psutil`). CI fails if the peak is over 800 MB (R-9.1).
 
 ## 9. Security
@@ -386,7 +388,7 @@ mk-invoice-bot/
 ## 11. Testing strategy
 - **Unit tests:**
   - QR payload parser (variants), RUC check digit, regex rules (table-driven), UBL parser, state machine transitions, cell-mapping formatter, batch strategies.
-- **Golden set (D54):** two sets with the same `expected.json` format, one file per image: the required fields (R-2.13), the buyer, `base`, `igv`, `service_charge`, `icbper`, `discounts`, `has_qr`, and `razon_social`. The **committed** set (`tests/golden/{images,expected}/`, ≥ 10) is drawn by a generator script with synthetic RUCs (S3.9) and runs in CI as a regression check. The **private** set (the owner's photos, each with its official XML as the source of `expected.json`, ≥ 30) stays outside git and is measured locally against R-2.9; the result goes to `specs/spikes/accuracy.md`.
+- **Golden set (D54):** two sets with the same `expected.json` format, one file per image: the required fields (R-2.13), the buyer, `base`, `igv`, `service_charge`, `icbper`, `discounts`, `has_qr`, and `razon_social`. The format is D127: `{"has_qr": bool, "fields": {name: value}}`, one `<name>.json` beside each `<name>.<jpg|png|pdf>`. The **committed** set (`tests/golden/`, ≥ 10) is drawn by a generator script with synthetic RUCs (S3.9) and runs in CI as a regression check. The **private** set (the owner's photos, each with its official XML as the source of `expected.json`, ≥ 30) stays outside git and is measured locally against R-2.9; the result goes to `specs/spikes/accuracy.md`.
 - **Contract tests:**
   - Recorded fixtures (VCR-style) for Meta, Google, Graph and SUNAT.
   - Fake channel for end-to-end conversation tests.

@@ -224,15 +224,15 @@ Anything bigger gets split before work starts.
 | S3.1 | Validators: RUC mod-11, serie regex, date bounds, total ≈ base + IGV + charges − discounts, IGV rate in `igv_rates`, `supported_tipos`; owns BR-E02, BR-E03, BR-E05 and BR-E09 | S | Table-driven tests, including check digits 10 → 0 and 11 → 1, and real-shaped cases at 18%, 10% and 10.5% with and without a service charge | R-2.4 |
 | S3.2 | SUNAT QR payload parser (pipe format, both date formats, URL payloads) | S | 20+ fixture payloads; a URL becomes `document_url` | R-2.2, R-2.8 |
 | S3.3 | QR cascade decoder (zxing → crops/upscale → WeChat → pyzbar, rotations) | M | Hit rate on the private set ≥ the S0.2 result and ≥ 95%; peak RSS logged. S0.2 (2026-11-13, `specs/spikes/qr.md`): 50 % on 6 photos, so the 95 % threshold stands and is not yet met | R-2.1 |
-| S3.4 | Padrón import (streaming, run by hand: `scripts/import_padron.py`) + lookup | M | Peak RAM < 50 MB on a synthetic mini-ZIP in tests; the lookup uses the primary-key index (asserted with `EXPLAIN`); peak disk while staging and live tables coexist is measured and recorded (estimated 2–3 GB, unverified); the weekly refresh comes with S12.4 | R-2.5 |
+| S3.4 | Padrón import (streaming, run by hand: `scripts/import_padron.py`) + lookup | M | Peak RAM < 50 MB on a synthetic mini-ZIP in tests; the lookup uses the primary-key index (asserted with `EXPLAIN`); peak disk while staging and live tables coexist is measured and recorded (estimated 2–3 GB, unverified); the weekly refresh comes with S12.4 | R-2.5, D123 |
 | S3.5 | OCR preprocessing + Tesseract subprocess with timeout | M | Deskew/CLAHE/threshold pipeline (S0.3); 30 s timeout → BR-E01 | R-2.3 |
 | S3.6 | OCR rule parser (`parsing_rules.yaml`) + printed-URL capture | M | Required-field accuracy ≥ 80% on the private set; service charge, ICBPER and discounts read when printed; `printed_urls` captured | R-2.3, R-2.10, R-2.14 |
 | S3.7 | Per-field source/confidence + `ok`/`needs_review` | S | A field with confidence < `review_threshold` is `needs_review`; the invoice is `ok` only when every required field is `ok`, otherwise BR-E09 | R-2.6, R-2.13 |
-| S3.8 | Golden-set accuracy report | S | CI runs the committed set and fails below the R-2.9 thresholds; `scripts/accuracy_report.py --set <path>` runs the private set locally and writes `specs/spikes/accuracy.md` (numbers only) | R-2.9 |
-| S3.9 | Synthetic receipt generator (D54) | M | A committed script draws receipts with synthetic RUCs (header, items, totals, IGV at 18%/10%/10.5%, service charge, a valid SUNAT QR) plus photo-like distortion; it writes the image and its `expected.json`; output is reproducible from a seed and passes the CI RUC/EXIF check | R-2.9, R-9.17 |
+| S3.8 | Golden-set accuracy report | S | CI runs the committed set and fails below the R-2.9 thresholds; `scripts/accuracy_report.py --set <path>` runs the private set locally and writes `specs/spikes/accuracy.md` (numbers only) | R-2.9, D127 |
+| S3.9 | Synthetic receipt generator (D54) | M | A committed script draws receipts with synthetic RUCs (header, items, totals, IGV at 18%/10%/10.5%, service charge, a valid SUNAT QR) plus photo-like distortion; it writes the image and its `expected.json`; output is reproducible from a seed and passes the CI RUC/EXIF check | R-2.9, R-9.17, D127 |
 | S7.3 | *(moved from E7, D55)* Light UBL 2.1 read + XML-matches-invoice check (D57) | M | Wrong XML → BR-F06; match fields and amounts read; an unreadable XML keeps the photo values marked for review; it produces `expected.json` for the private set | R-5.6, R-2.7 |
 | S7.7 | *(moved from E7, D55)* Hardened XML parsing, no signature checks (D57) | S | `DOCTYPE`/entities/oversize rejected (BR-F09, billion-laughs and XXE fixtures) | R-2.12 |
-| S3.10 | PDF input (D58) | M | A PDF starts an invoice like a photo; text layer + QR first, a page-1 render otherwise; over the byte cap or more than 5 pages → BR-E07; an XML sent on its own → BR-E07 | R-1.1, R-2.15 |
+| S3.10 | PDF input (D58) | M | A PDF starts an invoice like a photo; text layer + QR first, a page-1 render otherwise; over the byte cap or more than 5 pages → BR-E07; an XML sent on its own → BR-E07 | R-1.1, R-2.15, D121, D122 |
 | S3.11 | Extraction logs carry no extracted values | S | A test captures the logs of a full extraction and finds no RUC, DNI, name, OCR text or amount | R-9.16 |
 | S3.12 | RUC/EXIF check on every tracked file | S | `check_fixtures.py` scans `git ls-files`, not only `tests/` and `config/`; `specs/spikes/` and `docs/` are covered; binary fixtures such as the padrón mini-ZIP are built at test time | R-9.17 |
 
@@ -309,8 +309,8 @@ Anything bigger gets split before work starts.
 ## E6 · SUNAT validation
 | ID | Story | Size | Key AC | Reqs / rules |
 |---|---|---|---|---|
-| S6.1 | OAuth client_credentials + token cache in `kv` | S | Refreshes 60 s before expiry; works across restarts | R-4.3 |
-| S6.2 | `validarcomprobante` + BR-V01..V06 handling | M | `estadoCp` 0–4, RUC estado and outage cases each map to their rule and message (1 → continue, 0 → V01, 2 → V02, 3 → V05, 4 → V06); the V01 re-check is scheduled | R-4.1, R-4.2 |
+| S6.1 | OAuth client_credentials + token cache in `kv` | S | Refreshes 60 s before expiry; works across restarts | R-4.3, D124, D126 |
+| S6.2 | `validarcomprobante` + BR-V01..V06 handling | M | `estadoCp` 0–4, RUC estado and outage cases each map to their rule and message (1 → continue, 0 → V01, 2 → V02, 3 → V05, 4 → V06); the V01 re-check is scheduled | R-4.1, R-4.2, D124, D125 |
 
 ## E7 · Fetcher framework
 | ID | Story | Size | Key AC | Reqs / rules |
