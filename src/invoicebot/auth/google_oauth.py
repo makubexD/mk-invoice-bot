@@ -90,8 +90,13 @@ class GoogleTokens:
 
     async def _refresh(self) -> str:
         """Exchange the stored refresh token for a new access token and cache it."""
+        self._access_token = None
+        self._token_mtime_ns = None
+        try:
+            token_mtime_ns = self._token_path.stat().st_mtime_ns
+        except OSError as err:
+            raise AuthRequired(self._account) from err
         refresh_token = self._load_refresh_token()
-        self._token_mtime_ns = self._token_path.stat().st_mtime_ns
         try:
             response = await self._http.post(
                 TOKEN_URL,
@@ -110,6 +115,7 @@ class GoogleTokens:
         access_token, lifetime_s = _access_token(response)
         self._access_token = access_token
         self._expires_at = self._clock() + min(lifetime_s, MAX_TOKEN_LIFETIME_S)
+        self._token_mtime_ns = token_mtime_ns
         return access_token
 
     def _token_file_unchanged(self) -> bool:

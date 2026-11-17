@@ -160,6 +160,56 @@ async def test_rewritten_token_file_refreshes_with_the_new_token(tmp_path: Path)
     assert len(calls) == 2
 
 
+async def test_failed_refresh_after_rewritten_token_file_is_retried(tmp_path: Path) -> None:
+    """BR-D01: a 5xx refresh of a rewritten token file never falls back to the old access token."""
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"access_token": ACCESS_TOKEN, "expires_in": 3600})
+        return httpx.Response(503)
+
+    token_path, identity = _account(tmp_path)
+    async with _make_tokens(token_path, identity, Clock(), handler) as tokens:
+        assert await tokens.token() == ACCESS_TOKEN
+        save_refresh_token(token_path, identity, "rotated-refresh-token")
+        rewritten_at = token_path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(token_path, ns=(rewritten_at, rewritten_at))
+        with pytest.raises(GoogleTransient) as caught:
+            await tokens.token()
+        with pytest.raises(GoogleTransient):
+            await tokens.token()
+
+    assert caught.value.status == 503
+    assert len(calls) == 3
+
+
+async def test_unreachable_refresh_after_rewritten_token_file_is_retried(tmp_path: Path) -> None:
+    """BR-D01: a refresh that never reaches Google after a rewrite never serves the old token."""
+
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        if len(calls) == 1:
+            return httpx.Response(200, json={"access_token": ACCESS_TOKEN, "expires_in": 3600})
+        raise httpx.ConnectError("synthetic connection failure")
+
+    token_path, identity = _account(tmp_path)
+    async with _make_tokens(token_path, identity, Clock(), handler) as tokens:
+        assert await tokens.token() == ACCESS_TOKEN
+        save_refresh_token(token_path, identity, "rotated-refresh-token")
+        rewritten_at = token_path.stat().st_mtime_ns + 1_000_000_000
+        os.utime(token_path, ns=(rewritten_at, rewritten_at))
+        with pytest.raises(GoogleTransient):
+            await tokens.token()
+        with pytest.raises(GoogleTransient):
+            await tokens.token()
+
+    assert len(calls) == 3
+
+
 async def test_deleted_token_file_requires_sign_in(tmp_path: Path) -> None:
     """BR-D01: an account whose token file disappeared after a refresh has to sign in."""
     calls: list[httpx.Request] = []
