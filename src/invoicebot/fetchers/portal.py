@@ -89,23 +89,53 @@ class PortalFetcher:
             max_bytes=self._max_bytes,
             page_timeout_ms=PAGE_TIMEOUT_MS,
         )
-        try:
-            with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
-                stdout = await run_helper(
-                    self._helper_command,
-                    request.model_dump_json().encode(),
-                    helper_env(Path(scratch)),
-                    self._helper_timeout_s,
-                    MAX_HELPER_OUTPUT_BYTES,
-                )
-        except TimeoutError:
-            return FetchResult(FetchReason.TIMEOUT, (), portal.key)
-        except RuntimeError:
-            return FetchResult(FetchReason.TECHNICAL, (), portal.key)
-        try:
-            return HelperOutput.model_validate_json(stdout)
-        except ValidationError:
-            return FetchResult(FetchReason.TECHNICAL, (), portal.key)
+        return await run_browser_job(
+            self._helper_command,
+            request.model_dump_json().encode(),
+            self._helper_timeout_s,
+            portal.key,
+        )
+
+
+async def run_browser_job(
+    command: Sequence[str],
+    payload: bytes,
+    timeout_s: float,
+    fetcher_name: str,
+) -> HelperOutput | FetchResult:
+    """Run one browser-helper job in its own temp folder and validate its one JSON line.
+
+    The helper runs with a minimal environment whose temp files stay in a scratch folder
+    removed after the run, and its output is capped at ``MAX_HELPER_OUTPUT_BYTES`` (R-9.2).
+    ``fetcher_name`` becomes the ``portal_key`` of a failure result, so each fetcher reports
+    itself (R-5.7).
+
+    Returns:
+        The helper's parsed output, or the ``FetchResult`` saying why the job failed:
+        ``TIMEOUT`` when it outlives ``timeout_s``, ``TECHNICAL`` when the helper fails or
+        prints something that is not a valid ``HelperOutput``.
+
+    Raises:
+        asyncio.CancelledError: when the caller is cancelled; the helper's process group is
+            killed and reaped first (R-9.2).
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
+            stdout = await run_helper(
+                command,
+                payload,
+                helper_env(Path(scratch)),
+                timeout_s,
+                MAX_HELPER_OUTPUT_BYTES,
+            )
+    except TimeoutError:
+        return FetchResult(FetchReason.TIMEOUT, (), fetcher_name)
+    except RuntimeError:
+        return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
+    try:
+        return HelperOutput.model_validate_json(stdout)
+    except ValidationError:
+        return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
 
 
 def helper_env(tmp_dir: Path) -> dict[str, str]:

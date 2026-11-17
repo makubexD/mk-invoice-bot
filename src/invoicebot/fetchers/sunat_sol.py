@@ -10,22 +10,15 @@ from __future__ import annotations
 
 import json
 import sys
-import tempfile
 from collections.abc import Sequence
 from pathlib import Path
 
-from pydantic import SecretStr, ValidationError
+from pydantic import SecretStr
 
 from invoicebot.config.models import MediaMaxBytes, SunatSolSite
-from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.base import FetchInvoice, FetchResult
 from invoicebot.fetchers.browser.protocol import HelperOutput, SolCredentialsIn, SolRequest
-from invoicebot.fetchers.portal import (
-    MAX_HELPER_OUTPUT_BYTES,
-    PAGE_TIMEOUT_MS,
-    helper_env,
-    result_from,
-)
-from invoicebot.helper import run_helper
+from invoicebot.fetchers.portal import PAGE_TIMEOUT_MS, result_from, run_browser_job
 from invoicebot.secrets import Secrets
 from invoicebot.sunat_origins import SUNAT_SOL
 
@@ -72,23 +65,7 @@ class SunatSolFetcher:
 
     async def _run(self, payload: bytes) -> HelperOutput | FetchResult:
         """Run the helper in its own temp folder and validate its one JSON line (R-9.2, R-9.10)."""
-        try:
-            with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
-                stdout = await run_helper(
-                    self._helper_command,
-                    payload,
-                    helper_env(Path(scratch)),
-                    self._timeout_s,
-                    MAX_HELPER_OUTPUT_BYTES,
-                )
-        except TimeoutError:
-            return FetchResult(FetchReason.TIMEOUT, (), SUNAT_SOL)
-        except RuntimeError:
-            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL)
-        try:
-            return HelperOutput.model_validate_json(stdout)
-        except ValidationError:
-            return FetchResult(FetchReason.TECHNICAL, (), SUNAT_SOL)
+        return await run_browser_job(self._helper_command, payload, self._timeout_s, SUNAT_SOL)
 
 
 def _credentials(secrets: Secrets) -> SolCredentialsIn:
