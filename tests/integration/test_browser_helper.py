@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from invoicebot.fetchers.base import FetchReason, FetchResult
-from invoicebot.fetchers.browser.__main__ import _guarded_result
 from invoicebot.fetchers.browser.routing import RouteGuard
+from invoicebot.fetchers.browser.session import guarded_result
 from invoicebot.net.guard import GuardReason
 
 
@@ -76,14 +76,14 @@ def test_guarded_result_keeps_not_found_yet_when_blocked() -> None:
     """R-5.10: a block with a not-found result keeps not_found_yet."""
     not_found = FetchResult(reason=FetchReason.NOT_FOUND_YET, files=(), portal_key="synthetic")
 
-    assert _guarded_result(not_found, GuardReason.PRIVATE_ADDRESS) is not_found
+    assert guarded_result(not_found, GuardReason.PRIVATE_ADDRESS) is not_found
 
 
 def test_guarded_result_promotes_a_blocked_technical_result() -> None:
     """R-5.10: a block with a technical result gives guard_blocked."""
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
 
-    promoted = _guarded_result(technical, GuardReason.PRIVATE_ADDRESS)
+    promoted = guarded_result(technical, GuardReason.PRIVATE_ADDRESS)
 
     assert promoted.reason is FetchReason.GUARD_BLOCKED
     assert promoted.portal_key == "synthetic"
@@ -93,7 +93,7 @@ def test_guarded_result_keeps_technical_without_a_block() -> None:
     """R-5.10: a technical result without a block stays technical."""
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
 
-    assert _guarded_result(technical, None) is technical
+    assert guarded_result(technical, None) is technical
 
 
 def _request(out_dir: Path) -> dict[str, Any]:

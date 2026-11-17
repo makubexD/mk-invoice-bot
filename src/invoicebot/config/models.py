@@ -18,10 +18,13 @@ from pydantic import (
     ConfigDict,
     Field,
     PlainSerializer,
+    PositiveInt,
     StringConstraints,
     field_validator,
     model_validator,
 )
+
+from invoicebot.sunat_origins import is_sunat_origin
 
 
 class Owner(BaseModel):
@@ -268,24 +271,74 @@ class Microsoft(BaseModel):
     timeout_s: float = Field(gt=0)
 
 
+class Google(BaseModel):
+    """The OAuth client the bot signs in with for Drive and Gmail (R-6.5, D128, D129)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # A desktop app's public client id, so it is config and not a secret (D128).
+    client_id: str
+    timeout_s: PositiveInt = 30
+    #: D130: the most rows the sheets sink reads to find the invoice's key.
+    max_rows: PositiveInt = 20000
+    #: R-5.2: the most bytes one full-message read may stream before it is refused.
+    max_message_bytes: PositiveInt = 8_388_608
+
+
+#: An id Google may return; anything else is refused before it is used.
+GOOGLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
+
+#: The Drive id that names the user's own drive root rather than a folder.
+GOOGLE_DRIVE_ROOT_ID = "root"
+
+
 class GoogleDriveSink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_drive"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
     root_folder_id: str
     path: str
     filename: str
     upload: list[str]
+
+    @field_validator("root_folder_id")
+    @classmethod
+    def _root_folder_id_is_a_google_id(cls, value: str) -> str:
+        """R-6.1: a Drive folder id is one Google id, or the literal drive root."""
+        if value != GOOGLE_DRIVE_ROOT_ID and GOOGLE_ID_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"root_folder_id {value!r} is not a Google Drive id")
+        return value
+
+
+#: D130: the sheets column that always holds the invoice's natural key.
+SHEETS_KEY_COLUMN = "Clave"
 
 
 class GoogleSheetsSink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_sheets"]
+    account: str = Field(pattern=r"^[a-z0-9_]+$")
     spreadsheet_id: str
     tab: str
-    upsert_key: str
-    columns: dict[str, str]
+    columns: dict[str, str] = Field(min_length=1)
+
+    @field_validator("spreadsheet_id")
+    @classmethod
+    def _spreadsheet_id_is_a_google_id(cls, value: str) -> str:
+        """R-6.2: a spreadsheet id is one Google id."""
+        if GOOGLE_ID_PATTERN.fullmatch(value) is None:
+            raise ValueError(f"spreadsheet_id {value!r} is not a Google id")
+        return value
+
+    @field_validator("columns")
+    @classmethod
+    def _columns_skip_the_key_header(cls, value: dict[str, str]) -> dict[str, str]:
+        """R-6.3, D130: column A is always the key, so config must not add it again."""
+        if SHEETS_KEY_COLUMN in value:
+            raise ValueError(f"columns must not contain the header {SHEETS_KEY_COLUMN!r}")
+        return value
 
 
 class SinkFiles(BaseModel):
@@ -441,6 +494,24 @@ class Flow(BaseModel):
         """D98, R-5.2: a flow that lists the email_inbox fetcher configures that inbox."""
         if EMAIL_INBOX_FETCHER in self.fetchers and self.email_inbox is None:
             raise ValueError(f"flow fetchers lists '{EMAIL_INBOX_FETCHER}' without flow.email_inbox settings")
+        return self
+
+    @model_validator(mode="after")
+    def _google_sinks_come_in_pairs(self) -> Self:
+        """R-6.1, D131: the sheets sink renders the drive links, so the two come together."""
+        has_drive = False
+        has_sheets = False
+        for index, sink in enumerate(self.sinks):
+            if isinstance(sink, GoogleDriveSink):
+                has_drive = True
+            elif isinstance(sink, GoogleSheetsSink):
+                if not has_drive:
+                    raise ValueError(
+                        f"sinks[{index}] is a 'google_sheets' sink without a 'google_drive' sink before it"
+                    )
+                has_sheets = True
+        if has_drive and not has_sheets:
+            raise ValueError("a flow with a 'google_drive' sink needs a 'google_sheets' sink")
         return self
 
 
@@ -619,6 +690,7 @@ class Config(BaseModel):
     env: Literal["development", "production"]
     mail: Mail
     microsoft: Microsoft
+    google: Google | None = None
     profiles: dict[Annotated[str, StringConstraints(pattern=PROFILE_ID_PATTERN)], Profile]
     channels: list[Channel]
     sunat: Sunat
@@ -667,6 +739,18 @@ class Config(BaseModel):
                 raise ValueError(
                     f"flow '{name}' lists mail mode 'inbox_rule' without mail.owner_work_address"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def _google_usage_needs_google_settings(self) -> Self:
+        """R-6.5, D129: a Google sink or a gmail inbox needs the bot's OAuth client."""
+        if self.google is not None:
+            return self
+        for name, flow in self.flows.items():
+            if any(isinstance(sink, (GoogleDriveSink, GoogleSheetsSink)) for sink in flow.sinks):
+                raise ValueError(f"flow '{name}' has a Google sink without google settings")
+            if flow.email_inbox is not None and flow.email_inbox.provider == "gmail":
+                raise ValueError(f"flow '{name}' has a gmail inbox without google settings")
         return self
 
     @model_validator(mode="after")
@@ -789,10 +873,43 @@ class Portal(BaseModel):
     notes: str = ""
 
 
+class SolLogin(BaseModel):
+    """The SOL sign-in form: the page and the selectors that receive the credentials (D134)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    url: str
+    ruc: str
+    user: str
+    password: str
+    submit: str
+
+
+class SunatSolSite(BaseModel):
+    """The SOL site in ``config/sunat_sol.yaml``: sign-in and the invoice query (D134)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: Literal["active", "todo", "broken"]
+    login: SolLogin
+    query: Portal
+
+    @model_validator(mode="after")
+    def _login_url_is_a_sunat_origin(self) -> Self:
+        """R-9.10: the credentials are typed only on a hard-coded SUNAT origin."""
+        if not is_sunat_origin(self.login.url):
+            raise ValueError(f"sunat_sol.login.url {self.login.url!r} is not a hard-coded SUNAT origin")
+        return self
+
+
 class StoreDirectory(BaseModel):
-    """The two-folder store directory: stores by RUC and portals by key (D47, R-5.8)."""
+    """The two-folder store directory: stores by RUC and portals by key (D47, R-5.8).
+
+    ``sunat_sol`` is the optional SOL site file beside them (D134).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     stores: dict[str, Store]
     portals: dict[str, Portal]
+    sunat_sol: SunatSolSite | None = None

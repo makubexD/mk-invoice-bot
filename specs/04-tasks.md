@@ -390,11 +390,11 @@ Anything bigger gets split before work starts.
 ## E9 · Flow A (Google)
 | ID | Story | Size | Key AC | Reqs |
 |---|---|---|---|---|
-| S9.1 | Google OAuth bootstrap script + refresh | S | OAuth app in **production** status; scopes `drive.file` (+ `spreadsheets` only for an existing sheet, + `gmail.readonly` only with the inbox fallback); a one-time consent stores the refresh token in the encrypted store; BR-D01 on revocation → `PENDING_AUTH` | R-6.4, R-6.5 |
-| S9.2 | Drive sink: folders + upload + links | M | Path and filename templates; returns refs for the later sinks | R-6.1 |
-| S9.3 | Sheets sink: column mapping + upsert by natural key | M | A re-run updates the row and never duplicates it; writes use `valueInputOption=RAW`; a business name like `=HYPERLINK(…)` is stored as text | R-6.2, R-6.3, R-6.6 |
-| S9.4 | Completion message | S | ✅/⚠️/❌ + key fields + links in one message, on the origin channel | R-8.1, R-8.2 |
-| S9.5 | Gmail variant of `email_inbox` | S | Same contract as S11.9 | R-5.2 |
+| S9.1 | Google OAuth bootstrap script + refresh | S | OAuth app in **production** status; scopes `drive.file` (+ `spreadsheets` only for an existing sheet, + `gmail.readonly` only with the inbox fallback); a one-time consent stores the refresh token in the encrypted store; BR-D01 on revocation → `PENDING_AUTH` | R-6.4, R-6.5, D128 |
+| S9.2 | Drive sink: folders + upload + links | M | Path and filename templates; returns refs for the later sinks | R-6.1, D129, D131 |
+| S9.3 | Sheets sink: column mapping + upsert by natural key | M | A re-run updates the row and never duplicates it; writes use `valueInputOption=RAW`; a business name like `=HYPERLINK(…)` is stored as text | R-6.2, R-6.3, R-6.6, D130 |
+| S9.4 | Completion message | S | ✅/⚠️/❌ + key fields + links in one message, on the origin channel | R-8.1, R-8.2, D133 |
+| S9.5 | Gmail variant of `email_inbox` | S | Same contract as S11.9 | R-5.2, D135 |
 
 ## E10 · Browser fetchers
 | ID | Story | Size | Key AC | Reqs |
@@ -404,7 +404,7 @@ Anything bigger gets split before work starts.
 | S10.3 | Captcha: local OCR attempts (D99: built when `lalucha-ddns` is completed) | S | ≤ 2 attempts, then hand over to S10.4 | R-5.3 |
 | S10.4 | Captcha: ask the user in chat (D99: built when `lalucha-ddns` is completed; until then any captcha → BR-F04) | M | Sends the image, waits up to 5 min, BR-F05 on timeout; reCAPTCHA → BR-F04 | R-5.3, R-5.4 |
 | S10.5 | `invoicebot portal-test <key>` CLI | S | Runs one portal end to end against a sample; used in the runbook's "add a portal" steps | R-5.7 |
-| S10.6 | `sunat_sol` fetcher (flow A only; blocked by S0.4) | M | Secondary SOL user; selectors in a file; credentials typed only when `page.url` matches the hard-coded SUNAT origins (test with a look-alike page); skipped in flow B with BR-F01 | R-5.2, R-9.10 |
+| S10.6 | `sunat_sol` fetcher (flow A only; blocked by S0.4) | M | Secondary SOL user; selectors in a file; credentials typed only when `page.url` matches the hard-coded SUNAT origins (test with a look-alike page); skipped in flow B with BR-F01 | R-5.2, R-9.10, D134 |
 | S10.7 | Custom adapters for the 2–3 portals the generic adapter can't handle (D99: built with the first portal file that needs one) | M each | Each passes `portal-test` | R-5.8 |
 | S10.8 | Store directory loader (D47): `stores/` + `portals/`, brand by serie prefix, files in `config/` | M | `check_config.py` validates both folders; an unknown portal key, a duplicate RUC, or overlapping prefixes are rejected; several brands and no prefix match → a one-tap question; reload on `SIGHUP`; the config code moves off `portals.yaml`. Phase `fetch` builds the loader and checks; the brand choice by prefix and its question move to `file-b` (first use of `comercio`), and the `SIGHUP` reload to `ops` | R-5.8, R-11.9 |
 | S10.9 | Portal "not found yet" retries (D65) | S | A portal's "no such invoice" schedules the next try from `retry_schedule` (default 1 h, 6 h, 24 h, 72 h); the invoice shows "esperando al portal"; after the last try the chain moves on; a technical error is not retried this way | R-5.1 |

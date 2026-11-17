@@ -7,14 +7,14 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import httpx
 import pytest
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.models import MediaMaxBytes
-from invoicebot.fetchers.base import FetchInvoice, FetchReason
+from invoicebot.fetchers.base import FetchInvoice, FetchReason, MailboxError
 from invoicebot.fetchers.email_inbox import SEARCH_TOP, EmailInboxFetcher
 from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
-from invoicebot.sinks.onedrive import GraphError, GraphTransient
 
 # From tests/synthetic_rucs.txt.
 SYNTHETIC_RUC = "20000000001"
@@ -292,18 +292,18 @@ async def test_fetch_with_a_sign_in_needed_is_auth_required(tmp_path: Path) -> N
     assert result.reason is FetchReason.AUTH_REQUIRED
 
 
-async def test_fetch_with_a_transient_graph_error_is_technical(tmp_path: Path) -> None:
-    """R-5.2, R-5.6, S11.9: a transient Graph failure is a technical failure."""
-    mailbox = FakeMailbox([], {}, {}, error=GraphTransient(503))
+async def test_fetch_with_a_mailbox_error_is_technical(tmp_path: Path) -> None:
+    """R-5.2, R-5.6, S11.9: a mailbox failure is a technical failure."""
+    mailbox = FakeMailbox([], {}, {}, error=MailboxError("refused"))
 
     result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
 
     assert result.reason is FetchReason.TECHNICAL
 
 
-async def test_fetch_with_a_graph_error_is_technical(tmp_path: Path) -> None:
-    """R-5.2, R-5.6, S11.9: a Graph error is a technical failure."""
-    mailbox = FakeMailbox([], {}, {}, error=GraphError(403))
+async def test_fetch_with_an_http_error_is_technical(tmp_path: Path) -> None:
+    """R-5.2, R-5.6, S11.9: an HTTP failure is a technical failure."""
+    mailbox = FakeMailbox([], {}, {}, error=httpx.ConnectError("down"))
 
     result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
 

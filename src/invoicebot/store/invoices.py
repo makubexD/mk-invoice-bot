@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Literal, cast
 
 from psycopg import AsyncConnection
@@ -263,11 +264,17 @@ async def claim_natural_key(conn: AsyncConnection[Any], invoice_id: int, key: st
     return None
 
 
-async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
-    """Move every ``PENDING_AUTH`` invoice to ``DELIVERING`` and return their ids (BR-D01).
+def pending_auth_key(provider: str, account: str) -> str:
+    """Return the ``error`` value that names a parked invoice's account (BR-D01)."""
+    return f"{provider}:{account}"
 
-    The caller adds each invoice's ``deliver`` job in the same transaction, so a
-    crash never leaves an invoice ``DELIVERING`` without its job.
+
+async def resume_pending_auth(conn: AsyncConnection[Any], provider: str, account: str) -> list[int]:
+    """Move the ``PENDING_AUTH`` invoices parked for ``provider``'s ``account`` to ``DELIVERING`` (BR-D01).
+
+    Only the invoices whose ``error`` is ``<provider>:<account>`` resume, so a sign-in never
+    moves another account's parked invoice. The caller adds each invoice's ``deliver`` job in
+    the same transaction, so a crash never leaves an invoice ``DELIVERING`` without its job.
     """
     cur = await conn.execute(
         """
@@ -277,8 +284,10 @@ async def resume_pending_auth(conn: AsyncConnection[Any]) -> list[int]:
             error = NULL,
             updated_at = now()
         WHERE state = 'PENDING_AUTH'
+          AND error = %s
         RETURNING id
-        """
+        """,
+        (pending_auth_key(provider, account),),
     )
     return [int(row[0]) for row in await cur.fetchall()]
 
@@ -782,6 +791,33 @@ async def get_file_path(conn: AsyncConnection[Any], invoice_id: int, kind: FileK
     if row is None or row[0] is None:
         return None
     return str(row[0])
+
+
+async def photo_paths(conn: AsyncConnection[Any], invoice_id: int) -> list[Path]:
+    """Return the local paths of the invoice's photos, oldest first; does not commit (R-9.7).
+
+    Read-only: the caller still owns the files until it deletes them after a committed state
+    change. :func:`invoicebot.store.flow_b.take_photo_paths` is the clearing counterpart.
+    """
+    cur = await conn.execute(
+        """
+        SELECT local_path
+        FROM files
+        WHERE invoice_id = %s AND kind = 'photo' AND local_path IS NOT NULL
+        ORDER BY id
+        """,
+        (invoice_id,),
+    )
+    return [Path(str(row[0])) for row in await cur.fetchall()]
+
+
+async def load_sunat_status(conn: AsyncConnection[Any], invoice_id: int) -> dict[str, object] | None:
+    """Return the invoice's stored ``sunat_status_json`` object, or None (R-4.2)."""
+    cur = await conn.execute("SELECT sunat_status_json FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    if row is None or not isinstance(row[0], dict):
+        return None
+    return cast(dict[str, object], row[0])
 
 
 def _ruc_emisor(reading: Reading) -> int | None:

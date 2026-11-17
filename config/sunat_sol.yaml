@@ -1,0 +1,30 @@
+# The SOL site behind `sunat_sol` (D134). S0.4 fills in the real paths and
+# selectors from SUNAT's "Consulta de comprobantes" and sets `status: active`;
+# until then the file stays `todo`, so the fetcher is not registered (D82).
+
+status: todo
+
+login:
+  # Placeholder sign-in page on a hard-coded SUNAT origin (R-9.10).
+  url: "https://api-seguridad.sunat.gob.pe/v1/clientesextranet/login"
+  # Placeholder selectors; S0.4 reads the real ones from the sign-in form.
+  ruc: "#ruc"
+  user: "#usuario"
+  password: "#clave"
+  submit: "#btnAceptar"
+
+# Shaped like a portal file so the existing form filler runs it.
+query:
+  key: sunat_sol
+  adapter: generic_form
+  # Placeholder query page; S0.4 replaces it with "Consulta de comprobantes".
+  url: "https://e-menu.sunat.gob.pe/consulta-comprobantes"
+  fields:
+    "#rucEmisor": "{ruc_emisor}"
+    "#serie": "{serie}"
+    "#numero": "{numero}"
+  submit: "#btnBuscar"
+  downloads:
+    xml: "a:has-text('XML')"
+  not_found: ".not-found"
+  retry_schedule: ["1h", "6h", "24h"]

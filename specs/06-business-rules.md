@@ -112,6 +112,8 @@ BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sen
 | BR-D13 | Flow B: `inbox_rule` sent the email to the owner's inbox (trusted, D67) | The batch is `sent`; the invoice is `DONE` | `✅ Archivada en {folder}. El correo salió por tu regla de Outlook.` [No llegó] |
 | BR-D14 | A pdf/xml upload whose quote does not resolve while the profile has more than one stuck invoice (D102) | Not linked | `Tienes varios comprobantes esperando archivos: {invoices}. Vuelve a enviar el archivo respondiendo a la foto del comprobante.` |
 | BR-D15 | An uploaded pdf does not start with `%PDF-`, after an optional UTF-8 BOM and leading whitespace (D103) | Not stored; recorded as rejected | `El archivo que enviaste no es un PDF válido; no lo guardé.` |
+| BR-D16 | Flow A: Drive and Sheets are written and the flow's documents are all there (the flow A completion message, R-8.1, D133) | The invoice is `DONE`; the `completion` template outside the window | `✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.` `Fila: {link_row}` `Carpeta: {link_folder}` |
+| BR-D17 | Flow A: Drive and Sheets are written, but the desired PDF is still missing (R-8.1 "docs pending", D133) | The invoice is `DONE`; the `completion` template outside the window | `⚠️ Guardado {serie}-{numero} de {razon_social}, S/ {total}, pero aún sin PDF; lo agrego cuando llegue.` `Fila: {link_row}` `Carpeta: {link_folder}` |
 
 - BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, joined by `, `.
 

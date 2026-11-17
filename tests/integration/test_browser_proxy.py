@@ -13,12 +13,12 @@ from playwright.async_api import Browser, async_playwright
 
 from invoicebot.config.models import Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
-from invoicebot.fetchers.browser.__main__ import (
-    _guarded_result,
-    _launch_options,
+from invoicebot.fetchers.browser.proxy import GuardProxy
+from invoicebot.fetchers.browser.session import (
+    guarded_result,
+    launch_options,
     record_navigation_hosts,
 )
-from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.net.guard import GuardReason
 
 _HEAD_END = b"\r\n\r\n"
@@ -450,7 +450,7 @@ async def browser_proxy() -> AsyncIterator[GuardProxy]:
 async def browser(browser_proxy: GuardProxy) -> AsyncIterator[Browser]:
     """A headless Chromium launched with the helper's options through the proxy."""
     async with async_playwright() as playwright:
-        launched = await playwright.chromium.launch(**_launch_options(_portal(), browser_proxy.port))
+        launched = await playwright.chromium.launch(**launch_options(_portal(), browser_proxy.port))
         try:
             yield launched
         finally:
@@ -481,7 +481,7 @@ async def test_redirect_to_a_refused_address_never_reaches_it(
     block = browser_proxy.block_for(navigation_hosts)
     assert block is GuardReason.PRIVATE_ADDRESS
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
-    assert _guarded_result(technical, block).reason is FetchReason.GUARD_BLOCKED
+    assert guarded_result(technical, block).reason is FetchReason.GUARD_BLOCKED
 
 
 async def test_websocket_to_a_refused_address_is_blocked(
@@ -515,7 +515,7 @@ async def test_blocked_sub_resource_keeps_a_technical_result(
     assert _EVIL_HOST in browser_proxy.blocked
     assert navigation_hosts == [_START_HOST]
     technical = FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key="synthetic")
-    assert _guarded_result(technical, browser_proxy.block_for(navigation_hosts)) is technical
+    assert guarded_result(technical, browser_proxy.block_for(navigation_hosts)) is technical
 
 
 class _UdpCounter(asyncio.DatagramProtocol):

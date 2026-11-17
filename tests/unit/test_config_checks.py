@@ -86,6 +86,39 @@ def _codes(problems: list[Problem]) -> list[str]:
     return [problem.code for problem in problems]
 
 
+def _sol_config_dir(
+    tmp_path: Path,
+    *,
+    status: str,
+    login_url: str = "https://api-seguridad.sunat.gob.pe/v1/clientesextranet/login",
+    query: dict[str, object] | None = None,
+) -> Path:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    query_document: dict[str, object] = {
+        "key": "sunat_sol",
+        "adapter": "generic_form",
+        "url": "https://e-menu.sunat.gob.pe/consulta-comprobantes",
+        "submit": "#btnBuscar",
+        "downloads": {"xml": "a:has-text('XML')"},
+        "not_found": ".not-found",
+    }
+    query_document.update(query or {})
+    document = {
+        "status": status,
+        "login": {
+            "url": login_url,
+            "ruc": "#ruc",
+            "user": "#usuario",
+            "password": "#clave",
+            "submit": "#btnAceptar",
+        },
+        "query": query_document,
+    }
+    (config_dir / "sunat_sol.yaml").write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return config_dir
+
+
 def test_example_config_has_no_problems() -> None:
     """R-9.6: the shipped example config passes every check."""
     cfg = load_config(EXAMPLE)
@@ -103,6 +136,58 @@ def test_repo_config_has_no_blocking_problems() -> None:
     problems = run_checks(cfg, directory, changed_portals=frozenset())
 
     assert [problem for problem in problems if problem.blocking] == []
+
+
+def test_repo_sunat_sol_stays_todo_without_a_problem() -> None:
+    """R-5.2: the shipped config/ folder loads its todo SOL site and reports no problem for it."""
+    cfg = load_config(EXAMPLE)
+    directory = load_directory(ROOT / "config")
+
+    assert directory.sunat_sol is not None
+    assert directory.sunat_sol.status == "todo"
+    assert [
+        problem
+        for problem in run_checks(cfg, directory, changed_portals=frozenset())
+        if "sunat_sol" in problem.path
+    ] == []
+
+
+def test_sol_login_outside_sunat_is_refused_at_load(tmp_path: Path) -> None:
+    """R-9.10: a login.url outside the hard-coded SUNAT origins fails load_directory."""
+    config_dir = _sol_config_dir(tmp_path, status="todo", login_url="https://evil.test/login")
+
+    with pytest.raises(ValueError, match="not a hard-coded SUNAT origin"):
+        load_directory(config_dir)
+
+
+def test_active_sol_query_gets_the_portal_checks(tmp_path: Path) -> None:
+    """R-5.8: an active SOL query with a URL template is blocking and names its file."""
+    cfg = load_config(EXAMPLE)
+    directory = load_directory(
+        _sol_config_dir(
+            tmp_path,
+            status="active",
+            query={"url": "https://e-menu.sunat.gob.pe/{ruc_emisor}"},
+        )
+    )
+
+    problems = run_checks(cfg, directory, changed_portals=frozenset())
+
+    assert [(problem.code, problem.path, problem.blocking) for problem in problems] == [
+        ("PORTAL_URL_TEMPLATE", "sunat_sol.yaml:query.url", True)
+    ]
+
+
+def test_flow_listing_sunat_sol_with_sol_disabled_warns() -> None:
+    """R-5.8: a flow that lists sunat_sol while SOL is off gets a non-blocking warning."""
+    cfg = load_config(EXAMPLE)
+    cfg.sunat.sol.enabled = False
+
+    problems = run_checks(cfg, _directory(), changed_portals=frozenset())
+
+    assert [(problem.code, problem.path, problem.blocking) for problem in problems] == [
+        ("SOL_DISABLED", "flows.personal_google.fetchers", False)
+    ]
 
 
 def test_invalid_config_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:

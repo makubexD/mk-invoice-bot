@@ -17,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from lxml import etree
 
 from invoicebot.sinks.xlsx_formula import UnsupportedFormula, parse, range_refs
+from invoicebot.text import escape_formula
 
 _MAX_ENTRIES = 200
 _MAX_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
@@ -30,7 +31,6 @@ _REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
 _XML_NS = "http://www.w3.org/XML/1998/namespace"
 
-_R10_ESCAPE_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 _CELL_REF_RE = re.compile(r"\$?[A-Za-z]{1,3}\$?\d+")
 _RANGE_REF_RE = re.compile(r"(\$?[A-Za-z]{1,3}\$?\d+):(\$?[A-Za-z]{1,3}\$?\d+)")
 
@@ -190,7 +190,7 @@ def _write_cell(sheet_data: etree._Element, ref: str, value: str | Decimal) -> N
         inline = etree.SubElement(cell, f"{{{_MAIN_NS}}}is")
         text = etree.SubElement(inline, f"{{{_MAIN_NS}}}t")
         text.set(f"{{{_XML_NS}}}space", "preserve")
-        text.text = _escape_text(value)
+        text.text = escape_formula(value)
 
 
 def _ensure_row(sheet_data: etree._Element, row_number: int) -> etree._Element:
@@ -240,13 +240,6 @@ def _cell_column(cell: etree._Element) -> int:
     """Return the column number of ``cell``, using 0 when it has no ``r``."""
     ref = cell.get("r")
     return _split_ref(ref)[0] if ref is not None else 0
-
-
-def _escape_text(text: str) -> str:
-    """Return ``text`` with a leading apostrophe when Excel would read it as a formula (R-7.10)."""
-    if text.startswith(_R10_ESCAPE_PREFIXES):
-        return "'" + text
-    return text
 
 
 def _recompute(sheet_data: etree._Element, written: set[str]) -> None:

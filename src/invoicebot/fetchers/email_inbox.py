@@ -20,10 +20,16 @@ import httpx
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
-from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult, is_pdf
+from invoicebot.fetchers.base import (
+    FetchedFile,
+    FetchInvoice,
+    FetchReason,
+    FetchResult,
+    MailboxError,
+    is_pdf,
+)
 from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
 from invoicebot.fetchers.portal import invoice_reading, sha256_hex
-from invoicebot.sinks.onedrive import GraphError, GraphTransient
 
 #: The newest messages Graph is asked for; the invoice's own mail is near the top (S11.9).
 SEARCH_TOP = 25
@@ -76,7 +82,7 @@ class EmailInboxFetcher:
             return await self._fetch(invoice, out_dir)
         except AuthRequired:
             return _result(FetchReason.AUTH_REQUIRED)
-        except (GraphTransient, GraphError, httpx.HTTPError):
+        except (MailboxError, httpx.HTTPError):
             return _result(FetchReason.TECHNICAL)
 
     async def _fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:

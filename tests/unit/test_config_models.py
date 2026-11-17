@@ -17,6 +17,8 @@ from invoicebot.config.models import (
     ChannelTemplates,
     Config,
     FlowInbox,
+    GoogleDriveSink,
+    GoogleSheetsSink,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -61,11 +63,119 @@ def _write_portal(config_dir: Path, name: str, document: dict[str, Any]) -> Path
 
 
 def test_example_config_loads() -> None:
-    """R-9.6: the shipped example config validates against the typed models."""
+    """R-9.6, R-6.1, R-6.2: the shipped example config, Google sink ids included, validates."""
     cfg = load_config(EXAMPLE)
 
     assert isinstance(cfg, Config)
     assert cfg.owner.ruc == "20XXXXXXXXX"
+
+
+def test_example_config_has_google_settings() -> None:
+    """R-6.2: the example config names the OAuth client and each Google sink's account."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.google is not None
+    assert cfg.google.client_id.endswith(".apps.googleusercontent.com")
+    assert cfg.google.timeout_s == 30
+    assert cfg.google.max_rows == 20000
+    drive, sheets = cfg.flows["personal_google"].sinks
+    assert isinstance(drive, GoogleDriveSink)
+    assert isinstance(sheets, GoogleSheetsSink)
+    assert (drive.account, sheets.account) == ("owner", "owner")
+
+
+def test_google_max_message_bytes_must_be_positive(tmp_path: Path) -> None:
+    """R-5.2: the full-message read cap is a positive size, so zero fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["google"]["max_message_bytes"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="max_message_bytes"):
+        load_config(path)
+
+
+def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
+    """R-6.3: column A is the natural key, so a configured Clave column is refused."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["columns"]["Clave"] = "{serie}-{numero}"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="Clave"):
+        load_config(path)
+
+
+def test_sheets_sink_before_a_drive_sink_fails(tmp_path: Path) -> None:
+    """R-6.1: a sheets sink renders the drive links, so it needs a drive sink before it."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["sinks"][0]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="google_drive"):
+        load_config(path)
+
+
+def test_drive_sink_without_a_sheets_sink_fails(tmp_path: Path) -> None:
+    """R-6.1, R-6.2: the two Google sinks come in pairs, so a drive sink alone is refused."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["flows"]["personal_google"]["sinks"][1]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="google_sheets"):
+        load_config(path)
+
+
+def test_drive_root_folder_id_that_is_not_a_google_id_fails(tmp_path: Path) -> None:
+    """R-6.1, R-6.2: a root folder id is one Google id, so a path fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][0]["root_folder_id"] = "a/b"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="root_folder_id"):
+        load_config(path)
+
+
+def test_spreadsheet_id_that_is_not_a_google_id_fails(tmp_path: Path) -> None:
+    """R-6.1, R-6.2: a spreadsheet id is one Google id, so a value with a space fails."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["spreadsheet_id"] = "x y"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="spreadsheet_id"):
+        load_config(path)
+
+
+def test_drive_root_folder_id_may_be_the_literal_root(tmp_path: Path) -> None:
+    """R-6.1, R-6.2: the literal 'root' names the user's drive root and is accepted."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][0]["root_folder_id"] = "root"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    drive = cfg.flows["personal_google"].sinks[0]
+    assert isinstance(drive, GoogleDriveSink)
+    assert drive.root_folder_id == "root"
+
+
+def test_gmail_inbox_without_google_settings_fails(tmp_path: Path) -> None:
+    """R-6.5: a gmail inbox uses the bot's Google OAuth client, so google is required."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"] = []
+    del document["google"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="gmail"):
+        load_config(path)
+
+
+def test_leftover_upsert_key_is_refused(tmp_path: Path) -> None:
+    """R-6.3: the sheets key is always the natural key, so upsert_key is refused."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["upsert_key"] = "natural_key"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="upsert_key"):
+        load_config(path)
 
 
 def test_example_config_has_daily_times_and_ops_defaults() -> None:

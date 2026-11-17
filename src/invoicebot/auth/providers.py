@@ -1,16 +1,27 @@
-"""Microsoft accounts' token providers and the scopes each one signs in with (R-7.9, D85).
+"""The accounts each provider signs in and the scopes they need (R-6.5, R-7.9, D85, D129).
 
-The app and the ``auth-microsoft`` command build an account's provider the same way: the
-client id comes from config, the encrypted MSAL cache lives under ``data_dir/tokens``, and
-the age identity decrypts it.
+Microsoft: the app and the ``auth-microsoft`` command build an account's provider the same
+way: the client id comes from config, the encrypted MSAL cache lives under
+``data_dir/tokens``, and the age identity decrypts it.
+
+Google: ``google_accounts`` lists the accounts a Google sink or a ``gmail`` inbox names,
+and ``google_scopes_for`` derives each one's scopes from config alone (D129), so signing
+in asks for no scope the account's flows do not use.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 from invoicebot.auth.msal_cache import TokenProvider
-from invoicebot.config.models import Config, MailerSink, OneDriveFolderSink
+from invoicebot.config.models import (
+    Config,
+    GoogleDriveSink,
+    GoogleSheetsSink,
+    MailerSink,
+    OneDriveFolderSink,
+)
 from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
 
@@ -30,6 +41,12 @@ INBOX_RULE_MODE = "inbox_rule"
 ONEDRIVE_TARGET_PREFIX = "onedrive_"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
+#: The Drive scope a Google sink's account signs in with (R-6.5, D129).
+DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
+#: The Gmail scope a ``gmail`` inbox's account signs in with (R-6.5, D129).
+GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
+#: The inbox provider that talks to Gmail instead of Graph (R-6.5, D135).
+GMAIL_PROVIDER = "gmail"
 
 
 def build_token_provider(
@@ -52,6 +69,11 @@ def build_token_provider(
         cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
         identity=load_identity(settings.age_identity_path),
     )
+
+
+def google_token_path(data_dir: Path, account: str) -> Path:
+    """Return the encrypted refresh token file of one Google account (D128)."""
+    return data_dir / TOKENS_DIRECTORY / f"{account}.google.age"
 
 
 def _files_accounts(cfg: Config) -> set[str]:
@@ -116,3 +138,43 @@ def delivery_accounts(cfg: Config) -> frozenset[str]:
     return frozenset(
         account for account in microsoft_accounts(cfg) if delivery.intersection(scopes_for(cfg, account))
     )
+
+
+def _google_sink_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a Google sink names across every flow (R-6.5, D129)."""
+    return {
+        sink.account
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+        if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))
+    }
+
+
+def _gmail_inbox_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a ``gmail`` inbox fetcher searches (R-6.5, D129)."""
+    return {
+        flow.email_inbox.account
+        for flow in cfg.flows.values()
+        if flow.email_inbox is not None and flow.email_inbox.provider == GMAIL_PROVIDER
+    }
+
+
+def google_accounts(cfg: Config) -> set[str]:
+    """Return every account a Google sink or a ``gmail`` inbox names (R-6.5, D129)."""
+    return _google_sink_accounts(cfg) | _gmail_inbox_accounts(cfg)
+
+
+def google_scopes_for(cfg: Config, account: str) -> list[str]:
+    """Return the Google scopes ``account`` needs for the configured flows (R-6.5, D129).
+
+    Raises:
+        ValueError: no Google sink or ``gmail`` inbox names ``account``.
+    """
+    scopes: list[str] = []
+    if account in _google_sink_accounts(cfg):
+        scopes.append(DRIVE_FILE_SCOPE)
+    if account in _gmail_inbox_accounts(cfg):
+        scopes.append(GMAIL_READ_SCOPE)
+    if not scopes:
+        raise ValueError(f"no Google sink or gmail inbox names account {account!r}")
+    return scopes

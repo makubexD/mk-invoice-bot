@@ -28,6 +28,7 @@ from invoicebot.rules.messages_es import (
     docs_desc,
     fetcher_desc,
 )
+from invoicebot.sunat_origins import SUNAT_SOL
 
 #: BR-F07: the rule that reports an invoice nobody could fetch.
 RULE_EXHAUSTED = "BR-F07"
@@ -41,9 +42,6 @@ _REASON_RULES: dict[FetchReason, str] = {
     FetchReason.GUARD_BLOCKED: "BR-F08",
     FetchReason.XML_INVALID: "BR-F09",
 }
-
-#: The fetcher whose absence from a flow adds BR-F01's "not applicable" line (S7.4).
-SUNAT_FETCHER = "sunat_sol"
 
 
 def manual_message(
@@ -62,7 +60,7 @@ def manual_message(
     store = _store_for(reading, directory)
     portal = portal_for(reading.value("ruc_emisor") or "", directory)
     fetcher_lines = _fetcher_lines(attempts, store, portal, portal_broken)
-    if SUNAT_FETCHER not in flow.fetchers:
+    if SUNAT_SOL not in flow.fetchers:
         fetcher_lines = "\n".join(line for line in (fetcher_lines, MESSAGES["BR-F01"]) if line)
     return (
         MESSAGES[RULE_EXHAUSTED]

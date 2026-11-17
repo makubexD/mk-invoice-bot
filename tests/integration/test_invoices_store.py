@@ -41,6 +41,7 @@ from invoicebot.store.invoices import (
     lock_sunat_rechecks,
     park_stale,
     record_upload_rejection,
+    resume_pending_auth,
     save_reading,
     set_flow,
     set_state,
@@ -298,6 +299,28 @@ async def test_count_active_jobs_ignores_parked_jobs(
 
         # Leave no jobs for the config profiles: later tests count them per profile.
         await conn.execute("DELETE FROM jobs WHERE invoice_id = ANY(%s)", ([first, second, other],))
+
+
+async def test_resume_pending_auth_resumes_only_the_sign_ins_account(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D01: a sign-in resumes only the invoices parked for its own provider and account."""
+    async with db_pool.connection() as conn:
+        owner = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, owner, "PENDING_AUTH", rule_id="BR-D01", error="google:owner")
+        other_google = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, other_google, "PENDING_AUTH", rule_id="BR-D01", error="google:invoices_a")
+        microsoft = await create_invoice(conn, "yo", CHANNEL)
+        await set_state(conn, microsoft, "PENDING_AUTH", rule_id="BR-D01", error="microsoft:personal")
+
+        resumed = await resume_pending_auth(conn, "google", "owner")
+
+        assert owner in resumed
+        assert other_google not in resumed
+        assert microsoft not in resumed
+        assert await get_state(conn, owner) == ("DELIVERING", "yo")
+        assert await get_state(conn, other_google) == ("PENDING_AUTH", "yo")
+        assert await get_state(conn, microsoft) == ("PENDING_AUTH", "yo")
 
 
 async def test_park_stale_parks_only_old_waiting_invoices(

@@ -17,6 +17,7 @@ from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
 from invoicebot.pipeline.deliver import DELIVER_STEP
+from invoicebot.pipeline.pending_auth import MICROSOFT
 from invoicebot.settings import Settings
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -68,15 +69,15 @@ async def _run_cli(settings: Settings, provider: _StubProvider, account: str = A
 
 
 async def _seed_invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], state: str) -> int:
-    """Insert one invoice in ``state`` and return its id."""
+    """Insert one invoice in ``state``, parked for this file's account, and return its id."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
-            INSERT INTO invoices (profile_id, origin_channel, state)
-            VALUES (%s, 'whatsapp', %s)
+            INSERT INTO invoices (profile_id, origin_channel, state, error)
+            VALUES (%s, 'whatsapp', %s, %s)
             RETURNING id
             """,
-            (f"profile-{uuid4().hex}", state),
+            (f"profile-{uuid4().hex}", state, f"{MICROSOFT}:{ACCOUNT}"),
         )
         row = await cur.fetchone()
     assert row is not None
@@ -100,9 +101,12 @@ async def _job_steps(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id
 
 
 async def _count_pending(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> int:
-    """Return how many invoices are waiting for a sign-in."""
+    """Return how many invoices are waiting for this file's account to sign in."""
     async with pool.connection() as conn:
-        cur = await conn.execute("SELECT count(*) FROM invoices WHERE state = 'PENDING_AUTH'")
+        cur = await conn.execute(
+            "SELECT count(*) FROM invoices WHERE state = 'PENDING_AUTH' AND error = %s",
+            (f"{MICROSOFT}:{ACCOUNT}",),
+        )
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])

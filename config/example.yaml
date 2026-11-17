@@ -102,6 +102,8 @@ mail:
   confirm_timeout: "24h"                 # how long a mail waits for confirmation (R-7.8)
   agent_stale_after: "4h"                # a laptop job older than this is stale (R-7.8)
 microsoft: { client_id: "00000000-0000-0000-0000-000000000000", timeout_s: 30 }
+# Desktop-app OAuth client; the secret is the age-store secret google_client_secret (D128).
+google: { client_id: "000000000000-example.apps.googleusercontent.com", timeout_s: 30 }
 
 flows:
   personal_google:
@@ -117,15 +119,16 @@ flows:
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
     sinks:
       - kind: google_drive
+        account: owner                   # the account `invoicebot auth-google` signs in (D128)
         root_folder_id: "DRIVE_FOLDER_ID"
         path: "{fecha:%Y}/{fecha:%m}"
         filename: "{fecha:%Y-%m-%d}_{ruc_emisor}_{serie}-{numero}"
         upload: [photo, pdf, xml]
       - kind: google_sheets
-        spreadsheet_id: "SHEET_ID"
+        account: owner                   # the account `invoicebot auth-google` signs in (D128)
+        spreadsheet_id: "SPREADSHEET_ID"
         tab: "Compras"
-        upsert_key: natural_key
-        columns:                        # header -> expression
+        columns:                        # header -> expression; column A is always Clave (D130)
           Fecha: "{fecha:%d/%m/%Y}"
           RUC: "{ruc_emisor}"
           "Razón social": "{razon_social}"
@@ -134,10 +137,10 @@ flows:
           Base: "{base}"
           IGV: "{igv}"
           Total: "{total}"
-          "Estado SUNAT": "{sunat.estado_cp_desc}"
-          Foto: "{refs.google_drive.photo.link}"
-          PDF: "{refs.google_drive.pdf.link}"
-          XML: "{refs.google_drive.xml.link}"
+          "Estado SUNAT": "{estado_sunat}"
+          Foto: "{link_photo}"
+          PDF: "{link_pdf}"
+          XML: "{link_xml}"
       # n8n is not a sink: it subscribes to signed events (invoice.delivered, …) via the contract (R-12.4, v1.1)
 
   work_microsoft:

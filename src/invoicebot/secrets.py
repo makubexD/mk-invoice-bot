@@ -19,8 +19,8 @@ from typing import Any
 import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
 import yaml
 
-#: Adapter allowed to declare SOL credentials (R-9.10).
-SOL_ADAPTER = "sunat_sol"
+from invoicebot.sunat_origins import SUNAT_SOL
+
 SOL_KEY_PREFIX = "sol_"
 
 #: Environment suffixes that mark a value as secret (R-9.9), compared upper case.
@@ -126,10 +126,10 @@ class SecretStore:
         """Return the view for ``adapter_name``, restricted to ``declared`` (R-9.10)."""
         normalized = frozenset(key.lower() for key in declared)
         forbidden = sorted(key for key in normalized if key.startswith(SOL_KEY_PREFIX))
-        if forbidden and adapter_name != SOL_ADAPTER:
+        if forbidden and adapter_name != SUNAT_SOL:
             raise SolSecretNotAllowed(
                 f"adapter {adapter_name!r} may not declare SOL credentials "
-                f"({', '.join(forbidden)}); only {SOL_ADAPTER!r} may (R-9.10)"
+                f"({', '.join(forbidden)}); only {SUNAT_SOL!r} may (R-9.10)"
             )
         return Secrets(self, adapter_name, normalized)
 

@@ -22,7 +22,6 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.auth.providers import GRAPH_MODE
 from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
@@ -36,7 +35,7 @@ from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchRe
 from invoicebot.fetchers.chain import WAIT_REASONS, Attempt, Exhausted, Run, Wait, decide, retry_delay
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
-from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUG, RULE_AUTH_ADMIN
+from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUGS, RULE_AUTH_ADMIN
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
@@ -339,11 +338,14 @@ def _waiting_text(fetcher: str, invoice_id: int) -> str:
 
 
 async def _alert_sign_in(conn: AsyncConnection[Any], inputs: _Inputs) -> None:
-    """Alert the admins that the flow's mailbox needs a Microsoft sign-in (BR-D01, D98, D100)."""
+    """Alert the admins that the flow's mailbox needs a sign-in (BR-D01, D98, D100)."""
     inbox = inputs.flow.email_inbox
-    if inbox is None or inbox.provider != GRAPH_MODE:
+    if inbox is None:
         return
-    text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG, account=inbox.account)
+    slug = AUTH_PROVIDER_SLUGS.get(inbox.provider)
+    if slug is None:
+        return
+    text = MESSAGES[RULE_AUTH_ADMIN].format(provider=slug, account=inbox.account)
     await queue_admin_alert(conn, inputs.cfg.profiles, RULE_AUTH_ADMIN, text)
 
 

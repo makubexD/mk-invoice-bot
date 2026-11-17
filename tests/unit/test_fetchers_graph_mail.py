@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.fetchers.base import MailboxError
 from invoicebot.fetchers.graph_mail import GraphMailbox, MailAttachment, MailMessage
 from invoicebot.sinks.onedrive import GRAPH_BASE_URL, NOT_SENT_STATUS, GraphError
 
@@ -86,7 +87,7 @@ async def test_search_drops_a_message_without_attachments() -> None:
 
 
 async def test_search_refuses_an_id_graph_returns_that_is_not_a_graph_id() -> None:
-    """R-5.2, R-6.5: an id Graph returns that fails the pattern raises GraphError."""
+    """R-5.2, R-6.5: an id Graph returns that fails the pattern raises MailboxError."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -103,10 +104,11 @@ async def test_search_refuses_an_id_graph_returns_that_is_not_a_graph_id() -> No
         )
 
     async with _make_mailbox(handler) as mailbox:
-        with pytest.raises(GraphError) as raised:
+        with pytest.raises(MailboxError) as raised:
             await mailbox.search("serie", 10)
 
-    assert raised.value.status == NOT_SENT_STATUS
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
 
 
 @pytest.mark.parametrize(
@@ -117,17 +119,18 @@ async def test_search_refuses_an_id_graph_returns_that_is_not_a_graph_id() -> No
         {"value": [42]},
     ],
 )
-async def test_search_maps_a_malformed_body_to_graph_error(body: object) -> None:
-    """R-5.2, R-6.5: a body that is not a collection of message objects raises GraphError."""
+async def test_search_maps_a_malformed_body_to_mailbox_error(body: object) -> None:
+    """R-5.2, R-6.5: a body that is not a collection of message objects raises MailboxError."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=body)
 
     async with _make_mailbox(handler) as mailbox:
-        with pytest.raises(GraphError) as raised:
+        with pytest.raises(MailboxError) as raised:
             await mailbox.search("serie", 10)
 
-    assert raised.value.status == NOT_SENT_STATUS
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
 
 
 async def test_attachments_lists_only_file_attachments() -> None:
@@ -194,11 +197,9 @@ async def test_download_refuses_an_attachment_over_the_cap() -> None:
             await mailbox.download("msg1", "att1", max_bytes=10)
 
 
-@pytest.mark.parametrize(("status", "error"), [(401, AuthRequired), (403, GraphError)])
-async def test_search_maps_a_failed_response_like_raise_graph_error(
-    status: int, error: type[Exception]
-) -> None:
-    """R-5.2, R-6.5: a 401 asks for sign-in and any other failure is final, as raise_graph_error does."""
+@pytest.mark.parametrize(("status", "error"), [(401, AuthRequired), (403, MailboxError)])
+async def test_search_maps_a_failed_response_to_the_right_error(status: int, error: type[Exception]) -> None:
+    """R-5.2, R-6.5: a 401 asks for sign-in and any other failure is final, reported as MailboxError."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(status)
@@ -208,8 +209,19 @@ async def test_search_maps_a_failed_response_like_raise_graph_error(
             await mailbox.search("serie", 10)
 
 
+async def test_search_with_a_server_error_is_a_mailbox_error() -> None:
+    """R-5.2: a Graph 500 surfaces from search as MailboxError, not a Graph-specific error."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500)
+
+    async with _make_mailbox(handler) as mailbox:
+        with pytest.raises(MailboxError):
+            await mailbox.search("serie", 10)
+
+
 async def test_a_bad_id_is_refused_before_any_request() -> None:
-    """R-5.2, R-6.5: an id that fails the pattern raises GraphError and no request is sent."""
+    """R-5.2, R-6.5: an id that fails the pattern raises MailboxError and no request is sent."""
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -217,8 +229,9 @@ async def test_a_bad_id_is_refused_before_any_request() -> None:
         return httpx.Response(200, json={"value": []})
 
     async with _make_mailbox(handler) as mailbox:
-        with pytest.raises(GraphError) as raised:
+        with pytest.raises(MailboxError) as raised:
             await mailbox.attachments("../x")
 
-    assert raised.value.status == NOT_SENT_STATUS
+    assert isinstance(raised.value.__cause__, GraphError)
+    assert raised.value.__cause__.status == NOT_SENT_STATUS
     assert requests == []

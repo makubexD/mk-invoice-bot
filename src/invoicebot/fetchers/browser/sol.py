@@ -1,0 +1,84 @@
+"""The SOL helper entry: sign in and download one invoice's files (S10.1, R-5.2, R-9.10).
+
+Run as ``python -m invoicebot.fetchers.browser.sol``. It reads one JSON request from
+stdin, signs in to SUNAT SOL, runs the same form filler as the portal helper and prints
+one JSON result. The credentials are typed only while the page stays on a hard-coded
+SUNAT origin (R-9.10), and nothing from the request is logged or printed (R-9.16).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import sys
+from collections.abc import Awaitable, Callable
+from pathlib import Path
+
+from playwright.async_api import Page
+
+from invoicebot.config.models import MediaMaxBytes, Portal
+from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.browser.form import fill_and_download
+from invoicebot.fetchers.browser.protocol import HelperOutput, SolCredentialsIn, SolRequest
+from invoicebot.fetchers.browser.session import (
+    BadRequest,
+    browse,
+    emit,
+    limit_resources,
+    output,
+    read_request,
+)
+from invoicebot.fetchers.browser.sol_login import SolCredentials, log_in
+
+__all__ = ["SolCredentialsIn", "SolRequest", "main", "run_sol"]
+
+logger = logging.getLogger(__name__)
+
+type Fill = Callable[[Page, Portal, FetchInvoice, Path, MediaMaxBytes], Awaitable[FetchResult]]
+
+
+async def run_sol(page: Page, request: SolRequest, fill: Fill = fill_and_download) -> FetchResult:
+    """Sign in to SOL and run the invoice query, only if sign-in stayed on SUNAT (R-9.10)."""
+    site = request.site
+    await page.goto(site.login.url)
+    credentials = request.credentials
+    signed_in = await log_in(
+        page,
+        site.login,
+        SolCredentials(
+            ruc=credentials.ruc.get_secret_value(),
+            user=credentials.user.get_secret_value(),
+            password=credentials.password.get_secret_value(),
+        ),
+    )
+    if not signed_in:
+        return FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key=site.query.key)
+    return await fill(page, site.query, request.invoice, request.out_dir, request.max_bytes)
+
+
+def main() -> int:
+    """Read the request, run one SOL fetch and print its result (S10.1)."""
+    try:
+        request = read_request(SolRequest)
+    except BadRequest:
+        emit(HelperOutput(reason=FetchReason.TECHNICAL))
+        return 0
+    limit_resources(request.max_bytes)
+    try:
+        result = asyncio.run(
+            browse(
+                request.site.query,
+                request.page_timeout_ms,
+                lambda page: run_sol(page, request),
+            )
+        )
+    except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
+        logger.error("SOL browser helper failed: %s", type(error).__name__)
+        emit(HelperOutput(reason=FetchReason.TECHNICAL))
+    else:
+        emit(output(result))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

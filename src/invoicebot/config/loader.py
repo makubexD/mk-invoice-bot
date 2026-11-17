@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from invoicebot.config.models import Config, Portal, Store, StoreDirectory
+from invoicebot.config.models import Config, Portal, Store, StoreDirectory, SunatSolSite
 
 # Dotted, brace-wrapped paths without a format spec, e.g. "{owner.ruc}".
 # Single-name ({total}) and format-spec ({fecha:%Y}) tokens are runtime template
@@ -32,7 +32,8 @@ def load_directory(config_dir: Path) -> StoreDirectory:
     """Read the store directory from ``stores/`` and ``portals/`` (D47, R-5.8).
 
     A store file is named after its RUC and a portal file after its key, so
-    both are checked against the file name. Only ``yaml.safe_load`` is used.
+    both are checked against the file name. ``sunat_sol.yaml`` beside them is
+    read into the optional SOL site. Only ``yaml.safe_load`` is used.
     """
     stores: dict[str, Store] = {}
     for path in sorted((config_dir / "stores").glob("*.yaml")):
@@ -49,7 +50,10 @@ def load_directory(config_dir: Path) -> StoreDirectory:
             raise ValueError(f"{path}: a portal file must not set 'key'; it is the file name")
         portals[path.stem] = Portal.model_validate({"key": path.stem, **document})
 
-    return StoreDirectory(stores=stores, portals=portals)
+    sol_path = config_dir / "sunat_sol.yaml"
+    sunat_sol = SunatSolSite.model_validate(_read_mapping(sol_path)) if sol_path.exists() else None
+
+    return StoreDirectory(stores=stores, portals=portals, sunat_sol=sunat_sol)
 
 
 def _read_mapping(path: Path) -> dict[str, Any]:

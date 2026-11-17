@@ -6,6 +6,7 @@ the outbox sender as supervised background tasks until shutdown.
 """
 
 import asyncio
+import hmac
 import logging
 import os
 import signal
@@ -21,7 +22,15 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
-from invoicebot.auth.providers import GRAPH_MODE, build_token_provider, scopes_for
+from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_ADAPTER, GoogleTokens
+from invoicebot.auth.providers import (
+    GMAIL_PROVIDER,
+    GRAPH_MODE,
+    build_token_provider,
+    google_accounts,
+    google_token_path,
+    scopes_for,
+)
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -32,6 +41,8 @@ from invoicebot.config.models import (
     EMAIL_INBOX_FETCHER,
     Config,
     Flow,
+    FlowInbox,
+    GoogleDriveSink,
     Mail,
     MailerSink,
     OneDriveFolderSink,
@@ -40,10 +51,12 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
-from invoicebot.fetchers.email_inbox import EmailInboxFetcher
+from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
+from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
+from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.github.app_token import GitHubApp
 from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
@@ -59,6 +72,8 @@ from invoicebot.pipeline.deliver import (
     make_deliver_handler,
     make_resend_handler,
 )
+from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
+from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -79,15 +94,18 @@ from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
-from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets
+from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets, load_identity
 from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
+from invoicebot.sinks.google_drive import GoogleDrive
+from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.db import Pool, create_pool, ping
 from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
+from invoicebot.sunat_origins import SUNAT_SOL
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +114,8 @@ Lifespan = Callable[[FastAPI], AbstractAsyncContextManager[None]]
 TaskFactory = Callable[[], Awaitable[None]]
 #: Builds one flow's instance of a fetcher, or ``None`` when the flow cannot use it (S7.1).
 _FetcherBuilder = Callable[[str, Flow], Fetcher | None]
+#: Builds one flow's mailbox and, when it cannot, the reason it is disabled (D98).
+_InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 
 #: Secrets the WhatsApp channel declares (R-9.10).
 WHATSAPP_ADAPTER = "whatsapp"
@@ -113,6 +133,9 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
+#: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
+GOOGLE_DRIVE_KIND = "google_drive"
+ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
@@ -235,6 +258,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             token=secrets.get("whatsapp_token"),
         )
         app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
+        # One token source per Google account for the whole process: two instances on the
+        # same token file would race on a refresh (D135).
+        google_tokens = _google_tokens(settings, cfg, http, store)
         handlers = {
             DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
             EXTRACT_STEP: make_extract_handler(
@@ -249,7 +275,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 pool,
                 cfg,
                 directory,
-                _fetch_registries(settings, cfg, directory, guarded_http, http),
+                _fetch_registries(
+                    settings,
+                    cfg,
+                    directory,
+                    guarded_http,
+                    _InboxDeps(http, google_tokens),
+                    _sol_fetcher(cfg, directory, store),
+                ),
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
             ),
@@ -263,10 +296,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
-        if deliver is not None:
-            handlers[DELIVER_STEP] = deliver.deliver
-            handlers[FOLDER_STATUS_STEP] = deliver.folder_status
-            handlers.update(deliver.resends)
+        handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
         worker = Worker(pool, handlers)
         numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         transports = {
@@ -420,6 +450,120 @@ def _deliver_handlers(
         resends=make_resend_handler(context),
         laptop=laptop_task,
     )
+
+
+def _deliver_registry(
+    cfg: Config,
+    deliver: DeliverHandlers | None,
+    http: httpx.AsyncClient,
+    pool: Pool,
+    tokens: Mapping[str, GoogleTokens],
+) -> dict[str, Handler]:
+    """Return the delivery steps each flow's sink kind selects (D132).
+
+    The ``deliver`` step dispatches to the handler of the invoice's flow. Flow B's folder
+    status and resends stay registered as before, only when a OneDrive sink exists.
+    """
+    by_kind: dict[str, Handler] = {}
+    google = _google_deliver_handler(cfg, http, pool, tokens)
+    if google is not None:
+        by_kind[GOOGLE_DRIVE_KIND] = google
+    handlers: dict[str, Handler] = {}
+    if deliver is not None:
+        by_kind[ONEDRIVE_FOLDER_KIND] = deliver.deliver
+        handlers[FOLDER_STATUS_STEP] = deliver.folder_status
+        handlers.update(deliver.resends)
+    by_flow = _deliverers_by_flow(cfg, by_kind)
+    if by_flow:
+        handlers[DELIVER_STEP] = make_deliver_dispatch(pool, by_flow)
+    return handlers
+
+
+def _google_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
+    return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+
+
+def _google_tokens(
+    settings: Settings,
+    cfg: Config,
+    http: httpx.AsyncClient,
+    store: SecretStore,
+) -> dict[str, GoogleTokens]:
+    """Build one token provider per Google account, or none when Google is off (R-6.5, D128).
+
+    Every account shares the one client secret and the one age identity. With ``google``
+    config set, a missing ``google_client_secret`` or ``AGE_IDENTITY_PATH`` is a
+    configuration mistake, so it fails at startup rather than on the first delivery
+    (R-9.9, R-9.10). The secret never appears in the message.
+    """
+    google = cfg.google
+    if google is None:
+        return {}
+    secrets = _google_secrets(store)
+    if not secrets.enabled:
+        raise ValueError(
+            f"google config needs the missing secret(s) {', '.join(sorted(secrets.missing))} (R-9.9)"
+        )
+    if settings.age_identity_path is None:
+        raise ValueError("google config needs AGE_IDENTITY_PATH to decrypt the refresh tokens (D128)")
+    client_secret = secrets.get(GOOGLE_CLIENT_SECRET)
+    identity = load_identity(settings.age_identity_path)
+    return {
+        account: GoogleTokens(
+            http,
+            google.client_id,
+            client_secret,
+            account,
+            google_token_path(settings.data_dir, account),
+            identity,
+            google.timeout_s,
+        )
+        for account in google_accounts(cfg)
+    }
+
+
+def _google_deliver_handler(
+    cfg: Config,
+    http: httpx.AsyncClient,
+    pool: Pool,
+    tokens: Mapping[str, GoogleTokens],
+) -> Handler | None:
+    """Build flow A's deliver handler, or None when no flow files in Google Drive (R-6.1, D129).
+
+    Each sink calls Google with its own account's token provider. A Google sink without
+    ``google`` config is a configuration mistake, so it fails at startup rather than on
+    the first delivery (D128).
+    """
+    has_drive_sink = any(
+        isinstance(sink, GoogleDriveSink) for flow in cfg.flows.values() for sink in flow.sinks
+    )
+    if not has_drive_sink:
+        return None
+    if cfg.google is None:
+        raise ValueError("a google_drive sink needs the google config (D128)")
+    drives = {
+        account: GoogleDrive(http, tokens[account], cfg.google.timeout_s, account=account)
+        for account in tokens
+    }
+    sheets = {
+        account: GoogleSheets(
+            http, tokens[account], cfg.google.timeout_s, account=account, max_rows=cfg.google.max_rows
+        )
+        for account in tokens
+    }
+    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles))
+
+
+def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str, Handler]:
+    """Return each flow's deliverer by flow name, chosen from its first sink's kind (D132)."""
+    deliverers: dict[str, Handler] = {}
+    for name, flow in cfg.flows.items():
+        first = next(iter(flow.sinks), None)
+        handler = None if first is None else by_kind.get(first.kind)
+        if handler is not None:
+            deliverers[name] = handler
+    return deliverers
 
 
 def _laptop_flow(cfg: Config) -> Flow | None:
@@ -607,15 +751,39 @@ def _laptop_root(flow: Flow) -> str:
     raise RuntimeError("a flow listing laptop_outlook needs a onedrive_folder sink")
 
 
+@dataclass(frozen=True)
+class _InboxDeps:
+    """What an ``email_inbox`` fetcher needs: the HTTP client and the Google token sources (S7.1)."""
+
+    http: httpx.AsyncClient
+    google_tokens: Mapping[str, GoogleTokens]
+
+
+def _sol_fetcher(cfg: Config, directory: StoreDirectory, store: SecretStore) -> SunatSolFetcher | None:
+    """Build the SOL fetcher once the site is active, or None until then (S10.1, R-5.2).
+
+    A missing secret or a ``sol_ruc`` that is not the owner's RUC stops startup, naming
+    only the keys, so the helper never signs in as the wrong taxpayer (R-9.10).
+    """
+    site = directory.sunat_sol
+    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+        return None
+    secrets = store.scoped(SUNAT_SOL, set(SECRETS))
+    if secrets.enabled and not hmac.compare_digest(secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()):
+        raise ValueError("sunat_sol: secret sol_ruc does not match owner.ruc (R-9.10)")
+    return SunatSolFetcher(site, secrets, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
+
+
 def _fetch_registries(
     settings: Settings,
     cfg: Config,
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
-    graph_http: httpx.AsyncClient,
+    inbox: _InboxDeps,
+    sol: SunatSolFetcher | None,
 ) -> dict[str, dict[str, Fetcher]]:
     """Return each flow's fetcher registry, sharing one instance where it can (S7.1, D98)."""
-    builders = _fetcher_builders(settings, cfg, directory, guarded_http, graph_http)
+    builders = _fetcher_builders(settings, cfg, directory, guarded_http, inbox, sol)
     return {name: _flow_registry(name, flow, builders) for name, flow in cfg.flows.items()}
 
 
@@ -624,7 +792,8 @@ def _fetcher_builders(
     cfg: Config,
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
-    graph_http: httpx.AsyncClient,
+    inbox: _InboxDeps,
+    sol: SunatSolFetcher | None,
 ) -> dict[str, _FetcherBuilder]:
     """Return a builder per fetcher this build runs; adding a fetcher adds an entry (S7.1)."""
     portal = PortalFetcher(directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
@@ -637,7 +806,8 @@ def _fetcher_builders(
     return {
         PORTAL_FETCHER: lambda _name, _flow: portal,
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
-        EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, graph_http),
+        EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, inbox),
+        SUNAT_SOL: lambda _name, _flow: sol,
     }
 
 
@@ -652,7 +822,11 @@ def _fetch_schedules(directory: StoreDirectory) -> Mapping[str, Schedule]:
         portal_cfg = portal_for(invoice.ruc_emisor, directory)
         return DEFAULT_RETRY_SCHEDULE if portal_cfg is None else portal_cfg.retry_schedule
 
-    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal}
+    def sunat_sol(_flow: Flow, _invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        site = directory.sunat_sol
+        return DEFAULT_RETRY_SCHEDULE if site is None else site.query.retry_schedule
+
+    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal, SUNAT_SOL: sunat_sol}
 
 
 def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:
@@ -673,22 +847,53 @@ def _email_inbox_fetcher(
     flow: Flow,
     settings: Settings,
     cfg: Config,
-    http: httpx.AsyncClient,
+    deps: _InboxDeps,
 ) -> Fetcher | None:
-    """Return the flow's Graph mailbox fetcher, or ``None`` with a warning when it cannot run (D98)."""
+    """Return the flow's mailbox fetcher, or ``None`` with a warning when it cannot run (D98).
+
+    The provider picks the mailbox: Graph for ``graph`` and Gmail for ``gmail``.
+    """
     inbox = flow.email_inbox
+    builders: dict[str, _InboxBuilder] = {
+        GRAPH_MODE: partial(_graph_mailbox, settings, cfg, deps.http),
+        GMAIL_PROVIDER: partial(_gmail_mailbox, cfg, deps.http, deps.google_tokens),
+    }
     if inbox is None:
         reason = "the flow has no email_inbox settings"
-    elif inbox.provider != GRAPH_MODE:
+    elif inbox.provider not in builders:
         reason = f"provider {inbox.provider} is not supported"
-    elif settings.age_identity_path is None:
-        reason = "AGE_IDENTITY_PATH is not set"
     else:
-        provider = build_token_provider(settings, cfg, inbox.account, scopes_for(cfg, inbox.account))
-        mailbox = GraphMailbox(http, provider, inbox.account, cfg.microsoft.timeout_s)
-        return EmailInboxFetcher(mailbox, cfg.limits.media.max_bytes)
+        mailbox, reason = builders[inbox.provider](inbox)
+        if mailbox is not None:
+            return EmailInboxFetcher(mailbox, cfg.limits.media.max_bytes)
     logger.warning("email_inbox fetcher disabled", extra={"flow": name, "reason": reason})
     return None
+
+
+def _graph_mailbox(
+    settings: Settings, cfg: Config, http: httpx.AsyncClient, inbox: FlowInbox
+) -> tuple[Mailbox | None, str]:
+    """Return the flow's Graph mailbox, or why it cannot run (R-5.2, D98)."""
+    if settings.age_identity_path is None:
+        return None, "AGE_IDENTITY_PATH is not set"
+    provider = build_token_provider(settings, cfg, inbox.account, scopes_for(cfg, inbox.account))
+    return GraphMailbox(http, provider, inbox.account, cfg.microsoft.timeout_s), ""
+
+
+def _gmail_mailbox(
+    cfg: Config,
+    http: httpx.AsyncClient,
+    google_tokens: Mapping[str, GoogleTokens],
+    inbox: FlowInbox,
+) -> tuple[Mailbox | None, str]:
+    """Return the flow's Gmail mailbox, or why it cannot run (R-5.2, D135)."""
+    google = cfg.google
+    if google is None:
+        return None, "google config is not set"
+    tokens = google_tokens.get(inbox.account)
+    if tokens is None:
+        return None, f"the account {inbox.account} has no Google token source"
+    return GmailMailbox(http, tokens, inbox.account, google.timeout_s, google.max_message_bytes), ""
 
 
 async def _send_forever(sender: OutboxSender) -> None:
