@@ -25,6 +25,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.parse import parse_webhook
 from invoicebot.channels.whatsapp.signature import verify_handshake, verify_signature
+from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.teach import TeachSetup
@@ -53,8 +54,8 @@ class WebhookDeps:
     verify_token: str
     sender_hash_key: str
     max_queued_per_sender: int
-    #: The photo and PDF size limit BR-E07 names, in whole megabytes (D121).
-    media_max_mb: int
+    #: The photo and PDF size caps BR-E07 names (D121).
+    media_max_bytes: MediaMaxBytes
     #: The flow that tracks payments (R-7.12), when one opts in.
     payment_flow: PaymentFlow | None = None
     #: The profiles and resolver a /portal or BR-F02 answer teaches with (R-11.4).
@@ -158,7 +159,7 @@ async def _persist(deps: WebhookDeps, messages: list[InboundMessage]) -> None:
                     conn,
                     msg,
                     max_queued_per_sender=deps.max_queued_per_sender,
-                    media_max_mb=deps.media_max_mb,
+                    media_max_bytes=deps.media_max_bytes,
                     timezone=deps.timezone,
                     roles=IntakeRoles(
                         admins=deps.admin_profiles,

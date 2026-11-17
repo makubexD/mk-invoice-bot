@@ -78,7 +78,7 @@ from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
-from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE, make_download_handler
+from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
@@ -347,7 +347,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
         max_queued_per_sender=cfg.limits.max_queued_per_sender,
-        media_max_mb=cfg.limits.media.max_bytes.image // MEGABYTE,
+        media_max_bytes=cfg.limits.media.max_bytes,
         payment_flow=_payment_flow(cfg),
         teach=_teach_setup(cfg),
     )

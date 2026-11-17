@@ -13,10 +13,11 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.actions import handle_press
 from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command, parse_command
 from invoicebot.pipeline.edits import apply_edits, parse_edits
-from invoicebot.pipeline.handlers import RULE_MEDIA_REJECTED
+from invoicebot.pipeline.handlers import MEGABYTE, RULE_MEDIA_REJECTED
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
@@ -98,7 +99,7 @@ async def handle_inbound(
     msg: InboundMessage,
     *,
     max_queued_per_sender: int,
-    media_max_mb: int,
+    media_max_bytes: MediaMaxBytes,
     timezone: str,
     roles: IntakeRoles = NO_ROLES,
 ) -> IntakeResult:
@@ -113,8 +114,8 @@ async def handle_inbound(
     sender already has ``max_queued_per_sender`` active jobs, in which case it is
     answered with BR-S01 and ``back_pressure`` (BR-S01). A pdf or xml with an open
     invoice is ``stored`` as an upload for it (R-1.5); an xml with no open invoice is
-    refused with BR-E07, naming ``media_max_mb`` as the photo and PDF
-    size limit, and creates nothing (D58, D121). A text-only message may also
+    refused with BR-E07, naming the photo and PDF size caps from
+    ``media_max_bytes``, and creates nothing (D58, D121). A text-only message may also
     run a command (R-10.1), answer a BR-F02 portal question (R-11.4), apply its edits
     (D97) and store its overrides (D70). ``timezone`` is the owner's zone for the dates
     a command prints (S11.4), and ``roles`` carries the admins, the payment flow and
@@ -134,7 +135,7 @@ async def handle_inbound(
                 return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg, roles.laptop_flows)
         else:
-            return await _handle_non_press(conn, msg, roles, timezone, max_queued_per_sender, media_max_mb)
+            return await _handle_non_press(conn, msg, roles, timezone, max_queued_per_sender, media_max_bytes)
     for path in pressed.photo_paths:
         await asyncio.to_thread(path.unlink, missing_ok=True)
     return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
@@ -146,7 +147,7 @@ async def _handle_non_press(
     roles: IntakeRoles,
     timezone: str,
     max_queued_per_sender: int,
-    media_max_mb: int,
+    media_max_bytes: MediaMaxBytes,
 ) -> IntakeResult:
     """Route a message with no button press: queue it, refuse it or store it (D121)."""
     if any(attachment.kind == PHOTO_KIND for attachment in msg.attachments):
@@ -154,7 +155,7 @@ async def _handle_non_press(
     if await _upload_without_open_invoice(conn, msg):
         if any(attachment.kind == PDF_KIND for attachment in msg.attachments):
             return await _queue_or_back_pressure(conn, msg, max_queued_per_sender)
-        return await _refuse_lone_xml(conn, msg, media_max_mb)
+        return await _refuse_lone_xml(conn, msg, media_max_bytes)
     return await _store_with_overrides(conn, msg, roles, timezone)
 
 
@@ -203,12 +204,19 @@ async def _upload_without_open_invoice(conn: AsyncConnection[Any], msg: InboundM
 
 
 async def _refuse_lone_xml(
-    conn: AsyncConnection[Any], msg: InboundMessage, media_max_mb: int
+    conn: AsyncConnection[Any], msg: InboundMessage, media_max_bytes: MediaMaxBytes
 ) -> IntakeResult:
-    """Answer BR-E07 for an XML sent on its own and create nothing (D58, D121)."""
+    """Answer BR-E07 for an XML sent on its own and create nothing (D58, D121).
+
+    The text still names the photo cap as its single ``max_mb``; the photo and
+    PDF caps come alongside it for the wording step that follows.
+    """
+    max_mb = media_max_bytes.image // MEGABYTE
     text = MESSAGES[RULE_MEDIA_REJECTED].format(
         reason_desc=REJECTION_DESC["unsupported_type"],
-        max_mb=media_max_mb,
+        max_mb=max_mb,
+        image_mb=max_mb,
+        pdf_mb=media_max_bytes.pdf // MEGABYTE,
     )
     await _add_outbox(conn, msg, RULE_MEDIA_REJECTED, text)
     return IntakeResult(status="stored", invoice_id=None)

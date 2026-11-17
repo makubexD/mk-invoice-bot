@@ -142,6 +142,8 @@ async def reject_media(pool: Pool, rejection: MediaRejection) -> None:
     text = MESSAGES[RULE_MEDIA_REJECTED].format(
         reason_desc=_reason_desc(rejection.reason, rejection.limits),
         max_mb=_max_mb(rejection.kind, rejection.limits),
+        image_mb=rejection.limits.max_bytes.image // MEGABYTE,
+        pdf_mb=rejection.limits.max_bytes.pdf // MEGABYTE,
     )
     async with pool.connection() as conn, conn.transaction():
         await set_state(
