@@ -21,13 +21,26 @@ import sys
 import tempfile
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
-from invoicebot.auth.google_consent import ConsentError, consent_url, parse_redirect, pkce_pair
-from invoicebot.auth.google_oauth import TOKEN_URL, GoogleTokens, save_refresh_token
+from invoicebot.auth.google_consent import (
+    ERROR_PARAM,
+    STATE_PARAM,
+    ConsentError,
+    consent_url,
+    parse_redirect,
+    pkce_pair,
+)
+from invoicebot.auth.google_oauth import (
+    GOOGLE_OAUTH_ADAPTER,
+    TOKEN_URL,
+    GoogleTokens,
+    save_refresh_token,
+)
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.auth.providers import (
     DRIVE_FILE_SCOPE,
@@ -211,7 +224,7 @@ def _auth_google(
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to sign in")
     client_secret = (
         SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped("auth_google", {_CLIENT_SECRET_KEY})
+        .scoped(GOOGLE_OAUTH_ADAPTER, {_CLIENT_SECRET_KEY})
         .get(_CLIENT_SECRET_KEY)
     )
     try:
@@ -258,7 +271,7 @@ def _google_setup(
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to create the sheet")
     client_secret = (
         SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped("google_oauth", {_CLIENT_SECRET_KEY})
+        .scoped(GOOGLE_OAUTH_ADAPTER, {_CLIENT_SECRET_KEY})
         .get(_CLIENT_SECRET_KEY)
     )
     try:
@@ -345,7 +358,8 @@ async def _google_sign_in(
     Raises:
         ConsentError: the redirect's state does not match or carries no code.
         TimeoutError: no redirect arrives within ``SIGN_IN_TIMEOUT_S``.
-        _SignInError: the token endpoint refuses the code or returns no refresh token.
+        _SignInError: the token endpoint refuses the code, returns no refresh token, or
+            grants fewer scopes than the account needs.
     """
     identity_path = settings.age_identity_path
     if identity_path is None:
@@ -354,6 +368,7 @@ async def _google_sign_in(
     verifier, challenge = pkce_pair()
     state = secrets.token_urlsafe(_STATE_BYTES)
     redirect_path: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    scopes = google_scopes_for(cfg, account)
 
     async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         await _answer_redirect(reader, writer, redirect_path)
@@ -364,12 +379,12 @@ async def _google_sign_in(
         if not sockets:
             raise _SignInError("the sign-in listener did not bind")
         redirect_uri = f"http://127.0.0.1:{sockets[0].getsockname()[1]}"
-        scopes = google_scopes_for(cfg, account)
         show(consent_url(google.client_id, redirect_uri, scopes, state, challenge))
         async with asyncio.timeout(SIGN_IN_TIMEOUT_S):
             path = await redirect_path
     code = parse_redirect(path, state)
-    refresh_token = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
+    response = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
+    refresh_token = _granted_refresh_token(response, scopes)
     save_refresh_token(
         google_token_path(settings.data_dir, account),
         load_identity(identity_path),
@@ -384,11 +399,11 @@ async def _exchange_code(
     verifier: str,
     redirect_uri: str,
     transport: httpx.AsyncBaseTransport | None,
-) -> str:
-    """Swap the authorization code for a refresh token at Google's token endpoint (R-6.4).
+) -> httpx.Response:
+    """Swap the authorization code at Google's token endpoint and return its answer (R-6.4).
 
     Raises:
-        _SignInError: the endpoint answers non-200 or omits the refresh token.
+        _SignInError: the endpoint answers non-200.
         httpx.HTTPError: the request never reached Google.
     """
     google = _google_settings(cfg)
@@ -406,25 +421,35 @@ async def _exchange_code(
         )
     if response.status_code != httpx.codes.OK:
         raise _SignInError(f"the token endpoint answered {response.status_code} (R-6.4)")
-    return _refresh_token(response)
+    return response
 
 
-def _refresh_token(response: httpx.Response) -> str:
-    """Return the refresh token in a token response, or say how to make Google issue one (R-6.4).
+def _granted_refresh_token(response: httpx.Response, scopes: Sequence[str]) -> str:
+    """Return the refresh token in a token response, once every scope is granted (R-6.4, R-6.5).
 
     Raises:
-        _SignInError: the body is not a token response or carries no refresh token. The
-            message never echoes a token or the body (R-9.9).
+        _SignInError: the body is not a token response, carries no refresh token, or its
+            ``scope`` lacks one of ``scopes``. The message never echoes a token or the
+            body (R-9.9).
     """
     try:
         payload = response.json()
     except ValueError:
         payload = None
-    refresh_token = payload.get("refresh_token") if isinstance(payload, dict) else None
+    if not isinstance(payload, dict):
+        payload = {}
+    refresh_token = payload.get("refresh_token")
     if not isinstance(refresh_token, str) or not refresh_token:
         raise _SignInError(
             "the token response has no refresh_token; remove this app's access at "
             "https://myaccount.google.com/permissions and sign in again"
+        )
+    granted = payload.get("scope")
+    granted_scopes = granted.split() if isinstance(granted, str) else []
+    missing = [scope for scope in scopes if scope not in granted_scopes]
+    if missing:
+        raise _SignInError(
+            f"Google did not grant: {' '.join(missing)}; sign in again and allow every permission"
         )
     return refresh_token
 
@@ -455,11 +480,19 @@ async def _answer_redirect(
 
 
 def _request_path(line: bytes) -> str:
-    """Return the path of a ``GET <path> HTTP/1.1`` line, or "" for any other request (R-6.5)."""
+    """Return the path of Google's redirect request, or "" for any other request (R-6.5).
+
+    Only a request whose query carries ``state`` or ``error`` can be the redirect; a
+    ``/favicon.ico`` read or a browser preconnect must not end the sign-in.
+    """
     parts = line.decode("ascii", "replace").split()
     if len(parts) < 2 or parts[0] != "GET":
         return ""
-    return parts[1]
+    path = parts[1]
+    query = parse_qs(urlsplit(path).query)
+    if STATE_PARAM not in query and ERROR_PARAM not in query:
+        return ""
+    return path
 
 
 async def _resume_pending_auth(database_url: str, provider: str, account: str) -> int:

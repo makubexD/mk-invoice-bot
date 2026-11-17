@@ -13,7 +13,6 @@ import yaml
 
 from invoicebot.app import (
     GOOGLE_CLIENT_SECRET,
-    GOOGLE_OAUTH_ADAPTER,
     _daily_tasks,
     _fetch_schedules,
     _google_deliver_handler,
@@ -23,6 +22,7 @@ from invoicebot.app import (
     _validation_handlers,
     _validation_secrets,
 )
+from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SUNAT_SOL_FETCHER, SunatSolFetcher

@@ -16,7 +16,7 @@ import yaml
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.auth.providers import TOKENS_DIRECTORY
+from invoicebot.auth.providers import DRIVE_FILE_SCOPE, GMAIL_READ_SCOPE, TOKENS_DIRECTORY
 from invoicebot.cli import main
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.pending_auth import GOOGLE
@@ -31,7 +31,12 @@ INBOX_ACCOUNT = "invoices_a"
 CLIENT_SECRET_KEY = "google_client_secret"  # noqa: S105  # the store key's name, not a value
 SYNTHETIC_CLIENT_SECRET = "synthetic-client-secret"  # noqa: S105  # a synthetic test value
 SYNTHETIC_REFRESH_TOKEN = "synthetic-refresh"  # noqa: S105  # a synthetic test value
-TOKEN_RESPONSE = {"access_token": "a", "expires_in": 3600, "refresh_token": SYNTHETIC_REFRESH_TOKEN}
+TOKEN_RESPONSE = {
+    "access_token": "a",
+    "expires_in": 3600,
+    "refresh_token": SYNTHETIC_REFRESH_TOKEN,
+    "scope": f"{DRIVE_FILE_SCOPE} {GMAIL_READ_SCOPE}",
+}
 NO_REFRESH_RESPONSE = {"access_token": "a", "expires_in": 3600}
 
 
@@ -80,6 +85,23 @@ def _show_redirect(state: str | None = None) -> Callable[[str], None]:
         redirect_uri = query["redirect_uri"][0]
         echoed_state = state if state is not None else query["state"][0]
         threading.Thread(target=_open_redirect, args=(redirect_uri, echoed_state), daemon=True).start()
+
+    return show
+
+
+def _show_redirect_after_favicon() -> Callable[[str], None]:
+    """Return a show whose browser reads ``/favicon.ico`` before the redirect."""
+
+    def show(url: str) -> None:
+        query = parse_qs(urlsplit(url).query)
+        redirect_uri = query["redirect_uri"][0]
+        state = query["state"][0]
+
+        def browser() -> None:
+            httpx.get(f"{redirect_uri}/favicon.ico", timeout=10)
+            _open_redirect(redirect_uri, state)
+
+        threading.Thread(target=browser, daemon=True).start()
 
     return show
 
@@ -213,6 +235,46 @@ async def test_auth_google_missing_refresh_token_exits_one(
     error = capsys.readouterr().err
     assert "sign-in failed" in error
     assert "myaccount.google.com/permissions" in error
+
+
+async def test_auth_google_missing_scope_exits_one_and_saves_no_token(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R-6.5: a token response whose scope lacks drive.file exits 1 and names that scope."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    response = {**TOKEN_RESPONSE, "scope": GMAIL_READ_SCOPE}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response))
+
+    assert code == 1
+    assert not _token_path(settings).exists()
+    error = capsys.readouterr().err
+    assert "sign-in failed" in error
+    assert "Google did not grant" in error
+    assert DRIVE_FILE_SCOPE in error
+
+
+async def test_auth_google_stray_request_does_not_end_the_sign_in(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-6.5: a GET /favicon.ico before the redirect is ignored and the sign-in completes."""
+    identity, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+
+    code = await _run_cli(
+        settings,
+        _show_redirect_after_favicon(),
+        _token_transport(TOKEN_RESPONSE),
+    )
+
+    assert code == 0
+    token_path = _token_path(settings)
+    assert token_path.is_file()
+    assert pyrage.decrypt(token_path.read_bytes(), [identity]).decode("utf-8") == SYNTHETIC_REFRESH_TOKEN
 
 
 async def test_auth_google_unknown_account_exits_two_and_resumes_nothing(
