@@ -25,6 +25,12 @@ PUT_SQL = """
     SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
 """
 
+#: The delete that drops a cached value, whether or not it was there (R-4.3).
+DELETE_SQL = """
+    DELETE FROM kv
+    WHERE key = %s
+"""
+
 
 async def get(conn: AsyncConnection[Any], key: str) -> str | None:
     """Return the live value for ``key``, or None when absent or expired (R-4.3).
@@ -43,3 +49,11 @@ async def put(conn: AsyncConnection[Any], key: str, value: str, ttl: timedelta |
     database clock. Does not commit.
     """
     await conn.execute(PUT_SQL, (key, value, ttl))
+
+
+async def delete(conn: AsyncConnection[Any], key: str) -> None:
+    """Remove ``key`` from the cache, whether or not it was there (R-4.3).
+
+    Does not commit.
+    """
+    await conn.execute(DELETE_SQL, (key,))

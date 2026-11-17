@@ -8,6 +8,8 @@ host through the OS and returns the address list those checks judge.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import ipaddress
 import socket
 from collections.abc import Callable, Iterable
@@ -26,6 +28,20 @@ _IPV4_MASK = 0xFFFFFFFF
 NETWORK_SCHEMES = frozenset({"http", "https"})
 #: Longest a host may take to resolve before the guard treats it as unresolvable (R-5.10).
 DNS_TIMEOUT_S = 5.0
+#: Lookups in flight at once in a resolver's own pool, so a hung resolver fills only this one
+#: and not the default executor ``asyncio.to_thread`` shares (R-9.10).
+DNS_WORKERS = 4
+#: One ``getaddrinfo`` answer: family, type, protocol, canonical name and socket address.
+type AddressInfo = tuple[
+    socket.AddressFamily,
+    socket.SocketKind,
+    int,
+    str,
+    tuple[str, int] | tuple[str, int, int, int] | tuple[int, bytes],
+]
+#: The lookup a resolver runs off the event loop; injectable so tests can script or hang it.
+#: ``Iterable`` rather than ``list`` so ``socket.getaddrinfo``'s result type is accepted as is.
+type GetAddrInfo = Callable[..., Iterable[AddressInfo]]
 
 
 class GuardReason(StrEnum):
@@ -51,17 +67,30 @@ class Resolver(Protocol):
 
 
 class SystemResolver:
-    """Resolve hosts through the operating system's resolver, within a deadline (R-5.10)."""
+    """Resolve hosts through the operating system's resolver, within a deadline (R-5.10).
 
-    def __init__(self, timeout_s: float = DNS_TIMEOUT_S) -> None:
+    Lookups run in a small executor of their own, so a hung resolver cannot occupy the
+    default executor that ``asyncio.to_thread`` shares (R-9.10).
+    """
+
+    def __init__(
+        self,
+        timeout_s: float = DNS_TIMEOUT_S,
+        getaddrinfo: GetAddrInfo = socket.getaddrinfo,
+    ) -> None:
         self._timeout_s = timeout_s
+        self._getaddrinfo = getaddrinfo
+        self._executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=DNS_WORKERS, thread_name_prefix="dns"
+        )
 
     async def resolve(self, host: str) -> list[str]:
         """Return the host's unique address strings in answer order; none if it fails or times out."""
         loop = asyncio.get_running_loop()
+        lookup = functools.partial(self._getaddrinfo, host, None, type=socket.SOCK_STREAM)
         try:
             async with asyncio.timeout(self._timeout_s):
-                answers = await loop.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+                answers = await loop.run_in_executor(self._executor, lookup)
         except (TimeoutError, socket.gaierror, UnicodeError):
             # UnicodeError: the idna codec refuses an empty or over-long label ("a..b.com").
             return []

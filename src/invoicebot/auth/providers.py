@@ -41,6 +41,14 @@ INBOX_RULE_MODE = "inbox_rule"
 ONEDRIVE_TARGET_PREFIX = "onedrive_"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
+#: The scope that returns an id_token naming the signed-in mailbox (R-6.5, D138).
+OPENID_SCOPE = "openid"
+#: The scope that adds the mailbox and its verified flag to the id_token (R-6.5, D138).
+EMAIL_SCOPE = "email"
+#: The scopes that only name the signed-in user. Google grants ``email`` back as
+#: ``userinfo.email``, so the granted-scope check skips these; the id_token proves them
+#: (R-6.5, D138).
+IDENTITY_SCOPES = (OPENID_SCOPE, EMAIL_SCOPE)
 #: The Drive scope a Google sink's account signs in with (R-6.5, D129).
 DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 #: The Gmail scope a ``gmail`` inbox's account signs in with (R-6.5, D129).
@@ -177,4 +185,4 @@ def google_scopes_for(cfg: Config, account: str) -> list[str]:
         scopes.append(GMAIL_READ_SCOPE)
     if not scopes:
         raise ValueError(f"no Google sink or gmail inbox names account {account!r}")
-    return scopes
+    return [*IDENTITY_SCOPES, *scopes]

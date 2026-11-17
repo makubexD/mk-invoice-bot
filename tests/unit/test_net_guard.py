@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import threading
 from collections.abc import Iterable
 
 import pytest
 
 from invoicebot.net.guard import (
+    DNS_WORKERS,
+    AddressInfo,
     GuardReason,
     Resolver,
     SystemResolver,
@@ -106,19 +109,21 @@ async def test_resolve_and_check_returns_the_first_public_address() -> None:
     )
 
 
-async def test_system_resolver_returns_nothing_when_dns_outlasts_the_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_system_resolver_returns_nothing_when_dns_outlasts_the_deadline() -> None:
     """R-5.10: a resolution that outlives the deadline yields no addresses."""
-    loop = asyncio.get_running_loop()
+    answered = threading.Event()
 
-    async def slow_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
-        await asyncio.sleep(1)
+    def slow_getaddrinfo(*args: object, **kwargs: object) -> list[AddressInfo]:
+        answered.wait(1)
         # A late answer with an address: only the deadline can make resolve return [].
         return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.10", 0))]
 
-    monkeypatch.setattr(loop, "getaddrinfo", slow_getaddrinfo)
-    assert await SystemResolver(timeout_s=0.01).resolve("portal.example") == []
+    try:
+        assert (
+            await SystemResolver(timeout_s=0.01, getaddrinfo=slow_getaddrinfo).resolve("portal.example") == []
+        )
+    finally:
+        answered.set()
 
 
 def _refuse_all(addresses: Iterable[str]) -> GuardReason:
@@ -140,3 +145,36 @@ async def test_resolve_and_check_uses_the_given_check() -> None:
 async def test_system_resolver_returns_nothing_for_a_malformed_host(host: str) -> None:
     """R-5.10: a host the idna codec refuses resolves to no addresses instead of raising."""
     assert await SystemResolver().resolve(host) == []
+
+
+async def test_system_resolver_keeps_a_hung_lookup_out_of_the_default_executor() -> None:
+    """R-9.10: lookups that hang fill only the DNS pool, so ``asyncio.to_thread`` still runs."""
+    release = threading.Event()
+
+    def hang(*args: object, **kwargs: object) -> list[object]:
+        del args, kwargs
+        release.wait()
+        return []
+
+    resolver = SystemResolver(timeout_s=0.05, getaddrinfo=hang)
+    try:
+        answers = await asyncio.gather(*(resolver.resolve("portal.example") for _ in range(DNS_WORKERS + 2)))
+        assert answers == [[]] * (DNS_WORKERS + 2)
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: 1), 1) == 1
+    finally:
+        release.set()
+
+
+async def test_system_resolver_uses_the_injected_lookup_and_drops_duplicate_addresses() -> None:
+    """R-9.10: the injected lookup answers, and duplicate addresses appear once, in answer order."""
+
+    def fake_getaddrinfo(*args: object, **kwargs: object) -> list[object]:
+        del args, kwargs
+        duplicate = (socket.AF_INET, socket.SOCK_STREAM, 6, "", (PUBLIC_ADDRESS, 0))
+        distinct = (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.35", 0))
+        return [duplicate, duplicate, distinct]
+
+    assert await SystemResolver(getaddrinfo=fake_getaddrinfo).resolve("portal.example") == [
+        PUBLIC_ADDRESS,
+        "93.184.216.35",
+    ]

@@ -236,6 +236,9 @@ Delay = Annotated[timedelta, BeforeValidator(_delay), PlainSerializer(format_del
 
 _EMAIL_ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+$")
 
+#: D138: an account name is a key, so it is lowercase letters, digits and underscores.
+_ACCOUNT_NAME = re.compile(r"^[a-z0-9_]+$")
+
 
 class Mail(BaseModel):
     """Flow mail switches; real sending only in production (R-7.7, D89)."""
@@ -283,6 +286,22 @@ class Google(BaseModel):
     max_rows: PositiveInt = 20000
     #: R-5.2: the most bytes one full-message read may stream before it is refused.
     max_message_bytes: PositiveInt = 8_388_608
+    #: D138: the mailbox each account name is pinned to, checked by `auth-google`.
+    accounts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("accounts")
+    @classmethod
+    def _accounts_map_names_to_addresses(cls, value: dict[str, str]) -> dict[str, str]:
+        """R-6.5, D138: an account name is a key and its mailbox one lower-cased address."""
+        addresses: dict[str, str] = {}
+        for name, address in value.items():
+            if _ACCOUNT_NAME.fullmatch(name) is None:
+                raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
+            address = address.lower()
+            if _EMAIL_ADDRESS.fullmatch(address) is None:
+                raise ValueError(f"account '{name}' is not an email address")
+            addresses[name] = address
+        return addresses
 
 
 #: An id Google may return; anything else is refused before it is used.
@@ -682,6 +701,15 @@ def _has_personal_onedrive_sink(flow: Flow) -> bool:
     )
 
 
+def _google_accounts_in(flow: Flow) -> list[str]:
+    """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
+    accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
+    inbox = flow.email_inbox
+    if inbox is not None and inbox.provider == "gmail":
+        accounts.append(inbox.account)
+    return accounts
+
+
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -743,14 +771,18 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def _google_usage_needs_google_settings(self) -> Self:
-        """R-6.5, D129: a Google sink or a gmail inbox needs the bot's OAuth client."""
-        if self.google is not None:
-            return self
+        """R-6.5, D129, D138: a Google sink or gmail inbox needs its account in google.accounts."""
         for name, flow in self.flows.items():
-            if any(isinstance(sink, (GoogleDriveSink, GoogleSheetsSink)) for sink in flow.sinks):
-                raise ValueError(f"flow '{name}' has a Google sink without google settings")
-            if flow.email_inbox is not None and flow.email_inbox.provider == "gmail":
-                raise ValueError(f"flow '{name}' has a gmail inbox without google settings")
+            accounts = _google_accounts_in(flow)
+            if not accounts:
+                continue
+            if self.google is None:
+                raise ValueError(f"flow '{name}' has a Google sink or gmail inbox without google settings")
+            for account in accounts:
+                if account not in self.google.accounts:
+                    raise ValueError(
+                        f"flow '{name}' names Google account '{account}' missing from google.accounts"
+                    )
         return self
 
     @model_validator(mode="after")

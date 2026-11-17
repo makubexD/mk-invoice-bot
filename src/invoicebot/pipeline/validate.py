@@ -7,8 +7,8 @@ applies BR-V01..BR-V06's verdict and either moves the invoice to ``FETCHING_DOCS
 its summary (now carrying the SUNAT line) and its ``fetch`` job, or to ``CONFIRM_INVALID``
 with BR-V02/BR-V06's question. Without secrets (validation off, D124) it only sends the
 summary and moves on, exactly as routing did before. The token fetch and the validez call
-run with no connection held, except the short, separate ``kv`` read and write the token
-makes on connections of its own.
+run with no connection held, except the short, separate ``kv`` reads, writes and deletes
+the token makes on connections of its own.
 """
 
 from __future__ import annotations
@@ -48,7 +48,8 @@ from invoicebot.store.invoices import (
     set_sunat_status,
 )
 from invoicebot.store.padron import PadronRow, lookup
-from invoicebot.sunat.token import SunatUnavailable, token
+from invoicebot.sunat.token import SunatUnavailable, forget, token
+from invoicebot.sunat.validez import SunatUnauthorized
 from invoicebot.sunat.validez import validate as sunat_validate
 from invoicebot.sunat.verdict import RULE_ISSUER_STATE, RULE_MISSING, Verdict, decide
 
@@ -58,6 +59,8 @@ logger = logging.getLogger(__name__)
 VALIDATE_STEP = "validate"
 #: The recheck delay for a comprobante SUNAT does not know yet (BR-V01, D125).
 MISSING_RECHECK_HOURS = 24
+#: Validez calls per answer: the first, and one retry after a 401 drops the token (R-4.3).
+VALIDEZ_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
@@ -163,17 +166,23 @@ async def ask_sunat(
     cfg: Config,
     reading: Reading,
 ) -> CpStatus | None:
-    """Return SUNAT's answer, or None when it could not be asked (R-4.1, D125).
+    """Return SUNAT's answer, or None when it could not be asked (R-4.1, R-4.3, D125).
 
     The token's cache read and write each use their own short connection; the fetch and
-    the validez call run with no connection held. Any ``SunatUnavailable`` — a token
-    failure included — reads as no answer, which ``decide`` turns into BR-V04.
+    the validez call run with no connection held. A validez 401 drops the cached token
+    and retries once with a freshly fetched one (R-4.3); a second 401, like a token
+    failure or any other ``SunatUnavailable``, reads as no answer, which ``decide``
+    turns into BR-V04.
     """
-    try:
-        access_token = await token(pool, http, secrets, cfg.sunat.validez_api)
-        return await sunat_validate(http, access_token, cfg.sunat.validez_api, cfg.owner.ruc, reading)
-    except SunatUnavailable:
-        return None
+    for _ in range(VALIDEZ_ATTEMPTS):
+        try:
+            access_token = await token(pool, http, secrets, cfg.sunat.validez_api)
+            return await sunat_validate(http, access_token, cfg.sunat.validez_api, cfg.owner.ruc, reading)
+        except SunatUnauthorized:
+            await forget(pool)
+        except SunatUnavailable:
+            return None
+    return None
 
 
 async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) -> None:

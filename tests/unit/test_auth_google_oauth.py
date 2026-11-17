@@ -160,6 +160,29 @@ async def test_rewritten_token_file_refreshes_with_the_new_token(tmp_path: Path)
     assert len(calls) == 2
 
 
+async def test_token_file_replaced_with_the_same_mtime_refreshes(tmp_path: Path) -> None:
+    """R-4.3: a token file replaced by a new inode with the old mtime is detected as changed."""
+    calls: list[httpx.Request] = []
+    access_tokens = iter(["first-access-token", "second-access-token"])
+    clock = Clock(0.0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(200, json={"access_token": next(access_tokens), "expires_in": 3600})
+
+    token_path, identity = _account(tmp_path)
+    async with _make_tokens(token_path, identity, clock, handler) as tokens:
+        assert await tokens.token() == "first-access-token"
+        original_mtime_ns = token_path.stat().st_mtime_ns
+        replacement = tmp_path / "replacement.token"
+        save_refresh_token(replacement, identity, "rotated-refresh-token")
+        replacement.replace(token_path)
+        os.utime(token_path, ns=(original_mtime_ns, original_mtime_ns))
+        assert await tokens.token() == "second-access-token"
+
+    assert len(calls) == 2
+
+
 async def test_failed_refresh_after_rewritten_token_file_is_retried(tmp_path: Path) -> None:
     """BR-D01: a 5xx refresh of a rewritten token file never falls back to the old access token."""
     calls: list[httpx.Request] = []

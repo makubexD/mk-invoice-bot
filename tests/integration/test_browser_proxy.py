@@ -6,6 +6,7 @@ import asyncio
 from collections.abc import AsyncIterator, Iterable
 from contextlib import suppress
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pytest_asyncio
@@ -528,6 +529,40 @@ class _UdpCounter(asyncio.DatagramProtocol):
         """Count one datagram."""
         del data, addr
         self.hits += 1
+
+
+_PROC = Path("/proc")
+
+
+def _browser_arguments(guard_proxy: str) -> list[str]:
+    """The arguments of the running Chromium launched with ``guard_proxy``.
+
+    ``chrome://version``'s ``#command_line`` reports these same arguments, but Playwright's headless
+    shell, the build CI installs, has no ``chrome://version`` page, so read them from ``/proc``.
+    Chromium rewrites its title as one space-joined string, so join the fields before splitting.
+    """
+    for entry in _PROC.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "cmdline").read_bytes()
+        except OSError:
+            continue
+        arguments = raw.replace(b"\0", b" ").decode(errors="replace").split()
+        if arguments and "chrome" in Path(arguments[0]).name and guard_proxy in arguments:
+            return arguments
+    raise AssertionError(f"no Chromium process was launched with {guard_proxy}")
+
+
+async def test_launched_chromium_sends_loopback_through_the_guard(
+    browser: Browser, browser_proxy: GuardProxy
+) -> None:
+    """R-9.10: the browser's own arguments send loopback through the guard proxy too."""
+    assert browser.is_connected()
+    guard_proxy = f"--proxy-server=http://127.0.0.1:{browser_proxy.port}"
+    arguments = _browser_arguments(guard_proxy)
+    assert guard_proxy in arguments
+    assert "--proxy-bypass-list=<-loopback>" in arguments
 
 
 async def test_webrtc_stun_never_leaves_the_browser(browser: Browser) -> None:

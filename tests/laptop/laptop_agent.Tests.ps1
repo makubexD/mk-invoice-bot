@@ -192,13 +192,14 @@ BeforeAll {
         $jobFile = Join-Path -Path $outbox -ChildPath ($job.job_id + '.json')
         Write-JobJson -Path $jobFile -Job $job
         return [pscustomobject] @{
-            Job       = $job
-            Root      = $root
-            Folder    = $folder
-            Outbox    = $outbox
-            JobFile   = $jobFile
-            StateFile = Join-Path -Path $TestDrive -ChildPath ('sent-jobs-' + $runId + '.txt')
-            LogFile   = Join-Path -Path $TestDrive -ChildPath ('agent-' + $runId + '.log')
+            Job             = $job
+            Root            = $root
+            Folder          = $folder
+            Outbox          = $outbox
+            JobFile         = $jobFile
+            StateFile       = Join-Path -Path $TestDrive -ChildPath ('sent-jobs-' + $runId + '.txt')
+            FailedStateFile = Join-Path -Path $TestDrive -ChildPath ('failed-jobs-' + $runId + '.txt')
+            LogFile         = Join-Path -Path $TestDrive -ChildPath ('agent-' + $runId + '.log')
         }
     }
 }
@@ -459,7 +460,8 @@ Describe 'Test-JobFile' {
                 -WarningAction SilentlyContinue -WarningVariable warnings
             if ($null -ne $job) {
                 Send-Job -Job $job -Folder $fixture.Folder -Outlook $outlook `
-                    -StateFile $fixture.StateFile -Path $jobFile.FullName -Outbox $fixture.Outbox `
+                    -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+                    -Path $jobFile.FullName -Outbox $fixture.Outbox `
                     -Key $script:Vectors.key -LogFile $fixture.LogFile
             }
         }
@@ -529,7 +531,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
@@ -562,10 +565,12 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.CreateItemCalls.Count | Should -Be 1
@@ -582,7 +587,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook -ThrowOnSend
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $receiptPath = Join-Path -Path (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') `
@@ -604,7 +610,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile -DryRun
 
         $outlook.CreateItemCalls.Count | Should -Be 0
@@ -620,7 +627,8 @@ Describe 'Send-Job' {
         $outlook = New-FakeOutlook
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $log = Get-Content -LiteralPath $fixture.LogFile -Raw
@@ -653,7 +661,8 @@ Describe 'Send-Job' {
 
         $outlook = New-FakeOutlook
         Send-Job -Job $verified -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         $outlook.SentItems.Count | Should -Be 1
@@ -672,11 +681,74 @@ Describe 'Send-Job' {
         Copy-Item -LiteralPath $fixture.JobFile -Destination $given
 
         Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
-            -StateFile $fixture.StateFile -Path $given -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $given -Outbox $fixture.Outbox -Key $script:Vectors.key `
             -LogFile $fixture.LogFile
 
         Test-Path -LiteralPath $given | Should -BeFalse
         Test-Path -LiteralPath $fixture.JobFile -PathType Leaf | Should -BeTrue
+    }
+
+    It 'S11.14 a failed send leaves the job id in failed-jobs.txt and not in sent-jobs.txt' {
+        $fixture = New-SendFixture
+        $outlook = New-FakeOutlook -ThrowOnSend
+
+        Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -LogFile $fixture.LogFile
+
+        Get-Content -LiteralPath $fixture.FailedStateFile | Should -Contain $fixture.Job.job_id
+        @(Get-Content -LiteralPath $fixture.StateFile -ErrorAction SilentlyContinue |
+                Where-Object { $_.Trim() -eq $fixture.Job.job_id }).Count | Should -Be 0
+    }
+
+    It 'S11.14 the same job dropped into _outbox again is refused with a replay error receipt' {
+        $fixture = New-SendFixture
+        Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook (New-FakeOutlook -ThrowOnSend) `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -LogFile $fixture.LogFile
+        Write-JobJson -Path $fixture.JobFile -Job $fixture.Job
+        $outlook = New-FakeOutlook
+
+        Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -LogFile $fixture.LogFile
+
+        $outlook.CreateItemCalls.Count | Should -Be 0
+        $outlook.SentItems.Count | Should -Be 0
+        $receiptPath = Join-Path -Path (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') `
+            -ChildPath ($fixture.Job.job_id + '.json')
+        $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath $receiptPath -Raw)
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,type,hmac'
+        $receipt.error | Should -Be 'replay'
+        Test-Path -LiteralPath $fixture.JobFile | Should -BeFalse
+    }
+
+    It 'S11.14 a job id already in sent-jobs.txt is still refused as before' {
+        $fixture = New-SendFixture
+        [System.IO.File]::WriteAllText(
+            $fixture.StateFile,
+            $fixture.Job.job_id + [Environment]::NewLine,
+            [System.Text.UTF8Encoding]::new($false)
+        )
+        $outlook = New-FakeOutlook
+
+        Send-Job -Job $fixture.Job -Folder $fixture.Folder -Outlook $outlook `
+            -StateFile $fixture.StateFile -FailedStateFile $fixture.FailedStateFile `
+            -Path $fixture.JobFile -Outbox $fixture.Outbox -Key $script:Vectors.key `
+            -LogFile $fixture.LogFile
+
+        $outlook.CreateItemCalls.Count | Should -Be 0
+        $outlook.SentItems.Count | Should -Be 0
+        $receiptPath = Join-Path -Path (Join-Path -Path $fixture.Outbox -ChildPath 'receipts') `
+            -ChildPath ($fixture.Job.job_id + '.json')
+        $receipt = ConvertFrom-JobJson -Text (Get-Content -LiteralPath $receiptPath -Raw)
+        ($receipt.PSObject.Properties.Name -join ',') | Should -Be 'job_id,error,type,hmac'
+        $receipt.error | Should -Be 'replay'
+        Test-Path -LiteralPath $fixture.JobFile | Should -BeFalse
     }
 }
 

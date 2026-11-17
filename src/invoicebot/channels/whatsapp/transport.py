@@ -144,7 +144,7 @@ async def _send(
             await on_token_rejected()
             raise SendLater(TOKEN_RETRY_DELAY, RULE_TOKEN_REJECTED) from exc
         if exc.code in PERMANENT_META_CODES:
-            raise PermanentSendError(str(exc)) from exc
+            raise PermanentSendError(f"WhatsApp API error {exc.status}: code {exc.code}") from None
         raise
 
 

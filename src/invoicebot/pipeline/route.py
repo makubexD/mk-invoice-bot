@@ -31,7 +31,7 @@ from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, check_date
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
-from invoicebot.pipeline.extract import CANCELLED_STATE, ROUTE_STEP
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import (
@@ -68,7 +68,7 @@ from invoicebot.rules.messages_es import (
     tipos_desc,
 )
 from invoicebot.sinks.folders import comercio_for
-from invoicebot.states import VALIDATING
+from invoicebot.states import CANCELLED, CONFIRMING, ROUTING, VALIDATING
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import (
@@ -90,12 +90,8 @@ RULE_DUPLICATE = "BR-E04"
 UNROUTED_BUYER = "UNROUTED_BUYER"
 #: The reading fields that make up an invoice's natural key, in key order (D93).
 NATURAL_KEY_FIELDS = ("ruc_emisor", "tipo", "serie", "numero")
-#: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
-ROUTING_STATE = "ROUTING"
 #: Where a routed invoice waits; its ``validate`` job is queued with this state change (D124).
 ROUTED_STATE = VALIDATING
-#: Where an invoice waits for an answer to one of D92's questions.
-CONFIRMING_STATE = "CONFIRMING"
 
 
 @dataclass(frozen=True)
@@ -155,7 +151,7 @@ def make_route_handler(
         started = time.perf_counter()
         async with pool.connection() as conn:
             invoice = await load_invoice_head(conn, job.invoice_id)
-            if invoice is None or invoice.state != ROUTING_STATE:
+            if invoice is None or invoice.state != ROUTING:
                 return
             reading = await load_reading(conn, job.invoice_id)
             flow_data = await load_flow_data(conn, job.invoice_id)
@@ -416,7 +412,7 @@ async def _cancel_duplicate(
         created_at=duplicate.created_at.astimezone(ZoneInfo(timezone)),
         id=duplicate.invoice_id,
     )
-    await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=RULE_DUPLICATE, expected=ROUTING_STATE)
+    await set_state(conn, invoice_id, CANCELLED, rule_id=RULE_DUPLICATE, expected=ROUTING)
     await _reply(conn, invoice, invoice_id, RULE_DUPLICATE, text)
 
 
@@ -430,14 +426,14 @@ async def _write(
     if step.kind in ("ask_flow", "route"):
         await set_flow(conn, invoice_id, cast(str, step.flow_id))
     if step.kind == "cancel":
-        await set_state(conn, invoice_id, CANCELLED_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
+        await set_state(conn, invoice_id, CANCELLED, rule_id=step.rule_id, expected=ROUTING)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text)
     elif step.kind == "route":
         await _routed(conn, invoice_id, step.rule_id)
     else:
         if step.choices:
             await merge_flow_data(conn, invoice_id, {"choices": list(step.choices), "menu": step.menu})
-        await set_state(conn, invoice_id, CONFIRMING_STATE, rule_id=step.rule_id, expected=ROUTING_STATE)
+        await set_state(conn, invoice_id, CONFIRMING, rule_id=step.rule_id, expected=ROUTING)
         await _reply(conn, invoice, invoice_id, step.rule_id, step.text, step.buttons)
 
 
@@ -523,7 +519,7 @@ async def _routed(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> 
     The validate step sends the routed summary and asks SUNAT, so routing no longer
     writes an outbox row of its own.
     """
-    await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING_STATE)
+    await set_state(conn, invoice_id, ROUTED_STATE, rule_id=rule_id, expected=ROUTING)
     await enqueue(conn, invoice_id, VALIDATE_STEP)
 
 

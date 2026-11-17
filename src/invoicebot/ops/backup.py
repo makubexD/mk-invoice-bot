@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 from typing import Literal
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, urlsplit
 
 import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
 
@@ -41,6 +41,14 @@ EXCLUDED_NAMES = ("secrets*", "*.age")
 
 #: The stage that failed; BR-O04 maps each to its description.
 BackupReason = Literal["dump", "too_large", "encrypt", "upload"]
+
+#: The database URL query keys the dump accepts, each mapped to the child's environment name (R-9.14).
+PG_ENVIRONMENT_BY_QUERY_KEY = {
+    "sslmode": "PGSSLMODE",
+    "sslrootcert": "PGSSLROOTCERT",
+    "connect_timeout": "PGCONNECT_TIMEOUT",
+    "application_name": "PGAPPNAME",
+}
 
 
 class BackupError(Exception):
@@ -133,11 +141,21 @@ async def _read_dump(
     return bytes(data)
 
 
+def _netloc_host(netloc: str) -> str | None:
+    """Return the host from ``netloc`` with its case kept, or None when it has none (R-9.14)."""
+    hostport = netloc.rsplit("@", 1)[-1]
+    if hostport.startswith("["):
+        end = hostport.find("]")
+        return hostport[1:end] if end != -1 else None
+    host = hostport.rsplit(":", 1)[0]
+    return host or None
+
+
 def _pg_environment(database_url: str) -> dict[str, str]:
-    """Return the child's environment: PATH plus the libpq connection keys (D119, R-9.16)."""
+    """Return the child's environment: PATH plus the libpq connection keys (D119, R-9.14, R-9.16)."""
     parts = urlsplit(database_url)
     values = {
-        "PGHOST": parts.hostname,
+        "PGHOST": _netloc_host(parts.netloc),
         "PGPORT": str(parts.port) if parts.port is not None else None,
         "PGUSER": unquote(parts.username) if parts.username is not None else None,
         "PGPASSWORD": unquote(parts.password) if parts.password is not None else None,
@@ -145,6 +163,11 @@ def _pg_environment(database_url: str) -> dict[str, str]:
     }
     env = {"PATH": os.environ.get("PATH", "")}
     env.update({key: value for key, value in values.items() if value is not None})
+    for key, value in parse_qsl(parts.query):
+        env_name = PG_ENVIRONMENT_BY_QUERY_KEY.get(key)
+        if env_name is None:
+            raise ValueError(f"unsupported database URL query parameter: {key}")
+        env[env_name] = value
     return env
 
 

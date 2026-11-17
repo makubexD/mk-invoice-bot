@@ -281,6 +281,21 @@ async def test_a_permanent_meta_code_is_a_permanent_failure(db_pool: Pool) -> No
             await transport(_row(_message(rule_id="BR-F07")))
 
 
+async def test_a_permanent_meta_code_reports_only_its_status_and_code(db_pool: Pool) -> None:
+    """R-9.16: a permanent Meta error keeps its status and code, never Meta's free text."""
+    await _prepare(db_pool, window_hours_ago=None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": 131026, "message": "Param text['body'] = 0000"}})
+
+    async with _transport(db_pool, handler) as (transport, _sent):
+        with pytest.raises(PermanentSendError) as raised:
+            await transport(_row(_message(rule_id="BR-F07")))
+
+    assert str(raised.value) == "WhatsApp API error 400: code 131026"
+    assert "0000" not in str(raised.value)
+
+
 async def test_a_transient_meta_code_stays_a_whatsapp_error(db_pool: Pool) -> None:
     """R-11.5: Meta's code 1 on a 500 is transient, so it is not a PermanentSendError."""
     await _prepare(db_pool, window_hours_ago=None)

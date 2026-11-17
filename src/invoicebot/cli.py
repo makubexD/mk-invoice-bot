@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import base64
+import hmac
+import json
 import secrets
 import sys
 import tempfile
@@ -28,7 +31,6 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.auth.google_consent import (
-    ERROR_PARAM,
     STATE_PARAM,
     ConsentError,
     consent_url,
@@ -45,6 +47,7 @@ from invoicebot.auth.google_oauth import (
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 from invoicebot.auth.providers import (
     DRIVE_FILE_SCOPE,
+    IDENTITY_SCOPES,
     build_token_provider,
     delivery_accounts,
     google_accounts,
@@ -81,8 +84,19 @@ _CALLBACK_HEADERS = (
 _CALLBACK_RESPONSE = (
     _CALLBACK_HEADERS + str(len(_CALLBACK_BODY)).encode("ascii") + b"\r\n\r\n" + _CALLBACK_BODY
 )
+#: The page a request without this sign-in's ``state`` gets (R-9.9).
+_BAD_REQUEST_BODY = b"Bad request.\n"
+_BAD_REQUEST_RESPONSE = (
+    b"HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n"
+    b"Connection: close\r\nContent-Length: "
+    + str(len(_BAD_REQUEST_BODY)).encode("ascii")
+    + b"\r\n\r\n"
+    + _BAD_REQUEST_BODY
+)
 #: The random bytes behind the Google sign-in's ``state`` (R-6.5).
 _STATE_BYTES = 32
+#: An id_token is ``header.payload.signature`` (R-6.5, D138).
+_ID_TOKEN_PARTS = 3
 #: The age-store secret the Google sign-in reads (D128).
 
 #: The root folder ``google-setup`` creates for flow A's invoices (D129).
@@ -358,8 +372,9 @@ async def _google_sign_in(
     Raises:
         ConsentError: the redirect's state does not match or carries no code.
         TimeoutError: no redirect arrives within ``SIGN_IN_TIMEOUT_S``.
-        _SignInError: the token endpoint refuses the code, returns no refresh token, or
-            grants fewer scopes than the account needs.
+        _SignInError: the token endpoint refuses the code, the id_token does not name the
+            account's pinned mailbox, the endpoint returns no refresh token, or it grants
+            fewer scopes than the account needs.
     """
     identity_path = settings.age_identity_path
     if identity_path is None:
@@ -371,7 +386,7 @@ async def _google_sign_in(
     scopes = google_scopes_for(cfg, account)
 
     async def answer(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        await _answer_redirect(reader, writer, redirect_path)
+        await _answer_redirect(reader, writer, redirect_path, state)
 
     server = await asyncio.start_server(answer, "127.0.0.1", 0, limit=_REQUEST_LINE_LIMIT)
     async with server:
@@ -384,7 +399,9 @@ async def _google_sign_in(
             path = await redirect_path
     code = parse_redirect(path, state)
     response = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
-    refresh_token = _granted_refresh_token(response, scopes)
+    _require_pinned_mailbox(response, cfg, account)
+    data_scopes = [scope for scope in scopes if scope not in IDENTITY_SCOPES]
+    refresh_token = _granted_refresh_token(response, data_scopes)
     save_refresh_token(
         google_token_path(settings.data_dir, account),
         load_identity(identity_path),
@@ -424,6 +441,54 @@ async def _exchange_code(
     return response
 
 
+def _id_token_claims(response: httpx.Response) -> dict[str, object] | None:
+    """Return the id_token's payload, or None when it is missing or malformed (R-6.5, D138).
+
+    The signature is not checked: the token arrives from Google's TLS token endpoint in
+    the same answer to the code exchange (D138). Only the middle base64url part is read.
+    """
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    id_token = body.get("id_token")
+    if not isinstance(id_token, str):
+        return None
+    parts = id_token.split(".")
+    if len(parts) != _ID_TOKEN_PARTS:
+        return None
+    try:
+        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        claims = json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def _require_pinned_mailbox(response: httpx.Response, cfg: Config, account: str) -> None:
+    """Refuse a sign-in that is not the mailbox ``account`` is pinned to (R-6.5, D138).
+
+    Raises:
+        _SignInError: the id_token is missing or malformed, its ``email_verified`` is not
+            true, or its ``email`` differs from ``google.accounts[account]``. The message
+            names the expected and the signed-in address.
+    """
+    expected = _google_settings(cfg).accounts[account]
+    claims = _id_token_claims(response)
+    address = claims.get("email") if claims is not None else None
+    signed_in = address if isinstance(address, str) else "an unreadable id_token"
+    if (
+        isinstance(address, str)
+        and claims is not None
+        and claims.get("email_verified") is True
+        and address.casefold() == expected
+    ):
+        return
+    raise _SignInError(f"signed in as {signed_in}, but account {account!r} is pinned to {expected}")
+
+
 def _granted_refresh_token(response: httpx.Response, scopes: Sequence[str]) -> str:
     """Return the refresh token in a token response, once every scope is granted (R-6.4, R-6.5).
 
@@ -458,19 +523,21 @@ async def _answer_redirect(
     reader: asyncio.StreamReader,
     writer: asyncio.StreamWriter,
     redirect_path: asyncio.Future[str],
+    expected_state: str,
 ) -> None:
-    """Read one request line, answer the browser and hand the path to the sign-in (R-6.5).
+    """Read one request line and answer it; only this sign-in's redirect ends the wait (R-6.5, R-9.9).
 
-    A connection that sends no ``GET`` line (a browser preconnect, a probe) is answered
-    and ignored, so it cannot end the sign-in before the real redirect arrives.
+    A request whose ``state`` is missing or differs gets a plain 400 page and is
+    ignored, so a browser preconnect, a probe or another sign-in's redirect cannot end
+    this sign-in before the real redirect arrives.
     """
     try:
         line = await reader.readline()
     except (asyncio.LimitOverrunError, ValueError, asyncio.IncompleteReadError):
         line = b""
-    path = _request_path(line)
+    path = _request_path(line, expected_state)
     try:
-        writer.write(_CALLBACK_RESPONSE)
+        writer.write(_CALLBACK_RESPONSE if path else _BAD_REQUEST_RESPONSE)
         await writer.drain()
     finally:
         writer.close()
@@ -479,18 +546,19 @@ async def _answer_redirect(
         await writer.wait_closed()
 
 
-def _request_path(line: bytes) -> str:
-    """Return the path of Google's redirect request, or "" for any other request (R-6.5).
+def _request_path(line: bytes, expected_state: str) -> str:
+    """Return the redirect's path once its ``state`` matches, or "" for any other request (R-6.5, R-9.9).
 
-    Only a request whose query carries ``state`` or ``error`` can be the redirect; a
-    ``/favicon.ico`` read or a browser preconnect must not end the sign-in.
+    Only a request whose query carries this sign-in's ``state`` can be the redirect; a
+    ``/favicon.ico`` read, a browser preconnect or a redirect for another sign-in must
+    not end this one.
     """
     parts = line.decode("ascii", "replace").split()
     if len(parts) < 2 or parts[0] != "GET":
         return ""
     path = parts[1]
-    query = parse_qs(urlsplit(path).query)
-    if STATE_PARAM not in query and ERROR_PARAM not in query:
+    state = parse_qs(urlsplit(path).query, keep_blank_values=True).get(STATE_PARAM, [""])[0]
+    if not hmac.compare_digest(state.encode(), expected_state.encode()):
         return ""
     return path
 

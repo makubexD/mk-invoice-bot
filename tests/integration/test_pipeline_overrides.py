@@ -14,6 +14,8 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, InboundMessage
+from invoicebot.config.models import MediaMaxBytes
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.rules.messages_es import MESSAGES, OVERRIDES_SAVED, state_desc
 from invoicebot.store.flow_b import get_batch_state, merge_flow_data, open_batch, set_batch_state
@@ -23,6 +25,7 @@ from invoicebot.store.messages import link_message_to_invoice, store_inbound
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 #: The owner timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
 FLOW = "support"
@@ -114,7 +117,7 @@ async def test_photo_caption_override_lands_in_the_new_invoice(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         assert result.invoice_id is not None
         overrides = await _overrides(conn, result.invoice_id)
@@ -142,7 +145,7 @@ async def test_late_override_reopens_a_prepared_batch(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)
@@ -182,7 +185,7 @@ async def test_override_on_a_done_invoice_gets_br_s02(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)
@@ -212,7 +215,7 @@ async def test_text_without_equals_is_only_stored(
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
         overrides = await _overrides(conn, invoice_id)
         state = await _invoice_state(conn, invoice_id)

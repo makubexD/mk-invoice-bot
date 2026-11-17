@@ -27,6 +27,10 @@ _CENT = Decimal("0.01")
 _FECHA_FORMAT = "%d/%m/%Y"
 
 
+class SunatUnauthorized(SunatUnavailable):
+    """SUNAT rejected the bearer token, so the caller must fetch another (R-4.3)."""
+
+
 async def validate(
     http: httpx.AsyncClient,
     token: str,
@@ -38,6 +42,7 @@ async def validate(
 
     Raises:
         ValueError: the reading lacks a value the request needs.
+        SunatUnauthorized: SUNAT rejected the token; its text carries only the status (R-4.3).
         SunatUnavailable: the API timed out, failed or answered unusably (R-4.1).
     """
     body = _request_json(reading)
@@ -45,6 +50,8 @@ async def validate(
     headers = {"Authorization": f"Bearer {token}"}
     try:
         async with http.stream("POST", url, json=body, headers=headers, timeout=cfg.timeout_s) as response:
+            if response.status_code == httpx.codes.UNAUTHORIZED:
+                raise SunatUnauthorized(f"sunat validez request failed with status {response.status_code}")
             if response.status_code != httpx.codes.OK:
                 raise SunatUnavailable(f"sunat validez request failed with status {response.status_code}")
             raw = await read_capped(response)

@@ -18,7 +18,8 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.app import create_app
 from invoicebot.channels.profiles import ProfileIndex
-from invoicebot.config.models import Profile
+from invoicebot.config.models import MediaMaxBytes, Profile
+from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.store.db import Pool, create_pool, ping
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -30,6 +31,7 @@ HASH_KEY = "synthetic-hash-key"
 HANDSHAKE = "synthetic-verify-token"
 EPOCH = "1700000000"
 MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 TIMEZONE = "America/Lima"
 
 
@@ -59,7 +61,7 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
         max_queued_per_sender=MAX_QUEUED,
-        media_max_mb=10,
+        media_max_bytes=MEDIA_MAX_BYTES,
         timezone=TIMEZONE,
     )
     app = FastAPI()

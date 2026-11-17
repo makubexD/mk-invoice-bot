@@ -1,6 +1,8 @@
 """Integration tests for ``invoicebot auth-google`` (R-6.4, R-6.5, BR-D01)."""
 
 import asyncio
+import base64
+import json
 import re
 import threading
 from collections.abc import Callable
@@ -16,7 +18,13 @@ import yaml
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.auth.providers import DRIVE_FILE_SCOPE, GMAIL_READ_SCOPE, TOKENS_DIRECTORY
+from invoicebot import cli
+from invoicebot.auth.providers import (
+    DRIVE_FILE_SCOPE,
+    GMAIL_READ_SCOPE,
+    OPENID_SCOPE,
+    TOKENS_DIRECTORY,
+)
 from invoicebot.cli import main
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.pending_auth import GOOGLE
@@ -31,13 +39,34 @@ INBOX_ACCOUNT = "invoices_a"
 CLIENT_SECRET_KEY = "google_client_secret"  # noqa: S105  # the store key's name, not a value
 SYNTHETIC_CLIENT_SECRET = "synthetic-client-secret"  # noqa: S105  # a synthetic test value
 SYNTHETIC_REFRESH_TOKEN = "synthetic-refresh"  # noqa: S105  # a synthetic test value
+#: A timeout short enough for the tests that wait one out (R-9.9).
+SHORT_TIMEOUT_S = 0.2
+OWNER_EMAIL = "owner@example.com"
+INBOX_EMAIL = "invoices@example.com"
+#: Google grants the ``email`` scope back under this name (R-6.5).
+USERINFO_EMAIL_SCOPE = "https://www.googleapis.com/auth/userinfo.email"
+SCOPE = f"{OPENID_SCOPE} {USERINFO_EMAIL_SCOPE} {DRIVE_FILE_SCOPE} {GMAIL_READ_SCOPE}"
+
+
+def _b64url(raw: bytes) -> str:
+    """Return ``raw`` as unpadded base64url, as an id_token part is encoded (D138)."""
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def _id_token(email: str, *, verified: bool = True) -> str:
+    """Return a synthetic unsigned id_token naming ``email`` (D138)."""
+    claims = _b64url(json.dumps({"email": email, "email_verified": verified}).encode("utf-8"))
+    return f"c3ludGhldGlj.{claims}.c3ludGhldGlj"
+
+
 TOKEN_RESPONSE = {
     "access_token": "a",
     "expires_in": 3600,
     "refresh_token": SYNTHETIC_REFRESH_TOKEN,
-    "scope": f"{DRIVE_FILE_SCOPE} {GMAIL_READ_SCOPE}",
+    "scope": SCOPE,
+    "id_token": _id_token(OWNER_EMAIL),
 }
-NO_REFRESH_RESPONSE = {"access_token": "a", "expires_in": 3600}
+NO_REFRESH_RESPONSE = {"access_token": "a", "expires_in": 3600, "id_token": _id_token(OWNER_EMAIL)}
 
 
 def _age_material(tmp_path: Path) -> tuple[pyrage.x25519.Identity, Path, Path]:
@@ -99,6 +128,24 @@ def _show_redirect_after_favicon() -> Callable[[str], None]:
 
         def browser() -> None:
             httpx.get(f"{redirect_uri}/favicon.ico", timeout=10)
+            _open_redirect(redirect_uri, state)
+
+        threading.Thread(target=browser, daemon=True).start()
+
+    return show
+
+
+def _show_redirect_after_wrong_state(statuses: list[int]) -> Callable[[str], None]:
+    """Return a show whose browser sends a wrong-state redirect before the real one."""
+
+    def show(url: str) -> None:
+        query = parse_qs(urlsplit(url).query)
+        redirect_uri = query["redirect_uri"][0]
+        state = query["state"][0]
+
+        def browser() -> None:
+            response = httpx.get(f"{redirect_uri}/?code=x&state=wrong-state", timeout=10)
+            statuses.append(response.status_code)
             _open_redirect(redirect_uri, state)
 
         threading.Thread(target=browser, daemon=True).start()
@@ -204,8 +251,10 @@ async def test_auth_google_wrong_state_writes_no_token_and_resumes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """R-6.5: a redirect whose state differs exits non-zero, writes no token and resumes nothing."""
+    """R-6.5: a redirect whose state differs times out, writes no token and resumes nothing."""
+    monkeypatch.setattr(cli, "SIGN_IN_TIMEOUT_S", SHORT_TIMEOUT_S)
     _, identity_path, secrets_path = _age_material(tmp_path)
     settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
     invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
@@ -245,7 +294,7 @@ async def test_auth_google_missing_scope_exits_one_and_saves_no_token(
     """R-6.5: a token response whose scope lacks drive.file exits 1 and names that scope."""
     _, identity_path, secrets_path = _age_material(tmp_path)
     settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
-    response = {**TOKEN_RESPONSE, "scope": GMAIL_READ_SCOPE}
+    response = {**TOKEN_RESPONSE, "scope": f"{OPENID_SCOPE} {USERINFO_EMAIL_SCOPE} {GMAIL_READ_SCOPE}"}
 
     code = await _run_cli(settings, _show_redirect(), _token_transport(response))
 
@@ -275,6 +324,48 @@ async def test_auth_google_stray_request_does_not_end_the_sign_in(
     token_path = _token_path(settings)
     assert token_path.is_file()
     assert pyrage.decrypt(token_path.read_bytes(), [identity]).decode("utf-8") == SYNTHETIC_REFRESH_TOKEN
+
+
+async def test_auth_google_wrong_state_then_real_redirect_completes_the_sign_in(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-9.9: a wrong-state request is refused with 400 and the real redirect still signs in."""
+    identity, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    statuses: list[int] = []
+
+    code = await _run_cli(
+        settings,
+        _show_redirect_after_wrong_state(statuses),
+        _token_transport(TOKEN_RESPONSE),
+    )
+
+    assert code == 0
+    assert statuses == [400]
+    token_path = _token_path(settings)
+    assert token_path.is_file()
+    assert pyrage.decrypt(token_path.read_bytes(), [identity]).decode("utf-8") == SYNTHETIC_REFRESH_TOKEN
+
+
+async def test_auth_google_only_wrong_state_requests_time_out(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-9.9: wrong-state requests never end the sign-in; it ends in the timeout, not a consent error."""
+    monkeypatch.setattr(cli, "SIGN_IN_TIMEOUT_S", SHORT_TIMEOUT_S)
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+
+    code = await _run_cli(settings, _show_redirect("wrong-state"), _token_transport(TOKEN_RESPONSE))
+
+    assert code == 1
+    assert not _token_path(settings).exists()
+    error = capsys.readouterr().err
+    assert "sign-in failed" in error
+    assert "does not match" not in error
 
 
 async def test_auth_google_unknown_account_exits_two_and_resumes_nothing(
@@ -309,10 +400,102 @@ async def test_auth_google_inbox_account_resumes_no_invoice(
     settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
     invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
 
-    code = await _run_cli(settings, _show_redirect(), _token_transport(TOKEN_RESPONSE), INBOX_ACCOUNT)
+    response = {**TOKEN_RESPONSE, "id_token": _id_token(INBOX_EMAIL)}
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response), INBOX_ACCOUNT)
 
     assert code == 0
     assert _token_path(settings, INBOX_ACCOUNT).is_file()
     assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
     assert await _job_steps(db_pool, invoice_id) == []
     assert "resumed 0 invoice(s)" in capsys.readouterr().out
+
+
+async def test_auth_google_matching_mailbox_saves_the_token(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-6.5, D138: an id_token naming the pinned mailbox completes the sign-in."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(TOKEN_RESPONSE))
+
+    assert code == 0
+    assert _token_path(settings).is_file()
+
+
+async def test_auth_google_other_mailbox_saves_nothing_and_resumes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R-6.5, D138: an id_token for another mailbox exits 1 and saves no token."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
+    response = {**TOKEN_RESPONSE, "id_token": _id_token("someone-else@example.com")}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response))
+
+    assert code == 1
+    assert not _token_path(settings).exists()
+    assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
+    assert await _job_steps(db_pool, invoice_id) == []
+    error = capsys.readouterr().err
+    assert OWNER_EMAIL in error
+    assert "someone-else@example.com" in error
+
+
+async def test_auth_google_unverified_mailbox_is_refused(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """R-6.5, D138: an id_token whose email_verified is false exits 1 and saves no token."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    response = {**TOKEN_RESPONSE, "id_token": _id_token(OWNER_EMAIL, verified=False)}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response))
+
+    assert code == 1
+    assert not _token_path(settings).exists()
+    error = capsys.readouterr().err
+    assert OWNER_EMAIL in error
+
+
+@pytest.mark.parametrize(
+    "id_token",
+    [
+        pytest.param(None, id="missing"),
+        pytest.param("one-part", id="not-three-parts"),
+        pytest.param("head.%%%.signature", id="bad-base64"),
+        pytest.param(f"head.{_b64url(b'not json')}.signature", id="bad-json"),
+        pytest.param(
+            f"head.{_b64url(json.dumps({'email_verified': True}).encode('utf-8'))}.signature",
+            id="no-email",
+        ),
+    ],
+)
+async def test_auth_google_missing_or_malformed_id_token_is_refused(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    id_token: str | None,
+) -> None:
+    """R-6.5, D138: a missing, malformed or incomplete id_token exits 1 and saves no token."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    response = dict(TOKEN_RESPONSE)
+    if id_token is None:
+        response.pop("id_token")
+    else:
+        response["id_token"] = id_token
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response))
+
+    assert code == 1
+    assert not _token_path(settings).exists()
+    error = capsys.readouterr().err
+    assert "sign-in failed" in error
+    assert OWNER_EMAIL in error

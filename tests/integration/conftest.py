@@ -25,10 +25,10 @@ from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config as AppConfig
-from invoicebot.config.models import RoutingRule, StoreDirectory
+from invoicebot.config.models import MediaMaxBytes, RoutingRule, StoreDirectory
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
 from invoicebot.pipeline.gaps import GapContext
-from invoicebot.pipeline.handlers import EXTRACT_STEP
+from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
@@ -119,6 +119,7 @@ _CANVAS_PX = 800
 _QR_SCALE = 6
 _QR_OFFSET_PX = 100
 _MAX_QUEUED = 10
+_MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 #: The owner timezone, for the dates a command prints (S11.4).
 _TIMEZONE = "America/Lima"
 #: Font and layout that make Tesseract read the printed invoice text (D81, R-9.16).
@@ -238,7 +239,11 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
         async with db_pool.connection() as conn:
             await conn.execute("DELETE FROM outbox")
             intake = await handle_inbound(
-                conn, msg, max_queued_per_sender=_MAX_QUEUED, media_max_mb=10, timezone=_TIMEZONE
+                conn,
+                msg,
+                max_queued_per_sender=_MAX_QUEUED,
+                media_max_bytes=_MEDIA_MAX_BYTES,
+                timezone=_TIMEZONE,
             )
         assert intake.invoice_id is not None
         invoice_id = intake.invoice_id

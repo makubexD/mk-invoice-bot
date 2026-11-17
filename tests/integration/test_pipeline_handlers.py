@@ -24,7 +24,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
-from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
+from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.queue.jobs import Job
@@ -44,7 +44,7 @@ PDF_MIME = "application/pdf"
 MAX_QUEUED = 10
 #: The owner timezone, for the dates a command prints (S11.4).
 TIMEZONE = "America/Lima"
-MEGABYTE = 1024 * 1024
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 VALID_STATES: dict[str, frozenset[str]] = {"confirm": frozenset({"CONFIRMING"})}
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -141,7 +141,7 @@ async def _queue_photo(
     msg = _message(profile_id, external_id=_external_id(), attachments=[_photo(media_ref)])
     async with pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
     assert result.invoice_id is not None
     return result.invoice_id
@@ -349,7 +349,10 @@ async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(
     assert files == []
     assert (state, rule_id) == ("CANCELLED", "BR-E07")
     assert len(outbox_rows) == 1
-    assert "la imagen es demasiado grande" in outbox_rows[0][1]
+    assert outbox_rows[0][1] == (
+        "No puedo procesar este archivo (la imagen es demasiado grande). "
+        "Envíame una foto (JPG o PNG, hasta 8 MB) o el PDF del comprobante (hasta 16 MB)."
+    )
 
 
 async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
@@ -368,7 +371,7 @@ async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
     msg = _message(profile_id, external_id=_external_id(), attachments=[pdf])
     async with db_pool.connection() as conn:
         result = await handle_inbound(
-            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_mb=10, timezone=TIMEZONE
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
         )
     assert result.invoice_id is not None
     async with _make_client(handler) as client:
@@ -383,7 +386,10 @@ async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
     assert files == []
     assert (state, rule_id) == ("CANCELLED", "BR-E07")
     assert len(outbox_rows) == 1
-    assert "es demasiado grande" in outbox_rows[0][1]
+    assert outbox_rows[0][1] == (
+        "No puedo procesar este archivo (es demasiado grande). "
+        "Envíame una foto (JPG o PNG, hasta 8 MB) o el PDF del comprobante (hasta 16 MB)."
+    )
 
 
 async def test_media_info_failure_raises_and_changes_nothing(

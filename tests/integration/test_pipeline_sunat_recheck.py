@@ -327,7 +327,7 @@ async def test_annulled_answer_alerts_the_admin_and_leaves_the_state(
 async def test_outage_reschedules_on_the_backoff(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-V04: an outage stores no answer, increments rechecks and reschedules for the next attempt."""
+    """BR-V04: an outage keeps the stored answer, increments rechecks and reschedules for the next attempt."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id)
     invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=1)
@@ -341,12 +341,41 @@ async def test_outage_reschedules_on_the_backoff(
         minutes = await _run_after_minutes(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
     assert row == ("FETCHING_DOCS", None)
-    assert status["estado_cp"] is None
+    assert status["estado_cp"] == 0
     assert status["rechecks"] == 2
     assert jobs == ["sunat_recheck"]
     # It stored recheck 2, so the one it schedules is recheck 3.
     assert minutes == pytest.approx(backoff_minutes(3), abs=0.1)
     assert outbox == []
+
+
+async def test_an_outage_keeps_the_last_answer_and_bumps_rechecks(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-V04: a recheck with no answer keeps the stored answer and only bumps rechecks."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    invoice_id = await _fetching_invoice(db_pool, profile_id, _reading(await _today(db_pool)), rechecks=1)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_sunat_status(
+            conn,
+            invoice_id,
+            CpStatus(estado_cp=1, estado_ruc="00", cond_domi_ruc="00"),
+            rechecks=1,
+        )
+
+    async with db_pool.connection() as conn:
+        before = await _sunat_json(conn, invoice_id)
+
+    await _run(db_pool, cfg, invoice_id, transport=_sunat_handler(1, validez_status=500))
+
+    async with db_pool.connection() as conn:
+        stored = await _sunat_json(conn, invoice_id)
+    assert stored["estado_cp"] == 1
+    assert stored["rechecks"] == 2
+    assert {key: value for key, value in stored.items() if key != "rechecks"} == {
+        key: value for key, value in before.items() if key != "rechecks"
+    }
 
 
 async def test_each_backoff_recheck_is_scheduled_further_out(

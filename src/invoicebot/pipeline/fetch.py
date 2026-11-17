@@ -58,6 +58,7 @@ from invoicebot.rules.messages_es import (
     MESSAGES,
     UNKNOWN_ISSUER,
 )
+from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import taught_links
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
@@ -74,12 +75,6 @@ from invoicebot.store.invoices import (
 
 logger = logging.getLogger(__name__)
 
-#: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
-FETCHING_STATE = "FETCHING_DOCS"
-#: Where an invoice goes once its required documents are stored (R-5.1).
-DELIVERING_STATE = "DELIVERING"
-#: Where an invoice goes when no fetcher can get its documents (BR-F07).
-MANUAL_STATE = "MANUAL_REQUIRED"
 #: The gap kind raised when no fetcher knows the issuer's portal (BR-F02, spec 06 §3).
 PORTAL_MISSING = "PORTAL_MISSING"
 #: The gap kind raised when the portal fails technically too many times in a row (BR-F03).
@@ -140,7 +135,7 @@ def make_fetch_handler(
         started = time.perf_counter()
         async with pool.connection() as conn:
             head = await load_invoice_head(conn, job.invoice_id)
-            if head is None or head.state != FETCHING_STATE:
+            if head is None or head.state != FETCHING_DOCS:
                 return
             # A redelivered job whose next job already ran is stale (R-5.1).
             if await is_superseded(conn, job):
@@ -252,7 +247,7 @@ async def _is_current(conn: AsyncConnection[Any], job: Job) -> bool:
     if await is_superseded(conn, job):
         return False
     head = await load_invoice_head(conn, job.invoice_id)
-    return head is not None and head.state == FETCHING_STATE
+    return head is not None and head.state == FETCHING_DOCS
 
 
 async def _raise_broken_gap(
@@ -310,7 +305,7 @@ async def _record_result(
                     size=fetched.size,
                 ),
             )
-        await set_state(conn, inputs.job.invoice_id, DELIVERING_STATE, expected=FETCHING_STATE)
+        await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
     elif result.reason in WAIT_REASONS:
         run_after = None if delay is None else await _run_after(conn, delay)
@@ -364,7 +359,7 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             portal_broken=await _portal_is_broken(conn, inputs, reading),
         )
         await set_state(
-            conn, inputs.job.invoice_id, MANUAL_STATE, rule_id=RULE_EXHAUSTED, expected=FETCHING_STATE
+            conn, inputs.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_EXHAUSTED, expected=FETCHING_DOCS
         )
         await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
         await _ask_for_portal(conn, inputs, gap, reading)

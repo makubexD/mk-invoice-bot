@@ -18,7 +18,9 @@ from invoicebot.auth.google_consent import (
 )
 from invoicebot.auth.providers import (
     DRIVE_FILE_SCOPE,
+    EMAIL_SCOPE,
     GMAIL_READ_SCOPE,
+    OPENID_SCOPE,
     google_accounts,
     google_scopes_for,
 )
@@ -41,12 +43,27 @@ def example_config() -> Config:
 
 def test_example_config_owner_signs_in_with_drive_file_only(example_config: Config) -> None:
     """R-6.5: a Google sink's account gets drive.file, not gmail.readonly."""
-    assert google_scopes_for(example_config, "owner") == [DRIVE_FILE_SCOPE]
+    assert google_scopes_for(example_config, "owner") == [OPENID_SCOPE, EMAIL_SCOPE, DRIVE_FILE_SCOPE]
 
 
 def test_example_config_invoices_a_signs_in_with_gmail_read_only(example_config: Config) -> None:
     """R-6.5: a gmail inbox's account gets gmail.readonly, not drive.file."""
-    assert google_scopes_for(example_config, "invoices_a") == [GMAIL_READ_SCOPE]
+    assert google_scopes_for(example_config, "invoices_a") == [
+        OPENID_SCOPE,
+        EMAIL_SCOPE,
+        GMAIL_READ_SCOPE,
+    ]
+
+
+def test_consent_url_asks_for_openid_and_email(example_config: Config) -> None:
+    """R-6.5, D138: the sign-in asks for openid and email besides the account's data scopes."""
+    _, challenge = pkce_pair()
+    scopes = google_scopes_for(example_config, "owner")
+
+    url = consent_url("client-id", REDIRECT_URI, scopes, STATE, challenge)
+
+    requested = parse_qs(urlsplit(url).query)["scope"][0].split()
+    assert requested == [OPENID_SCOPE, EMAIL_SCOPE, DRIVE_FILE_SCOPE]
 
 
 def test_google_accounts_lists_every_named_account(example_config: Config) -> None:

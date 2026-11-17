@@ -1,7 +1,8 @@
-"""Integration tests for the daily task loop (R-9.11, D114)."""
+"""Integration tests for the daily task loop (R-9.11, D114, BR-D05)."""
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -9,10 +10,15 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.app import _github_health
+from invoicebot.config.loader import load_config
+from invoicebot.github.app_token import GitHubTokenError, TokenFailure
 from invoicebot.ops.daily import DailyTask, run_due
+from invoicebot.pipeline.outgoing import RULE_GITHUB_ALERT
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
+EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 #: The owner timezone, where a task's local date is decided (D114).
 TIMEZONE = "America/Lima"
 #: Every key this file writes, so the cleanup deletes only its own claims.
@@ -27,6 +33,37 @@ async def clean_daily_keys(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -
     async with db_pool.connection() as conn:
         await conn.execute("DELETE FROM ops_state WHERE key LIKE %s", (f"{KEY_PREFIX}%",))
     yield
+
+
+class _FakeGitHubApp:
+    """A token source that either mints a token or fails with a fixed reason (BR-D05)."""
+
+    def __init__(self, failure: TokenFailure | None = None) -> None:
+        self._failure = failure
+        self.invalidations = 0
+
+    async def token(self) -> str:
+        if self._failure is not None:
+            raise GitHubTokenError(self._failure)
+        return "synthetic-installation-token"
+
+    def invalidate(self) -> None:
+        self.invalidations += 1
+
+
+async def _delete_token_alert_state(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+    """Delete BR-D05's alert rows and its rate-limit claim (BR-D05)."""
+    async with pool.connection() as conn:
+        await conn.execute("DELETE FROM outbox WHERE payload_json->>'rule_id' = %s", (RULE_GITHUB_ALERT,))
+        await conn.execute("DELETE FROM ops_state WHERE key = %s", (RULE_GITHUB_ALERT,))
+
+
+@pytest_asyncio.fixture(loop_scope="session")
+async def clean_token_alert(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> AsyncIterator[None]:
+    """BR-D05: start and end a token-alert test with no alert row or claim of its own."""
+    await _delete_token_alert_state(db_pool)
+    yield
+    await _delete_token_alert_state(db_pool)
 
 
 def _recorder(calls: list[str], key: str) -> Callable[[], Awaitable[None]]:
@@ -157,3 +194,46 @@ async def test_claim_at_start_of_today_in_lima_does_not_run(
 
     assert started == []
     assert calls == []
+
+
+async def test_github_health_failure_drops_the_cache_and_queues_one_alert(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], clean_token_alert: None
+) -> None:
+    """BR-D05: a token check that fails invalidates the cache and queues one admin alert."""
+    cfg = load_config(EXAMPLE)
+    app = _FakeGitHubApp("uninstalled")
+
+    await _github_health(app, db_pool, cfg)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            """SELECT payload_json->>'text' FROM outbox
+               WHERE payload_json->>'rule_id' = %s""",
+            (RULE_GITHUB_ALERT,),
+        )
+        texts = [str(row[0]) for row in await cur.fetchall()]
+
+    assert app.invalidations == 1
+    assert len(texts) == 1
+    assert cfg.gaps.github.repo in texts[0]
+
+
+async def test_github_health_success_drops_the_cache_and_queues_no_alert(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], clean_token_alert: None
+) -> None:
+    """BR-D05: a token check that succeeds invalidates the cache and queues no alert."""
+    cfg = load_config(EXAMPLE)
+    app = _FakeGitHubApp()
+
+    await _github_health(app, db_pool, cfg)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM outbox WHERE payload_json->>'rule_id' = %s",
+            (RULE_GITHUB_ALERT,),
+        )
+        row = await cur.fetchone()
+
+    assert app.invalidations == 1
+    assert row is not None
+    assert row[0] == 0

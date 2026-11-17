@@ -74,6 +74,16 @@ async def token(
     return access_token
 
 
+async def forget(pool: Pool) -> None:
+    """Drop the cached token so the next :func:`token` call fetches a fresh one (R-4.3).
+
+    Uses a short connection and transaction of its own, so no connection is held
+    across the caller's HTTP calls.
+    """
+    async with pool.connection() as conn, conn.transaction():
+        await kv.delete(conn, CACHE_KEY)
+
+
 async def _fetch(http: httpx.AsyncClient, secrets: Secrets, cfg: ValidezApi) -> tuple[str, int]:
     """POST the client_credentials form and return the validated token fields (R-4.3)."""
     url = cfg.token_url.format(client_id=secrets.get("sunat_client_id"))

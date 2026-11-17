@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Literal
 
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
-from invoicebot.channels.media_limits import MediaRejected, RejectionReason, max_bytes_for
+from invoicebot.channels.media_limits import MediaRejected, RejectionReason
 from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import download_media
 from invoicebot.config.models import MediaLimits
@@ -20,6 +20,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
+from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
@@ -27,7 +28,7 @@ from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 EXTRACT_STEP = "extract"
 #: Rule that cancels media over a cap or of an unsupported type (BR-E07).
 RULE_MEDIA_REJECTED = "BR-E07"
-#: Bytes in a megabyte, for BR-E07's ``{max_mb}``.
+#: Bytes in a megabyte, for BR-E07's photo and PDF caps.
 MEGABYTE = 1024 * 1024
 TMP_DIRECTORY = "tmp"
 
@@ -140,13 +141,14 @@ async def reject_media(pool: Pool, rejection: MediaRejection) -> None:
     """
     text = MESSAGES[RULE_MEDIA_REJECTED].format(
         reason_desc=_reason_desc(rejection.reason, rejection.limits),
-        max_mb=_max_mb(rejection.kind, rejection.limits),
+        image_mb=rejection.limits.max_bytes.image // MEGABYTE,
+        pdf_mb=rejection.limits.max_bytes.pdf // MEGABYTE,
     )
     async with pool.connection() as conn, conn.transaction():
         await set_state(
             conn,
             rejection.invoice_id,
-            "CANCELLED",
+            CANCELLED,
             rule_id=RULE_MEDIA_REJECTED,
             expected=rejection.expected,
         )
@@ -162,13 +164,3 @@ async def reject_media(pool: Pool, rejection: MediaRejection) -> None:
 def _reason_desc(reason: RejectReason, limits: MediaLimits) -> str:
     """Return BR-E07's reason text, naming the page cap when that is the reason (D122)."""
     return REJECTION_DESC[reason].format(max_pages=limits.max_pdf_pages)
-
-
-def _max_mb(kind: AttachmentKind, limits: MediaLimits) -> int:
-    """Return the kind's byte cap in whole megabytes for BR-E07's text."""
-    try:
-        cap = max_bytes_for(kind, limits)
-    except MediaRejected:
-        # An unsupported kind has no cap of its own; the photo cap is the default.
-        cap = limits.max_bytes.image
-    return cap // MEGABYTE

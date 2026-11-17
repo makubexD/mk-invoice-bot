@@ -23,7 +23,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.config.models import Mail
 from invoicebot.pipeline.actions import send_not_confirmed
-from invoicebot.pipeline.deliver import DONE_STATE, PREPARED_BATCH_STATE, SENT_BATCH_STATE
+from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE, SENT_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
@@ -31,6 +31,7 @@ from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.sinks.base import Drive
 from invoicebot.sinks.laptop_job import MAX_RECEIPT_BYTES, Receipt, parse_receipt
 from invoicebot.sinks.onedrive import FileTooLarge
+from invoicebot.states import DONE
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     get_batch_state,
@@ -216,7 +217,7 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> lis
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
-    await set_state(conn, invoice_id, DONE_STATE, rule_id=RULE_DONE)
+    await set_state(conn, invoice_id, DONE, rule_id=RULE_DONE)
     await _queue_done(conn, invoice_id)
     await set_receipt_at(conn, job_id)
     return await take_photo_paths(conn, invoice_id)

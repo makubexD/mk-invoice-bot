@@ -52,12 +52,16 @@ RULE_APPROVED = "BR-S06_approved"
 RULE_REJECTED = "BR-S06_rejected"
 #: An approved link is used as it is and is never replaced (BR-S06).
 STATE_APPROVED = "approved"
-#: BR-S06's button ids: ``t<ruc>:ok`` and ``t<ruc>:no`` (D118).
+#: BR-S06's button ids: ``t<ruc>v<version>:ok`` and ``t<ruc>v<version>:no`` (D118, D137).
 BUTTON_ID_PREFIX = "t"
+BUTTON_VERSION_INFIX = "v"
 BUTTON_OK_SUFFIX = "ok"
 BUTTON_NO_SUFFIX = "no"
-#: The whole id of a BR-S06 decision press: ``t<ruc>:ok`` or ``t<ruc>:no`` (D118).
-_PRESS_PATTERN = rf"{BUTTON_ID_PREFIX}([0-9]{{11}}):({BUTTON_OK_SUFFIX}|{BUTTON_NO_SUFFIX})"
+#: The whole id of a BR-S06 decision press: ``t<ruc>v<version>:ok`` or ``t<ruc>v<version>:no`` (D118, D137).
+_PRESS_PATTERN = (
+    rf"{BUTTON_ID_PREFIX}([0-9]{{11}}){BUTTON_VERSION_INFIX}([0-9]{{1,9}})"
+    rf":({BUTTON_OK_SUFFIX}|{BUTTON_NO_SUFFIX})"
+)
 
 
 @dataclass(frozen=True)
@@ -112,13 +116,13 @@ async def teach(
         return
     proposed = await taught_links.propose(conn, ruc_emisor, url, ctx.sender.profile_id)
     await queue_message(conn, ctx.sender, MESSAGES[RULE_TEACH], rule_id=RULE_TEACH)
-    if proposed:
+    if proposed is not None:
         await queue_admin_alert(
             conn,
             ctx.profiles,
             RULE_TEACH,
             _owner_text(ctx, razon_social, ruc_emisor, url),
-            buttons=_decision_buttons(ruc_emisor),
+            buttons=_decision_buttons(ruc_emisor, proposed),
         )
 
 
@@ -188,8 +192,9 @@ async def handle_press(
         logger.info("ignored BR-S06 press", extra={"profile_id": msg.profile_id})
         return
     ruc_emisor = int(match.group(1))
-    approved = match.group(2) == BUTTON_OK_SUFFIX
-    link = await taught_links.decide(conn, ruc_emisor, approved)
+    version = int(match.group(2))
+    approved = match.group(3) == BUTTON_OK_SUFFIX
+    link = await taught_links.decide(conn, ruc_emisor, version, approved)
     if link is None:
         return
     if approved:
@@ -209,26 +214,24 @@ async def _record_hint(
     ruc_emisor: int,
     url: str,
 ) -> None:
-    """Store an approved link as the portal gap's hint and put it on the gap's issue (D118)."""
+    """Store an approved link as the portal gap's hint and put it on the gap's issue (D118).
+
+    A pending ``create_issue`` row takes the hint in its fields, so it reaches the issue
+    body. When that row was already picked up, an enabled GitHub repo gets a ``comment``
+    row instead, which resolves the issue at send time (D118).
+    """
     gap_fingerprint = fingerprint(PORTAL_MISSING, str(ruc_emisor))
     await set_hint(conn, gap_fingerprint, url)
     gap = await get_gap(conn, gap_fingerprint)
     if gap is None:
         return
-    if gap.issue_url is None:
-        await outbox.set_pending_issue_hint(conn, gap_fingerprint, url)
-    elif setup.github_repo is not None:
-        await outbox.add(
-            conn,
-            "github",
-            setup.github_repo,
-            {
-                "op": "comment",
-                "fingerprint": gap_fingerprint,
-                "issue_url": gap.issue_url,
-                "hint_url": url,
-            },
-        )
+    payload: dict[str, str] = {"op": "comment", "fingerprint": gap_fingerprint, "hint_url": url}
+    if gap.issue_url is not None:
+        payload["issue_url"] = gap.issue_url
+    elif await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0 or gap.raised_at is None:
+        return
+    if setup.github_repo is not None:
+        await outbox.add(conn, "github", setup.github_repo, payload)
 
 
 def _owner_text(
@@ -246,9 +249,10 @@ def _owner_text(
     )
 
 
-def _decision_buttons(ruc_emisor: int) -> tuple[Button, Button]:
-    """Return BR-S06's [Aprobar] and [Rechazar] buttons (D118)."""
+def _decision_buttons(ruc_emisor: int, version: int) -> tuple[Button, Button]:
+    """Return BR-S06's [Aprobar] and [Rechazar] buttons for one proposal version (D118, D137)."""
+    base = f"{BUTTON_ID_PREFIX}{ruc_emisor}{BUTTON_VERSION_INFIX}{version}"
     return (
-        Button(id=f"{BUTTON_ID_PREFIX}{ruc_emisor}:{BUTTON_OK_SUFFIX}", title=BUTTON_APPROVE),
-        Button(id=f"{BUTTON_ID_PREFIX}{ruc_emisor}:{BUTTON_NO_SUFFIX}", title=BUTTON_REJECT),
+        Button(id=f"{base}:{BUTTON_OK_SUFFIX}", title=BUTTON_APPROVE),
+        Button(id=f"{base}:{BUTTON_NO_SUFFIX}", title=BUTTON_REJECT),
     )
