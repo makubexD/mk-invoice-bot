@@ -58,6 +58,18 @@ from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
 from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
+from invoicebot.pipeline.pending_auth import (
+    PENDING_AUTH_STATE as PENDING_AUTH_STATE,
+)
+from invoicebot.pipeline.pending_auth import (
+    RULE_AUTH as RULE_AUTH,
+)
+from invoicebot.pipeline.pending_auth import (
+    RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
+)
+from invoicebot.pipeline.pending_auth import (
+    park_for_auth,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
@@ -119,20 +131,12 @@ RULE_STALE = "BR-D12"
 RULE_INBOX = "BR-D13"
 #: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
 RULE_SEND_FAILED_ADMIN = "BR-D03_admin"
-#: BR-D01: the rule that parks an invoice until the account signs in (R-7.9).
-RULE_AUTH = "BR-D01"
-#: BR-D01's admin-only alert, with the script the admin runs (BR-D01).
-RULE_AUTH_ADMIN = "BR-D01_admin"
 #: BR-D02: the rule that reports an Excel template that cannot be filled (R-7.10).
 RULE_TEMPLATE_INVALID = "BR-D02"
 #: The gap kind of a flow's Excel template that cannot be filled (BR-D02, spec 06 §3).
 TEMPLATE_INVALID = "TEMPLATE_INVALID"
-#: Where a missing token leaves the invoice until the account signs in (BR-D01).
-PENDING_AUTH_STATE = "PENDING_AUTH"
 #: Where a broken Excel template leaves the invoice (BR-D02).
 MANUAL_REQUIRED_STATE = "MANUAL_REQUIRED"
-#: The provider named in the sender's BR-D01 text.
-AUTH_PROVIDER_NAME = "Microsoft"
 #: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
 AUTH_PROVIDER_SLUG = "microsoft"
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
@@ -810,14 +814,17 @@ def _send_failed_admin_text(prepared: _Values, invoice_id: int) -> str:
 
 async def _pending_auth(context: DeliverContext, invoice: _Invoice, account: str) -> None:
     """Park the invoice until the account signs in and alert its sender and admins (BR-D01)."""
-    text = MESSAGES[RULE_AUTH].format(provider=AUTH_PROVIDER_NAME)
-    admin_text = MESSAGES[RULE_AUTH_ADMIN].format(provider=AUTH_PROVIDER_SLUG, account=account)
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
-        await set_state(conn, invoice.job.invoice_id, PENDING_AUTH_STATE, rule_id=RULE_AUTH)
-        await _notify(conn, invoice.head, invoice.job.invoice_id, RULE_AUTH, text, [])
-        await queue_admin_alert(conn, context.cfg.profiles, RULE_AUTH_ADMIN, admin_text)
+        await park_for_auth(
+            conn,
+            invoice.head,
+            invoice.job.invoice_id,
+            AUTH_PROVIDER_SLUG,
+            account,
+            context.cfg.profiles,
+        )
 
 
 async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_name: str) -> None:
