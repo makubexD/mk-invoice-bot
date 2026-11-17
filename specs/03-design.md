@@ -261,6 +261,7 @@ status: active                          # active | todo | broken
   - Playwright login with the secondary SOL user, navigate to "Consulta de comprobantes de pago", query by issuer, serie and número, download the XML.
   - SOL credentials are typed only when `page.url` matches the SUNAT origins hard-coded in source (R-9.10).
   - The selectors live in a file so they're easy to fix when SUNAT changes the UI.
+  - **Site file (D134):** `config/sunat_sol.yaml` holds `status`, a `login` block (`url`, `ruc`, `user`, `password`, `submit`) and a `query` block shaped like a portal file, run by the portal form filler. The SUNAT origins live in `invoicebot/sunat_origins.py`; the credentials reach their own helper entry (`python -m invoicebot.fetchers.browser.sol`) on stdin only. Registered only when `sunat.sol.enabled` and the file is `active`; startup refuses a `sol_ruc` other than `owner.ruc`.
   - **To validate manually in Phase 0 (S0.4, still a blocker):** that this menu actually offers the XML for received invoices. SIRE Compras returns rows, not XML, so it can't replace this fetcher.
 - **`email_inbox`:**
   - Each flow names its mailbox (D98): `flows.<name>.email_inbox: {provider, account, retry_schedule}`. Flow B reads the bot's Outlook.com mailbox (`account: bot`, `Mail.Read`) through Graph: `$search` on the serie, the 25 newest messages with attachments received since the invoice date minus one day, an attachment name matching `{serie}-0*{numero}`, at most 5 XMLs downloaded; a sign-in needed waits on the retry schedule (D100).
@@ -278,7 +279,8 @@ status: active                          # active | todo | broken
 ## 7. Sinks and flows (declarative)
 `config/example.yaml` shows the full shape. Key ideas:
 - **Flows are config (D53).** A flow lists `accepted_tipos`, `fetchers` (ordered), `required_docs`, and `sinks` (ordered); routing rules pick it by buyer and type. A new flow, sink or mail mode is a new config entry or a new module behind an existing port, registered in one mapping; no `if flow == …` in the pipeline. Some sinks are `batch_aware`.
-- A sink receives a `DeliveryContext` (invoice, files, previous sink outputs such as Drive links) and returns refs that later sinks or the final message can use.
+- A sink receives a `DeliveryContext` (invoice, files, previous sink outputs such as Drive links) and returns refs that later sinks or the final message can use. Flow A's refs are flat values (D131): the Drive sink returns `link_folder`, `link_photo`, `link_pdf`, `link_xml`, the Sheets sink `link_row`.
+- **Flow A (D129–D133):** `DELIVER_STEP` dispatches by the flow's first sink kind (D132). The bot creates its own Drive root folder and Sheet with `invoicebot google-setup`, so `drive.file` is enough (D129). Files go to `{root}/{YYYY}/{MM}/`, reused by name on a retry. The Sheet's column A, `Clave`, holds the natural key; a known key updates its row, a new one appends (D130). `DONE` sends BR-D16, or BR-D17 when the PDF is missing (D133).
 - Template expressions use a tiny safe formatter (`str.format_map` with a restricted namespace plus formatting filters), not full Jinja, to save memory. Jinja is used only for email bodies, and imported lazily.
 - **Formula injection (R-6.6, R-7.10):** Sheets writes use `valueInputOption=RAW`; Excel text cells are written as strings; any text starting with `= + - @`, tab or carriage return gets a leading `'`. The Excel template's SHA-256 is pinned in config.
 - **Flow B (D48, D49, D61–D71):** `DELIVERING` builds the invoice's folder, patches the Excel and stores the PDF and XML on each storage target, then prepares the email through the first configured mail mode. Each invoice is a batch of one. The batch is `prepared` until R-7.8 says it is `sent`; then the invoice is `DONE` and a job renames the folder `_Sent`. `/pagado` later renames it `_PAID_…` and moves it into the year folder. The target config (placeholders; `config/example.yaml` moves to this shape in the `file-b` phase):
@@ -346,7 +348,7 @@ microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 - **Logs (R-9.16):** a redaction filter masks every loaded secret and the Telegram bot token (which appears in API URLs); a test proves it.
 - **Commands (R-10.1):** a command acts only on the sender profile's own invoices unless the sender is an admin; an unknown or foreign id gets the same answer (BR-S07).
 - **CI (R-9.17):** gitleaks, pip-audit and bandit; no `pull_request_target`; no self-hosted runners; fork PR runs need approval; `yaml.safe_load` everywhere. While the repo is public, CI rejects images with EXIF data and any valid RUC not on the synthetic allowlist. A store file's own RUC is the one exception (D47).
-- **OAuth (R-6.5, R-7.9):** Google `drive.file` (+ `spreadsheets` only for an existing sheet); the OAuth app in production status. Microsoft: minimal Graph scopes; device code first, auth-code + PKCE loopback when the tenant blocks device code.
+- **OAuth (R-6.5, R-7.9):** Google `drive.file` (+ `spreadsheets` only for an existing sheet); the OAuth app in production status; `auth-google` uses a loopback redirect with PKCE, and the refresh token is age-encrypted in `tokens/<account>.google.age` (D128). Microsoft: minimal Graph scopes; device code first, auth-code + PKCE loopback when the tenant blocks device code.
 - The scraper honors per-domain rate limits (≥ 10 s between requests to the same portal), uses a realistic UA, and makes no parallel requests.
 
 ## 10. Repository layout (planned)
@@ -376,7 +378,7 @@ mk-invoice-bot/
     fetchers/portals/{generic_form,...}.py
     sinks/{base,google_drive,google_sheets,onedrive,onedrive_folder,excel_template,mailer,mailer_gmail,mailer_graph}.py
                          # onedrive.py and mailer_graph.py are the Graph clients (D84)
-    auth/{google_oauth,msal_cache}.py   # msal_cache: one age-encrypted cache per account (D85)
+    auth/{google_oauth,msal_cache}.py   # msal_cache: one age-encrypted cache per account (D85); google_oauth: tokens/<account>.google.age (D128)
     browser/pool.py
   scripts/{auth_google.py,auth_microsoft.py,import_padron.py,memprofile.py,check_config.py,restore_drill.sh}
   .github/workflows/{ci.yml,deploy.yml}   # gap-watch.yml is post-MVP (D44)

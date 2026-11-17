@@ -126,6 +126,17 @@ MESSAGES: dict[str, str] = {
         "Vuelve a enviar el archivo respondiendo a la foto del comprobante."
     ),
     "BR-D15": "El archivo que enviaste no es un PDF válido; no lo guardé.",
+    "BR-D16": (
+        "✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.\n"
+        "Fila: {link_row}\n"
+        "Carpeta: {link_folder}"
+    ),
+    "BR-D17": (
+        "⚠️ Guardado {serie}-{numero} de {razon_social}, S/ {total}, pero aún sin PDF; "
+        "lo agrego cuando llegue.\n"
+        "Fila: {link_row}\n"
+        "Carpeta: {link_folder}"
+    ),
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",
