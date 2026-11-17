@@ -6,6 +6,7 @@ the outbox sender as supervised background tasks until shutdown.
 """
 
 import asyncio
+import hmac
 import logging
 import os
 import signal
@@ -56,6 +57,7 @@ from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
+from invoicebot.fetchers.sunat_sol import SECRETS, SUNAT_SOL_FETCHER, SunatSolFetcher
 from invoicebot.github.app_token import GitHubApp
 from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.logging import configure_logging
@@ -276,7 +278,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 pool,
                 cfg,
                 directory,
-                _fetch_registries(settings, cfg, directory, guarded_http, http, google_tokens),
+                _fetch_registries(
+                    settings,
+                    cfg,
+                    directory,
+                    guarded_http,
+                    _InboxDeps(http, google_tokens),
+                    _sol_fetcher(cfg, directory, store),
+                ),
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
             ),
@@ -755,16 +764,39 @@ def _laptop_root(flow: Flow) -> str:
     raise RuntimeError("a flow listing laptop_outlook needs a onedrive_folder sink")
 
 
+@dataclass(frozen=True)
+class _InboxDeps:
+    """What an ``email_inbox`` fetcher needs: the HTTP client and the Google token sources (S7.1)."""
+
+    http: httpx.AsyncClient
+    google_tokens: Mapping[str, GoogleTokens]
+
+
+def _sol_fetcher(cfg: Config, directory: StoreDirectory, store: SecretStore) -> SunatSolFetcher | None:
+    """Build the SOL fetcher once the site is active, or None until then (S10.1, R-5.2).
+
+    A missing secret or a ``sol_ruc`` that is not the owner's RUC stops startup, naming
+    only the keys, so the helper never signs in as the wrong taxpayer (R-9.10).
+    """
+    site = directory.sunat_sol
+    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+        return None
+    secrets = store.scoped(SUNAT_SOL_FETCHER, set(SECRETS))
+    if secrets.enabled and not hmac.compare_digest(secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()):
+        raise ValueError("sunat_sol: secret sol_ruc does not match owner.ruc (R-9.10)")
+    return SunatSolFetcher(site, secrets, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
+
+
 def _fetch_registries(
     settings: Settings,
     cfg: Config,
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
-    graph_http: httpx.AsyncClient,
-    google_tokens: Mapping[str, GoogleTokens],
+    inbox: _InboxDeps,
+    sol: SunatSolFetcher | None,
 ) -> dict[str, dict[str, Fetcher]]:
     """Return each flow's fetcher registry, sharing one instance where it can (S7.1, D98)."""
-    builders = _fetcher_builders(settings, cfg, directory, guarded_http, graph_http, google_tokens)
+    builders = _fetcher_builders(settings, cfg, directory, guarded_http, inbox, sol)
     return {name: _flow_registry(name, flow, builders) for name, flow in cfg.flows.items()}
 
 
@@ -773,8 +805,8 @@ def _fetcher_builders(
     cfg: Config,
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
-    graph_http: httpx.AsyncClient,
-    google_tokens: Mapping[str, GoogleTokens],
+    inbox: _InboxDeps,
+    sol: SunatSolFetcher | None,
 ) -> dict[str, _FetcherBuilder]:
     """Return a builder per fetcher this build runs; adding a fetcher adds an entry (S7.1)."""
     portal = PortalFetcher(directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
@@ -787,9 +819,8 @@ def _fetcher_builders(
     return {
         PORTAL_FETCHER: lambda _name, _flow: portal,
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
-        EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(
-            name, flow, settings, cfg, graph_http, google_tokens
-        ),
+        EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, inbox),
+        SUNAT_SOL_FETCHER: lambda _name, _flow: sol,
     }
 
 
@@ -804,7 +835,11 @@ def _fetch_schedules(directory: StoreDirectory) -> Mapping[str, Schedule]:
         portal_cfg = portal_for(invoice.ruc_emisor, directory)
         return DEFAULT_RETRY_SCHEDULE if portal_cfg is None else portal_cfg.retry_schedule
 
-    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal}
+    def sunat_sol(_flow: Flow, _invoice: FetchInvoice) -> tuple[timedelta, ...]:
+        site = directory.sunat_sol
+        return DEFAULT_RETRY_SCHEDULE if site is None else site.query.retry_schedule
+
+    return {EMAIL_INBOX_FETCHER: inbox, PORTAL_FETCHER: portal, SUNAT_SOL_FETCHER: sunat_sol}
 
 
 def _flow_registry(name: str, flow: Flow, builders: Mapping[str, _FetcherBuilder]) -> dict[str, Fetcher]:
@@ -825,8 +860,7 @@ def _email_inbox_fetcher(
     flow: Flow,
     settings: Settings,
     cfg: Config,
-    http: httpx.AsyncClient,
-    google_tokens: Mapping[str, GoogleTokens],
+    deps: _InboxDeps,
 ) -> Fetcher | None:
     """Return the flow's mailbox fetcher, or ``None`` with a warning when it cannot run (D98).
 
@@ -834,8 +868,8 @@ def _email_inbox_fetcher(
     """
     inbox = flow.email_inbox
     builders: dict[str, _InboxBuilder] = {
-        GRAPH_MODE: partial(_graph_mailbox, settings, cfg, http),
-        GMAIL_PROVIDER: partial(_gmail_mailbox, cfg, http, google_tokens),
+        GRAPH_MODE: partial(_graph_mailbox, settings, cfg, deps.http),
+        GMAIL_PROVIDER: partial(_gmail_mailbox, cfg, deps.http, deps.google_tokens),
     }
     if inbox is None:
         reason = "the flow has no email_inbox settings"

@@ -15,14 +15,17 @@ from invoicebot.app import (
     GOOGLE_CLIENT_SECRET,
     GOOGLE_OAUTH_ADAPTER,
     _daily_tasks,
+    _fetch_schedules,
     _google_deliver_handler,
     _google_secrets,
     _google_tokens,
+    _sol_fetcher,
     _validation_handlers,
     _validation_secrets,
 )
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
+from invoicebot.fetchers.sunat_sol import SUNAT_SOL_FETCHER, SunatSolFetcher
 from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
@@ -32,6 +35,7 @@ from invoicebot.sunat import token as sunat
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
+SOL_SITE = ROOT / "config" / "sunat_sol.yaml"
 
 
 async def _noop() -> None:
@@ -68,6 +72,28 @@ class _RecordingStore(SecretStore):
         """Record the adapter and its declared keys, then return the real view."""
         self.scoped_calls.append((adapter_name, frozenset(declared)))
         return super().scoped(adapter_name, declared)
+
+
+def _with_owner_ruc(cfg: Config, ruc: str) -> Config:
+    """Return ``cfg`` with the owner's RUC replaced (R-9.10)."""
+    return cfg.model_copy(update={"owner": cfg.owner.model_copy(update={"ruc": ruc})})
+
+
+def _sol_directory(status: str) -> StoreDirectory:
+    """Return a store directory holding the shipped SOL site with ``status`` (R-5.2)."""
+    site = SunatSolSite.model_validate(yaml.safe_load(SOL_SITE.read_text(encoding="utf-8")))
+    return StoreDirectory(stores={}, portals={}, sunat_sol=site.model_copy(update={"status": status}))
+
+
+def _sol_store(sol_ruc: str) -> SecretStore:
+    """Return a store with the SOL sign-in secrets, whose RUC is ``sol_ruc`` (R-9.10)."""
+    return SecretStore(
+        {
+            "sol_ruc": sol_ruc,
+            "sol_user": "synthetic-user",
+            "sol_password": "synthetic-password",
+        }
+    )
 
 
 def _with_backup_at(cfg: Config, at: time) -> Config:
@@ -196,3 +222,40 @@ def test_config_with_google_and_no_secret_fails_startup(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match=GOOGLE_CLIENT_SECRET):
         _google_tokens(Settings(data_dir=tmp_path, age_identity_path=None), cfg, cast(Any, None), store)
+
+
+def test_todo_sol_site_registers_no_fetcher() -> None:
+    """R-5.2: a todo SOL site leaves the sunat_sol fetcher unregistered."""
+    cfg = load_config(EXAMPLE)
+
+    assert _sol_fetcher(cfg, _sol_directory("todo"), _sol_store("20000000010")) is None
+
+
+def test_active_sol_site_with_matching_secrets_registers_the_fetcher() -> None:
+    """R-5.2: an active site with matching SOL secrets builds the fetcher."""
+    cfg = _with_owner_ruc(load_config(EXAMPLE), "20000000010")
+
+    fetcher = _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000010"))
+
+    assert isinstance(fetcher, SunatSolFetcher)
+
+
+def test_mismatched_sol_ruc_stops_startup_naming_only_the_key() -> None:
+    """R-9.10: a sol_ruc that is not the owner's RUC fails startup without either value."""
+    cfg = _with_owner_ruc(load_config(EXAMPLE), "20000000010")
+
+    with pytest.raises(ValueError, match="sol_ruc") as raised:
+        _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000028"))
+
+    assert "20000000010" not in str(raised.value)
+    assert "20000000028" not in str(raised.value)
+
+
+def test_sunat_sol_schedule_comes_from_the_site_file() -> None:
+    """R-5.2: sunat_sol's retry schedule is the site query's schedule."""
+    directory = _sol_directory("todo")
+
+    schedule = _fetch_schedules(directory)[SUNAT_SOL_FETCHER]
+
+    assert directory.sunat_sol is not None
+    assert schedule(cast(Any, None), cast(Any, None)) == directory.sunat_sol.query.retry_schedule
