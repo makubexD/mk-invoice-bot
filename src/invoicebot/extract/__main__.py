@@ -178,10 +178,12 @@ def _read_pdf(options: _Options) -> dict[str, Any]:
         document = open_pdf(options.path, options.max_pdf_pages)
     except TooManyPages:
         return _too_many_pages()
-    except ValueError:
+    except (ValueError, MemoryError):
         return _unreadable(ocr=False)
     try:
         return _pdf_payload(document, options)
+    except MemoryError:
+        return _unreadable(ocr=False)
     finally:
         document.close()
 
@@ -190,7 +192,7 @@ def _pdf_payload(document: PdfDocument, options: _Options) -> dict[str, Any]:
     """Merge the page-1 QR with the text layer or the OCR of its render (R-2.15, D122)."""
     try:
         layer = page_text(document)
-        gray = render_gray(document)
+        gray = render_gray(document, options.max_px)
         hit = read_invoice_qr(gray)
     except (ValueError, cv2.error):
         return _unreadable(ocr=False)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import ctypes
 import io
 import json
+import math
 from pathlib import Path
 
 import cv2
@@ -16,7 +17,14 @@ import pytest
 from invoicebot.extract import __main__ as helper
 from invoicebot.extract.fields import FULL_CONFIDENCE
 from invoicebot.extract.ocr import OcrWord
-from invoicebot.extract.pdf import TooManyPages, open_pdf, render_gray, text_to_ocr
+from invoicebot.extract.pdf import (
+    DEFAULT_RENDER_DPI,
+    PDF_POINTS_PER_INCH,
+    TooManyPages,
+    open_pdf,
+    render_gray,
+    text_to_ocr,
+)
 
 # Synthetic RUC from tests/synthetic_rucs.txt. No real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
@@ -40,6 +48,10 @@ WHITE = 255
 MAX_PDF_PAGES = 5
 PDF_MIN_TEXT_CHARS = 40
 MAX_PX = 2000
+#: A long-side cap above any normal page at 200 dpi, so the default dpi applies.
+ROOMY_MAX_PX = 10_000
+#: The largest page side pdfium accepts, in PDF points.
+HUGE_PAGE_POINTS = 14400
 MAX_BYTES = 10_000_000
 RULES_PATH = "config/parsing_rules.yaml"
 HELPER_TIMEOUT_S = 30
@@ -96,6 +108,14 @@ def _write_blank_pdf(path: Path, pages: int) -> None:
     document = pdfium.PdfDocument.new()
     for _ in range(pages):
         document.new_page(width=200, height=200)
+    document.save(str(path))
+    document.close()
+
+
+def _write_huge_page_pdf(path: Path) -> None:
+    """Write a one-page PDF whose page is the largest pdfium accepts."""
+    document = pdfium.PdfDocument.new()
+    document.new_page(width=HUGE_PAGE_POINTS, height=HUGE_PAGE_POINTS)
     document.save(str(path))
     document.close()
 
@@ -217,10 +237,57 @@ def test_render_gray_page_one_is_a_gray_uint8_array(tmp_path: Path) -> None:
     _write_text_pdf(pdf)
     document = open_pdf(pdf, MAX_PDF_PAGES)
     try:
-        gray = render_gray(document, dpi=72)
+        gray = render_gray(document, MAX_PX, dpi=72)
     finally:
         document.close()
 
     assert gray.dtype == np.uint8
     assert gray.ndim == 2
     assert gray.shape == (TEXT_PAGE[1], TEXT_PAGE[0])
+
+
+def test_render_gray_caps_a_page_larger_than_the_pixel_limit(tmp_path: Path) -> None:
+    """R-9.1: a page whose long side exceeds ``max_px`` at 200 dpi renders with its long side capped."""
+    pdf = tmp_path / "huge.pdf"
+    _write_huge_page_pdf(pdf)
+    document = open_pdf(pdf, MAX_PDF_PAGES)
+    try:
+        gray = render_gray(document, MAX_PX)
+    finally:
+        document.close()
+
+    assert max(gray.shape) <= MAX_PX
+    assert max(gray.shape) >= MAX_PX - 1
+
+
+def test_render_gray_keeps_a_small_page_at_the_default_dpi(tmp_path: Path) -> None:
+    """R-9.1: a page under the long-side cap renders at the full default 200 dpi unchanged."""
+    pdf = tmp_path / "invoice.pdf"
+    _write_text_pdf(pdf)
+    document = open_pdf(pdf, MAX_PDF_PAGES)
+    try:
+        gray = render_gray(document, ROOMY_MAX_PX)
+    finally:
+        document.close()
+
+    scale = DEFAULT_RENDER_DPI / PDF_POINTS_PER_INCH
+    expected = (math.ceil(TEXT_PAGE[1] * scale), math.ceil(TEXT_PAGE[0] * scale))
+    assert gray.shape == expected
+
+
+def _raise_memory_error(document: pdfium.PdfDocument, options: object) -> dict[str, object]:
+    """Stand in for ``_pdf_payload`` when the render cannot allocate its bitmap."""
+    raise MemoryError
+
+
+def test_pdf_memory_error_is_reported_unreadable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R-9.1: an allocation failure while reading a PDF answers unreadable, not a retry."""
+    pdf = tmp_path / "invoice.pdf"
+    _write_blank_pdf(pdf, 1)
+    monkeypatch.setattr(helper, "_pdf_payload", _raise_memory_error)
+
+    payload = _run_helper(monkeypatch, capsys, pdf)
+
+    assert payload == helper._unreadable(ocr=False)

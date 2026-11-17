@@ -10,6 +10,7 @@ valid after the bitmap is released. Any ``pypdfium2`` failure becomes ``ValueErr
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import cast
 
@@ -64,14 +65,30 @@ def page_text(document: PdfDocument) -> str:
         raise ValueError(UNREADABLE_MESSAGE) from err
 
 
-def render_gray(document: PdfDocument, dpi: int = DEFAULT_RENDER_DPI) -> np.ndarray:
-    """Render page 1 as a detached grayscale ``uint8`` array at ``dpi`` (D122).
+def render_gray(document: PdfDocument, max_px: int, dpi: int = DEFAULT_RENDER_DPI) -> np.ndarray:
+    """Render page 1 as a detached grayscale ``uint8`` array at ``dpi`` (D122, R-9.1).
+
+    A page whose long side at ``dpi`` would exceed ``max_px`` pixels is rendered at a lower
+    scale, the same long-side cap a photo gets, so a huge page cannot allocate a huge bitmap.
+
+    Args:
+        document: the open PDF whose page 1 is rendered.
+        max_px: the long-side pixel cap the photo path also uses (R-9.1).
+        dpi: resolution to render at when the page fits under ``max_px``.
 
     Raises:
-        ValueError: when pdfium cannot render the page.
+        ValueError: when pdfium cannot read the page or render it.
     """
     try:
-        bitmap = document[0].render(scale=dpi / PDF_POINTS_PER_INCH, grayscale=True)
+        width, height = document[0].get_size()
+    except PdfiumError as err:
+        raise ValueError(UNREADABLE_MESSAGE) from err
+    if width <= 0 or height <= 0:
+        raise ValueError(UNREADABLE_MESSAGE)
+    # pdfium rounds each side up, so a scale a hair under the exact fit keeps the long side at max_px.
+    scale = min(dpi / PDF_POINTS_PER_INCH, math.nextafter(max_px / max(width, height), 0.0))
+    try:
+        bitmap = document[0].render(scale=scale, grayscale=True)
         return np.array(bitmap.to_numpy(), dtype=np.uint8, copy=True)
     except PdfiumError as err:
         raise ValueError(UNREADABLE_MESSAGE) from err
