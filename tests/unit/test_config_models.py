@@ -84,6 +84,59 @@ def test_example_config_has_google_settings() -> None:
     assert (drive.account, sheets.account) == ("owner", "owner")
 
 
+def test_example_config_maps_each_google_account_to_its_mailbox() -> None:
+    """R-6.5: the example pins each sink and gmail inbox account to its mailbox (D138)."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.google is not None
+    assert cfg.google.accounts == {
+        "owner": "owner@example.com",
+        "invoices_a": "invoices@example.com",
+    }
+
+
+def test_google_sink_naming_an_unlisted_account_fails(tmp_path: Path) -> None:
+    """R-6.5: a sink's account must be a key of google.accounts (D138)."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["google"]["accounts"]["owner"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="owner"):
+        load_config(path)
+
+
+def test_gmail_inbox_naming_an_unlisted_account_fails(tmp_path: Path) -> None:
+    """R-6.5: a gmail inbox's account must be a key of google.accounts (D138)."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["google"]["accounts"]["invoices_a"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="invoices_a"):
+        load_config(path)
+
+
+def test_google_account_address_without_an_at_sign_fails(tmp_path: Path) -> None:
+    """R-6.5: an account's mailbox is one address, so a value without '@' fails (D138)."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["google"]["accounts"]["owner"] = "not-an-address"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="owner"):
+        load_config(path)
+
+
+def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
+    """R-6.5: an account's mailbox is lower-cased, so the pinned address compares case-free."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["google"]["accounts"]["owner"] = "Owner@Example.COM"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert cfg.google is not None
+    assert cfg.google.accounts["owner"] == "owner@example.com"
+
+
 def test_google_max_message_bytes_must_be_positive(tmp_path: Path) -> None:
     """R-5.2: the full-message read cap is a positive size, so zero fails at load."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

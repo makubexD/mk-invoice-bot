@@ -103,7 +103,11 @@ mail:
   agent_stale_after: "4h"                # a laptop job older than this is stale (R-7.8)
 microsoft: { client_id: "00000000-0000-0000-0000-000000000000", timeout_s: 30 }
 # Desktop-app OAuth client; the secret is the age-store secret google_client_secret (D128).
-google: { client_id: "000000000000-example.apps.googleusercontent.com", timeout_s: 30 }
+# D138: each account name is pinned to the mailbox `invoicebot auth-google` signs in.
+google:
+  client_id: "000000000000-example.apps.googleusercontent.com"
+  timeout_s: 30
+  accounts: { owner: owner@example.com, invoices_a: invoices@example.com }
 
 flows:
   personal_google:
