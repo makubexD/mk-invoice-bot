@@ -1023,3 +1023,39 @@ def test_flow_without_manual_uploads_defaults_to_empty(tmp_path: Path) -> None:
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     assert load_config(path).flows["personal_google"].manual_uploads == []
+
+
+def test_example_config_has_the_owners_dni() -> None:
+    """D143: the shipped example config carries the synthetic owner DNI."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.owner.dni == "40000000"
+
+
+def test_owner_without_a_dni_loads_as_none(tmp_path: Path) -> None:
+    """D143: owner.dni is optional, so a config without it loads with None."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["owner"]["dni"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).owner.dni is None
+
+
+def test_owner_dni_with_seven_digits_fails(tmp_path: Path) -> None:
+    """D143: the owner's DNI is eight digits, so a seven-digit value fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = "4000000"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"owner\.dni must be 8 digits"):
+        load_config(path)
+
+
+def test_owner_dni_with_a_letter_fails(tmp_path: Path) -> None:
+    """D143: the owner's DNI is digits only, so a letter anywhere fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = "4000000A"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"owner\.dni must be 8 digits"):
+        load_config(path)

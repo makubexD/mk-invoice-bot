@@ -6,6 +6,7 @@
 
 owner:
   ruc: "20XXXXXXXXX"          # your company RUC (flow A buyer)
+  dni: "40000000"             # owner's DNI (boletas, BR-R10)
   profile: yo                 # owner profile: admin alerts go to its preferred channel
   timezone: America/Lima
   language: es-PE

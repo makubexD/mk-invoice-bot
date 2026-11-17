@@ -26,6 +26,9 @@ from pydantic import (
 
 from invoicebot.sunat_origins import is_sunat_origin
 
+#: D143: the owner's DNI, eight digits, used by BR-R10 to route boletas made out to it.
+DNI_PATTERN = re.compile(r"^[0-9]{8}$")
+
 
 class Owner(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -34,6 +37,16 @@ class Owner(BaseModel):
     profile: str
     timezone: str
     language: str
+    #: D143: optional; when set, a boleta made out to this DNI goes to the personal flow.
+    dni: str | None = None
+
+    @field_validator("dni")
+    @classmethod
+    def _dni_is_eight_digits(cls, value: str | None) -> str | None:
+        """D143: the owner's DNI is optional, and when set it is exactly eight digits."""
+        if value is not None and DNI_PATTERN.fullmatch(value) is None:
+            raise ValueError("owner.dni must be 8 digits")
+        return value
 
 
 class Work(BaseModel):
