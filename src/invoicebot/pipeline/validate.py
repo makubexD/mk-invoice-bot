@@ -6,9 +6,9 @@ API when the adapter's secrets are present and, in one transaction, stores the a
 applies BR-V01..BR-V06's verdict and either moves the invoice to ``FETCHING_DOCS`` with
 its summary (now carrying the SUNAT line) and its ``fetch`` job, or to ``CONFIRM_INVALID``
 with BR-V02/BR-V06's question. Without secrets (validation off, D124) it only sends the
-summary and moves on, exactly as routing did before. The token and the validez call run
-with no transaction held, except the short ``kv`` read/write the token makes on its own
-connection.
+summary and moves on, exactly as routing did before. The token fetch and the validez call
+run with no connection held, except the short, separate ``kv`` read and write the token
+makes on connections of its own.
 """
 
 from __future__ import annotations
@@ -165,13 +165,12 @@ async def ask_sunat(
 ) -> CpStatus | None:
     """Return SUNAT's answer, or None when it could not be asked (R-4.1, D125).
 
-    The token is fetched on its own short transaction; the validez call then runs with
-    no connection held. Any ``SunatUnavailable`` — a token failure included — reads as
-    no answer, which ``decide`` turns into BR-V04.
+    The token's cache read and write each use their own short connection; the fetch and
+    the validez call run with no connection held. Any ``SunatUnavailable`` — a token
+    failure included — reads as no answer, which ``decide`` turns into BR-V04.
     """
     try:
-        async with pool.connection() as conn, conn.transaction():
-            access_token = await token(conn, http, secrets, cfg.sunat.validez_api)
+        access_token = await token(pool, http, secrets, cfg.sunat.validez_api)
         return await sunat_validate(http, access_token, cfg.sunat.validez_api, cfg.owner.ruc, reading)
     except SunatUnavailable:
         return None

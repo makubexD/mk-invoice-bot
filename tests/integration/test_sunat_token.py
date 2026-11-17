@@ -17,6 +17,8 @@ from invoicebot.store import kv
 from invoicebot.sunat.token import (
     ADAPTER,
     CACHE_KEY,
+    MAX_RESPONSE_BYTES,
+    MAX_TOKEN_TTL_S,
     SECRETS,
     SunatUnavailable,
     token,
@@ -73,6 +75,11 @@ def _assert_secret_free(message: str) -> None:
     assert ACCESS_VALUE not in message
 
 
+def _unreachable(request: httpx.Request) -> httpx.Response:
+    """Fail a test whose token call makes an unexpected HTTP request."""
+    pytest.fail(f"unexpected HTTP request: {request.method} {request.url}")
+
+
 async def test_first_call_posts_the_form_and_caches_the_token(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -83,11 +90,8 @@ async def test_first_call_posts_the_form_and_caches_the_token(
         requests.append(request)
         return httpx.Response(200, json={"access_token": ACCESS_VALUE, "expires_in": 3600})
 
-    async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http,
-        db_pool.connection() as conn,
-    ):
-        found = await token(conn, http, _secrets(), _cfg())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        found = await token(db_pool, http, _secrets(), _cfg())
 
     assert found == ACCESS_VALUE
     assert len(requests) == 1
@@ -122,14 +126,28 @@ async def test_second_call_within_the_ttl_makes_no_request(
         return httpx.Response(200, json={"access_token": ACCESS_VALUE, "expires_in": 3600})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
-        async with db_pool.connection() as conn:
-            first = await token(conn, http, _secrets(), _cfg())
-        async with db_pool.connection() as conn:
-            second = await token(conn, http, _secrets(), _cfg())
+        first = await token(db_pool, http, _secrets(), _cfg())
+        second = await token(db_pool, http, _secrets(), _cfg())
 
     assert calls == 1
     assert first == ACCESS_VALUE
     assert second == ACCESS_VALUE
+
+
+async def test_cache_hit_makes_no_http_request(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: a live cached token is returned without any HTTP request."""
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO kv (key, value, expires_at) VALUES (%s, %s, now() + interval '1 hour')",
+            (CACHE_KEY, ACCESS_VALUE),
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_unreachable)) as http:
+        found = await token(db_pool, http, _secrets(), _cfg())
+
+    assert found == ACCESS_VALUE
 
 
 async def test_cached_token_59_seconds_from_expiry_is_refreshed(
@@ -149,11 +167,8 @@ async def test_cached_token_59_seconds_from_expiry_is_refreshed(
         requests.append(request)
         return httpx.Response(200, json={"access_token": REFRESHED_VALUE, "expires_in": 3600})
 
-    async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http,
-        db_pool.connection() as conn,
-    ):
-        found = await token(conn, http, _secrets(), _cfg())
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        found = await token(db_pool, http, _secrets(), _cfg())
 
     assert found == REFRESHED_VALUE
     assert len(requests) == 1
@@ -170,12 +185,9 @@ async def test_non_200_raises_sunat_unavailable_without_secrets(
             json={"error": "invalid_client", "echo": CLIENT_CREDENTIAL, "token": ACCESS_VALUE},
         )
 
-    async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http,
-        db_pool.connection() as conn,
-    ):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(SunatUnavailable) as excinfo:
-            await token(conn, http, _secrets(), _cfg())
+            await token(db_pool, http, _secrets(), _cfg())
 
     message = str(excinfo.value)
     assert "401" in message
@@ -190,12 +202,9 @@ async def test_timeout_raises_sunat_unavailable_without_secrets(
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.TimeoutException("timed out")
 
-    async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http,
-        db_pool.connection() as conn,
-    ):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(SunatUnavailable) as excinfo:
-            await token(conn, http, _secrets(), _cfg())
+            await token(db_pool, http, _secrets(), _cfg())
 
     message = str(excinfo.value)
     assert "timed out" in message
@@ -213,11 +222,61 @@ async def test_malformed_body_raises_sunat_unavailable_without_secrets(
             return httpx.Response(200, content=body)
         return httpx.Response(200, json=body)
 
-    async with (
-        httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http,
-        db_pool.connection() as conn,
-    ):
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         with pytest.raises(SunatUnavailable) as excinfo:
-            await token(conn, http, _secrets(), _cfg())
+            await token(db_pool, http, _secrets(), _cfg())
 
     _assert_secret_free(str(excinfo.value))
+
+
+async def test_oversized_response_raises_sunat_unavailable(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: a token body past MAX_RESPONSE_BYTES raises SunatUnavailable and caches nothing."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (MAX_RESPONSE_BYTES + 1))
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(SunatUnavailable, match="too large"):
+            await token(db_pool, http, _secrets(), _cfg())
+
+    async with db_pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
+    assert cached is None
+
+
+async def test_huge_expires_in_caches_at_most_one_day(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: expires_in = 10**15 caches with a TTL of at most MAX_TOKEN_TTL_S, without OverflowError."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": ACCESS_VALUE, "expires_in": 10**15})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        found = await token(db_pool, http, _secrets(), _cfg())
+
+    assert found == ACCESS_VALUE
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT expires_at - now() FROM kv WHERE key = %s", (CACHE_KEY,))
+        row = await cur.fetchone()
+    assert row is not None
+    assert 0 < row[0].total_seconds() <= MAX_TOKEN_TTL_S
+
+
+async def test_short_expires_in_returns_the_token_without_caching_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: expires_in = 30 leaves no time after the margin, so the token is not cached."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"access_token": ACCESS_VALUE, "expires_in": 30})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        found = await token(db_pool, http, _secrets(), _cfg())
+
+    assert found == ACCESS_VALUE
+    async with db_pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
+    assert cached is None

@@ -15,10 +15,7 @@ import httpx
 
 from invoicebot.config.models import ValidezApi
 from invoicebot.extract.fields import Reading
-from invoicebot.sunat.token import SunatUnavailable
-
-#: The most of a validez response this client reads (R-4.1).
-MAX_RESPONSE_BYTES = 64 * 1024
+from invoicebot.sunat.token import BodyTooLarge, SunatUnavailable, read_capped
 
 #: The ``estadoCp`` digits this client understands, as the strings SUNAT sends (R-4.1).
 _VALID_ESTADO_CP = frozenset({"0", "1", "2", "3", "4"})
@@ -37,10 +34,6 @@ class CpStatus:
     estado_cp: int
     estado_ruc: str | None
     cond_domi_ruc: str | None
-
-
-class _BodyTooLarge(Exception):
-    """The validez response outgrew ``MAX_RESPONSE_BYTES`` (R-4.1)."""
 
 
 async def validate(
@@ -63,12 +56,12 @@ async def validate(
         async with http.stream("POST", url, json=body, headers=headers, timeout=cfg.timeout_s) as response:
             if response.status_code != httpx.codes.OK:
                 raise SunatUnavailable(f"sunat validez request failed with status {response.status_code}")
-            raw = await _read_body(response)
+            raw = await read_capped(response)
     except httpx.TimeoutException:
         raise SunatUnavailable("sunat validez request timed out") from None
     except httpx.HTTPError:
         raise SunatUnavailable("sunat validez request failed") from None
-    except _BodyTooLarge:
+    except BodyTooLarge:
         raise SunatUnavailable("sunat validez response is too large") from None
     return _parse(raw)
 
@@ -97,18 +90,6 @@ def _request_json(reading: Reading) -> dict[str, str]:
         "fechaEmision": fecha.strftime(_FECHA_FORMAT),
         "monto": str(total.quantize(_CENT)),
     }
-
-
-async def _read_body(response: httpx.Response) -> bytes:
-    """Read the body under ``MAX_RESPONSE_BYTES``, refusing it once past the cap (R-4.1)."""
-    chunks: list[bytes] = []
-    total = 0
-    async for chunk in response.aiter_bytes():
-        total += len(chunk)
-        if total > MAX_RESPONSE_BYTES:
-            raise _BodyTooLarge
-        chunks.append(chunk)
-    return b"".join(chunks)
 
 
 def _parse(raw: bytes) -> CpStatus:

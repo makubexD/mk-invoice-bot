@@ -6,15 +6,15 @@ and the secrets never reach a log or an exception text.
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
-from typing import Any
 
 import httpx
-from psycopg import AsyncConnection
 
 from invoicebot.config.models import ValidezApi
 from invoicebot.secrets import Secrets
 from invoicebot.store import kv
+from invoicebot.store.db import Pool
 
 #: The adapter name its scoped secrets are declared under (R-9.10).
 ADAPTER = "sunat_validez"
@@ -31,28 +31,46 @@ SCOPE = "https://api.sunat.gob.pe/v1/contribuyente/contribuyentes"
 #: The token is fetched again this long before its real expiry (R-4.3).
 REFRESH_MARGIN_S = 60
 
+#: The longest a token is cached, whatever ``expires_in`` claims (R-4.3).
+MAX_TOKEN_TTL_S = 24 * 60 * 60
+
+#: The most of a SUNAT response this module reads (R-4.1).
+MAX_RESPONSE_BYTES = 64 * 1024
+
 
 class SunatUnavailable(Exception):
     """The SUNAT validez API could not be reached or answered unusably (R-4.1, R-4.3)."""
 
 
+class BodyTooLarge(Exception):
+    """A SUNAT response outgrew ``MAX_RESPONSE_BYTES`` (R-4.1)."""
+
+
 async def token(
-    conn: AsyncConnection[Any],
+    pool: Pool,
     http: httpx.AsyncClient,
     secrets: Secrets,
     cfg: ValidezApi,
 ) -> str:
     """Return the SUNAT access token, fetching and caching one on a miss (R-4.3).
 
-    Does not commit: the caller owns the transaction. The token is stored with
-    a TTL of ``expires_in - 60 s`` so it is refreshed before it expires.
+    The cache is read and written on short connections of their own, so the fetch
+    runs with no connection or transaction held. The token is cached for
+    ``expires_in``, capped at :data:`MAX_TOKEN_TTL_S` and 60 s short so it is
+    refreshed before it expires; a lifetime that leaves no time after the margin
+    returns the token uncached.
     """
-    cached = await kv.get(conn, CACHE_KEY)
+    async with pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
     if cached is not None:
         return cached
 
     access_token, expires_in = await _fetch(http, secrets, cfg)
-    await kv.put(conn, CACHE_KEY, access_token, timedelta(seconds=expires_in - REFRESH_MARGIN_S))
+    ttl_s = min(expires_in, MAX_TOKEN_TTL_S) - REFRESH_MARGIN_S
+    if ttl_s <= 0:
+        return access_token
+    async with pool.connection() as conn, conn.transaction():
+        await kv.put(conn, CACHE_KEY, access_token, timedelta(seconds=ttl_s))
     return access_token
 
 
@@ -66,17 +84,19 @@ async def _fetch(http: httpx.AsyncClient, secrets: Secrets, cfg: ValidezApi) -> 
         "client_secret": secrets.get("sunat_client_secret"),
     }
     try:
-        response = await http.post(url, data=form, timeout=cfg.timeout_s)
+        async with http.stream("POST", url, data=form, timeout=cfg.timeout_s) as response:
+            if response.status_code != httpx.codes.OK:
+                raise SunatUnavailable(f"sunat token request failed with status {response.status_code}")
+            raw = await read_capped(response)
     except httpx.TimeoutException:
         raise SunatUnavailable("sunat token request timed out") from None
     except httpx.HTTPError:
         raise SunatUnavailable("sunat token request failed") from None
-
-    if response.status_code != httpx.codes.OK:
-        raise SunatUnavailable(f"sunat token request failed with status {response.status_code}")
+    except BodyTooLarge:
+        raise SunatUnavailable("sunat token response is too large") from None
 
     try:
-        payload = response.json()
+        payload = json.loads(raw)
     except ValueError:
         raise SunatUnavailable("sunat token response is not valid JSON") from None
     if not isinstance(payload, dict):
@@ -89,3 +109,19 @@ async def _fetch(http: httpx.AsyncClient, secrets: Secrets, cfg: ValidezApi) -> 
     if isinstance(expires_in, bool) or not isinstance(expires_in, int) or expires_in <= 0:
         raise SunatUnavailable("sunat token response has no positive expires_in")
     return access_token, expires_in
+
+
+async def read_capped(response: httpx.Response) -> bytes:
+    """Read the body under ``MAX_RESPONSE_BYTES``, refusing it once past the cap (R-4.1).
+
+    Raises:
+        BodyTooLarge: the body passed the cap before its end.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in response.aiter_bytes():
+        total += len(chunk)
+        if total > MAX_RESPONSE_BYTES:
+            raise BodyTooLarge
+        chunks.append(chunk)
+    return b"".join(chunks)
