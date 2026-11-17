@@ -1,0 +1,15 @@
+{
+  "fields": {
+    "base": "10410.00",
+    "fecha_emision": "2025-05-14",
+    "igv": "1093.05",
+    "num_doc_adq": "20000000001",
+    "numero": "12303",
+    "ruc_emisor": "20000000010",
+    "serie": "B215",
+    "service_charge": "1041.00",
+    "tipo": "03",
+    "total": "12544.05"
+  },
+  "has_qr": true
+}

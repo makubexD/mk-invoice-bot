@@ -1,0 +1,15 @@
+{
+  "fields": {
+    "base": "20431.40",
+    "fecha_emision": "2025-04-25",
+    "igv": "2043.14",
+    "num_doc_adq": "20000000001",
+    "numero": "3877",
+    "ruc_emisor": "20000000028",
+    "serie": "B751",
+    "service_charge": "2043.14",
+    "tipo": "03",
+    "total": "24517.68"
+  },
+  "has_qr": true
+}

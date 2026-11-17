@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "18224.88",
+    "fecha_emision": "2024-10-02",
+    "igv": "3280.48",
+    "num_doc_adq": "20000000001",
+    "numero": "32711",
+    "ruc_emisor": "20000000028",
+    "serie": "F288",
+    "tipo": "01",
+    "total": "21505.36"
+  },
+  "has_qr": true
+}

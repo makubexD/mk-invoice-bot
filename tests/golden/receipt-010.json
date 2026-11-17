@@ -1,0 +1,15 @@
+{
+  "fields": {
+    "base": "17372.02",
+    "fecha_emision": "2025-04-01",
+    "igv": "3126.96",
+    "num_doc_adq": "20000000036",
+    "numero": "21002",
+    "ruc_emisor": "20000000010",
+    "serie": "F983",
+    "service_charge": "1737.20",
+    "tipo": "01",
+    "total": "22236.18"
+  },
+  "has_qr": false
+}

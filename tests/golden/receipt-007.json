@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "8446.52",
+    "fecha_emision": "2026-03-28",
+    "igv": "886.88",
+    "num_doc_adq": "20000000036",
+    "numero": "12007",
+    "ruc_emisor": "20000000001",
+    "serie": "B882",
+    "tipo": "03",
+    "total": "9333.40"
+  },
+  "has_qr": false
+}

@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "20756.79",
+    "fecha_emision": "2024-05-03",
+    "igv": "3736.22",
+    "num_doc_adq": "20000000010",
+    "numero": "38849",
+    "ruc_emisor": "20000000044",
+    "serie": "B742",
+    "tipo": "03",
+    "total": "24493.01"
+  },
+  "has_qr": false
+}

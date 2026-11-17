@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "6226.20",
+    "fecha_emision": "2024-11-01",
+    "igv": "653.75",
+    "num_doc_adq": "20000000044",
+    "numero": "96660",
+    "ruc_emisor": "20000000010",
+    "serie": "F061",
+    "tipo": "01",
+    "total": "6879.95"
+  },
+  "has_qr": true
+}

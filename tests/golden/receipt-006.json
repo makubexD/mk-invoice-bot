@@ -1,0 +1,14 @@
+{
+  "fields": {
+    "base": "14404.48",
+    "fecha_emision": "2025-02-27",
+    "igv": "1440.45",
+    "num_doc_adq": "20000000001",
+    "numero": "66155",
+    "ruc_emisor": "20000000044",
+    "serie": "B205",
+    "tipo": "03",
+    "total": "15844.93"
+  },
+  "has_qr": true
+}

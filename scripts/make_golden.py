@@ -215,18 +215,24 @@ def _total_lines(receipt: _Receipt) -> list[str]:
 
 
 def _receipt_lines(receipt: _Receipt) -> list[tuple[str, float]]:
-    """Return every text line in drawing order with its font scale."""
+    """Return every text line in drawing order with its font scale.
+
+    The title and the serie-numero print large, as real receipts print them; at body size
+    the blur and noise make OCR drop or misread the serie too often for a stable set.
+    """
     title = "FACTURA ELECTRONICA" if receipt.tipo == "01" else "BOLETA DE VENTA ELECTRONICA"
+    document_id = f"{receipt.serie}-{receipt.numero}"
     head = [
         title,
         f"RUC {receipt.ruc}",
         f"CLIENTE: RUC {receipt.buyer_ruc}",
         f"FECHA {receipt.fecha.isoformat()}",
-        f"{receipt.serie}-{receipt.numero}",
+        document_id,
         "",
     ]
     body = [*_item_lines(receipt.items), "", *_total_lines(receipt)]
-    return [(text, TITLE_SCALE if text == title else TEXT_SCALE) for text in [*head, *body]]
+    headlines = {title, document_id}
+    return [(text, TITLE_SCALE if text in headlines else TEXT_SCALE) for text in [*head, *body]]
 
 
 def _draw_text(lines: list[tuple[str, float]]) -> np.ndarray:
