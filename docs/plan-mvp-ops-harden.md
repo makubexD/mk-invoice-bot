@@ -63,7 +63,7 @@ Test: `uv run pytest -q tests/integration/test_whatsapp_transport.py tests/integ
 
 Files: `src/invoicebot/net/guard.py`, `tests/unit/test_net_guard.py`.
 
-- `SystemResolver.__init__` gains `getaddrinfo: Callable[..., list[...]] = socket.getaddrinfo` and creates `concurrent.futures.ThreadPoolExecutor(max_workers=DNS_WORKERS, thread_name_prefix="dns")` (`DNS_WORKERS = 4`, a module constant). `resolve` runs `loop.run_in_executor(self._executor, partial(getaddrinfo, host, None, type=socket.SOCK_STREAM))` under the same deadline. A `close()` method calls `self._executor.shutdown(wait=False, cancel_futures=True)`; the owner of the resolver (grep its constructions in `src`) calls it on shutdown.
+- `SystemResolver.__init__` gains `getaddrinfo: Callable[..., list[...]] = socket.getaddrinfo` and creates `concurrent.futures.ThreadPoolExecutor(max_workers=DNS_WORKERS, thread_name_prefix="dns")` (`DNS_WORKERS = 4`, a module constant). `resolve` runs `loop.run_in_executor(self._executor, partial(getaddrinfo, host, None, type=socket.SOCK_STREAM))` under the same deadline. No `close()`: each resolver lives as long as its owner (two for the app's lifetime, one per browser helper process), and the executor starts its threads lazily.
 - Tests: R-9.10 with a `getaddrinfo` that blocks on a `threading.Event`, `DNS_WORKERS + 2` resolves all return `[]` at the deadline, and `asyncio.to_thread(lambda: 1)` still answers within 1 s afterwards (the default executor is free); set the event at the end. The existing deadline and malformed-host tests still pass.
 
 Test: `uv run pytest -q tests/unit/test_net_guard.py`.
