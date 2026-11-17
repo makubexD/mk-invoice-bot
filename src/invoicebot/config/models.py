@@ -843,15 +843,6 @@ class Portal(BaseModel):
     notes: str = ""
 
 
-class StoreDirectory(BaseModel):
-    """The two-folder store directory: stores by RUC and portals by key (D47, R-5.8)."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    stores: dict[str, Store]
-    portals: dict[str, Portal]
-
-
 class SolLogin(BaseModel):
     """The SOL sign-in form: the page and the selectors that receive the credentials (D134)."""
 
@@ -879,3 +870,16 @@ class SunatSolSite(BaseModel):
         if not is_sunat_origin(self.login.url):
             raise ValueError(f"sunat_sol.login.url {self.login.url!r} is not a hard-coded SUNAT origin")
         return self
+
+
+class StoreDirectory(BaseModel):
+    """The two-folder store directory: stores by RUC and portals by key (D47, R-5.8).
+
+    ``sunat_sol`` is the optional SOL site file beside them (D134).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    stores: dict[str, Store]
+    portals: dict[str, Portal]
+    sunat_sol: SunatSolSite | None = None

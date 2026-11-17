@@ -58,6 +58,10 @@ _FLOW_FOLDER_CODE = "FLOW_FOLDER_TEMPLATE"
 _FLOW_ATTACH_CODE = "FLOW_MAIL_ATTACH"
 _FLOW_LABEL_CODE = "FLOW_LABEL_LENGTH"
 _STORE_COMERCIO_CODE = "STORE_COMERCIO_LENGTH"
+_SOL_DISABLED_CODE = "SOL_DISABLED"
+
+#: The fetcher name a flow lists for SUNAT's SOL site (D134); ``pipeline`` owns the same name.
+_SUNAT_FETCHER = "sunat_sol"
 
 
 @dataclass(frozen=True)
@@ -83,6 +87,7 @@ def run_checks(cfg: Config, directory: StoreDirectory, *, changed_portals: froze
         problems.extend(_portal_problems(key, portal, changed=key in changed_portals))
     for ruc, store in directory.stores.items():
         problems.extend(_store_problems(ruc, store, directory.portals))
+    problems.extend(_sol_problems(cfg, directory))
     problems.extend(_llm_fallback_problems(cfg))
     problems.extend(_routing_problems(cfg))
     return problems
@@ -308,37 +313,88 @@ def _problem(flow_name: str, index: int, field: str, *, code: str, reason: str) 
     )
 
 
-def _portal_problems(key: str, portal: Portal, *, changed: bool) -> list[Problem]:
+def _portal_problems(
+    key: str,
+    portal: Portal,
+    *,
+    changed: bool,
+    path_prefix: str | None = None,
+    field_separator: str = ":",
+) -> list[Problem]:
+    """R-5.8: one portal's status, adapter, URL and form completeness.
+
+    Paths point at ``portals/<key>.yaml:<field>`` unless ``path_prefix`` names
+    another source, such as the SOL site's ``sunat_sol.yaml:query``.
+    """
+    base_path = path_prefix or f"portals/{key}.yaml"
     problems: list[Problem] = []
     if portal.status != "active":
         problems.append(
             Problem(
                 code="PORTAL_NOT_ACTIVE",
-                path=f"portals/{key}.yaml:status",
+                path=f"{base_path}{field_separator}status",
                 message=f"portal '{portal.key}' has status '{portal.status}'; only active portals are used",
                 blocking=changed,
             )
         )
-    adapter_problem = _adapter_problem(key, portal)
+    adapter_problem = _adapter_problem(portal, base_path=base_path, field_separator=field_separator)
     if adapter_problem is not None:
         problems.append(adapter_problem)
-    template_problem = _url_template_problem(key, portal)
+    template_problem = _url_template_problem(portal, base_path=base_path, field_separator=field_separator)
     if template_problem is not None:
         problems.append(template_problem)
-    incomplete_problem = _form_incomplete_problem(key, portal)
+    incomplete_problem = _form_incomplete_problem(portal, path=base_path)
     if incomplete_problem is not None:
         problems.append(incomplete_problem)
     return problems
 
 
-def _url_template_problem(key: str, portal: Portal) -> Problem | None:
+def _sol_problems(cfg: Config, directory: StoreDirectory) -> list[Problem]:
+    """R-5.8: the SOL site's query passes the portal checks, and a skipped chain step warns."""
+    problems: list[Problem] = []
+    site = directory.sunat_sol
+    if cfg.sunat.sol.enabled and site is not None and site.status == "active":
+        # The site's status governs the query; a portal file's default status would hide its checks.
+        query = site.query.model_copy(update={"status": "active"})
+        problems.extend(
+            _portal_problems(
+                _SUNAT_FETCHER,
+                query,
+                changed=False,
+                path_prefix="sunat_sol.yaml:query",
+                field_separator=".",
+            )
+        )
+    if not cfg.sunat.sol.enabled:
+        problems.extend(_sol_disabled_problems(cfg))
+    return problems
+
+
+def _sol_disabled_problems(cfg: Config) -> list[Problem]:
+    """R-5.8: a flow listing ``sunat_sol`` while SOL is off runs a chain that skips it."""
+    return [
+        Problem(
+            code=_SOL_DISABLED_CODE,
+            path=f"flows.{flow_name}.fetchers",
+            message=(
+                f"flow '{flow_name}' lists the '{_SUNAT_FETCHER}' fetcher, "
+                "but sunat.sol.enabled is false, so the chain skips it (R-5.8)"
+            ),
+            blocking=False,
+        )
+        for flow_name, flow in cfg.flows.items()
+        if _SUNAT_FETCHER in flow.fetchers
+    ]
+
+
+def _url_template_problem(portal: Portal, *, base_path: str, field_separator: str) -> Problem | None:
     """R-5.8: an active portal must carry a real URL, not a template the fetcher cannot fill."""
     # shortcut: URL templates such as {ruc_emisor} come with the first portal that needs one.
     if portal.status != "active" or portal.url is None or _URL_TEMPLATE_MARKER not in portal.url:
         return None
     return Problem(
         code="PORTAL_URL_TEMPLATE",
-        path=f"portals/{key}.yaml:url",
+        path=f"{base_path}{field_separator}url",
         message=(
             f"portal '{portal.key}' is active but its url is a template; "
             "URL templates are not supported yet (R-5.8)"
@@ -347,8 +403,8 @@ def _url_template_problem(key: str, portal: Portal) -> Problem | None:
     )
 
 
-def _adapter_problem(key: str, portal: Portal) -> Problem | None:
-    path = f"portals/{key}.yaml:adapter"
+def _adapter_problem(portal: Portal, *, base_path: str, field_separator: str) -> Problem | None:
+    path = f"{base_path}{field_separator}adapter"
     adapter = portal.adapter
     if adapter == _GENERIC_FORM_ADAPTER:
         return None
@@ -377,7 +433,7 @@ def _adapter_problem(key: str, portal: Portal) -> Problem | None:
     return None
 
 
-def _form_incomplete_problem(key: str, portal: Portal) -> Problem | None:
+def _form_incomplete_problem(portal: Portal, *, path: str) -> Problem | None:
     """R-5.8: an active generic_form portal must carry every form field it reads."""
     if portal.adapter != _GENERIC_FORM_ADAPTER or portal.status != "active":
         return None
@@ -386,7 +442,7 @@ def _form_incomplete_problem(key: str, portal: Portal) -> Problem | None:
         return None
     return Problem(
         code="PORTAL_FORM_INCOMPLETE",
-        path=f"portals/{key}.yaml",
+        path=path,
         message=f"portal '{portal.key}' is an active generic_form portal but lacks {', '.join(missing)}",
         blocking=True,
     )
