@@ -1,12 +1,13 @@
 # Multi-stage image for the invoice bot. Works unchanged with Docker or Podman:
 # every image reference is fully qualified and only classic Dockerfile syntax is used.
 
-FROM docker.io/library/python:3.12.16-slim AS builder
+FROM docker.io/library/python:3.12.16-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177 AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7@sha256:96f40d3904aad8d0bd010539001d36c8e2188b981e1334471a90c4a1d93bb490 /uv /usr/local/bin/uv
 
 ENV UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy
+    UV_LINK_MODE=copy \
+    UV_PYTHON_DOWNLOADS=never
 
 WORKDIR /app
 
@@ -16,7 +17,7 @@ COPY src ./src
 RUN uv sync --frozen --no-dev
 
 
-FROM docker.io/library/python:3.12.16-slim
+FROM docker.io/library/python:3.12.16-slim@sha256:05a994d2344eb364cc186910f4fc8786a38215f39f00d0acc25bff33a08f4177
 
 WORKDIR /app
 
