@@ -115,7 +115,7 @@ BR-F02's answers (D118): a text that is one `https` URL, or "no sé", from a sen
 | BR-D16 | Flow A: Drive and Sheets are written and the flow's documents are all there (the flow A completion message, R-8.1, D133) | The invoice is `DONE`; the `completion` template outside the window | `✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.` `Fila: {link_row}` `Carpeta: {link_folder}` |
 | BR-D17 | Flow A: Drive and Sheets are written, but the desired PDF is still missing (R-8.1 "docs pending", D133) | The invoice is `DONE`; the `completion` template outside the window | `⚠️ Guardado {serie}-{numero} de {razon_social}, S/ {total}, pero aún sin PDF; lo agrego cuando llegue.` `Fila: {link_row}` `Carpeta: {link_folder}` |
 
-- BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, joined by `, `.
+- BR-D14's `{invoices}` is one `#{id} {serie}-{numero}` item per stuck invoice, newest first, joined by `, `; at most 10 items, then `, …` when there are more (D140).
 
 ### Payments (P)
 | ID | Condition | Result | Chat message |
@@ -150,6 +150,8 @@ BR-S06's owner answers (D118), outside the catalog: [Aprobar] sets the link `app
 | BR-O02 | Disk usage on the data volume is above 80% | Alert, rate-limited | `💾 El disco está al {pct}%.` |
 | BR-O03 | A channel token is rejected (WhatsApp 401/190, Telegram 401) | Alert; sends on that channel wait in the outbox | `🔑 El token de {channel} no funciona. Renuévalo.` |
 | BR-O04 | The nightly backup failed or wasn't uploaded | Alert | `🗄️ Falló la copia de seguridad de anoche ({reason_desc}).` |
+
+Owner gap commands (S8.9, D139), admin-only and outside the catalog: `/gaps` answers `Brechas abiertas:` and one line per open or reported gap, newest `last_seen` first, at most 20 then `…`: `{fingerprint} · {kind} · {subject} · {count}×{issue}` (`{issue}` is ` · <issue url>` or empty); with none it answers `No hay brechas abiertas.` `/gap ignorar <fingerprint>` answers `Listo, ignoro la brecha {fingerprint}.` or `No encuentro la brecha {fingerprint}.` A non-admin gets the unknown-command answer, and `/ayuda` lists these two only to admins.
 
 ---
 

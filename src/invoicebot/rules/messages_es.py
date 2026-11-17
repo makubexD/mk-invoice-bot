@@ -464,6 +464,22 @@ HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
 HELP_PAGADO = "/pagado dd/mm monto, o /pagado dd/mm #12 #14: registra un reembolso recibido"
 #: ``/portal``'s own line in the command list (R-11.4).
 HELP_PORTAL = "/portal 20100000001 https://…: propone el portal de descarga de ese RUC"
+#: ``/gaps``'s own line in the command list, shown to admins only (S8.9, D139).
+HELP_GAPS = "/gaps: brechas de configuración abiertas"
+#: ``/gap``'s own line in the command list, shown to admins only (S8.9, D139).
+HELP_GAP = "/gap ignorar <id>: deja de avisar de esa brecha"
+#: ``/gaps`` with no open gap (S8.9, D139).
+GAPS_EMPTY = "No hay brechas abiertas."
+#: The first line of the ``/gaps`` answer (S8.9, D139).
+GAPS_HEADER = "Brechas abiertas:"
+#: One ``/gaps`` line per gap; ``{issue}`` is ``GAPS_ISSUE`` or empty (S8.9, D139).
+GAPS_LINE = "{fingerprint} · {kind} · {subject} · {count}×{issue}"
+#: The issue part of a ``GAPS_LINE`` (S8.9, D139).
+GAPS_ISSUE = " · {issue_url}"
+#: ``/gap ignorar`` on a gap it silenced (S8.9, D139).
+GAP_IGNORED = "Listo, ignoro la brecha {fingerprint}."
+#: ``/gap ignorar`` on an unknown or already ignored gap (S8.9, D139).
+GAP_UNKNOWN = "No encuentro la brecha {fingerprint}."
 #: One BR-P02 set line in the body, numbered from 1 (R-7.12, D107).
 PAYMENT_SET_LINE = "Opción {n}: {fecha_min}…, {count} facturas: {ids}"
 #: BR-P02's short button title for one matching set, numbered from 1 (R-7.12, D107).

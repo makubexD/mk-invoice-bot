@@ -359,7 +359,7 @@ Anything bigger gets split before work starts.
 
 *S8.4 and S8.6 moved to E16 (post-MVP, D44).*
 
-**S8.7 · Config reload + auto-resume** · M · Reqs R-11.9, R-9.6 · Deps S1.2, S8.1, S12.2 · Phase `ops` (D112)
+**S8.7 · Config reload + auto-resume** · M · Reqs R-11.9, R-9.6 · Deps S1.2, S8.1, S12.2 · Phase 9b `ops-reload` (D112; D136)
 - *As a sender, I want my stuck invoice to finish by itself once the portal is added, so that I don't resend anything.*
 - **AC:**
   - `SIGHUP` reloads the config, which is validated **before** it is swapped in (a bad config keeps the old one and alerts the owner).
@@ -371,7 +371,7 @@ Anything bigger gets split before work starts.
   - `broken_after` consecutive *technical* failures (not "not found") raise the gap and its issue.
   - The owner sets `status: broken` by hand (D44); the bot-made flip PR is S16.1 (post-MVP).
 
-**S8.9 · Admin commands + GitHub App health** · S · Rules BR-D05 · Reqs R-10, R-11.10 · Phase `ops` (D112)
+**S8.9 · Admin commands + GitHub App health** · S · Rules BR-D05 · Reqs R-10, R-11.10 · Phase 9a `ops-harden` (D112; D139)
 - **AC:**
   - `/gaps` lists open gaps with their issue links.
   - `/gap ignorar <id>` silences one.

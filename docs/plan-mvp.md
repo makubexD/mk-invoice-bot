@@ -17,7 +17,10 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 6e  | `widen-b-gaps-ops` (done 2026-11-16) | E8 (S8.1–S8.3, S8.5, S8.8, S8.10, S8.11; D112); E15 (S12.3, S15.1, S15.2); gap leftovers (`shortcut:` logs, BR-E06, BR-R06, BR-F03) (D105)                      | M4         | S0.10; an `age` recipient and the backup target                                  |
 | 7   | `read-more` (done 2026-11-16)        | S3.4, S3.8–S3.10; E6 (D121–D127)                                                                                                                                | M5         | S0.1: private set growing to ≥ 30 pairs; S0.5                                    |
 | 8   | `flow-a` (done 2026-11-17)           | E9, S10.6 (D128–D135); landed: Google auth and `google-setup`, Drive and Sheets sinks, Gmail `email_inbox`, `sunat_sol` fetcher (`todo` until S0.4)             | M6         | S0.4, Google OAuth app in production status (both for the live check only)       |
-| 9   | `ops`                                | E12, S8.7, S8.9 (D112), then S12.7 (repo private), then S16.2                                                                                                   | M7         | VPS chosen (D42)                                                                 |
+| 9a  | `ops-harden`                         | S8.9 (D139); code leftovers marked `ops-harden` below (D136–D140)                                                                                               | part of M7 | Nothing                                                                          |
+| 9b  | `ops-reload`                         | S8.7, S10.8 `SIGHUP`, S12.1, S12.4, S12.5 (D136)                                                                                                                | part of M7 | Nothing                                                                          |
+| 9c  | `ops-host`                           | host leftovers marked `ops-host` below (helper users, network, cgroup caps, Chromium sandbox, Compose password); first deploy (D136)                            | M7         | VPS chosen (D42)                                                                 |
+| 9d  | `ops-live`                           | S12.7 (repo private), then S16.2 (D136)                                                                                                                         | M7         | the owner's word for S12.7                                                       |
 | –   | v1.1 `contract`                      | E13, E14                                                                                                                                                        | M8         | —                                                                                |
 | –   | optional `llm-fallback`              | E3b                                                                                                                                                             | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
 
@@ -34,7 +37,7 @@ Each item goes into the named phase's plan.
 - ~~**`routing` (before the first live trial):** keyed sender hash.~~ Done 2026-11-13 in `docs/plan-sender-hash.md`: HMAC-SHA256 keyed by the age-store secret `sender_hash_key`; an empty secret now counts as missing.
 - ~~**`routing` (widen-b-harden):** an outbox row that can never succeed (a text over Meta's limit, a recipient with no WhatsApp number) is retried 8 times. Mark it dead at once. Make the template language configurable instead of the `es_PE` default.~~ Done in `widen-b-harden`.
 - **Telegram (`ops` or whenever a second channel lands):** `pipeline/handlers.py` and `pipeline/replies.py` import the WhatsApp adapter, as the plan asked. When the second channel arrives, put the download behind a per-channel media port and move the `<id>:<action>` button codec to a channel-neutral module. Check the media id against its pattern at the parse boundary, so a bad id cancels the invoice instead of being retried.
-- **`ops`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.
+- **`ops-host`:** the Compose database password is the dev default and travels in `DATABASE_URL`. On the VPS, take it from the age store or an env file outside the repo.
 
 Rules for every phase plan: steps of one concern in at most about 3 files, each with its own test command; tests cite requirement and rule IDs; no real RUCs, phone numbers or photos in git (D27).
 
@@ -57,14 +60,14 @@ Each item goes into the named phase's plan.
 - **`ocr` (step 10):** the QR payload repairs the spike found (date with time, label before the RUC, word buyer type; the decimal comma is already read), and the XML fix for a `schemaLocation` namespace with a relative Windows path (2 of 10 real XMLs fail as `malformed`).
 - **`ocr` (step 4):** an OCR field at confidence 0.9 would show as "Deducido" in the summary, because `route.py` detects inference by `confidence == INFERRED_CONFIDENCE`. Mark inference explicitly on `Field` instead.
 - **`widen-b` (with S7.2 `qr_url`, moved from `fetch`; widen-b-fetch):** `document_url` is any `http(s)` string from a QR. Allowlist the SUNAT and store hosts before anything fetches it (SSRF).
-- **`ops` (moved from `fetch`, a host setting):** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared. The browser helper (D82) needs network, so it gets its own user with internet-only egress instead.
+- **`ops-host` (moved from `fetch`, a host setting):** the image helper runs as the bot's user with network access; rlimits cap memory, CPU and writes. Run it as a separate user without network (systemd-run or a podman sandbox) before the host is shared. The browser helper (D82) needs network, so it gets its own user with internet-only egress instead.
 - ~~**`read-more`:** `scripts/check_fixtures.py` skips binary files, so a committed PDF or xlsx with a real RUC passes. Allow those types only under a fixture allowlist.~~ Done in `read-more`.
 
 ## Carried over from the `ocr` review
 
 Each item goes into the named phase's plan.
 
-- **`ops` (before the host is shared, moved from `fetch`):** put the image and browser helpers and Tesseract under a cgroup memory cap on the 2 GB host.
+- **`ops-host` (before the host is shared, moved from `fetch`):** put the image and browser helpers and Tesseract under a cgroup memory cap on the 2 GB host.
 - **`fetch` step 18:** set `RLIMIT_FSIZE=0` for Tesseract and document it; cap the OCR text size and the matches per parsing rule.
 - **`fetch` step 17:** catch OpenCV errors in the helper and report the photo as unreadable instead of exiting non-zero (today the queue retries them).
 - **`fetch` step 17:** the helper's `variant` and `decoder` strings are logged unchecked. Move the QR variant and decoder names to a module without cv2 and make the result fields `Literal`s of them (R-9.16).
@@ -78,11 +81,11 @@ Each item goes into the named phase's plan.
 
 Each item goes into the named phase's plan.
 
-- **`ops` gate (before live fetching on a shared host):** Chromium runs with `--no-sandbox`, Playwright's default. Enable `chromium_sandbox=True` with user namespaces, or run the browser helper as its own uid or container.
-- **`ops`:** a test that kills the browser helper mid-fetch and then finds no `chrome-headless-shell` process left. Playwright starts the browser detached, so the helper's process group may not hold it.
-- **`ops`:** a hostile page can start many downloads into Playwright's artifacts folder before the page timeout. The folder now sits in the fetch's own `TMPDIR`, which the bot removes after every run, but nothing caps its size during the run. Cap the helper's disk.
-- **`ops` (defense in depth):** run the browser helper in a network namespace or under nftables rules whose only allowed connection is its guard proxy, so a Chromium path that skips the proxy (WebRTC is closed by a launch flag) still reaches nothing.
-- **`ops` (each Playwright upgrade):** loopback goes through the guard proxy only because Playwright adds `--proxy-bypass-list=<-loopback>`. Add a test that reads the launched Chromium's arguments, so an upgrade cannot drop it silently.
+- **`ops-host` gate (before live fetching on a shared host):** Chromium runs with `--no-sandbox`, Playwright's default. Enable `chromium_sandbox=True` with user namespaces, or run the browser helper as its own uid or container.
+- **`ops-host`:** a test that kills the browser helper mid-fetch and then finds no `chrome-headless-shell` process left. Playwright starts the browser detached, so the helper's process group may not hold it.
+- **`ops-host`:** a hostile page can start many downloads into Playwright's artifacts folder before the page timeout. The folder now sits in the fetch's own `TMPDIR`, which the bot removes after every run, but nothing caps its size during the run. Cap the helper's disk.
+- **`ops-host` (defense in depth):** run the browser helper in a network namespace or under nftables rules whose only allowed connection is its guard proxy, so a Chromium path that skips the proxy (WebRTC is closed by a launch flag) still reaches nothing.
+- **`ops-harden` (each Playwright upgrade):** loopback goes through the guard proxy only because Playwright adds `--proxy-bypass-list=<-loopback>`. Add a test that reads the launched Chromium's arguments, so an upgrade cannot drop it silently.
 - **`widen-b-fetch` (with the next portal):** `check_config` renders each active portal's `pick` and `calendar` selectors from a sample, so a bad selector fails at startup instead of every fetch ending `technical`.
 - ~~**`widen-b` (widen-b-harden):** a startup check that `retrieval.portal_timeout_s` stays below the worker lease (300 s, `queue/worker.py`), so a fetch never outlives its lease; a second run is already harmless (R-5.1).~~ Done in `widen-b-harden`.
 - ~~**`widen-b` (widen-b-harden):** `EmailInbox.retry_schedule` is an unvalidated `list[str]`; give it `Portal.retry_schedule`'s delay type.~~ Done in `widen-b-harden`.
@@ -90,7 +93,7 @@ Each item goes into the named phase's plan.
 ## Moved by the `fetch` plan (D82)
 
 - S7.6's `httpx` transport and the `document_url` allowlist go to `widen-b` with S7.2.
-- S10.8's brand choice by serie prefix (and its one-tap question) goes to `file-b`; its `SIGHUP` reload goes to `ops`.
+- S10.8's brand choice by serie prefix (and its one-tap question) goes to `file-b`; its `SIGHUP` reload goes to `ops-reload`.
 - The `BrowserPool` of spec 03 §8 is replaced by a browser helper process per fetch (D82).
 
 ## Moved by the `file-b` plan (D84–D90)
@@ -122,8 +125,8 @@ Each item goes into the named phase's plan.
 - **`widen-b-fetch` (widen-b-fetch):** a value made only of unsafe characters is now `""` after cleaning, but `missing_required` still counts the field as present. Treat an empty field as absent.
 - **`widen-b-fetch` (with the next portal):** `portal_timeout_s` only has to stay below the 300 s lease (`JOB_LEASE_S`); leave a margin for the helper start and the handler's database work (e.g. 30 s).
 - **`widen-b-talk` (widen-b-talk):** a non-string `retry_schedule` entry (`[5]`) makes `parse_delay` raise `TypeError`, not a `ValidationError`, for a portal and the email inbox. Give both one `Annotated` delay type.
-- **`ops`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
-- **`ops`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
+- **`ops-harden`:** move the remaining state string constants (`actions.py`, `route.py`, `extract.py`, `fetch.py`, `deliver.py`, `handlers.py`) to `invoicebot/states.py` (added by `widen-b-talk`).
+- **`ops-harden`:** for a permanent Meta error code, store only the status and code in `last_error`, in case Meta's message echoes a parameter. The dead-row log line could also say the failure was permanent.
 
 ## Carried over from the `widen-b-fetch` review
 
@@ -134,8 +137,8 @@ Each item goes into the named phase's plan.
 - **`widen-b-deliver` (widen-b-deliver):** the outbox stores the channel message id, so a quote of BR-F07 matches its invoice (D102).
 - **`widen-b-deliver` (widen-b-deliver; from the review-fix round):** the inbox `$search` stays on the serie (spec 03), because the stored numero has no leading zeros and Graph splits words at the hyphen, so `F001-123` misses `F001-00000123`. A store's other mail with the same serie can still push the invoice out of the 25 newest; search for both the plain and the zero-padded `{serie}-{numero}` and merge by message id, with a zero-padded test mail.
 - **`widen-b-deliver` (widen-b-deliver):** a cancellation while the connection goes back to the pool, after the commit, makes `pipeline/fetch.py` and `pipeline/uploads.py` delete files whose rows are committed. Mark the commit done before the pool exit and clean up only when it isn't.
-- **`ops`:** `SystemResolver`'s deadline abandons the `getaddrinfo` thread without stopping it, so a hung resolver fills the default executor that `asyncio.to_thread` shares. Give DNS its own small executor. Reachable today only through allowlisted hosts.
-- **`ops`:** pin the Docker base image by digest and set `UV_PYTHON_DOWNLOADS=never`; cap the BR-D14 list (e.g. 10 items and "…"); add a webhook test where a real NUL byte makes Postgres refuse the middle message.
+- **`ops-harden`:** `SystemResolver`'s deadline abandons the `getaddrinfo` thread without stopping it, so a hung resolver fills the default executor that `asyncio.to_thread` shares. Give DNS its own small executor. Reachable today only through allowlisted hosts.
+- **`ops-harden`:** pin the Docker base image by digest and set `UV_PYTHON_DOWNLOADS=never`; cap the BR-D14 list (e.g. 10 items and "…"); add a webhook test where a real NUL byte makes Postgres refuse the middle message.
 
 ## Carried over from the `widen-b-deliver` review
 
@@ -152,27 +155,27 @@ Each item goes into the `widen-b-gaps-ops` plan unless named otherwise.
 
 Each item goes into the named phase's plan.
 
-- **`ops`:** `laptop_agent.ps1` removes a job id from `sent-jobs.txt` when the send fails, so a captured job dropped back into `_outbox/` within its 7 days is sent again (recipients stay allowlisted). Keep failed ids in a separate state so a replay is refused without writing a false `sent` receipt.
-- **`ops`:** the BR-S06 [Aprobar] id carries only the RUC (D118), so a stale button from a rejected proposal approves the next one. Put a proposal version in the id and match it in `taught_links.decide` (a D118 change).
-- **`ops`:** `scripts/restore_drill.sh` passes the database URL, password included, on the `psql`/`pg_restore` command line; use `PG*` variables or a `.pgpass`. `ops/backup.py` `_pg_environment` drops URL query keys such as `sslmode`; pass them through or refuse them.
-- **`ops`:** an approval during the GitHub issue creation can lose the hint (`set_pending_issue_hint` updates 0 rows once the row is sent); queue a `comment` row when it does. `upsert_gap`'s `raised_now` can be true twice under concurrent raises; lock the row first if workers run in parallel.
+- **`ops-harden`:** `laptop_agent.ps1` removes a job id from `sent-jobs.txt` when the send fails, so a captured job dropped back into `_outbox/` within its 7 days is sent again (recipients stay allowlisted). Keep failed ids in a separate state so a replay is refused without writing a false `sent` receipt.
+- **`ops-harden`:** the BR-S06 [Aprobar] id carries only the RUC (D118), so a stale button from a rejected proposal approves the next one. Put a proposal version in the id and match it in `taught_links.decide` (a D118 change).
+- **`ops-harden`:** `scripts/restore_drill.sh` passes the database URL, password included, on the `psql`/`pg_restore` command line; use `PG*` variables or a `.pgpass`. `ops/backup.py` `_pg_environment` drops URL query keys such as `sslmode`; pass them through or refuse them.
+- **`ops-harden`:** an approval during the GitHub issue creation can lose the hint (`set_pending_issue_hint` updates 0 rows once the row is sent); queue a `comment` row when it does. `upsert_gap`'s `raised_now` can be true twice under concurrent raises; lock the row first if workers run in parallel.
 
 ## Carried over from the `read-more` review
 
 Each item goes into the named phase's plan.
 
 - **`read-more` live check (`docs/plan-mvp-read-more.md` § "Deferred: live check"):** S0.5, S0.1, the padrón RSS and disk measurement and a WhatsApp PDF; it records M5.
-- **`ops`:** a 401 from validez keeps the cached SUNAT token until its TTL (at most a day); delete `kv['sunat_token']` on a 401.
-- **`ops`:** a recheck that gets no answer overwrites the stored `estado_cp` with null; keep the last answer and bump only the count.
-- **`ops`:** the lone-XML refusal (BR-E07) quotes the image byte cap as "the photo and PDF limit"; pick the cap per kind, as `handlers._max_mb` does.
+- **`ops-harden`:** a 401 from validez keeps the cached SUNAT token until its TTL (at most a day); delete `kv['sunat_token']` on a 401.
+- **`ops-harden`:** a recheck that gets no answer overwrites the stored `estado_cp` with null; keep the last answer and bump only the count.
+- **`ops-harden`:** the lone-XML refusal (BR-E07) quotes the image byte cap as "the photo and PDF limit"; pick the cap per kind, as `handlers._max_mb` does.
 - **Known, accepted:** `scripts/import_padron.py` reads a padrón line with no length cap; the ZIP is downloaded by the owner by hand, and `check_zip` caps entries and ratio.
 
 ## Carried over from `flow-a`
 
 - **`flow-a` live check (`docs/plan-mvp-flow-a.md` § "Deferred: live check"):** Google OAuth client in production, `auth-google` and `google-setup`, an M6 run through Drive and Sheets, a Gmail `email_inbox` fetch, S0.4 (`config/sunat_sol.yaml` stays `todo` and out of the default chain if SOL gives no XML) and BR-D01; it records M6.
-- **`ops`:** `auth-google` saves the token of whichever Google user signed in; request `openid email`, compare the address with one set per account in config and refuse a mismatch (py-security-auditor, 2026-11-17).
+- **`ops-harden`:** `auth-google` saves the token of whichever Google user signed in; request `openid email`, compare the address with one set per account in config and refuse a mismatch (py-security-auditor, 2026-11-17).
 - **`flow-a` live check, SOL egress:** the sign-in's SUNAT-only `page.route` misses websockets and redirect hops and starts after the login page's first load, so a compromised SUNAT script could send the typed credentials off SUNAT. Record the hosts the live SOL login and query use, then give `GuardProxy` a SUNAT host allowlist for the SOL session (`CONNECT` and `GET`) and install the route before `goto` (py-security-auditor, 2026-11-17).
-- **`ops`:** `GoogleTokens` detects a new token file by `st_mtime_ns` only; compare `(st_ino, st_mtime_ns, st_size)` for filesystems with coarse timestamps. The `auth-google` loopback listener ends on the first request carrying any `state`; accept only the matching one (fails safe today; py-security-auditor, 2026-11-17).
+- **`ops-harden`:** `GoogleTokens` detects a new token file by `st_mtime_ns` only; compare `(st_ino, st_mtime_ns, st_size)` for filesystems with coarse timestamps. The `auth-google` loopback listener ends on the first request carrying any `state`; accept only the matching one (fails safe today; py-security-auditor, 2026-11-17).
 
 ## Known drift between code and specs
 
