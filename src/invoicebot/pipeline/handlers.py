@@ -20,6 +20,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
+from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
@@ -146,7 +147,7 @@ async def reject_media(pool: Pool, rejection: MediaRejection) -> None:
         await set_state(
             conn,
             rejection.invoice_id,
-            "CANCELLED",
+            CANCELLED,
             rule_id=RULE_MEDIA_REJECTED,
             expected=rejection.expected,
         )

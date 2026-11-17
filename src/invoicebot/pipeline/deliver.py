@@ -83,7 +83,7 @@ from invoicebot.sinks.folders import comercio_for
 from invoicebot.sinks.mailer import Completion, MailMode, build_mail
 from invoicebot.sinks.onedrive import GraphError
 from invoicebot.sinks.onedrive_folder import file_folder
-from invoicebot.states import StateMoved
+from invoicebot.states import BATCHED, DELIVERING, DONE, MANUAL_REQUIRED, StateMoved
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     claim_seq,
@@ -108,10 +108,6 @@ from invoicebot.store.mail_jobs import add_mail_job, waiting_job_age_hours
 
 logger = logging.getLogger(__name__)
 
-#: The only state this handler acts on; any other leaves the invoice as it is (R-9.4).
-DELIVERING_STATE = "DELIVERING"
-#: Where the assisted mode leaves the invoice after the draft is ready (R-7.7).
-BATCHED_STATE = "BATCHED"
 #: BR-D07: the rule that reports a filed invoice whose mail waits for the owner.
 RULE_BATCHED = "BR-D07"
 #: The batch state committed before the automatic mode sends, so a crash never resends (D89).
@@ -122,8 +118,6 @@ PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"
 SENT_BATCH_STATE = "sent"
 #: The batch state of a send that a previous attempt crashed during (D89).
 FAILED_BATCH_STATE = "failed"
-#: Where the automatic mode leaves the invoice once the mail is sent (R-7.7).
-DONE_STATE = "DONE"
 #: BR-D03: the rule that reports a mail that could not be sent.
 RULE_SEND_FAILED = "BR-D03"
 #: BR-D12: the rule that tells the sender a waiting laptop job has not gone out yet (R-7.7).
@@ -136,8 +130,6 @@ RULE_SEND_FAILED_ADMIN = "BR-D03_admin"
 RULE_TEMPLATE_INVALID = "BR-D02"
 #: The gap kind of a flow's Excel template that cannot be filled (BR-D02, spec 06 §3).
 TEMPLATE_INVALID = "TEMPLATE_INVALID"
-#: Where a broken Excel template leaves the invoice (BR-D02).
-MANUAL_REQUIRED_STATE = "MANUAL_REQUIRED"
 #: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
 AUTH_PROVIDER_SLUG = MICROSOFT
 #: Each inbox provider's slug in BR-D01's admin text, naming ``scripts/auth_<slug>.py``.
@@ -150,7 +142,7 @@ LAPTOP_OUTLOOK_MODE = "laptop_outlook"
 #: :func:`merge_flow_data` merges and cannot delete a key (D89).
 RESENDING_KEY = "resending"
 #: The invoice states a resend job acts on: delivered, not still in flight (R-7.8, R-7.14).
-RESEND_STATES = frozenset({DONE_STATE, BATCHED_STATE})
+RESEND_STATES = frozenset({DONE, BATCHED})
 
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"
@@ -231,7 +223,7 @@ def make_deliver_handler(context: DeliverContext) -> Handler:
 
     async def handle(job: Job) -> None:
         started = time.perf_counter()
-        invoice = await _load(context, job, {DELIVERING_STATE})
+        invoice = await _load(context, job, {DELIVERING})
         if invoice is None:
             return
         sinks = _sinks(invoice.flow)
@@ -622,7 +614,7 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
                 size=len(data),
             ),
         )
-        await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
+        await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
         await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
 
 
@@ -675,7 +667,7 @@ async def _automatic(
         await enqueue(conn, delivery.invoice_id, FOLDER_STATUS_STEP)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
-        await set_state(conn, delivery.invoice_id, DONE_STATE, rule_id=mode.done_rule)
+        await set_state(conn, delivery.invoice_id, DONE, rule_id=mode.done_rule)
         await _notify(
             conn,
             delivery.head,
@@ -732,7 +724,7 @@ async def _handed_off(
         await add_mail_job(conn, job_id, delivery.invoice_id)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
-        await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_BATCHED)
+        await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
 
 
 def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
@@ -763,7 +755,7 @@ async def _crashed_send(
         return
     batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
-    await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
+    await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
     await _notify(
         conn,
         delivery.head,
@@ -791,7 +783,7 @@ async def _send_failed(
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
-        await set_state(conn, delivery.invoice_id, BATCHED_STATE, rule_id=RULE_SEND_FAILED)
+        await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
         await _notify(conn, delivery.head, delivery.invoice_id, RULE_SEND_FAILED, text, [])
         await queue_admin_alert(
@@ -838,7 +830,7 @@ async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_nam
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, invoice.job.invoice_id):
             return
-        await set_state(conn, invoice.job.invoice_id, MANUAL_REQUIRED_STATE, rule_id=RULE_TEMPLATE_INVALID)
+        await set_state(conn, invoice.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_TEMPLATE_INVALID)
         await _notify(
             conn,
             invoice.head,
@@ -878,7 +870,7 @@ def _template_sighting(invoice: _Invoice, sink_name: str) -> GapSighting:
 async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool:
     """Return True when the invoice is still ``DELIVERING`` inside the caller's transaction."""
     head = await load_invoice_head(conn, invoice_id)
-    return head is not None and head.state == DELIVERING_STATE
+    return head is not None and head.state == DELIVERING
 
 
 async def _notify(

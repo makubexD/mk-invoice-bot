@@ -19,11 +19,11 @@ from invoicebot.pipeline.actions import (
     SENT_BATCH_STATE,
     send_stale,
 )
-from invoicebot.pipeline.deliver import DELIVER_STEP, DELIVERING_STATE
+from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import OVERRIDES_SAVED
-from invoicebot.states import BATCHED, DONE
+from invoicebot.states import BATCHED, DELIVERING, DONE
 from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data
 from invoicebot.store.invoices import find_override_target, get_state_rule, set_state
 from invoicebot.text import has_unsafe_char
@@ -95,7 +95,7 @@ async def apply_overrides(
     merged = {**_stored_overrides(await load_flow_data(conn, invoice_id)), **overrides}
     await merge_flow_data(conn, invoice_id, {"overrides": merged})
     if state == BATCHED and batch_state == PREPARED_BATCH_STATE:
-        await set_state(conn, invoice_id, DELIVERING_STATE)
+        await set_state(conn, invoice_id, DELIVERING)
         await enqueue(conn, invoice_id, DELIVER_STEP)
     await _confirm(conn, msg, invoice_id)
     return invoice_id
