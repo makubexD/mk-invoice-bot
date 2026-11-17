@@ -12,11 +12,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
+from uuid import uuid4
 
 import httpx
 import pytest
@@ -24,20 +25,23 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.channels.base import Attachment, AttachmentKind, DownloadedMedia, InboundMessage
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config, StoreDirectory
-from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.config.models import Config, MediaLimits, StoreDirectory
+from invoicebot.fetchers.base import FetchedFile, Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.pipeline.pending_auth import GOOGLE
-from invoicebot.pipeline.steps import DELIVER_STEP
+from invoicebot.pipeline.steps import ATTACH_STEP, DELIVER_STEP
+from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import ROW_LINK_TEMPLATE, GoogleSheets
 from invoicebot.store.invoices import resume_pending_auth
+from invoicebot.store.messages import link_message_to_invoice, store_inbound
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -54,7 +58,12 @@ ROW_NUMBER = 2
 OWNER_RUC = "20000000001"
 RAZON_SOCIAL = "Restaurante La Lena S.A.C."
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
+PDF_MIME = "application/pdf"
 BEARER = "synthetic-bearer-value"
+#: Zero-based cell indexes in flow A's sheet row: column A is the key (D130), then the
+#: configured columns in order (config/example.yaml): … Foto, PDF, XML.
+PDF_CELL = 11
+XML_CELL = 12
 _ACK_ID = re.compile(r"#(\d+)")
 
 
@@ -120,18 +129,52 @@ def _matching_xml(payload: str) -> bytes:
 
 
 class _MatchingFetcher:
-    """A ``Fetcher`` that returns the PDF and XML matching the photo's QR (R-5.1, R-5.6)."""
+    """A ``Fetcher`` that returns the files matching the photo's QR (R-5.1, R-5.6)."""
 
-    def __init__(self, payload: str) -> None:
+    def __init__(self, payload: str, *, kinds: tuple[Literal["pdf", "xml"], ...] = ("pdf", "xml")) -> None:
         self._payload = payload
+        self._kinds = kinds
 
     async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
         del invoice
-        files = (
-            _written(out_dir, "pdf", PDF_BYTES),
-            _written(out_dir, "xml", _matching_xml(self._payload)),
+        files = []
+        if "pdf" in self._kinds:
+            files.append(_written(out_dir, "pdf", PDF_BYTES))
+        if "xml" in self._kinds:
+            files.append(_written(out_dir, "xml", _matching_xml(self._payload)))
+        return FetchResult(FetchReason.OK, tuple(files), None)
+
+
+class _NotFoundFetcher:
+    """A ``Fetcher`` whose source holds no document, the final reason that ends its turn (R-5.4)."""
+
+    async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
+        del invoice, out_dir
+        return FetchResult(FetchReason.NOT_FOUND, (), None)
+
+
+class _FakeMediaSource:
+    """A channel's media source over the upload bodies the test serves (R-1.5)."""
+
+    def __init__(self, media: Mapping[str, tuple[str, bytes]]) -> None:
+        self._media = media
+
+    async def download(
+        self, media_ref: str, kind: AttachmentKind, out_dir: Path, limits: MediaLimits
+    ) -> DownloadedMedia:
+        """Write the body for ``media_ref`` and return its path, hash and size."""
+        del kind, limits
+        mime, body = self._media[media_ref]
+        directory = out_dir / media_ref
+        directory.mkdir(parents=True)
+        path = directory / "file"
+        path.write_bytes(body)
+        return DownloadedMedia(
+            path=path,
+            sha256=hashlib.sha256(body).hexdigest(),
+            size=len(body),
+            mime=mime,
         )
-        return FetchResult(FetchReason.OK, files, None)
 
 
 class _Tokens:
@@ -218,18 +261,33 @@ async def _fetch_documents(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     cfg: Config,
     invoice_id: int,
-    payload: str,
+    fetchers: Mapping[str, Fetcher],
     data_dir: Path,
 ) -> None:
-    """Run the one registered fetcher on the invoice, moving it to ``DELIVERING`` (R-5.1)."""
-    handler = make_fetch_handler(
-        pool,
-        cfg,
-        StoreDirectory(stores={}, portals={}),
-        {FLOW: {"qr_url": _MatchingFetcher(payload)}},
-        data_dir,
-    )
+    """Run flow A's fetcher chain once on the invoice's newest fetch job (R-5.1)."""
+    handler = make_fetch_handler(pool, cfg, StoreDirectory(stores={}, portals={}), {FLOW: fetchers}, data_dir)
     await handler(await _newest_job(pool, invoice_id, FETCH_STEP))
+
+
+async def _profile_id(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> str:
+    """Return the sender profile the invoice belongs to."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT profile_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _fetch_attempts(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int
+) -> list[tuple[str, str]]:
+    """Return the invoice's ``(fetcher, reason)`` attempts, oldest first (R-5.7)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT fetcher, reason FROM fetch_attempts WHERE invoice_id = %s ORDER BY id", (invoice_id,)
+        )
+        rows = await cur.fetchall()
+    return [(str(fetcher), str(reason)) for fetcher, reason in rows]
 
 
 async def _state(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> tuple[str, str | None]:
@@ -266,7 +324,7 @@ async def test_a_photo_is_fetched_and_filed_in_drive_and_sheets(
     fake_channel, payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
     invoice_id = _invoice_id(fake_channel)
     cfg = _config()
-    await _fetch_documents(db_pool, cfg, invoice_id, payload, tmp_path)
+    await _fetch_documents(db_pool, cfg, invoice_id, {"qr_url": _MatchingFetcher(payload)}, tmp_path)
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     google = _Google()
@@ -291,7 +349,7 @@ async def test_a_revoked_google_token_parks_and_resume_finishes_the_delivery(
     fake_channel, payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
     invoice_id = _invoice_id(fake_channel)
     cfg = _config()
-    await _fetch_documents(db_pool, cfg, invoice_id, payload, tmp_path)
+    await _fetch_documents(db_pool, cfg, invoice_id, {"qr_url": _MatchingFetcher(payload)}, tmp_path)
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     tokens = _Tokens(revoked=True)
@@ -309,3 +367,92 @@ async def test_a_revoked_google_token_parks_and_resume_finishes_the_delivery(
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
 
     assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")
+
+
+async def test_a_fetch_with_only_the_pdf_delivers_without_an_xml_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    read_conversation: Any,
+) -> None:
+    """D142: flow A requires only the PDF, so a fetch without XML ends DONE and leaves its XML cell empty."""
+    fake_channel, payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
+    invoice_id = _invoice_id(fake_channel)
+    cfg = _config()
+    await _fetch_documents(
+        db_pool, cfg, invoice_id, {"qr_url": _MatchingFetcher(payload, kinds=("pdf",))}, tmp_path
+    )
+    assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
+
+    google = _Google()
+    async with _dispatch(db_pool, cfg, google, _Tokens()) as dispatch:
+        await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
+
+    assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")
+    assert [name.rsplit(".", 1)[-1] for name in google.uploaded] == ["jpg", "pdf"]
+    assert len(google.rows) == 1
+    assert google.rows[0][PDF_CELL] != ""
+    assert google.rows[0][XML_CELL] == ""
+
+
+async def test_a_fetch_with_only_the_xml_is_missing_docs_and_chains(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    read_conversation: Any,
+) -> None:
+    """D142: a fetch with only the XML records missing_docs, and the chain runs the next fetcher."""
+    fake_channel, payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
+    invoice_id = _invoice_id(fake_channel)
+    cfg = _config()
+    fetchers = {
+        "qr_url": _MatchingFetcher(payload, kinds=("xml",)),
+        "portal_registry": _MatchingFetcher(payload),
+    }
+    await _fetch_documents(db_pool, cfg, invoice_id, fetchers, tmp_path)
+    assert (await _state(db_pool, invoice_id))[0] == "FETCHING_DOCS"
+    assert await _fetch_attempts(db_pool, invoice_id) == [("qr_url", "missing_docs")]
+
+    await _fetch_documents(db_pool, cfg, invoice_id, fetchers, tmp_path)
+    assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
+    assert await _fetch_attempts(db_pool, invoice_id) == [
+        ("qr_url", "missing_docs"),
+        ("portal_registry", "ok"),
+    ]
+
+
+async def test_a_manual_pdf_upload_in_manual_required_delivers(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    read_conversation: Any,
+) -> None:
+    """D142: flow A needs only the PDF, so a manual PDF upload completes a stuck invoice and it delivers."""
+    fake_channel, _payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
+    invoice_id = _invoice_id(fake_channel)
+    cfg = _config()
+    fetchers = {"qr_url": _NotFoundFetcher()}
+    await _fetch_documents(db_pool, cfg, invoice_id, fetchers, tmp_path)
+    await _fetch_documents(db_pool, cfg, invoice_id, fetchers, tmp_path)
+    assert await _state(db_pool, invoice_id) == ("MANUAL_REQUIRED", "BR-F07")
+
+    media_ref = f"ref-{uuid4().hex}"
+    msg = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=await _profile_id(db_pool, invoice_id),
+        sender_role="owner",
+        attachments=[Attachment(kind="pdf", media_ref=media_ref, mime=PDF_MIME, size=len(PDF_BYTES))],
+        received_at=datetime.now(UTC),
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        assert await store_inbound(conn, msg)
+        await link_message_to_invoice(conn, msg.channel, msg.external_id, invoice_id)
+    media = _FakeMediaSource({media_ref: (PDF_MIME, PDF_BYTES)})
+    attach = make_attach_handler(db_pool, cfg, {"whatsapp": media}, tmp_path, cfg.limits.media)
+    await attach(_job(1, invoice_id, ATTACH_STEP))
+    assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
+
+    google = _Google()
+    async with _dispatch(db_pool, cfg, google, _Tokens()) as dispatch:
+        await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
+
+    assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")
+    assert [name.rsplit(".", 1)[-1] for name in google.uploaded] == ["jpg", "pdf"]
