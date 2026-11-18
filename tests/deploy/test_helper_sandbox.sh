@@ -3,7 +3,7 @@
 #
 # Builds the real app image and runs tests/deploy/sandbox_checks.py inside it, with the
 # throwaway config dir and the read-only fixtures the checks need. Exits with the checks'
-# exit code; fourteen `ok` lines mean the sandbox isolates each helper.
+# exit code; fifteen `ok` lines mean the sandbox isolates each helper.
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

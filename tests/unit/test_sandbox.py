@@ -13,6 +13,7 @@ from invoicebot.sandbox import (
     SandboxUnavailable,
     browser_command,
     browser_prefix,
+    check_no_parent_dir,
     check_sandbox,
     helper_prefixes,
     hidden_dirs,
@@ -48,6 +49,18 @@ def test_browser_prefix_rejects_a_non_masked_data_root(data_dir: Path) -> None:
     """D150: the data root must be absolute and not `/`."""
     with pytest.raises(ValueError, match="data_dir"):
         browser_prefix([], 64, data_dir)
+
+
+def test_browser_prefix_rejects_a_data_root_with_a_parent_dir() -> None:
+    """D150: a data root with a `..` part could mask a path outside the data root."""
+    with pytest.raises(ValueError, match="data_dir"):
+        browser_prefix([], 64, Path("/data/../etc"))
+
+
+def test_check_no_parent_dir_rejects_an_out_dir_with_a_parent_dir() -> None:
+    """D150: the out dir reaches the wrapper as HELPER_OUT_DIR, so a `..` part is refused too."""
+    with pytest.raises(ValueError, match="out_dir"):
+        check_no_parent_dir(Path("/data/../x"), "out_dir")
 
 
 def test_browser_prefix_places_data_dir_after_tmp_size() -> None:

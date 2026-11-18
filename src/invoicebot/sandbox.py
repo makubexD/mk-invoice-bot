@@ -45,6 +45,7 @@ data=$2
 shift 2
 out=${HELPER_OUT_DIR:-}
 if [ -n "$out" ]; then
+  case "/$out/" in */../*) echo "out dir has .." >&2; exit 1 ;; esac
   case "$out" in "$data"/*) ;; *) echo "out dir outside data root" >&2; exit 1 ;; esac
   mkdir "$TMPDIR/.out"
   mount --bind "$out" "$TMPDIR/.out"
@@ -82,12 +83,30 @@ def image_prefix(hidden_dirs: Sequence[Path]) -> tuple[str, ...]:
     )
 
 
+def check_no_parent_dir(path: Path, name: str) -> None:
+    """Raise ``ValueError`` when ``path`` has a ``..`` component (D150).
+
+    A ``..`` part lets the path leave the data root the wrapper masks, so the Python side
+    and the shell both refuse it before any mount happens.
+
+    Args:
+        path: The path to check.
+        name: The argument name to report in the error.
+
+    Raises:
+        ValueError: When ``path`` has a ``..`` component.
+    """
+    if ".." in path.parts:
+        raise ValueError(f"{name} must not contain '..'")
+
+
 def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int, data_dir: Path) -> tuple[str, ...]:
     """Return the argv prefix that sandboxes a browser helper, masking the data root (D147, D150)."""
     if tmp_mb < 1:
         raise ValueError("tmp_mb must be at least 1")
     if not data_dir.is_absolute() or data_dir == Path("/"):
         raise ValueError("data_dir must be absolute and not /")
+    check_no_parent_dir(data_dir, "data_dir")
     return (
         "unshare",
         "--user",

@@ -234,6 +234,17 @@ def check_browser_data_masked() -> None:
             shutil.rmtree(fixture, ignore_errors=True)
 
 
+def check_browser_out_dir_parent() -> None:
+    """The browser prefix refuses an out dir with a ``..`` component (D150)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env = {**_browser_env(tmpdir), "HELPER_OUT_DIR": f"{DATA_ROOT}/../x"}
+        done = _run([*PREFIXES.browser, "true"], env, SHORT_TIMEOUT_S)
+    if done.returncode == 0:
+        raise CheckFailed("an out dir with .. was accepted")
+    if "out dir has .." not in done.stderr:
+        raise CheckFailed(f"no 'out dir has ..' in stderr: {done.stderr.strip()!r}")
+
+
 #: A helper that drops its parent-death signal and leaves the process group, then waits.
 ESCAPE_SNIPPET = (
     "import ctypes, os, time\n"
@@ -377,6 +388,7 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "browser-config-hidden-oom": check_browser_config_hidden_oom,
     "browser-tmp-cap": check_browser_tmp_cap,
     "browser-data-masked": check_browser_data_masked,
+    "browser-out-dir-parent": check_browser_out_dir_parent,
     "image-umount-refused": check_image_umount_refused,
     "browser-umount-refused": check_browser_umount_refused,
     "image-no-escape": check_image_no_escape,
