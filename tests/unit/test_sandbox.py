@@ -81,7 +81,7 @@ def test_browser_script_binds_the_out_dir_before_masking_and_moves_it_back_after
     bind = BROWSER_SCRIPT.index('mount --bind "$out" "$TMPDIR/.out"')
     mask = BROWSER_SCRIPT.index('mount -t tmpfs -o size=4k,mode=0755 none "$data"')
     move = BROWSER_SCRIPT.index('mount --move "$TMPDIR/.out" "$out"')
-    remount = BROWSER_SCRIPT.index('mount -o remount,ro "$data"')
+    remount = BROWSER_SCRIPT.index('mount -o remount,bind,ro "$data"')
 
     assert bind < mask < move < remount
 

@@ -35,7 +35,8 @@ wait $!
 #: Runs inside the first namespace: a capped `$TMPDIR`, the hidden dirs masked, the network kept.
 #: The helper runs as an unprivileged user in a nested namespace, and this shell stays PID 1,
 #: for the same reasons as in `IMAGE_SCRIPT`.
-#: The data root is masked read-only; only `HELPER_OUT_DIR` is bound back (D150).
+#: The data root is masked read-only; only `HELPER_OUT_DIR` is bound back (D150). The read-only
+#: flag goes on the mount point (`remount,bind`): a tmpfs superblock remount fails in the userns.
 BROWSER_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
@@ -53,7 +54,7 @@ if [ -n "$out" ]; then
   mkdir -p "$out"
   mount --move "$TMPDIR/.out" "$out"
 fi
-mount -o remount,ro "$data"
+mount -o remount,bind,ro "$data"
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
 unshare --user --map-user=1000 --map-group=1000 "$@" <&0 &

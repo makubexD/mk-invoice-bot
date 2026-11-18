@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -28,6 +29,8 @@ from invoicebot.sandbox import helper_prefixes, hidden_dirs
 RUNTIME_CONFIG = Path("/app/runtime-config")
 #: The browser helper's capped scratch mount (D147).
 TMP_MB = 64
+#: The app's data root in the image; the browser prefix masks it but for the out dir (D150).
+DATA_ROOT = Path("/data")
 #: Where this script and its read-only fixtures are mounted in the container.
 CHECKS = Path(__file__).resolve().parent
 CONFIG = CHECKS / "config"
@@ -43,7 +46,7 @@ class CheckFailed(Exception):
 
 
 #: The config dir is hidden the same way app.py hides it: from the marker file's parent.
-PREFIXES = helper_prefixes(True, hidden_dirs([RUNTIME_CONFIG / "marker"]), TMP_MB)
+PREFIXES = helper_prefixes(True, hidden_dirs([RUNTIME_CONFIG / "marker"]), TMP_MB, DATA_ROOT)
 
 
 def _base_env() -> dict[str, str]:
@@ -195,6 +198,42 @@ def check_browser_tmp_cap() -> None:
         raise CheckFailed("writing 80 MiB to $TMPDIR succeeded")
 
 
+def check_browser_data_masked() -> None:
+    """The browser prefix masks the data root but binds back only ``HELPER_OUT_DIR`` (D150)."""
+    photos = DATA_ROOT / "photos"
+    out_dir = DATA_ROOT / "tmp/1/a"
+    fixtures = (photos, DATA_ROOT / "tmp")
+    photos.mkdir(parents=True)
+    out_dir.mkdir(parents=True)
+    (photos / "x.jpg").write_bytes(b"x")
+    (out_dir / "in.txt").write_text("in\n", encoding="utf-8")
+    try:
+        script = (
+            "set -e\n"
+            f"cat {out_dir}/in.txt\n"
+            f"echo y > {out_dir}/new\n"
+            f"if ls {photos}; then exit 1; fi\n"
+            f"if cat {photos}/x.jpg; then exit 1; fi\n"
+            f"if touch {DATA_ROOT}/z; then exit 1; fi\n"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {**_browser_env(tmpdir), "HELPER_OUT_DIR": str(out_dir)}
+            done = _run([*PREFIXES.browser, "sh", "-c", script], env, SHORT_TIMEOUT_S)
+        if done.returncode != 0:
+            raise CheckFailed(f"sh exited {done.returncode}: {done.stderr.strip()!r}")
+        new = out_dir / "new"
+        if not new.is_file() or new.read_text(encoding="utf-8").strip() != "y":
+            raise CheckFailed(f"the write to the out dir is not visible: {new.is_file()}")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            env = {**_browser_env(tmpdir), "HELPER_OUT_DIR": "/etc"}
+            done = _run([*PREFIXES.browser, "true"], env, SHORT_TIMEOUT_S)
+        if done.returncode == 0:
+            raise CheckFailed("an out dir outside the data root was accepted")
+    finally:
+        for fixture in fixtures:
+            shutil.rmtree(fixture, ignore_errors=True)
+
+
 #: A helper that drops its parent-death signal and leaves the process group, then waits.
 ESCAPE_SNIPPET = (
     "import ctypes, os, time\n"
@@ -337,6 +376,7 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "image-oom": check_image_oom,
     "browser-config-hidden-oom": check_browser_config_hidden_oom,
     "browser-tmp-cap": check_browser_tmp_cap,
+    "browser-data-masked": check_browser_data_masked,
     "image-umount-refused": check_image_umount_refused,
     "browser-umount-refused": check_browser_umount_refused,
     "image-no-escape": check_image_no_escape,
