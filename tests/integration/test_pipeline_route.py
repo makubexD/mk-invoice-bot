@@ -946,7 +946,8 @@ async def test_stale_answered_flow_is_dropped_and_reasked(
     """BR-R03: a stored answers.flow that is no longer a candidate is dropped and re-asked."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
-    # A boleta has only personal_google as a candidate, so the stored work flow is stale.
+    # A boleta's candidates are personal_google and personal_dni (D143), so the stored
+    # work flow (facturas only) is stale.
     invoice_id = await _routing_invoice(
         db_pool,
         profile_id,
@@ -964,6 +965,7 @@ async def test_stale_answered_flow_is_dropped_and_reasked(
     assert rule_id == "BR-R03"
     assert buttons == [
         {"id": button_id(invoice_id, "pick", 0, 0), "title": "Mi empresa (Google)"},
+        {"id": button_id(invoice_id, "pick", 1, 0), "title": "Boletas a mi DNI"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
 
