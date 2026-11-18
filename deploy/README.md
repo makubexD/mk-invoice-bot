@@ -114,6 +114,116 @@ script needs access to the engine socket (or rootless Podman) and to
 `CONFIG_DIR`, `BACKUP_DIR` and `STATE_DIR`. Rootless Podman on an SELinux host
 (see below) needs the SELinux labels fixed before the app can read its config.
 
+## Local MVP host (D141, D146–D148)
+
+The MVP runs on the owner's Ubuntu machine as a second Compose project,
+`invoicebot-live`, reached through Tailscale Funnel. `deploy/deploy-live.sh`
+wraps `deploy/deploy.sh`: it resolves the live directories, exports them and
+passes the arguments through unchanged.
+
+### 1. Layout
+
+Everything lives under `LIVE_ROOT`, `$HOME/.local/share/invoicebot` by default
+(mode `700`). Each variable keeps a value already set in the environment:
+
+| Directory | Default | Holds |
+|---|---|---|
+| `CONFIG_DIR` | `$LIVE_ROOT/config` | `config.yaml`, `secrets.age`, `age-identity.txt` |
+| `BACKUP_DIR` | `$LIVE_ROOT/backups` | `pre-<tag>.sql.gz` dumps |
+| `STATE_DIR` | `$LIVE_ROOT/deploy` | `current_tag`, the last healthy tag |
+| `DB_SECRETS_DIR` | `$LIVE_ROOT/db` | `postgres-password` and `pgpass` |
+
+Live runtime config goes in `$LIVE_ROOT/config`, not in the repo's `config/`.
+`DB_SECRETS_DIR` is created by the first `deploy-live.sh` run, which generates
+the database password once into `postgres-password` and `pgpass` (both mode
+`600`, `pgpass` owned by uid `10001`). Never commit these files or copy them
+into the repo.
+
+The age identity file must be readable by the container's `bot` user (uid
+`10001`):
+
+```sh
+podman unshare chown 10001:10001 "$HOME/.local/share/invoicebot/config/age-identity.txt"
+```
+
+### 2. Deploy
+
+Build the tag from the checkout, then deploy it. `deploy-live.sh <tag>` backs up,
+migrates, switches the image and health-checks; with `--config` it validates and
+installs a config file and sends `SIGHUP`:
+
+```sh
+podman build -f deploy/Dockerfile -t localhost/invoicebot-app:$(git rev-parse --short=12 HEAD) .
+./deploy/deploy-live.sh <tag>
+./deploy/deploy-live.sh --config <candidate>
+```
+
+### 3. Start on boot
+
+Let the user manager start without a login session, and enable the Podman
+restart unit. Containers with `restart: unless-stopped` come back after a
+reboot:
+
+```sh
+loginctl enable-linger "$USER"
+systemctl --user enable --now podman-restart.service
+```
+
+### 4. Helper sandbox (D147)
+
+The sandbox is on by default in the image (`HELPER_SANDBOX=1`). Each helper runs
+in `unshare` namespaces:
+
+- the extract (OCR) helper runs without network, with an empty `/proc` and the
+  runtime config and secrets directories hidden;
+- the browser helpers (portal, SUNAT SOL) keep the network, and get a `$TMPDIR`
+  capped at `HELPER_TMP_MB` (default 256), the config and secrets directories
+  hidden and Chromium's own sandbox.
+
+Both set `oom_score_adj` to 1000. The app refuses to start if the namespaces are
+unavailable. Docker's default seccomp profile blocks `unshare`, so the image
+needs Podman, or Docker with a profile that allows it. The check is:
+
+```sh
+bash tests/deploy/test_helper_sandbox.sh
+```
+
+### 5. Tailscale Funnel (D146)
+
+Install Tailscale from tailscale.com, then sign in:
+
+```sh
+sudo tailscale up
+```
+
+Expose only the webhook and the health endpoint, both proxied to the app's
+loopback port:
+
+```sh
+sudo tailscale funnel --bg --set-path /webhook/whatsapp http://127.0.0.1:8080/webhook/whatsapp
+sudo tailscale funnel --bg --set-path /health http://127.0.0.1:8080/health
+tailscale funnel status
+```
+
+The public URL is `https://<machine>.<tailnet>.ts.net`. The first `funnel`
+command asks to allow Funnel in the tailnet policy. Turn it off with:
+
+```sh
+tailscale funnel reset
+```
+
+### 6. Uptime check (R-9.14)
+
+Point the external uptime monitor at `https://<machine>.<tailnet>.ts.net/health`
+and alert on any non-200.
+
+### 7. Dev and live side by side
+
+Both stacks publish the app on `127.0.0.1:8080`, so only one app runs at a time.
+The dev stack (project `invoicebot`, port `5432`, dev password) stays for its
+Postgres and the tests. The live Postgres publishes no port. Never point
+`TEST_DATABASE_URL` at the live project.
+
 ## What the deploy does
 
 1. Starts `postgres` and waits until it is healthy.
@@ -234,7 +344,8 @@ It prints a `https://<random>.trycloudflare.com` URL. In the Meta app's WhatsApp
 configuration set the callback URL to `<that URL>/webhook/whatsapp` and the
 verify token to the value of `whatsapp_verify_token`, then subscribe to the
 `messages` field. The URL changes every time the tunnel restarts, so update the
-callback each time; quick tunnels are for trials only.
+callback each time; quick tunnels are for one-off trials only. The local MVP
+host uses Tailscale Funnel instead (D146).
 
 ## Laptop agent
 
