@@ -101,6 +101,9 @@ def _lookup(document: dict[str, Any], path: str) -> tuple[bool, str]:
         if not isinstance(current, dict) or part not in current:
             return False, ""
         current = current[part]
+    if current is None:
+        # D143: an unset value (``dni:``) must not become the text "None" a rule matches.
+        return False, ""
     if isinstance(current, (dict, list)):
         raise ValueError(f"Placeholder '{{{path}}}' does not resolve to a scalar")
     return True, str(current)

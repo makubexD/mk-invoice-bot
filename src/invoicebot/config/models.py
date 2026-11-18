@@ -26,6 +26,9 @@ from pydantic import (
 
 from invoicebot.sunat_origins import is_sunat_origin
 
+#: D143: the owner's DNI, eight digits, used by BR-R10 to route boletas made out to it.
+DNI_PATTERN = re.compile(r"^[0-9]{8}$")
+
 
 class Owner(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -34,6 +37,16 @@ class Owner(BaseModel):
     profile: str
     timezone: str
     language: str
+    #: D143: optional; when set, a boleta made out to this DNI goes to the personal flow.
+    dni: str | None = None
+
+    @field_validator("dni")
+    @classmethod
+    def _dni_is_eight_digits(cls, value: str | None) -> str | None:
+        """D143: the owner's DNI is optional, and when set it is exactly eight digits."""
+        if value is not None and DNI_PATTERN.fullmatch(value) is None:
+            raise ValueError("owner.dni must be 8 digits")
+        return value
 
 
 class Work(BaseModel):
@@ -332,16 +345,27 @@ class GoogleDriveSink(BaseModel):
 
 #: D130: the sheets column that always holds the invoice's natural key.
 SHEETS_KEY_COLUMN = "Clave"
+#: The longest tab title Google Sheets accepts (R-6.2).
+SHEETS_TAB_MAX_CHARS = 100
 
 
 class GoogleSheetsSink(BaseModel):
+    """A flow's Google Sheets sink: the row it appends (R-6.3, D130).
+
+    With ``existing`` true, ``spreadsheet_id`` is the owner's own sheet, whose
+    account needs the broader spreadsheets scope (R-6.5, D145).
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     kind: Literal["google_sheets"]
     account: str = Field(pattern=r"^[a-z0-9_]+$")
     spreadsheet_id: str
-    tab: str
+    #: R-6.2: Sheets refuses an empty title, one over 100 characters, or one with ``[]*?:/\``.
+    tab: str = Field(min_length=1, max_length=SHEETS_TAB_MAX_CHARS, pattern=r"^[^\[\]*?:/\\]+$")
     columns: dict[str, str] = Field(min_length=1)
+    #: D145: true when the sheet is the owner's, not one ``google-setup`` creates.
+    existing: bool = False
 
     @field_validator("spreadsheet_id")
     @classmethod
@@ -516,20 +540,13 @@ class Flow(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _google_sinks_come_in_pairs(self) -> Self:
-        """R-6.1, D131: the sheets sink renders the drive links, so the two come together."""
-        has_drive = False
-        has_sheets = False
-        for index, sink in enumerate(self.sinks):
-            if isinstance(sink, GoogleDriveSink):
-                has_drive = True
-            elif isinstance(sink, GoogleSheetsSink):
-                if not has_drive:
-                    raise ValueError(
-                        f"sinks[{index}] is a 'google_sheets' sink without a 'google_drive' sink before it"
-                    )
-                has_sheets = True
-        if has_drive and not has_sheets:
+    def _google_drive_needs_sheets(self) -> Self:
+        """D144: a drive sink renders links the sheets sink holds, so drive needs sheets.
+
+        A sheets sink alone is allowed: the flow writes its row without uploading files.
+        """
+        kinds = {sink.kind for sink in self.sinks}
+        if "google_drive" in kinds and "google_sheets" not in kinds:
             raise ValueError("a flow with a 'google_drive' sink needs a 'google_sheets' sink")
         return self
 

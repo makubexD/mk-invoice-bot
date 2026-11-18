@@ -43,6 +43,7 @@ from invoicebot.config.models import (
     Flow,
     FlowInbox,
     GoogleDriveSink,
+    GoogleSheetsSink,
     Mail,
     MailerSink,
     OneDriveFolderSink,
@@ -136,6 +137,7 @@ GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
 #: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
 GOOGLE_DRIVE_KIND = "google_drive"
+GOOGLE_SHEETS_KIND = "google_sheets"
 ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
@@ -471,6 +473,7 @@ def _deliver_registry(
     google = _google_deliver_handler(cfg, http, pool, tokens)
     if google is not None:
         by_kind[GOOGLE_DRIVE_KIND] = google
+        by_kind[GOOGLE_SHEETS_KIND] = google
     handlers: dict[str, Handler] = {}
     if deliver is not None:
         by_kind[ONEDRIVE_FOLDER_KIND] = deliver.deliver
@@ -532,19 +535,21 @@ def _google_deliver_handler(
     pool: Pool,
     tokens: Mapping[str, GoogleTokens],
 ) -> Handler | None:
-    """Build flow A's deliver handler, or None when no flow files in Google Drive (R-6.1, D129).
+    """Build the Google flows' deliver handler, or None when no flow has a Google sink (R-6.1, D129, D144).
 
     Each sink calls Google with its own account's token provider. A Google sink without
     ``google`` config is a configuration mistake, so it fails at startup rather than on
     the first delivery (D128).
     """
-    has_drive_sink = any(
-        isinstance(sink, GoogleDriveSink) for flow in cfg.flows.values() for sink in flow.sinks
+    has_google_sink = any(
+        isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
     )
-    if not has_drive_sink:
+    if not has_google_sink:
         return None
     if cfg.google is None:
-        raise ValueError("a google_drive sink needs the google config (D128)")
+        raise ValueError("a Google sink needs the google config (D128)")
     drives = {
         account: GoogleDrive(http, tokens[account], cfg.google.timeout_s, account=account)
         for account in tokens

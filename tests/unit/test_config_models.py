@@ -157,24 +157,56 @@ def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_sheets_sink_before_a_drive_sink_fails(tmp_path: Path) -> None:
-    """R-6.1: a sheets sink renders the drive links, so it needs a drive sink before it."""
+@pytest.mark.parametrize("tab", ["", "x" * 101, "Compras/2026", "Compras[1]", "Compras?"])
+def test_sheets_sink_with_a_tab_title_sheets_refuses_fails(tmp_path: Path, tab: str) -> None:
+    """R-6.2: an empty, too long or forbidden-character tab title fails at load, not at Google."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["tab"] = tab
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="tab"):
+        load_config(path)
+
+
+def test_routing_rule_naming_an_unset_owner_dni_fails(tmp_path: Path) -> None:
+    """D143, BR-R10: a rule on {owner.dni} with dni unset fails at load instead of matching "None"."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = None
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValueError, match=r"owner\.dni"):
+        load_config(path)
+
+
+def test_sheets_sink_without_a_drive_sink_loads(tmp_path: Path) -> None:
+    """D144: a sheets sink alone writes the row, so a flow without a drive sink loads."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["flows"]["personal_google"]["sinks"][0]
     path = _write_yaml(tmp_path / "example.yaml", document)
 
-    with pytest.raises(ValidationError, match="google_drive"):
-        load_config(path)
+    cfg = load_config(path)
+
+    kinds = [sink.kind for sink in cfg.flows["personal_google"].sinks]
+    assert kinds == ["google_sheets"]
 
 
 def test_drive_sink_without_a_sheets_sink_fails(tmp_path: Path) -> None:
-    """R-6.1, R-6.2: the two Google sinks come in pairs, so a drive sink alone is refused."""
+    """D144: a drive sink renders links the sheets sink holds, so a drive sink alone is refused."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["flows"]["personal_google"]["sinks"][1]
     path = _write_yaml(tmp_path / "example.yaml", document)
 
-    with pytest.raises(ValidationError, match="google_sheets"):
+    with pytest.raises(ValidationError, match="needs a 'google_sheets' sink"):
         load_config(path)
+
+
+def test_drive_sink_before_a_sheets_sink_loads() -> None:
+    """D144: a drive sink followed by a sheets sink loads with both."""
+
+    cfg = load_config(EXAMPLE)
+
+    kinds = [sink.kind for sink in cfg.flows["personal_google"].sinks]
+    assert kinds == ["google_drive", "google_sheets"]
 
 
 def test_drive_root_folder_id_that_is_not_a_google_id_fails(tmp_path: Path) -> None:
@@ -1002,7 +1034,7 @@ def test_example_config_declares_each_flows_manual_uploads() -> None:
     """R-1.5: each flow declares the file kinds a sender may upload, in preference order."""
     cfg = load_config(EXAMPLE)
 
-    assert cfg.flows["personal_google"].manual_uploads == ["xml", "pdf"]
+    assert cfg.flows["personal_google"].manual_uploads == ["pdf", "xml"]
     assert cfg.flows["work_microsoft"].manual_uploads == ["pdf", "xml"]
 
 
@@ -1023,3 +1055,41 @@ def test_flow_without_manual_uploads_defaults_to_empty(tmp_path: Path) -> None:
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     assert load_config(path).flows["personal_google"].manual_uploads == []
+
+
+def test_example_config_has_the_owners_dni() -> None:
+    """D143: the shipped example config carries the synthetic owner DNI."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.owner.dni == "40000000"
+
+
+def test_owner_without_a_dni_loads_as_none(tmp_path: Path) -> None:
+    """D143: owner.dni is optional, so a config without it loads with None."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["owner"]["dni"]
+    rules = document["routing"]["rules"]
+    document["routing"]["rules"] = [rule for rule in rules if rule["id"] != "BR-R10"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    assert load_config(path).owner.dni is None
+
+
+def test_owner_dni_with_seven_digits_fails(tmp_path: Path) -> None:
+    """D143: the owner's DNI is eight digits, so a seven-digit value fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = "4000000"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"owner\.dni must be 8 digits"):
+        load_config(path)
+
+
+def test_owner_dni_with_a_letter_fails(tmp_path: Path) -> None:
+    """D143: the owner's DNI is digits only, so a letter anywhere fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = "4000000A"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=r"owner\.dni must be 8 digits"):
+        load_config(path)

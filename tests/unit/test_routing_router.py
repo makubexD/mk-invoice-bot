@@ -69,6 +69,7 @@ def _reading(
     num_doc_adq: str | None = None,
     ruc_emisor: str = WORK_RUC,
     tipo: str = "01",
+    tipo_doc_adq: str | None = None,
 ) -> Reading:
     """Build a reading; ``num_doc_adq`` is left out when the buyer is missing."""
     fields = {
@@ -77,6 +78,8 @@ def _reading(
     }
     if num_doc_adq is not None:
         fields["num_doc_adq"] = Field(value=num_doc_adq, source="qr", confidence=1.0)
+    if tipo_doc_adq is not None:
+        fields["tipo_doc_adq"] = Field(value=tipo_doc_adq, source="qr", confidence=1.0)
     return Reading(fields=fields, document_url=None)
 
 
@@ -125,7 +128,7 @@ def test_compile_rules_accepts_the_example_config_rules() -> None:
     """R-3.1: the routing rules shipped in config/example.yaml compile at startup."""
     rules = compile_rules(load_config(EXAMPLE).routing)
 
-    assert [rule.id for rule in rules] == ["BR-R01", "BR-R02"]
+    assert [rule.id for rule in rules] == ["BR-R01", "BR-R02", "BR-R10"]
 
 
 @pytest.mark.parametrize(
@@ -204,6 +207,45 @@ def test_route_flow_outside_profile_is_rejected() -> None:
     result = _route(_reading(num_doc_adq=WORK_RUC), profile_flows=[FLOW_A])
 
     assert result == RouteResult(flow=FLOW_B, rule="BR-R05")
+
+
+def _route_from_example(reading: Reading) -> RouteResult:
+    """Route ``reading`` with the shipped example config, as startup would."""
+    cfg = load_config(EXAMPLE)
+    return route(
+        reading,
+        cfg.profiles["yo"].flows,
+        compile_rules(cfg.routing),
+        cfg.flows,
+        cfg.routing.unmatched,
+    )
+
+
+def test_route_example_config_owner_dni_boleta_uses_br_r10() -> None:
+    """BR-R10: a boleta with the owner's DNI and tipo_doc_adq 1 routes to personal_dni."""
+    reading = _reading(num_doc_adq="40000000", tipo="03", tipo_doc_adq="1")
+
+    result = _route_from_example(reading)
+
+    assert result == RouteResult(flow="personal_dni", rule="BR-R10")
+
+
+def test_route_example_config_another_dni_is_unmatched() -> None:
+    """BR-R10: another buyer's DNI matches no rule, so the invoice is unmatched (BR-R03)."""
+    reading = _reading(num_doc_adq="40000001", tipo="03", tipo_doc_adq="1")
+
+    result = _route_from_example(reading)
+
+    assert result == RouteResult(flow=None, rule="BR-R03")
+
+
+def test_route_example_config_owner_ruc_still_uses_br_r01() -> None:
+    """BR-R10: the owner RUC rule still wins for a purchase made with the company RUC."""
+    reading = _reading(num_doc_adq="20XXXXXXXXX", tipo="03")
+
+    result = _route_from_example(reading)
+
+    assert result == RouteResult(flow="personal_google", rule="BR-R01")
 
 
 def test_route_tipo_outside_accepted_tipos_is_rejected() -> None:

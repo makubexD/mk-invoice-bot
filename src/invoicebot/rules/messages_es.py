@@ -33,6 +33,7 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-R08": "Este comprobante es {tipo_desc}, y {flow.label} solo acepta {accepted_desc}. No lo proceso.",
     "BR-R09": "¿De qué local es esta factura de {razon_social}?",
+    "BR-R10": "➡️ {flow.label}",
     "BR-E01": (
         "No pude leer este comprobante. Envíame una foto más cerca y con buena luz, "
         "o escribe los datos así:\n"
@@ -137,6 +138,7 @@ MESSAGES: dict[str, str] = {
         "Fila: {link_row}\n"
         "Carpeta: {link_folder}"
     ),
+    "BR-D18": "✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.\nFila: {link_row}",
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",

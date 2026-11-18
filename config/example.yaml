@@ -6,6 +6,7 @@
 
 owner:
   ruc: "20XXXXXXXXX"          # your company RUC (flow A buyer)
+  dni: "40000000"             # owner's DNI (boletas, BR-R10)
   profile: yo                 # owner profile: admin alerts go to its preferred channel
   timezone: America/Lima
   language: es-PE
@@ -22,7 +23,7 @@ profiles:
     whatsapp: "51999999999"
     telegram_user_id: 100000001
     preferred_channel: whatsapp       # where admin alerts go
-    flows: [personal_google, work_microsoft]
+    flows: [personal_google, personal_dni, work_microsoft]
     admin: true
   asistente:
     name: "Asistente"
@@ -74,6 +75,7 @@ llm_fallback:
   monthly_cap_usd: 2.00                 # at the cap: BR-E08
   flows:
     personal_google: false              # opt in per flow
+    personal_dni: false                 # opt in per flow
     work_microsoft: false               # D43: work invoices never go to DeepSeek; check_config.py rejects true
   # secret: LLM_API_KEY
 
@@ -87,9 +89,12 @@ routing:
     - id: BR-R02
       when: { num_doc_adq: ["{work.ruc}"] }
       flow: work_microsoft
+    - id: BR-R10
+      when: { num_doc_adq: ["{owner.dni}"], tipo_doc_adq: ["1"] }
+      flow: personal_dni
     # Example for later: a second company, or route by issuer. A new rule needs its own
     # row in specs/06-business-rules.md before it is used here (R-11.1).
-    # - id: BR-R10
+    # - id: BR-R11
     #   when: { num_doc_adq: ["20ZZZZZZZZZ"] }
     #   flow: second_company
   unmatched: ask                # ask (BR-R03) | reject (BR-R07)
@@ -118,8 +123,8 @@ flows:
       provider: gmail                   # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
       account: invoices_a               # the mailbox the fetcher searches (D98)
       retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
-    required_docs: [xml]                # pdf is nice-to-have
-    manual_uploads: [xml, pdf]          # what a sender may upload by hand, in preference order (R-1.5, D66)
+    required_docs: [pdf]                # D142: xml is kept when it comes
+    manual_uploads: [pdf, xml]          # what a sender may upload by hand, in preference order (R-1.5, D66)
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
     sinks:
       - kind: google_drive
@@ -146,6 +151,28 @@ flows:
           PDF: "{link_pdf}"
           XML: "{link_xml}"
       # n8n is not a sink: it subscribes to signed events (invoice.delivered, …) via the contract (R-12.4, v1.1)
+
+  personal_dni:
+    label: "Boletas a mi DNI"
+    accepted_tipos: ["03"]
+    fetchers: []
+    required_docs: []
+    manual_uploads: []
+    deliver_without_docs: false
+    sinks:
+      - kind: google_sheets
+        account: owner                   # the account `invoicebot auth-google` signs in (D128)
+        existing: false
+        # existing: true  # use your own sheet (D145); run auth-google again
+        spreadsheet_id: "DNI_SHEET_ID_PLACEHOLDER"
+        tab: "Boletas"
+        columns:                        # header -> expression; column A is always Clave (D130)
+          Fecha: "{fecha:%d/%m/%Y}"
+          RUC: "{ruc_emisor}"
+          "Razón social": "{razon_social}"
+          "Serie-Número": "{serie}-{numero}"
+          Total: "{total}"
+          "Estado SUNAT": "{estado_sunat}"
 
   work_microsoft:
     label: "Trabajo (Microsoft)"

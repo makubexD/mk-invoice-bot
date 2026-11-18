@@ -25,6 +25,8 @@ LINK_FOLDER = "link_folder"
 LINK_PHOTO = "link_photo"
 LINK_PDF = "link_pdf"
 LINK_XML = "link_xml"
+#: Every link name a Drive sink writes; a flow without one cannot fill them (D144).
+DRIVE_LINK_NAMES = frozenset({LINK_FOLDER, LINK_PHOTO, LINK_PDF, LINK_XML})
 
 #: The types Drive stores each kind with (R-6.1).
 PHOTO_MIME = "image/jpeg"

@@ -131,7 +131,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-6.2 (M)** THE SYSTEM SHALL append one row to the configured Sheet and tab. The column mapping is configurable and includes Drive links.
 - **R-6.3 (M)** IF the row for the natural key already exists, THE SYSTEM SHALL update it, not duplicate it.
 - **R-6.4 (S)** THE SYSTEM SHALL use OAuth with a refresh token, with the consent screen in production mode.
-- **R-6.5 (M)** Google OAuth SHALL use least privilege: `drive.file`; `spreadsheets` only when the owner uses an existing sheet (Q6); `gmail.readonly` for the inbox fallback only, preferably on a dedicated mailbox. The OAuth app SHALL be in **production** status (unverified is fine for personal use), because testing mode expires refresh tokens after 7 days.
+- **R-6.5 (M)** Google OAuth SHALL use least privilege: `drive.file`; `spreadsheets` only for an account whose sheets sink is `existing: true` (Q6, D145); `gmail.readonly` for the inbox fallback only, preferably on a dedicated mailbox. The OAuth app SHALL be in **production** status (unverified is fine for personal use), because testing mode expires refresh tokens after 7 days.
 - **R-6.6 (M)** Sheets writes SHALL use `valueInputOption=RAW`, and any text value starting with `=`, `+`, `-`, `@`, tab or carriage return SHALL be escaped with a leading `'`, so no cell is ever evaluated as a formula.
 
 ## R-7 · Flow B: OneDrive + Excel template + email

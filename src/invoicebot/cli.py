@@ -8,8 +8,9 @@ size, and whether the XML matches; it never prints an invoice field value or a f
 the invoices that were parked in ``PENDING_AUTH`` (BR-D01). ``auth-google`` runs the
 installed-app sign-in with a loopback redirect and PKCE, stores the account's encrypted
 refresh token and resumes the same waiting invoices (R-6.4, R-6.5, D128). ``google-setup``
-creates the account's Drive folder and invoices spreadsheet with its header and prints both
-ids for the private config (R-6.2, D129).
+takes a flow name: it creates the flow's Drive folder (only when the flow has a Drive
+sink) and either creates its spreadsheet with the header or checks an existing one, then
+prints the ids for the private config (R-6.2, D129, D145).
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ import secrets
 import sys
 import tempfile
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -57,7 +59,15 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.config.loader import load_config, load_directory
-from invoicebot.config.models import SHEETS_KEY_COLUMN, Config, Google, GoogleSheetsSink, StoreDirectory
+from invoicebot.config.models import (
+    SHEETS_KEY_COLUMN,
+    Config,
+    Flow,
+    Google,
+    GoogleDriveSink,
+    GoogleSheetsSink,
+    StoreDirectory,
+)
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
@@ -169,9 +179,9 @@ def _parser() -> argparse.ArgumentParser:
     google.add_argument("--account", required=True, help="account name, e.g. owner")
     setup = subparsers.add_parser(
         "google-setup",
-        help="create the account's Drive folder and invoices spreadsheet",
+        help="create or check the flow's Drive folder and spreadsheet",
     )
-    setup.add_argument("--account", required=True, help="account name, e.g. owner")
+    setup.add_argument("--flow", required=True, help="flow name, e.g. personal_google")
     setup.add_argument(
         "--folder-name",
         default=GOOGLE_SETUP_FOLDER_NAME,
@@ -254,13 +264,21 @@ def _auth_google(
     return 0
 
 
-def _sheets_sink_for(cfg: Config, account: str) -> GoogleSheetsSink | None:
-    """Return the first flow's sheets sink that names ``account``, or None (D129)."""
-    for flow in cfg.flows.values():
-        for sink in flow.sinks:
-            if isinstance(sink, GoogleSheetsSink) and sink.account == account:
-                return sink
-    return None
+@dataclass(frozen=True)
+class _SetupTarget:
+    """The flow's sheets sink to create or check, and its Drive sink when it has one (D145)."""
+
+    sink: GoogleSheetsSink
+    drive: GoogleDriveSink | None
+
+
+def _setup_target(flow: Flow) -> _SetupTarget | None:
+    """Return what ``google-setup`` creates or checks for ``flow``, or None (D145)."""
+    sink = next((other for other in flow.sinks if isinstance(other, GoogleSheetsSink)), None)
+    if sink is None:
+        return None
+    drive = next((other for other in flow.sinks if isinstance(other, GoogleDriveSink)), None)
+    return _SetupTarget(sink, drive)
 
 
 def _google_setup(
@@ -270,15 +288,21 @@ def _google_setup(
     args: argparse.Namespace,
     transport: httpx.AsyncBaseTransport | None,
 ) -> int:
-    """Create the account's Drive folder and spreadsheet and print both ids (R-6.2, D129).
+    """Create or check the flow's Drive folder and sheet and print their ids (R-6.2, D129, D145).
 
-    The header comes from the first flow whose sheets sink names the account. An account
-    no flow's sheets sink names exits 2 before any request; the command writes no config
-    file, so the ids it prints go into the private config by hand.
+    The flow named by ``--flow`` supplies its sheets sink, whose account signs the
+    request and whose ``existing`` flag chooses creating a sheet or checking one.
+    An unknown flow, or a flow with no Google sheets sink, exits 2 before any
+    request. The command writes no config file, so the ids it prints go into the
+    private config by hand.
     """
-    sink = _sheets_sink_for(cfg, args.account)
-    if sink is None:
-        parser.error(f"account {args.account!r} has no Google sheets sink in any flow")
+    flow = cfg.flows.get(args.flow)
+    if flow is None:
+        configured = ", ".join(sorted(cfg.flows)) or "none"
+        parser.error(f"flow {args.flow!r} is not configured; configured flows: {configured}")
+    target = _setup_target(flow)
+    if target is None:
+        parser.error(f"flow {args.flow!r} has no Google sheets sink")
     if cfg.google is None:
         parser.error("google settings must be configured to run google-setup (D128)")
     if settings.secrets_path is None or settings.age_identity_path is None:
@@ -289,16 +313,15 @@ def _google_setup(
         .get(GOOGLE_CLIENT_SECRET)
     )
     try:
-        folder_id, spreadsheet_id = asyncio.run(
-            _create_google_setup(settings, cfg, args, sink, client_secret, transport)
-        )
-    except AuthRequired:
-        sys.stderr.write(f"sign-in needed: run invoicebot auth-google --account {args.account}\n")
+        lines = asyncio.run(_create_google_setup(settings, cfg, args, target, client_secret, transport))
+    except AuthRequired as required:
+        sys.stderr.write(f"sign-in needed: run invoicebot auth-google --account {required.account}\n")
         return 1
     except (GoogleError, httpx.HTTPError) as error:
         sys.stderr.write(f"google-setup failed: {error}\n")
         return 1
-    sys.stdout.write(f"root_folder_id: {folder_id}\nspreadsheet_id: {spreadsheet_id}\n")
+    for line in lines:
+        sys.stdout.write(line + "\n")
     return 0
 
 
@@ -306,46 +329,57 @@ async def _create_google_setup(
     settings: Settings,
     cfg: Config,
     args: argparse.Namespace,
-    sink: GoogleSheetsSink,
+    target: _SetupTarget,
     client_secret: str,
     transport: httpx.AsyncBaseTransport | None,
-) -> tuple[str, str]:
-    """Create the Drive folder and the sheet with its header; return both ids (R-6.2, D129).
+) -> list[str]:
+    """Create or check the flow's folder and sheet; return the lines to print (R-6.2, D129, D145).
+
+    A flow with a Drive sink gets a root folder in that sink's account. A sheet the sink does not mark
+    ``existing`` is created with the header; an existing sheet has its tab added
+    or its header checked, and nothing else is written.
 
     Raises:
         AuthRequired: the account has no usable refresh token.
-        GoogleError: Google refuses a request or answers without a usable id.
+        GoogleError: Google refuses a request, answers without a usable id, or
+            the existing tab's first row differs (``SheetHeaderMismatch``).
         httpx.HTTPError: a request never reached Google.
     """
     identity_path = settings.age_identity_path
     if identity_path is None:
         raise _SignInError("AGE_IDENTITY_PATH must be set to create the sheet")
     google = _google_settings(cfg)
+    sink = target.sink
+    header = [SHEETS_KEY_COLUMN, *sink.columns]
+    lines: list[str] = []
     async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as http:
-        tokens = GoogleTokens(
-            http,
-            google.client_id,
-            client_secret,
-            args.account,
-            google_token_path(settings.data_dir, args.account),
-            load_identity(identity_path),
-            google.timeout_s,
-        )
-        drive = GoogleDrive(http, tokens, google.timeout_s, account=args.account)
+        identity = load_identity(identity_path)
+
+        def tokens_for(account: str) -> GoogleTokens:
+            token_path = google_token_path(settings.data_dir, account)
+            return GoogleTokens(
+                http, google.client_id, client_secret, account, token_path, identity, google.timeout_s
+            )
+
+        if target.drive is not None:
+            account = target.drive.account
+            drive = GoogleDrive(http, tokens_for(account), google.timeout_s, account=account)
+            folder_id = await drive.ensure_folder("root", args.folder_name)
+            lines.append(f"root_folder_id: {folder_id}")
         sheets = GoogleSheets(
             http,
-            tokens,
+            tokens_for(sink.account),
             google.timeout_s,
-            account=args.account,
+            account=sink.account,
             max_rows=google.max_rows,
         )
-        folder_id = await drive.ensure_folder("root", args.folder_name)
-        spreadsheet_id = await sheets.create(
-            args.sheet_title,
-            sink.tab,
-            [SHEETS_KEY_COLUMN, *sink.columns],
-        )
-    return folder_id, spreadsheet_id
+        if sink.existing:
+            await sheets.ensure_tab(sink.spreadsheet_id, sink.tab, header)
+            lines.append(f"spreadsheet_id: {sink.spreadsheet_id} (checked)")
+        else:
+            spreadsheet_id = await sheets.create(args.sheet_title, sink.tab, header)
+            lines.append(f"spreadsheet_id: {spreadsheet_id}")
+    return lines
 
 
 def _google_settings(cfg: Config) -> Google:

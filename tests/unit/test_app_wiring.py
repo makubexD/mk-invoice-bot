@@ -14,6 +14,7 @@ import yaml
 from invoicebot.app import (
     GOOGLE_CLIENT_SECRET,
     _daily_tasks,
+    _deliver_registry,
     _fetch_schedules,
     _google_deliver_handler,
     _google_secrets,
@@ -26,7 +27,7 @@ from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SunatSolFetcher
-from invoicebot.pipeline.steps import SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.secrets import Secrets, SecretStore
@@ -103,14 +104,49 @@ def _with_backup_at(cfg: Config, at: time) -> Config:
     return cfg.model_copy(update={"ops": cfg.ops.model_copy(update={"backup": backup})})
 
 
+def _drop_dni_flow(document: dict[str, Any]) -> None:
+    """Remove the Sheets-only ``personal_dni`` flow and what names it (D144)."""
+    del document["flows"]["personal_dni"]
+    del document["llm_fallback"]["flows"]["personal_dni"]
+    rules = document["routing"]["rules"]
+    document["routing"]["rules"] = [rule for rule in rules if rule["flow"] != "personal_dni"]
+    for profile in document["profiles"].values():
+        profile["flows"] = [name for name in profile["flows"] if name != "personal_dni"]
+
+
 def _without_google(tmp_path: Path) -> Config:
     """Load the example config with no Google sink, gmail inbox or google block (R-6.4)."""
     document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     del document["google"]
+    _drop_dni_flow(document)
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
     path = tmp_path / "no-google.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return load_config(path)
+
+
+def _sheets_only(tmp_path: Path) -> Config:
+    """Load the example config with its Google flow keeping only the sheets sink (D144)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["personal_google"]
+    flow["sinks"] = [sink for sink in flow["sinks"] if sink["kind"] != "google_drive"]
+    sheets = next(sink for sink in flow["sinks"] if sink["kind"] == "google_sheets")
+    sheets["columns"] = {
+        name: expression for name, expression in sheets["columns"].items() if "link_" not in expression
+    }
+    path = tmp_path / "sheets-only.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return load_config(path)
+
+
+def _without_google_sinks(tmp_path: Path) -> Config:
+    """Load the example config with no Google sink, keeping the google block (D144)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"] = []
+    _drop_dni_flow(document)
+    path = tmp_path / "no-google-sinks.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return load_config(path)
 
@@ -233,6 +269,24 @@ def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
     assert tokens == {}
     assert handler is None
     assert store.scoped_calls == []
+
+
+def test_sheets_only_google_flow_gets_a_deliverer(tmp_path: Path) -> None:
+    """D144: a flow with only a google_sheets sink gets the Google deliver dispatcher."""
+    cfg = _sheets_only(tmp_path)
+
+    handlers = _deliver_registry(cfg, None, cast(Any, None), cast(Any, None), {})
+
+    assert DELIVER_STEP in handlers
+
+
+def test_config_without_google_sinks_builds_no_google_handler(tmp_path: Path) -> None:
+    """D144: with no Google sink of either kind no Google deliver handler is built."""
+    cfg = _without_google_sinks(tmp_path)
+
+    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), {})
+
+    assert handler is None
 
 
 def test_config_with_google_and_no_secret_fails_startup(tmp_path: Path) -> None:

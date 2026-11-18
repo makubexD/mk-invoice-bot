@@ -42,6 +42,7 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-F07": "manual_required",
     "BR-D16": "completion",
     "BR-D17": "completion",
+    "BR-D18": "completion",
     "BR-S08": "pending_user_reminder",
     "BR-S04": "admin_alert",
     "BR-O01": "admin_alert",
