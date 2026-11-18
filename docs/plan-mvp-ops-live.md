@@ -13,7 +13,7 @@ Roadmap: `docs/plan-mvp.md` row 9d (D136, D141). The bot runs for real on this m
 
 - Steps 1–7: nothing.
 - Steps 8, 9 and 12: the Google OAuth client. The owner set it up on 2026-11-18, and `google.client_id` is in the private config. They also need the owner at the keyboard for the browser sign-ins and the SOL login.
-- Steps 14–18: Meta business verification approved. On 2026-11-18 it was still in review, so the WABA cannot send. The Entra app exists (`microsoft.client_id` is set). Step 16 also needs S0.11 and the bot's Outlook.com mailbox. Step 17 needs S0.10. Step 18 needs S0.1 (≥ 30 pairs) and S0.5, and records what is missing if they are not ready.
+- `docs/plan-mvp-live-chat.md` (D154): Meta business verification approved. On 2026-11-18 it was still in review, so the WABA cannot send. The Entra app exists (`microsoft.client_id` is set). Step 16 also needs S0.11 and the bot's Outlook.com mailbox. Step 17 needs S0.10. Step 18 needs S0.1 (≥ 30 pairs) and S0.5, and records what is missing if they are not ready.
 
 **Moved out by the owner (2026-11-18):** S12.7 (repo private) is "not yet". S16.2 waits for it (D52), so both leave this phase. Step 1 records that in the roadmap.
 
@@ -257,55 +257,17 @@ Test: `uv run python scripts/check_config.py config/example.yaml` and the same o
 Deferred with S0.4 (D153). Skip it and say so in the step's commit (`Route: inline: skipped, deferred by D153`). The
 allowlist design stays in D152 for when S0.4 runs.
 
-## Step 14: Meta goes live `[inline: Meta business settings and secrets]`
+## Step 14: Backup and restore drill `[inline: the owner's OneDrive and the off-host age key]`
 
-Waits for Meta business verification. Until then, stop here and push-notify the owner that steps 1–13 are done.
+Reruns step 9's first check now that the backup `age` key pair exists and Microsoft is signed in (D154).
 
-The steps follow the `live-trial-meta-setup` memory. Do not create a second app or portfolio.
+1. Copy the Microsoft token file into the live app's `/data/tokens` (owner `bot`, mode `0600`) as step 8 did for
+   Google. Set `ops.backup.at` a few minutes ahead in the private config, restart the app, and confirm
+   `db-<date>.dump.age` and `config-<date>.tar.age` land in the OneDrive backup folder. Put `ops.backup.at` back.
+2. `createdb invoicebot_drill` on the dev Postgres and run `scripts/restore_drill.sh` with the off-host identity on
+   the downloaded dump. Record the run in `deploy/README.md`'s table and drop `invoicebot_drill`.
 
-1. A permanent System User token with `whatsapp_business_messaging` and `whatsapp_business_management`, stored in the age store as `whatsapp_token` (replaces the 24 h one). Reset the app secret (it was pasted in chat on 2026-11-16) and store the new one.
-2. Register the bot number with the Cloud API (it leaves the WhatsApp Business app), and put its `phone_number_id` in the private config.
-3. Submit the utility templates (S0.7) and wait for approval.
-4. Webhook callback `https://<machine>.<tailnet>.ts.net/webhook/whatsapp` with the verify token, subscribed to `messages`. Redeploy.
-5. The owner sends "Hola" and gets the bot's answer.
+Test: the drill prints `invoices: <n>` and exits 0; the table row exists.
 
-Test: one inbound and one outbound message in the live log; no 131031.
-
-## Step 15: Flow A live (M6) `[inline: the owner's real invoices and Google account]`
-
-1. **M6:** a personal invoice photo leads to files in `{root}/{YYYY}/{MM}/`, one Sheet row, and BR-D16 with working links. Send it again after `/reprocesar`: the row is updated, not duplicated.
-2. **PDF only (D142):** an invoice from a store that gives only the PDF completes.
-3. **DNI boleta (D143):** a real boleta to the owner's DNI routes to `personal_dni` and writes one row with BR-D18. Record how many boleta photos carry a QR with the DNI.
-4. **Gmail:** forward a store's invoice mail to the dedicated Gmail; `email_inbox` finds its XML.
-5. **WhatsApp PDF (read-more):** a store PDF sent as a document is read from its text layer.
-6. **SOL:** deferred with S0.4 (D153); skip it.
-7. **BR-D01:** remove the app's access in the Google account, send a photo, and confirm `PENDING_AUTH` plus the admin alert. Sign in again and confirm the invoice finishes.
-8. Record M6 in `specs/04-tasks.md`.
-
-Test: the checks above, by hand.
-
-## Step 16: Flow B live (M3, 6d) `[inline: the owner's work invoices, OneDrive and mailboxes]`
-
-Follow `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" and then `docs/plan-mvp-widen-b-deliver.md` § "Deferred: live check": `inbox_rule`, the laptop agent, `/pagado` and the go-live import dry run. The import's real run waits for the owner's go. Set `mail.send_enabled` back to `false` after each run, and record M3 and the 6d part of M4 in `specs/04-tasks.md`.
-
-Test: the checks in those two sections, by hand.
-
-## Step 17: Gaps and self-alerts live (6e) `[inline: GitHub App on the ops repo and the owner's chat]`
-
-Follow `docs/plan-mvp-widen-b-gaps-ops.md` § "Deferred: live check" (GitHub and self-alerts; the backup part was step 9). Also check this plan's fixes:
-
-- `/gap ignorar` on a gap whose issue is queued: the gap stays ignored and gives no `GAP_admin`.
-- `/portal` for a gap with no issue yet: no comment row waits.
-
-Record M4 in `specs/04-tasks.md`.
-
-Test: the checks above, by hand.
-
-## Step 18: Read checks and the M7 record (M5, M7) `[inline: the owner's private samples and SUNAT credentials]`
-
-1. **S0.5:** with the SUNAT API credentials in the age store and `validez_api.enabled: true`, send a work invoice. Confirm the token URL and request fields against the real API (fix the config defaults if they differ) and that `sunat_status_json` holds `estado_cp` 1.
-2. **S0.1:** with ≥ 30 private pairs, run `scripts/accuracy_report.py --set <private dir> --write` and record the numbers. Check `_fix_serie` against any serie with D, O, Q, I or L in its last three characters.
-3. If S0.1 or S0.5 is not ready, record what is missing. v1 cannot go live without S0.1 (D56).
-4. Record M5 and the 9d part of M7 in `specs/04-tasks.md`.
-
-Test: the records exist.
+Steps 15 onwards (Meta goes live, the flow A and flow B runs, gaps live, read checks) moved to
+`docs/plan-mvp-live-chat.md` (D154).
