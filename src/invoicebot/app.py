@@ -63,6 +63,7 @@ from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, pg_environment, run_backup
 from invoicebot.ops.daily import DailyTask, daily_forever
+from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
@@ -371,6 +372,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             cfg,
             partial(_run_backup, settings, cfg, pool, drive),
             partial(_run_retention, pool, cfg),
+            partial(housekeep, pool, settings.data_dir),
             partial(daily_digest, pool, cfg.profiles, cfg.gaps),
             None if github_app is None else partial(_github_health, github_app, pool, cfg),
         )
@@ -777,14 +779,16 @@ def _daily_tasks(
     cfg: Config,
     backup: Callable[[], Awaitable[None]],
     retention: Callable[[], Awaitable[None]],
+    housekeeping: Callable[[], Awaitable[None]],
     digest: Callable[[], Awaitable[None]],
     github_health: Callable[[], Awaitable[None]] | None,
 ) -> list[DailyTask]:
     """Build the daily tasks, failing on an unknown target (R-9.11, BR-D05).
 
     Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
-    ``date.min`` base so a late backup wraps to the next day's early time. The
-    GitHub App health check runs at the digest time only when GitHub is configured.
+    ``date.min`` base so a late backup wraps to the next day's early time.
+    Housekeeping runs at the retention time. The GitHub App health check runs at
+    the digest time only when GitHub is configured.
     """
     kind = cfg.ops.backup.target.kind
     if kind != BACKUP_TARGET_KIND:
@@ -796,6 +800,7 @@ def _daily_tasks(
     tasks = [
         DailyTask(key="backup", at=backup_at, run=backup),
         DailyTask(key="retention", at=retention_at, run=retention),
+        DailyTask(key="housekeeping", at=retention_at, run=housekeeping),
         DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
     ]
     if github_health is not None:

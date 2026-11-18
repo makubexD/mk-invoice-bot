@@ -9,6 +9,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.config.models import RetentionDays
+from invoicebot.states import TERMINAL
 
 _NULL_MESSAGE_PAYLOADS = """
     UPDATE messages
@@ -24,6 +25,12 @@ _DELETE_OUTBOX = """
 """
 _DELETE_EVENTS = "DELETE FROM events WHERE created_at < now() - make_interval(days => %s)"
 _DELETE_JOBS = "DELETE FROM jobs WHERE created_at < now() - make_interval(days => %s)"
+_DELETE_STALE_JOBS = """
+    DELETE FROM jobs USING invoices
+    WHERE jobs.invoice_id = invoices.id
+      AND invoices.state = ANY(%s)
+      AND (jobs.lease_until IS NULL OR jobs.lease_until < now())
+"""
 
 
 async def _execute(conn: AsyncConnection[Any], statement: str, days: int) -> int:
@@ -46,3 +53,14 @@ async def prune(conn: AsyncConnection[Any], days: RetentionDays) -> dict[str, in
         "events": await _execute(conn, _DELETE_EVENTS, days.events),
         "jobs": await _execute(conn, _DELETE_JOBS, days.jobs),
     }
+
+
+async def delete_stale_jobs(conn: AsyncConnection[Any]) -> int:
+    """Delete the jobs of terminal invoices that no worker holds (R-9.7, S12.4).
+
+    A job is stale once its invoice can no longer move (``TERMINAL``) and its
+    lease has expired or was never taken. Returns the number of rows deleted;
+    does not commit.
+    """
+    cur = await conn.execute(_DELETE_STALE_JOBS, (list(TERMINAL),))
+    return cur.rowcount
