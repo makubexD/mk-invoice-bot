@@ -118,7 +118,10 @@ async def _transport(client: _Client, row: OutboxRow) -> str | None:
         token = await _access_token(client)
         return await _create_issue(client, token, fingerprint, _issue_fields(row.payload.get("fields")))
     if op == "close_issue":
-        number = _issue_number(_payload_text(row.payload, "issue_url"))
+        issue_url = _payload_text(row.payload, "issue_url")
+        if not issue_url.startswith(f"https://github.com/{client.repo}/issues/"):
+            raise PermanentSendError("github issue url is not in the configured repo")
+        number = _issue_number(issue_url)
         token = await _access_token(client)
         await _close_issue(client, token, number)
         return None
@@ -247,14 +250,22 @@ async def _comment(client: _Client, token: str, issue_url: str, hint_url: str) -
 
 
 async def _close_issue(client: _Client, token: str, number: str) -> None:
-    """Post the close comment and close the issue (R-11.9)."""
+    """Close the issue once: a retry that finds it closed writes nothing (R-11.9).
+
+    The PATCH runs before the close comment, so a retry after it finds the issue
+    closed. A comment POST that fails after the PATCH is not retried; the issue is
+    closed, which is what matters.
+    """
     issue_url = f"{_api_url(client)}/issues/{number}"
+    existing = _json(await _send(client, token, _Request("GET", issue_url)))
+    if isinstance(existing, dict) and existing.get("state") == "closed":
+        return
+    await _send(client, token, _Request("PATCH", issue_url, json_body={"state": "closed"}))
     await _send(
         client,
         token,
         _Request("POST", f"{issue_url}/comments", json_body={"body": CLOSE_COMMENT}),
     )
-    await _send(client, token, _Request("PATCH", issue_url, json_body={"state": "closed"}))
 
 
 def _api_url(client: _Client) -> str:
