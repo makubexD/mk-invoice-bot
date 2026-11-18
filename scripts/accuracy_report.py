@@ -85,10 +85,10 @@ def _pairs(set_dir: Path) -> list[_Pair]:
 def _read_media(pair: _Pair, cfg: Config) -> Reading | None:
     """Run the extract helper over ``pair`` and return its reading, if it has one (R-2.9)."""
     completed = subprocess.run(  # noqa: S603 - fixed argv built by the pipeline, never a shell
-        helper_argv(str(pair.media), pair.kind, cfg.extraction, cfg.limits.media, RULES_PATH),
+        helper_argv(pair.kind, cfg.extraction, cfg.limits.media, RULES_PATH),
+        input=pair.media.read_bytes(),
         capture_output=True,
         check=True,
-        text=True,
         timeout=cfg.extraction.helper_timeout_s,
     )
     payload = json.loads(completed.stdout)

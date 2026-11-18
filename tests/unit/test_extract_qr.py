@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import io
 import json
-from pathlib import Path
+import sys
+from types import SimpleNamespace
 from typing import get_args
 
 import cv2
@@ -12,6 +14,7 @@ import pytest
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot.extract import __main__ as helper
+from invoicebot.extract.fields import reading_from_json
 from invoicebot.extract.image import variants
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.qr import OPENCV_DECODER, ZXING_DECODER, read_invoice_qr
@@ -28,6 +31,12 @@ CANVAS = (800, 800)  # height, width
 LARGE_CANVAS = 2000
 SMALL_SCALE = 3
 QR_SCALE = 6
+MAX_PX = 2000
+MAX_BYTES = 10_000_000
+SMALL_MAX_BYTES = 1024
+HELPER_PSM = 6
+HELPER_TIMEOUT_S = 5
+RULES_PATH = "config/parsing_rules.yaml"
 
 
 def _canvas(height: int, width: int) -> np.ndarray:
@@ -46,6 +55,24 @@ def _paste(canvas: np.ndarray, code: np.ndarray, top: int, left: int) -> np.ndar
     height, width = code.shape
     canvas[top : top + height, left : left + width] = code
     return canvas
+
+
+def _argv(*, max_bytes: int = MAX_BYTES) -> list[str]:
+    """Build the helper argv one photo input comes in as (D122, D158)."""
+    return [
+        str(MAX_PX),
+        str(max_bytes),
+        "tesseract",
+        "spa",
+        str(HELPER_PSM),
+        str(HELPER_TIMEOUT_S),
+        RULES_PATH,
+    ]
+
+
+def _feed_stdin(monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    """Make the helper read ``data`` from its stdin (D158)."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(data)))
 
 
 def test_read_invoice_qr_clean_image_returns_payload() -> None:
@@ -138,7 +165,7 @@ def test_read_invoice_qr_blank_image_returns_none() -> None:
 
 
 def test_helper_opencv_error_reports_unreadable_and_exits_zero(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """BR-E01, R-2.1: an OpenCV error while reading a photo is an unreadable result, exit 0."""
 
@@ -147,25 +174,43 @@ def test_helper_opencv_error_reports_unreadable_and_exits_zero(
 
     monkeypatch.setattr(helper, "_limit_resources", lambda: None)
     monkeypatch.setattr(helper, "load_gray", explode)
-    photo = tmp_path / "photo.jpg"
-    photo.write_bytes(b"not an image")
-    argv = [
-        str(photo),
-        "2000",
-        "10000",
-        "tesseract",
-        "spa",
-        "6",
-        "5",
-        "config/parsing_rules.yaml",
-    ]
+    _feed_stdin(monkeypatch, b"not an image")
 
-    exit_code = helper.main(argv)
+    exit_code = helper.main(_argv())
 
     assert exit_code == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["error"] == "unreadable"
     assert payload["reading"] is None
+
+
+def test_helper_reads_a_qr_photo_from_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D158: a synthetic QR photo fed on stdin prints the same payload as a path input did."""
+    canvas = _paste(_canvas(*CANVAS), _code(PAYLOAD), 100, 100)
+    encoded, buffer = cv2.imencode(".png", canvas)
+    assert encoded
+    _feed_stdin(monkeypatch, buffer.tobytes())
+    monkeypatch.setattr(helper, "_limit_resources", lambda: None)
+
+    assert helper.main(_argv()) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] is None
+    assert reading_from_json(payload["reading"]) == EXPECTED
+
+
+def test_helper_stdin_over_the_byte_cap_is_unreadable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D158: an input of max_bytes + 1 bytes prints the unreadable payload and exits 0."""
+    _feed_stdin(monkeypatch, b"x" * (SMALL_MAX_BYTES + 1))
+    monkeypatch.setattr(helper, "_limit_resources", lambda: None)
+
+    assert helper.main(_argv(max_bytes=SMALL_MAX_BYTES)) == 0
+
+    assert json.loads(capsys.readouterr().out) == helper._unreadable(ocr=False)
 
 
 def test_variant_and_decoder_names_are_the_closed_sets() -> None:

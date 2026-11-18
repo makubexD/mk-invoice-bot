@@ -24,10 +24,10 @@ def _score_pair(expected_path: Path, cfg: Config) -> Score:
     """Run the helper over the pair's image and score its reading against the expected file."""
     image = expected_path.with_suffix(".jpg")
     completed = subprocess.run(  # noqa: S603 - fixed argv: this interpreter and a repo fixture path
-        helper_argv(str(image), "photo", cfg.extraction, cfg.limits.media, RULES),
+        helper_argv("photo", cfg.extraction, cfg.limits.media, RULES),
+        input=image.read_bytes(),
         capture_output=True,
         check=True,
-        text=True,
         timeout=cfg.extraction.helper_timeout_s,
     )
     payload = json.loads(completed.stdout)

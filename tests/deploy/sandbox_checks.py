@@ -20,6 +20,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from invoicebot.config.loader import load_config
 from invoicebot.pipeline.extract import PIXELS_PER_MEGAPIXEL, helper_argv
@@ -75,14 +76,24 @@ def _image_env() -> dict[str, str]:
     }
 
 
-def _run(argv: Sequence[str], env: Mapping[str, str], timeout_s: float) -> subprocess.CompletedProcess[str]:
-    """Run a fixed argv with a timeout, capturing its output."""
+def _run(
+    argv: Sequence[str],
+    env: Mapping[str, str],
+    timeout_s: float,
+    stdin: bytes | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    """Run a fixed argv with a timeout, capturing its output and feeding ``stdin`` when given.
+
+    Output is text unless binary ``stdin`` is fed, in which case it stays bytes so the input
+    reaches the helper unchanged.
+    """
     return subprocess.run(  # noqa: S603 - fixed argv built here, never a shell
         list(argv),
         capture_output=True,
         check=False,
         env=dict(env),
-        text=True,
+        input=stdin,
+        text=stdin is None,
         timeout=timeout_s,
     )
 
@@ -365,19 +376,17 @@ def check_no_orphan_chromium() -> None:
 
 
 def check_extract_helper() -> None:
-    """The image prefix reads the golden set's first image and prints one JSON line."""
+    """The image prefix reads the golden set's first image from stdin and prints one JSON line."""
     config = load_config(CONFIG / "example.yaml")
     image = sorted(GOLDEN.glob("*.json"))[0].with_suffix(".jpg")
-    argv = helper_argv(
-        str(image), "photo", config.extraction, config.limits.media, CONFIG / "parsing_rules.yaml"
-    )
-    done = _run([*PREFIXES.image, *argv], _image_env(), HELPER_TIMEOUT_S)
+    argv = helper_argv("photo", config.extraction, config.limits.media, CONFIG / "parsing_rules.yaml")
+    done = _run([*PREFIXES.image, *argv], _image_env(), HELPER_TIMEOUT_S, stdin=image.read_bytes())
     if done.returncode != 0:
-        raise CheckFailed(f"helper exited {done.returncode}: {done.stderr.strip()!r}")
+        raise CheckFailed(f"helper exited {done.returncode}: {done.stderr!r}")
     try:
         json.loads(done.stdout)
     except json.JSONDecodeError:
-        raise CheckFailed(f"stdout is not JSON: {done.stdout.strip()!r}") from None
+        raise CheckFailed(f"stdout is not JSON: {done.stdout!r}") from None
 
 
 CHECKS_BY_NAME: dict[str, Callable[[], None]] = {

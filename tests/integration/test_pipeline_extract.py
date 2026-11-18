@@ -470,25 +470,30 @@ async def test_valid_qr_photo_saves_the_reading_and_queues_routing(
     assert unreadable == []
 
 
-def _write_prefix_script(tmp_path: Path) -> tuple[Path, Path]:
-    """Write a fake helper prefix that records its argv then runs the helper (D147).
+def _write_prefix_script(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Write a fake helper prefix that records its argv and stdin then runs the helper (D147, D158).
 
-    Returns the script and the marker file it appends each argument to, one per line.
+    Returns the script, the marker file it appends each argument to, and the file it copies
+    stdin to before piping the same bytes on to the helper.
     """
     marker = tmp_path / "prefix-argv.txt"
+    stdin_path = tmp_path / "prefix-stdin.bin"
     script = tmp_path / "sandbox-prefix.sh"
-    script.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> {shlex.quote(str(marker))}\nexec "$@"\n')
+    script.write_text(
+        f"#!/bin/sh\nprintf '%s\\n' \"$@\" >> {shlex.quote(str(marker))}\n"
+        f'tee {shlex.quote(str(stdin_path))} | "$@"\n'
+    )
     script.chmod(0o755)
-    return script, marker
+    return script, marker, stdin_path
 
 
 async def test_helper_prefix_wraps_the_extract_helper(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D147: the helper prefix runs before the extract helper and the invoice still routes."""
+    """D147, D158: the prefix runs before the helper, which receives the photo bytes on stdin."""
     photo = _write_qr_photo(VALID_PAYLOAD, tmp_path / f"prefixed{PNG}")
     invoice_id, profile_id = await _invoice_with_photo(db_pool, photo)
-    script, marker = _write_prefix_script(tmp_path)
+    script, marker, stdin_path = _write_prefix_script(tmp_path)
 
     await _run_handler(db_pool, invoice_id, helper_prefix=(str(script),))
 
@@ -503,9 +508,10 @@ async def test_helper_prefix_wraps_the_extract_helper(
     assert route_jobs == 1
     assert unreadable == []
     recorded = marker.read_text().splitlines()
-    assert str(photo) in recorded
+    assert str(photo) not in recorded
     assert "-m" in recorded
     assert recorded[recorded.index("-m") + 1] == "invoicebot.extract"
+    assert stdin_path.read_bytes() == photo.read_bytes()
 
 
 async def test_text_only_photo_routes_with_ocr_fields(
@@ -982,14 +988,15 @@ async def test_cancelling_the_handler_leaves_no_helper_process(
     children: list[asyncio.subprocess.Process] = []
     real_exec = asyncio.create_subprocess_exec
 
-    async def _slow_exec(*_args: Any, **_kwargs: Any) -> asyncio.subprocess.Process:
+    async def _slow_exec(*_args: Any, **kwargs: Any) -> asyncio.subprocess.Process:
         child = await real_exec(
             sys.executable,
             "-c",
             SLOW_HELPER_SCRIPT,
+            stdin=kwargs.get("stdin", asyncio.subprocess.DEVNULL),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=_kwargs.get("start_new_session", False),
+            start_new_session=kwargs.get("start_new_session", False),
         )
         children.append(child)
         started.set()
@@ -1028,6 +1035,7 @@ async def test_timeout_kills_a_helper_and_the_child_it_started(
             "-c",
             TREE_HELPER_SCRIPT,
             str(pid_file),
+            stdin=kwargs.get("stdin", asyncio.subprocess.DEVNULL),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=kwargs.get("start_new_session", False),
@@ -1069,6 +1077,7 @@ async def test_helper_output_over_the_cap_raises_so_the_queue_retries(
             sys.executable,
             "-c",
             OVERSIZED_HELPER_SCRIPT,
+            stdin=kwargs.get("stdin", asyncio.subprocess.DEVNULL),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             start_new_session=kwargs.get("start_new_session", False),

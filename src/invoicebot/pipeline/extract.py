@@ -3,12 +3,14 @@
 :func:`make_extract_handler` builds the handler of the ``extract`` job step. QR decoding and
 OCR run in ``python -m invoicebot.extract`` under the heavy-work slot, so the bot process
 never loads OpenCV, zxing, Tesseract or pypdfium2 and their memory returns when the helper
-exits (D78, D122). The helper's one JSON line is validated before use. The outcome's state
+exits (D78, D122). The file's bytes go to the helper on stdin, so it never opens a path under
+the data root (D158). The helper's one JSON line is validated before use. The outcome's state
 change, next job and outbox message commit in one transaction (CLAUDE.md "Database").
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -232,17 +234,17 @@ async def _run_helper(
     """Run the extract helper under the heavy slot and return its validated result.
 
     ``helper_prefix`` is prepended to the helper's argv (D147). The helper receives the input
-    kind, that kind's byte cap, the PDF caps, the OCR config and ``rules_path`` as arguments.
-    It runs with a minimal environment and an import path
-    that does not include the working directory, and its whole process group is killed and
-    reaped on every exit — timeout, crash or cancellation — so no decode process or child it
-    started outlives its job (R-9.2).
+    kind, that kind's byte cap, the PDF caps, the OCR config and ``rules_path`` as arguments,
+    and the file's bytes on stdin — never its path (D158). It runs with a minimal environment
+    and an import path that does not include the working directory, and its whole process group
+    is killed and reaped on every exit — timeout, crash or cancellation — so no decode process
+    or child it started outlives its job (R-9.2).
 
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
             reaped first.
-        RuntimeError: when the helper exits non-zero, prints more than
-            ``MAX_HELPER_OUTPUT_BYTES`` or prints malformed JSON.
+        RuntimeError: when the input file cannot be read, the helper exits non-zero, prints
+            more than ``MAX_HELPER_OUTPUT_BYTES`` or prints malformed JSON.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -251,26 +253,31 @@ async def _run_helper(
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
     }
-    argv = [*helper_prefix, *helper_argv(path, kind, extraction_cfg, media, rules_path)]
+    try:
+        # The intake already capped the file at the media limit (R-1.11).
+        data = await asyncio.to_thread(Path(path).read_bytes)
+    except OSError as err:
+        raise RuntimeError("extract input cannot be read") from err
+    argv = [*helper_prefix, *helper_argv(kind, extraction_cfg, media, rules_path)]
     async with HEAVY:
-        stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
+        stdout = await run_helper(argv, data, env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
     return _parse_result(stdout)
 
 
 def helper_argv(
-    path: str, kind: AttachmentKind, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+    kind: AttachmentKind, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
 ) -> list[str]:
-    """Return the extract helper's argv for one file (D78, D122).
+    """Return the extract helper's argv for one input kind (D78, D122, D158).
 
-    The golden-set test and the accuracy report run the helper with this same argv, so they
-    measure what the pipeline reads (R-2.9).
+    The input itself travels on the helper's stdin, never as an argument (D158). The golden-set
+    test and the accuracy report run the helper with this same argv, so they measure what the
+    pipeline reads (R-2.9).
     """
     return [
         sys.executable,
         "-P",
         "-m",
         "invoicebot.extract",
-        path,
         str(extraction_cfg.max_image_px),
         str(max_bytes_for(kind, media)),
         extraction_cfg.ocr.engine,

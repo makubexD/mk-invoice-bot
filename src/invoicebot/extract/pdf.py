@@ -31,15 +31,18 @@ class TooManyPages(ValueError):
     """The document has more pages than the configured cap (BR-E07, D122)."""
 
 
-def open_pdf(path: str | Path, max_pages: int) -> PdfDocument:
-    """Open ``path`` and return it, or raise when it is unreadable or too long (D122).
+def open_pdf(source: str | Path | bytes, max_pages: int) -> PdfDocument:
+    """Open ``source`` and return it, or raise when it is unreadable or too long (D122).
+
+    ``source`` is a path or the file's bytes; the extract helper passes bytes, so it never
+    opens a path under the data root (D158).
 
     Raises:
         TooManyPages: when the document has more than ``max_pages`` pages.
         ValueError: when the bytes are not a readable PDF.
     """
     try:
-        document = PdfDocument(path)
+        document = PdfDocument(source)
         page_count = len(document)
     except PdfiumError as err:
         raise ValueError(UNREADABLE_MESSAGE) from err
