@@ -1,11 +1,12 @@
 # mk-invoice-bot
 
-A WhatsApp and Telegram bot that reads Peruvian invoices from photos, validates them and files them. One Python
-process (FastAPI + asyncio) and Postgres, built for a 2 GB host.
+A WhatsApp bot (Telegram comes in v1.1) that reads Peruvian invoices from photos, validates them and files them.
+One Python process (FastAPI + asyncio) and Postgres, built for a 2 GB host.
 
 - **Source of truth:** `specs/` (requirements `02`, design `03`, backlog `04`, business rules `06`). Code and tests
   cite requirement and rule IDs (`R-1.8`, `BR-S01`). If the code and a spec disagree, stop and say so.
-- **Roadmap:** `docs/plan-mvp.md`; each phase has its own `docs/plan-mvp-<phase>.md`.
+- **Roadmap:** `docs/plan-mvp.md`; each phase has its own `docs/plan-mvp-<phase>.md`, moved to
+  `docs/archive/` when it finishes (D162). Diagrams are in `docs/architecture.md` (D161).
 - **Out of scope:** Jarvis. Nothing here may import it or depend on it; integration is the REST/MCP/events contract.
 
 ## Commands
