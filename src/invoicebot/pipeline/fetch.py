@@ -38,7 +38,7 @@ from invoicebot.fetchers.chain import WAIT_REASONS, Attempt, Exhausted, Run, Wai
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUGS, RULE_AUTH_ADMIN
-from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
+from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
@@ -338,6 +338,10 @@ async def _record_result(
             )
         await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
+        # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
+        repo = inputs.cfg.gaps.github.repo
+        await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_MISSING, repo)
+        await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_BROKEN, repo)
     elif result.reason in WAIT_REASONS:
         run_after = None if delay is None else await _run_after(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)

@@ -28,6 +28,7 @@ from invoicebot.store.gaps import (
     GapRow,
     alert_due,
     get_gap,
+    linked_gap,
     mark_alerted,
     mark_closed,
     mark_reported,
@@ -149,6 +150,18 @@ async def close_gap(conn: AsyncConnection[Any], gap: GapRow, repo: str) -> None:
             repo,
             {"op": "close_issue", "issue_url": gap.issue_url},
         )
+
+
+async def close_if_fixed(conn: AsyncConnection[Any], invoice_id: int, kind: str, repo: str) -> None:
+    """Close the invoice's linked gap of ``kind`` when it is fixed (R-11.9, D157).
+
+    Called once the invoice gets past the step that failed: a gap
+    ``reevaluate`` marked fixed closes, while an open or reported one stays.
+    Does not commit; the caller owns the transaction.
+    """
+    gap = await linked_gap(conn, invoice_id, kind)
+    if gap is not None and gap.state == "fixed":
+        await close_gap(conn, gap, repo)
 
 
 async def _queue_digest(conn: AsyncConnection[Any], profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:

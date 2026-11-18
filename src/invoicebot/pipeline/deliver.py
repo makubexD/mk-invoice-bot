@@ -58,7 +58,7 @@ from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
-from invoicebot.pipeline.gaps import GapContext, GapSighting, raise_gap
+from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.pending_auth import (
     GOOGLE,
@@ -617,6 +617,7 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
         )
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
         await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
+        await _close_fixed_gap(conn, context, delivery.invoice_id)
 
 
 def _draft_reply(delivery: _Delivery) -> tuple[str, Button]:
@@ -677,6 +678,7 @@ async def _automatic(
             MESSAGES[mode.done_rule].format(folder=delivery.folder),
             _done_buttons(delivery.invoice_id, mode.done_rule),
         )
+        await _close_fixed_gap(conn, context, delivery.invoice_id)
         photos = await take_photo_paths(conn, delivery.invoice_id)
 
     for path in photos:
@@ -726,6 +728,12 @@ async def _handed_off(
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
+        await _close_fixed_gap(conn, context, delivery.invoice_id)
+
+
+async def _close_fixed_gap(conn: AsyncConnection[Any], context: DeliverContext, invoice_id: int) -> None:
+    """Close the invoice's fixed template gap now that delivery succeeded (R-11.9)."""
+    await close_if_fixed(conn, invoice_id, TEMPLATE_INVALID, context.cfg.gaps.github.repo)
 
 
 def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
