@@ -35,7 +35,6 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
-from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -50,7 +49,6 @@ from invoicebot.config.models import (
     StoreDirectory,
     WhatsAppChannel,
 )
-from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
 from invoicebot.fetchers.gmail import GmailMailbox
@@ -93,8 +91,8 @@ from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
-from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
+from invoicebot.runtime_config import ConfigRejected, RuntimeConfig, load_runtime_config
 from invoicebot.sandbox import (
     HelperPrefixes,
     browser_command,
@@ -217,6 +215,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await pool.close()
 
 
+def _load_runtime(settings: Settings) -> RuntimeConfig:
+    """Load the runtime config, logging why startup rejects it (R-9.6)."""
+    try:
+        return load_runtime_config(settings)
+    except ConfigRejected as err:
+        logger.error("config rejected at startup", extra={"reason": err.reason})
+        raise
+
+
 @asynccontextmanager
 async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> AsyncIterator[None]:
     """Wire the WhatsApp channel when config, secrets and a database are present."""
@@ -229,11 +236,10 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         yield
         return
     assert_no_plain_secrets(os.environ)
-    cfg = load_config(settings.config_path)
-    directory = load_directory(settings.config_path.parent)
-    # Fail fast: a missing or invalid rules file stops startup (S3.6).
-    load_rules(settings.parsing_rules_path)
-    rules = compile_rules(cfg.routing)
+    runtime = _load_runtime(settings)
+    cfg = runtime.cfg
+    directory = runtime.directory
+    rules = runtime.rules
     store = _load_secrets(settings)
     configure_logging(store.values())
     secrets = store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
