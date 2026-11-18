@@ -33,37 +33,47 @@ for path in "$identity_file" "$dump_file"; do
     fi
 done
 
-# The URL arrives on stdin, so neither the URL nor the password is ever an argv entry.
-mapfile -d '' -t pg_fields < <(python3 -c '
-import sys
-from urllib.parse import unquote, urlsplit
-
-parts = urlsplit(sys.stdin.read().strip())
-fields = (
-    parts.hostname or "",
-    str(parts.port) if parts.port else "5432",
-    unquote(parts.username or ""),
-    unquote(parts.password or ""),
-    unquote(parts.path.lstrip("/")),
-)
-sys.stdout.buffer.write(b"".join(field.encode() + b"\0" for field in fields))
-' <<<"$database_url")
-if [[ ${#pg_fields[@]} -ne 5 ]]; then
-    echo "restore drill: cannot parse RESTORE_DATABASE_URL" >&2
-    exit 1
-fi
-export PGHOST="${pg_fields[0]}"
-export PGPORT="${pg_fields[1]}"
-export PGUSER="${pg_fields[2]}"
-export PGPASSWORD="${pg_fields[3]}"
-export PGDATABASE="${pg_fields[4]}"
-
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(dirname -- "$script_dir")
 
 plain_dump=$(mktemp)
 restore_log=$(mktemp)
 trap 'rm -f -- "$plain_dump" "$restore_log"' EXIT
+
+# The URL arrives on stdin, so neither the URL nor the password is ever an argv entry (R-9.15).
+# The split is the backup's, so both accept the same query keys (R-9.14). The pairs stay in
+# memory: `wait` on the process substitution gives Python's exit status.
+mapfile -d '' -t pg_fields < <(uv run --project "$repo_root" python -I -c '
+import sys
+
+from invoicebot.ops.backup import pg_environment
+
+try:
+    environment = pg_environment(sys.stdin.read().strip())
+except ValueError as error:
+    print(error, file=sys.stderr)
+    raise SystemExit(1)
+
+for key, value in environment.items():
+    if key != "PATH":
+        sys.stdout.buffer.write(f"{key}={value}\0".encode())
+' <<<"$database_url")
+if ! wait $!; then
+    echo "restore drill: cannot parse RESTORE_DATABASE_URL" >&2
+    exit 1
+fi
+
+pg_keys=" PGHOST PGPORT PGUSER PGPASSWORD PGDATABASE PGSSLMODE PGSSLROOTCERT PGCONNECT_TIMEOUT PGAPPNAME PGPASSFILE "
+for field in "${pg_fields[@]}"; do
+    case "$pg_keys" in
+        # "${field?}" carries the whole KEY=VALUE word: shellcheck cannot see that it assigns a variable.
+        *" ${field%%=*} "*) export "${field?}" ;;
+        *)
+            echo "restore drill: cannot parse RESTORE_DATABASE_URL" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # Paths arrive as argv, so nothing from the command line is pasted into Python code.
 if ! uv run --project "$repo_root" python -I - "$identity_file" "$dump_file" "$plain_dump" <<'PYTHON'
