@@ -17,15 +17,21 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 #: A sandbox check prints nothing; anything larger is a broken wrapper, not output (R-9.2).
 CHECK_OUTPUT_BYTES = 4 * 1024
 
-#: Runs inside the first namespace: an empty `/proc`, the hidden dirs masked, no network.
-#: The helper runs with no capabilities, so it cannot unmount a mask. This shell stays
-#: PID 1 of the namespace instead of exec'ing: a helper that leaves the process group
-#: still dies with it, because the kernel kills the whole namespace when PID 1 exits.
-#: `<&0` keeps stdin, which a background command would otherwise read from /dev/null.
+#: Runs inside the first namespace: an empty `/proc`, the data root masked, the hidden dirs
+#: masked, no network. The data root is masked read-only the way `BROWSER_SCRIPT` masks it
+#: without an out dir (D158). The helper runs with no capabilities, so it cannot unmount a
+#: mask. This shell stays PID 1 of the namespace instead of exec'ing: a helper that leaves
+#: the process group still dies with it, because the kernel kills the whole namespace when
+#: PID 1 exits. `<&0` keeps stdin, which a background command would otherwise read from
+#: /dev/null.
 IMAGE_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
 mount -t tmpfs -o size=4k,mode=0555 none /proc
+data=$1
+shift
+mount -t tmpfs -o size=4k,mode=0555 none "$data"
+mount -o remount,bind,ro "$data"
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
 setpriv --bounding-set=-all --inh-caps=-all --no-new-privs -- "$@" <&0 &
@@ -45,6 +51,7 @@ data=$2
 shift 2
 out=${HELPER_OUT_DIR:-}
 if [ -n "$out" ]; then
+  case "/$out/" in */../*) echo "out dir has .." >&2; exit 1 ;; esac
   case "$out" in "$data"/*) ;; *) echo "out dir outside data root" >&2; exit 1 ;; esac
   mkdir "$TMPDIR/.out"
   mount --bind "$out" "$TMPDIR/.out"
@@ -62,8 +69,8 @@ wait $!
 """
 
 
-def image_prefix(hidden_dirs: Sequence[Path]) -> tuple[str, ...]:
-    """Return the argv prefix that sandboxes the extract helper (D147)."""
+def image_prefix(hidden_dirs: Sequence[Path], data_dir: Path) -> tuple[str, ...]:
+    """Return the argv prefix that sandboxes the extract helper, masking the data root (D147, D158)."""
     return (
         "unshare",
         "--user",
@@ -77,9 +84,27 @@ def image_prefix(hidden_dirs: Sequence[Path]) -> tuple[str, ...]:
         "-c",
         IMAGE_SCRIPT,
         "sandbox",
+        str(data_dir),
         *map(str, hidden_dirs),
         "--",
     )
+
+
+def check_no_parent_dir(path: Path, name: str) -> None:
+    """Raise ``ValueError`` when ``path`` has a ``..`` component (D150).
+
+    A ``..`` part lets the path leave the data root the wrapper masks, so the Python side
+    and the shell both refuse it before any mount happens.
+
+    Args:
+        path: The path to check.
+        name: The argument name to report in the error.
+
+    Raises:
+        ValueError: When ``path`` has a ``..`` component.
+    """
+    if ".." in path.parts:
+        raise ValueError(f"{name} must not contain '..'")
 
 
 def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int, data_dir: Path) -> tuple[str, ...]:
@@ -88,6 +113,7 @@ def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int, data_dir: Path) -> 
         raise ValueError("tmp_mb must be at least 1")
     if not data_dir.is_absolute() or data_dir == Path("/"):
         raise ValueError("data_dir must be absolute and not /")
+    check_no_parent_dir(data_dir, "data_dir")
     return (
         "unshare",
         "--user",
@@ -126,10 +152,10 @@ class SandboxUnavailable(RuntimeError):
 
 
 def helper_prefixes(enabled: bool, hidden: Sequence[Path], tmp_mb: int, data_dir: Path) -> HelperPrefixes:
-    """Return the prefixes for the enabled sandbox, or empty ones when it is off (D147, D150)."""
+    """Return the prefixes for the enabled sandbox, or empty ones when it is off (D147, D150, D158)."""
     if not enabled:
         return HelperPrefixes((), ())
-    return HelperPrefixes(image_prefix(hidden), browser_prefix(hidden, tmp_mb, data_dir))
+    return HelperPrefixes(image_prefix(hidden, data_dir), browser_prefix(hidden, tmp_mb, data_dir))
 
 
 def browser_command(prefixes: HelperPrefixes, base: Sequence[str]) -> tuple[str, ...]:

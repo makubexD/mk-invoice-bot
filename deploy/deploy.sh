@@ -295,7 +295,9 @@ update_config() {
     mv -f "$tmp" "$CONFIG_DIR/config.yaml"
     log "installed $CONFIG_DIR/config.yaml"
 
-    "$ENGINE" kill --signal HUP "$app_id" >&2
+    # Signal PID 1 from inside: `podman kill` marks the container stopped by the
+    # user, so the restart policy would not bring back the app a good reload ends (D155).
+    "$ENGINE" exec "$app_id" sh -c 'kill -HUP 1' >&2
     log "sent SIGHUP to the app; config reload requested"
     exit 0
 }

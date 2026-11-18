@@ -60,6 +60,7 @@ RULES: dict[str, Rule] = {
     "BR-F09": Rule("BR-F09", None, "BR-F09"),
     "BR-F11": Rule("BR-F11", None, "BR-F11"),
     "BR-F10": Rule("BR-F10", None, "BR-F10"),
+    "BR-F12": Rule("BR-F12", None, "BR-F12"),
     "BR-F07": Rule("BR-F07", "MANUAL_REQUIRED", "BR-F07"),
     "BR-D01": Rule("BR-D01", "PENDING_AUTH", "BR-D01"),
     "BR-D02": Rule("BR-D02", "MANUAL_REQUIRED", "BR-D02"),
@@ -97,4 +98,5 @@ RULES: dict[str, Rule] = {
     "BR-O02": Rule("BR-O02", None, "BR-O02"),
     "BR-O03": Rule("BR-O03", None, "BR-O03"),
     "BR-O04": Rule("BR-O04", None, "BR-O04"),
+    "BR-O05": Rule("BR-O05", None, "BR-O05"),
 }

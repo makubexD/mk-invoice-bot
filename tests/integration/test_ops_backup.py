@@ -127,6 +127,16 @@ async def test_backup_config_tarball_skips_secrets_and_age_files(
     assert names == ["example.yaml"]
 
 
+async def test_backup_returns_the_uploaded_payload_sizes(job: BackupJob, drive: FakeDrive) -> None:
+    """R-9.11: run_backup returns the sizes of the two uploaded encrypted payloads."""
+    sizes = await run_backup(job, drive, TODAY)
+
+    dump_path = f"{TARGET}/db-{TODAY.isoformat()}.dump.age"
+    config_path = f"{TARGET}/config-{TODAY.isoformat()}.tar.age"
+    assert sizes.dump_bytes == len(drive.uploads[dump_path])
+    assert sizes.config_bytes == len(drive.uploads[config_path])
+
+
 async def test_backup_dump_over_cap_raises_too_large_and_uploads_nothing(
     job: BackupJob, drive: FakeDrive
 ) -> None:

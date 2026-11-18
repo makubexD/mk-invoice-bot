@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -35,7 +36,6 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
-from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -50,7 +50,6 @@ from invoicebot.config.models import (
     StoreDirectory,
     WhatsAppChannel,
 )
-from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
 from invoicebot.fetchers.gmail import GmailMailbox
@@ -65,6 +64,8 @@ from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
 from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, pg_environment, run_backup
 from invoicebot.ops.daily import DailyTask, daily_forever
+from invoicebot.ops.housekeeping import housekeep
+from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
@@ -85,6 +86,7 @@ from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
+from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
@@ -93,8 +95,9 @@ from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
-from invoicebot.routing.router import compile_rules
+from invoicebot.reload import reload_config
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
+from invoicebot.runtime_config import ConfigRejected, RuntimeConfig, load_runtime_config
 from invoicebot.sandbox import (
     HelperPrefixes,
     browser_command,
@@ -161,10 +164,14 @@ BACKUP_TARGET_KIND = "onedrive"
 PG_DUMP_CMD = ("pg_dump",)
 #: BR-O04's alert ceiling: at most one backup-failure alert per twelve hours.
 BACKUP_ALERT_EVERY = timedelta(hours=12)
+#: BR-O05's alert ceiling: at most one rejected-config alert per hour.
+CONFIG_ALERT_EVERY = timedelta(hours=1)
 #: Retention runs half an hour after the backup, so it prunes what the dump kept (S15.1).
 RETENTION_DELAY = timedelta(minutes=30)
 #: The rule id and rate-limit key of the backup-failure alert (BR-O04).
 RULE_BACKUP_ALERT = "BR-O04"
+#: The rule id and rate-limit key of the rejected-config alert (BR-O05).
+RULE_CONFIG_ALERT = "BR-O05"
 
 
 @dataclass(frozen=True)
@@ -183,11 +190,6 @@ async def _no_db_ping() -> bool:
     return False
 
 
-def _log_config_reload_request() -> None:
-    """Acknowledge SIGHUP; the actual config reload arrives in a later phase."""
-    logger.info("config reload requested (SIGHUP)")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the pool, install SIGHUP and run the runtime until shutdown."""
@@ -198,10 +200,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await pool.open(wait=False)
         app.state.db_ping = partial(ping, pool)
 
+    app.state.reload = None
     loop = asyncio.get_running_loop()
     sighup_installed = False
     try:
-        loop.add_signal_handler(signal.SIGHUP, _log_config_reload_request)
+        loop.add_signal_handler(signal.SIGHUP, _on_sighup, app)
         sighup_installed = True
     except (NotImplementedError, RuntimeError, ValueError):
         # Platforms or threads without signal support still start normally.
@@ -217,6 +220,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await pool.close()
 
 
+def _on_sighup(app: FastAPI) -> None:
+    """Hand SIGHUP to the runtime's reload, or ignore it when no runtime is wired (R-9.6, D155).
+
+    Health-only mode has no config to reload, so the signal must not end the process.
+    """
+    reload: Callable[[], None] | None = app.state.reload
+    if reload is None:
+        logger.info("config reload ignored: no runtime config is loaded")
+        return
+    reload()
+
+
+def _load_runtime(settings: Settings) -> RuntimeConfig:
+    """Load the runtime config, logging why startup rejects it (R-9.6)."""
+    try:
+        return load_runtime_config(settings)
+    except ConfigRejected as err:
+        logger.error("config rejected at startup", extra={"reason": err.reason})
+        raise
+
+
 @asynccontextmanager
 async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> AsyncIterator[None]:
     """Wire the WhatsApp channel when config, secrets and a database are present."""
@@ -229,11 +253,10 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         yield
         return
     assert_no_plain_secrets(os.environ)
-    cfg = load_config(settings.config_path)
-    directory = load_directory(settings.config_path.parent)
-    # Fail fast: a missing or invalid rules file stops startup (S3.6).
-    load_rules(settings.parsing_rules_path)
-    rules = compile_rules(cfg.routing)
+    runtime = _load_runtime(settings)
+    cfg = runtime.cfg
+    directory = runtime.directory
+    rules = runtime.rules
     store = _load_secrets(settings)
     configure_logging(store.values())
     secrets = store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
@@ -349,15 +372,20 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             pg_environment(database_url)
         daily_tasks = _daily_tasks(
             cfg,
-            partial(_run_backup, settings, cfg, pool, drive),
-            partial(_run_retention, pool, cfg),
-            partial(daily_digest, pool, cfg.profiles, cfg.gaps),
-            None if github_app is None else partial(_github_health, github_app, pool, cfg),
+            DailyRuns(
+                backup=partial(_run_backup, settings, cfg, pool, drive),
+                retention=partial(_run_retention, pool, cfg),
+                housekeeping=partial(housekeep, pool, settings.data_dir),
+                padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
+                digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
+                github_health=None if github_app is None else partial(_github_health, github_app, pool, cfg),
+            ),
         )
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
             "outbox": partial(_send_forever, sender),
             "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
+            "reevaluate": partial(_reevaluate_at_start, pool, cfg, directory),
         }
         background["daily"] = partial(daily_forever, pool, cfg.owner.timezone, daily_tasks)
         background["selfcheck"] = partial(
@@ -365,8 +393,55 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         )
         if deliver is not None and deliver.laptop is not None:
             background["laptop"] = deliver.laptop
-        async with _background(background):
+        async with _reload_ready(app, settings, pool, cfg), _background(background):
             yield
+
+
+async def _reevaluate_at_start(pool: Pool, cfg: Config, directory: StoreDirectory) -> None:
+    """Re-check the gaps once at this start, then idle (D156).
+
+    A reload is a start, so a deploy or config change that fixes a gap is seen here. It runs
+    as a supervised task, so a database that is down at startup neither blocks the app nor
+    skips the check: the supervisor retries it until it succeeds.
+    """
+    await reevaluate(pool, cfg, directory)
+    await asyncio.Event().wait()
+
+
+@asynccontextmanager
+async def _reload_ready(app: FastAPI, settings: Settings, pool: Pool, cfg: Config) -> AsyncIterator[None]:
+    """Accept a SIGHUP config reload while the runtime runs (R-9.6, D155)."""
+    reloads: set[asyncio.Task[bool]] = set()
+    app.state.reload = partial(_start_config_reload, reloads, settings, pool, cfg)
+    try:
+        yield
+    finally:
+        app.state.reload = None
+
+
+def _start_config_reload(
+    reloads: set[asyncio.Task[bool]], settings: Settings, pool: Pool, cfg: Config
+) -> None:
+    """Start one config reload task, ignoring a SIGHUP while one is running (R-9.6, D155)."""
+    if reloads:
+        logger.info("config reload already running")
+        return
+    task = asyncio.create_task(
+        reload_config(
+            partial(load_runtime_config, settings),
+            partial(_alert_config_rejected, pool, cfg),
+            partial(os.kill, os.getpid(), signal.SIGTERM),
+        )
+    )
+    reloads.add(task)
+    task.add_done_callback(reloads.discard)
+    task.add_done_callback(_log_reload_failure)
+
+
+def _log_reload_failure(task: asyncio.Task[bool]) -> None:
+    """Log a reload that raised instead of rejecting, so it never fails silently (R-9.6)."""
+    if not task.cancelled() and (err := task.exception()) is not None:
+        logger.error("config reload failed", exc_info=err)
 
 
 def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
@@ -712,18 +787,27 @@ async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
         )
 
 
-def _daily_tasks(
-    cfg: Config,
-    backup: Callable[[], Awaitable[None]],
-    retention: Callable[[], Awaitable[None]],
-    digest: Callable[[], Awaitable[None]],
-    github_health: Callable[[], Awaitable[None]] | None,
-) -> list[DailyTask]:
+@dataclass(frozen=True)
+class DailyRuns:
+    """What each daily task runs; ``_daily_tasks`` takes their times from the config (R-9.11)."""
+
+    backup: Callable[[], Awaitable[None]]
+    retention: Callable[[], Awaitable[None]]
+    housekeeping: Callable[[], Awaitable[None]]
+    padron: Callable[[], Awaitable[None]]
+    digest: Callable[[], Awaitable[None]]
+    github_health: Callable[[], Awaitable[None]] | None
+
+
+def _daily_tasks(cfg: Config, runs: DailyRuns) -> list[DailyTask]:
     """Build the daily tasks, failing on an unknown target (R-9.11, BR-D05).
 
     Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
-    ``date.min`` base so a late backup wraps to the next day's early time. The
-    GitHub App health check runs at the digest time only when GitHub is configured.
+    ``date.min`` base so a late backup wraps to the next day's early time.
+    Housekeeping runs at the retention time. The padrón refresh runs at its
+    configured weekly time, its task checking the weekday when it runs (S12.4).
+    The GitHub App health check runs at the digest time only when GitHub is
+    configured.
     """
     kind = cfg.ops.backup.target.kind
     if kind != BACKUP_TARGET_KIND:
@@ -733,12 +817,14 @@ def _daily_tasks(
     backup_at = cfg.ops.backup.at
     retention_at = (datetime.combine(date.min, backup_at) + RETENTION_DELAY).time()
     tasks = [
-        DailyTask(key="backup", at=backup_at, run=backup),
-        DailyTask(key="retention", at=retention_at, run=retention),
-        DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
+        DailyTask(key="backup", at=backup_at, run=runs.backup),
+        DailyTask(key="retention", at=retention_at, run=runs.retention),
+        DailyTask(key="housekeeping", at=retention_at, run=runs.housekeeping),
+        DailyTask(key="padron", at=cfg.sunat.padron.at, run=runs.padron),
+        DailyTask(key="digest", at=cfg.gaps.digest_at, run=runs.digest),
     ]
-    if github_health is not None:
-        tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=github_health))
+    if runs.github_health is not None:
+        tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=runs.github_health))
     return tasks
 
 
@@ -781,10 +867,26 @@ async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive)
     """Back up once, alerting BR-O04 by stage instead of retrying or raising (BR-O04)."""
     today = await _owner_today(pool, cfg.owner.timezone)
     try:
-        await run_backup(_backup_job(settings, cfg), drive, today)
+        sizes = await run_backup(_backup_job(settings, cfg), drive, today)
     except BackupError as error:
         logger.warning("backup failed", extra={"reason": error.reason})
         await _alert_backup_failure(pool, cfg, error.reason)
+        return
+    logger.info(
+        "backup uploaded",
+        extra={"dump_bytes": sizes.dump_bytes, "config_bytes": sizes.config_bytes},
+    )
+
+
+async def _run_padron_refresh(pool: Pool, http: httpx.AsyncClient, cfg: Config, data_dir: Path) -> None:
+    """Refresh the padrón on its configured weekday, logging a failed download (S12.4)."""
+    today = await _owner_today(pool, cfg.owner.timezone)
+    if today.weekday() != cfg.sunat.padron.weekday:
+        return
+    try:
+        await refresh_padron(pool, http, cfg.sunat.padron, data_dir)
+    except PadronRefreshError as error:
+        logger.warning("padron refresh failed", extra={"reason": error.reason})
 
 
 async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -> None:
@@ -793,6 +895,15 @@ async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -
     async with pool.connection() as conn, conn.transaction():
         await queue_rate_limited_alert(
             conn, cfg.profiles, RULE_BACKUP_ALERT, BACKUP_ALERT_EVERY, RULE_BACKUP_ALERT, text
+        )
+
+
+async def _alert_config_rejected(pool: Pool, cfg: Config, reason: str) -> None:
+    """Queue BR-O05's rate-limited admin alert for a rejected config reload (BR-O05, D155)."""
+    text = MESSAGES[RULE_CONFIG_ALERT].format(reason=reason)
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn, cfg.profiles, RULE_CONFIG_ALERT, CONFIG_ALERT_EVERY, RULE_CONFIG_ALERT, text
         )
 
 

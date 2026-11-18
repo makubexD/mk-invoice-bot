@@ -17,6 +17,7 @@ from pydantic import (
     BeforeValidator,
     ConfigDict,
     Field,
+    HttpUrl,
     PlainSerializer,
     PositiveInt,
     StringConstraints,
@@ -132,10 +133,63 @@ class Sol(BaseModel):
     enabled: bool
 
 
+def _parse_refresh_cron(value: str) -> tuple[int, int, int]:
+    """S12.4: parse ``M H * * D`` into ``(minute, hour, cron weekday)``.
+
+    The refresh needs one fixed time on one weekday, so only plain integers are
+    accepted; ranges, steps and lists are refused at load.
+    """
+    message = (
+        "sunat.padron.refresh_cron must be 'M H * * D' with minute 0-59, "
+        f"hour 0-23 and weekday 0-6 (Sunday 0), got {value!r}"
+    )
+    parts = value.split()
+    if len(parts) != 5 or parts[2] != "*" or parts[3] != "*":
+        raise ValueError(message)
+    minute_text, hour_text, weekday_text = parts[0], parts[1], parts[4]
+    if not all(re.fullmatch(r"[0-9]+", part) for part in (minute_text, hour_text, weekday_text)):
+        raise ValueError(message)
+    minute, hour, weekday = int(minute_text), int(hour_text), int(weekday_text)
+    if not (0 <= minute <= 59 and 0 <= hour <= 23 and 0 <= weekday <= 6):
+        raise ValueError(message)
+    return minute, hour, weekday
+
+
 class Padron(BaseModel):
+    """S12.4: where the padrón ZIP comes from and when to refresh it."""
+
     model_config = ConfigDict(extra="forbid")
 
     refresh_cron: str
+    url: HttpUrl = HttpUrl("https://www2.sunat.gob.pe/padron_reducido_ruc.zip")
+    max_mb: int = Field(600, gt=0)
+
+    @field_validator("refresh_cron")
+    @classmethod
+    def _is_a_weekly_time(cls, value: str) -> str:
+        """S12.4: the refresh runs once a week at one fixed time, so only ``M H * * D`` loads."""
+        _parse_refresh_cron(value)
+        return value
+
+    @field_validator("url")
+    @classmethod
+    def _is_https(cls, value: HttpUrl) -> HttpUrl:
+        """S12.4: the padrón replaces every RUC, so it is only downloaded over https."""
+        if value.scheme != "https":
+            raise ValueError("padron.url must use https")
+        return value
+
+    @property
+    def at(self) -> time:
+        """S12.4: the time of day the weekly refresh runs."""
+        minute, hour, _ = _parse_refresh_cron(self.refresh_cron)
+        return time(hour, minute)
+
+    @property
+    def weekday(self) -> int:
+        """S12.4: the refresh weekday in Python's Monday-0 numbering (cron 0 is Sunday 6)."""
+        _, _, cron_weekday = _parse_refresh_cron(self.refresh_cron)
+        return (cron_weekday + 6) % 7
 
 
 class Sunat(BaseModel):

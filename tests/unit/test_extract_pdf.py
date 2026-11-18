@@ -6,7 +6,9 @@ import ctypes
 import io
 import json
 import math
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import cv2
 import numpy as np
@@ -120,10 +122,9 @@ def _write_huge_page_pdf(path: Path) -> None:
     document.close()
 
 
-def _argv(path: Path, kind: str) -> list[str]:
-    """Build the helper argv a phone or PDF input comes in as (D122)."""
+def _argv(kind: str) -> list[str]:
+    """Build the helper argv a phone or PDF input comes in as (D122, D158)."""
     return [
-        str(path),
         str(MAX_PX),
         str(MAX_BYTES),
         "tesseract",
@@ -137,13 +138,19 @@ def _argv(path: Path, kind: str) -> list[str]:
     ]
 
 
+def _feed_stdin(monkeypatch: pytest.MonkeyPatch, data: bytes) -> None:
+    """Make the helper read ``data`` from its stdin (D158)."""
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(data)))
+
+
 def _run_helper(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pdf: Path
 ) -> dict[str, object]:
-    """Run the helper over ``pdf`` with resource limits disabled and return its payload."""
+    """Run the helper over ``pdf``'s bytes on stdin with resource limits disabled."""
     monkeypatch.setattr(helper, "_limit_resources", lambda: None)
+    _feed_stdin(monkeypatch, pdf.read_bytes())
 
-    assert helper.main(_argv(pdf, helper.PDF_INPUT_KIND)) == 0
+    assert helper.main(_argv(helper.PDF_INPUT_KIND)) == 0
 
     return json.loads(capsys.readouterr().out)
 
@@ -273,6 +280,19 @@ def test_render_gray_keeps_a_small_page_at_the_default_dpi(tmp_path: Path) -> No
     scale = DEFAULT_RENDER_DPI / PDF_POINTS_PER_INCH
     expected = (math.ceil(TEXT_PAGE[1] * scale), math.ceil(TEXT_PAGE[0] * scale))
     assert gray.shape == expected
+
+
+def test_helper_reads_a_text_pdf_from_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D158: a synthetic PDF fed on stdin is read from its text layer."""
+    pdf = tmp_path / "stdin.pdf"
+    _write_text_pdf(pdf)
+
+    payload = _run_helper(monkeypatch, capsys, pdf)
+
+    assert payload["error"] is None
+    assert payload["reading"]["fields"]["ruc_emisor"]["value"] == SYNTHETIC_RUC
 
 
 def _raise_memory_error(document: pdfium.PdfDocument, options: object) -> dict[str, object]:

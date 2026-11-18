@@ -26,6 +26,7 @@ from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_x
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.helper import run_helper
+from invoicebot.sandbox import check_no_parent_dir
 
 #: The browser helper module; ``-P`` keeps the working directory off its import path.
 DEFAULT_HELPER_COMMAND = (sys.executable, "-P", "-m", "invoicebot.fetchers.browser")
@@ -119,9 +120,12 @@ async def run_browser_job(
         prints something that is not a valid ``HelperOutput``.
 
     Raises:
+        ValueError: when ``out_dir`` has a ``..`` component, which would let it leave the
+            data root the sandbox wrapper masks (D150).
         asyncio.CancelledError: when the caller is cancelled; the helper's process group is
             killed and reaped first (R-9.2).
     """
+    check_no_parent_dir(out_dir, "out_dir")
     try:
         with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
             stdout = await run_helper(

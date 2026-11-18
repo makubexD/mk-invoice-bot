@@ -83,6 +83,7 @@ MESSAGES: dict[str, str] = {
     "BR-F10": (
         "ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos."
     ),
+    "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
         "{fetcher_lines}\n"
@@ -173,6 +174,7 @@ MESSAGES: dict[str, str] = {
     "BR-O02": "💾 El disco está al {pct}%.",
     "BR-O03": "🔑 El token de {channel} no funciona. Renuévalo.",
     "BR-O04": "🗄️ Falló la copia de seguridad de anoche ({reason_desc}).",
+    "BR-O05": "⚙️ La nueva configuración no es válida; sigo con la anterior ({reason}).",
     "GAP_admin": "🧩 Falta configurar: {kind_desc} — {subject}.{issue_line}",
     "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
 }

@@ -1,9 +1,10 @@
-"""Extract helper process: read one invoice photo or PDF and print one JSON line (D78, D122).
+"""Extract helper process: read one invoice photo or PDF from stdin and print one JSON line (D78, D122).
 
-The extract handler starts this module as ``python -m invoicebot.extract <path> <max_px>
-<max_bytes> <engine> <lang> <psm> <timeout_s> <rules_path>``, optionally followed by
+The extract handler starts this module as ``python -m invoicebot.extract <max_px> <max_bytes>
+<engine> <lang> <psm> <timeout_s> <rules_path>``, optionally followed by
 ``<kind> <max_pdf_pages> <pdf_min_text_chars>`` where ``kind`` is ``photo`` or ``pdf``. With no
-trailing arguments the input is a photo, which keeps the original call working. It loads the
+trailing arguments the input is a photo, which keeps the original call working. The file's bytes
+arrive on stdin and the helper never opens a path under the data root (D158). It loads the
 input once, reads its SUNAT QR, reads its text and parses the fields with the configured rules,
 then merges both readings (D81). A text-layer PDF is parsed directly and its fields carry the
 ``pdf`` source; a PDF without enough text is rendered on page 1 and read as a photo (R-2.15).
@@ -11,11 +12,11 @@ It writes exactly one JSON object to stdout: ``{"reading": {...} | null, "varian
 "decoder": ..., "ocr": bool, "error": null | "unreadable" | "too_many_pages"}``, where ``ocr``
 says whether Tesseract returned text. OpenCV, Tesseract, zxing and pypdfium2 live here and are
 released when the process exits (D78). Nothing else is printed: stderr is discarded by the
-handler because it could carry decoded text (R-9.16). A path or rules file that cannot be read
-exits non-zero, so the caller raises and the queue retries. The process caps its own address
-space, CPU time and file writes before it decodes anything, and an input above the byte cap
-prints the same "unreadable" result as an undecodable image. An OpenCV error while reading the
-image, or an unreadable PDF, is reported the same way, as an unreadable input (BR-E01).
+handler because it could carry decoded text (R-9.16). A rules file that cannot be read exits
+non-zero, so the caller raises and the queue retries. The process caps its own address space,
+CPU time and file writes before it decodes anything, and an input above the byte cap prints the
+same "unreadable" result as an undecodable image. An OpenCV error while reading the image, or an
+unreadable PDF, is reported the same way, as an unreadable input (BR-E01).
 """
 
 from __future__ import annotations
@@ -41,10 +42,10 @@ from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 from invoicebot.extract.pdf import TooManyPages, open_pdf, page_text, render_gray, text_to_ocr
 from invoicebot.extract.qr import QrHit, read_invoice_qr
 
-#: Exit code for a missing file or a bad invocation; the handler retries these (R-9.4).
+#: Exit code for a bad invocation or an unreadable rules file; the handler retries these (R-9.4).
 EXIT_FAILURE = 1
-#: Photo, pixel cap, byte cap, OCR engine, language, PSM, timeout and rules path.
-ARGUMENT_COUNT = 8
+#: Pixel cap, byte cap, OCR engine, language, PSM, timeout and rules path.
+ARGUMENT_COUNT = 7
 #: Optional input kind, PDF page cap and text-layer threshold after those arguments (D122).
 OPTIONAL_ARGUMENT_COUNT = 3
 DEFAULT_INPUT_KIND = "photo"
@@ -71,7 +72,6 @@ MAX_FILE_BYTES = 0
 class _Options:
     """The validated argv of one helper run (D122)."""
 
-    path: Path
     max_px: int
     max_bytes: int
     ocr: Ocr
@@ -89,7 +89,7 @@ def _limit_resources() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Read the input named by ``argv`` and print the helper result (R-2.1, R-2.15)."""
+    """Read the input from stdin and print the helper result (R-2.1, R-2.15, D158)."""
     # Single-threaded cv2: a preexec_fn after fork must not meet a lock held by a cv2 worker
     # thread, or the child deadlocks (R-9.2).
     cv2.setNumThreads(0)
@@ -98,14 +98,12 @@ def main(argv: list[str] | None = None) -> int:
     options = _parse_arguments(args)
     if options is None:
         return EXIT_FAILURE
-    try:
-        if options.path.stat().st_size > options.max_bytes:
-            _emit(_unreadable(ocr=False))
-            return 0
-        payload = _read_invoice(options)
-    except OSError:
-        return EXIT_FAILURE
-    _emit(payload)
+    # One byte past the cap is enough to tell an oversized input from one that fits.
+    data = sys.stdin.buffer.read(options.max_bytes + 1)
+    if len(data) > options.max_bytes:
+        _emit(_unreadable(ocr=False))
+        return 0
+    _emit(_read_invoice(data, options))
     return 0
 
 
@@ -116,14 +114,13 @@ def _parse_arguments(args: list[str]) -> _Options | None:
         return None
     kind, max_pdf_pages, pdf_min_text_chars = trailing
     try:
-        max_px = int(args[1])
-        max_bytes = int(args[2])
-        ocr_cfg = Ocr(engine=args[3], lang=args[4], psm=int(args[5]), timeout_s=int(args[6]))
-        rules = load_rules(Path(args[7]))
+        max_px = int(args[0])
+        max_bytes = int(args[1])
+        ocr_cfg = Ocr(engine=args[2], lang=args[3], psm=int(args[4]), timeout_s=int(args[5]))
+        rules = load_rules(Path(args[6]))
     except (OSError, ValueError, yaml.YAMLError):
         return None
     return _Options(
-        path=Path(args[0]),
         max_px=max_px,
         max_bytes=max_bytes,
         ocr=ocr_cfg,
@@ -151,17 +148,17 @@ def _trailing_options(args: list[str]) -> tuple[str, int, int] | None:
     return kind, max_pdf_pages, pdf_min_text_chars
 
 
-def _read_invoice(options: _Options) -> dict[str, Any]:
+def _read_invoice(data: bytes, options: _Options) -> dict[str, Any]:
     """Read the input as a photo or a PDF and return the helper result (R-2.1, R-2.15)."""
     if options.kind == PDF_INPUT_KIND:
-        return _read_pdf(options)
-    return _read_photo(options.path, options.max_px, options.ocr, options.rules)
+        return _read_pdf(data, options)
+    return _read_photo(data, options.max_px, options.ocr, options.rules)
 
 
-def _read_photo(path: Path, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> dict[str, Any]:
-    """Read one photo as before and return the helper result (R-2.1, R-2.13)."""
+def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> dict[str, Any]:
+    """Read one photo from its bytes and return the helper result (R-2.1, R-2.13)."""
     try:
-        gray = load_gray(path.read_bytes(), max_px)
+        gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
         processed = preprocess(gray)
     except (ImageUnreadable, cv2.error):
@@ -172,10 +169,10 @@ def _read_photo(path: Path, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> d
     return _payload(reading, hit, ocr_ran=text is not None)
 
 
-def _read_pdf(options: _Options) -> dict[str, Any]:
+def _read_pdf(data: bytes, options: _Options) -> dict[str, Any]:
     """Read page 1 of a PDF from its text layer or, failing that, its render (R-2.15, D122)."""
     try:
-        document = open_pdf(options.path, options.max_pdf_pages)
+        document = open_pdf(data, options.max_pdf_pages)
     except TooManyPages:
         return _too_many_pages()
     except (ValueError, MemoryError):

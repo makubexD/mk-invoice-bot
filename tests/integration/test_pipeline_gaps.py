@@ -3,20 +3,23 @@
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.config.digest import config_digest
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Profile
+from invoicebot.config.models import Portal, Profile
 from invoicebot.fetchers.base import FetchReason
-from invoicebot.gaps.kinds import GAP_KINDS
+from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.gaps import (
     GapContext,
     GapSighting,
+    close_if_fixed,
     daily_digest,
     issue_opened,
     raise_gap,
@@ -24,6 +27,7 @@ from invoicebot.pipeline.gaps import (
 )
 from invoicebot.queue import outbox
 from invoicebot.store.gaps import upsert_gap
+from invoicebot.store.invoices import create_invoice
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -34,8 +38,16 @@ ISSUER_RUC_INT = 20000000001
 SUBJECT = f"RUC {ISSUER_RUC}"
 GAP_FINGERPRINT = f"portal_missing:{ISSUER_RUC}"
 PARSER_FINGERPRINT = f"parser_miss:{ISSUER_RUC}"
+BROKEN_PORTAL_KEY = "synthetic_portal"
+BROKEN_FINGERPRINT = f"portal_broken:{BROKEN_PORTAL_KEY}"
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 HINT_URL = "https://portal.example.pe/consulta"
+#: The fingerprint parts each config-fixable kind names its gap with (D157).
+KIND_PARTS: dict[str, tuple[str, ...]] = {
+    "PORTAL_MISSING": (ISSUER_RUC,),
+    "PORTAL_BROKEN": (BROKEN_PORTAL_KEY,),
+    "TEMPLATE_INVALID": ("work_microsoft", "excel_template"),
+}
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -148,6 +160,108 @@ async def _create_issue_payload(conn: AsyncConnection[Any]) -> dict[str, Any]:
     return dict(row[0])
 
 
+async def _invoice_id(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> int:
+    """Create an invoice a gap can link to and return its id."""
+    async with pool.connection() as conn, conn.transaction():
+        return await create_invoice(conn, f"gaps-{uuid4().hex}", "whatsapp")
+
+
+async def _linked_gap(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    kind: str,
+    *,
+    state: str,
+    issue_url: str | None = None,
+) -> None:
+    """Insert a gap of ``kind`` in ``state`` linked to ``invoice_id``."""
+    gap_fingerprint = fingerprint(kind, *KIND_PARTS[kind])
+    await conn.execute(
+        """
+        INSERT INTO gaps (fingerprint, kind, subject, state, raised_at, issue_url)
+        VALUES (%s, %s, %s, %s, now(), %s)
+        """,
+        (gap_fingerprint, kind, SUBJECT, state, issue_url),
+    )
+    await conn.execute(
+        "INSERT INTO invoice_gaps (invoice_id, fingerprint) VALUES (%s, %s)",
+        (invoice_id, gap_fingerprint),
+    )
+
+
+async def _gap_state(conn: AsyncConnection[Any], kind: str) -> str:
+    """Return the state of the gap of ``kind``."""
+    cur = await conn.execute(
+        "SELECT state FROM gaps WHERE fingerprint = %s",
+        (fingerprint(kind, *KIND_PARTS[kind]),),
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])
+
+
+async def _github_payloads(conn: AsyncConnection[Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Return each github outbox row's recipient and payload, oldest first."""
+    cur = await conn.execute("""SELECT "to", payload_json FROM outbox WHERE channel = 'github' ORDER BY id""")
+    return [(str(to), dict(payload)) for to, payload in await cur.fetchall()]
+
+
+async def test_close_if_fixed_closes_a_fixed_gap_and_queues_its_close_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.9: a fixed PORTAL_MISSING gap with an issue closes and queues one close_issue row."""
+    repo = load_config(EXAMPLE).gaps.github.repo
+    invoice_id = await _invoice_id(db_pool)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _linked_gap(conn, invoice_id, "PORTAL_MISSING", state="fixed", issue_url=ISSUE_URL)
+        await close_if_fixed(conn, invoice_id, "PORTAL_MISSING", repo)
+
+    async with db_pool.connection() as conn:
+        state = await _gap_state(conn, "PORTAL_MISSING")
+        rows = await _github_payloads(conn)
+    assert state == "closed"
+    assert rows == [(repo, {"op": "close_issue", "issue_url": ISSUE_URL})]
+
+
+@pytest.mark.parametrize("kind", sorted(KIND_PARTS))
+async def test_close_if_fixed_closes_a_fixed_gap_without_an_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], kind: str
+) -> None:
+    """R-11.9: a fixed gap with no issue closes without queuing a GitHub row."""
+    repo = load_config(EXAMPLE).gaps.github.repo
+    invoice_id = await _invoice_id(db_pool)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _linked_gap(conn, invoice_id, kind, state="fixed")
+        await close_if_fixed(conn, invoice_id, kind, repo)
+
+    async with db_pool.connection() as conn:
+        state = await _gap_state(conn, kind)
+        rows = await _github_payloads(conn)
+    assert state == "closed"
+    assert rows == []
+
+
+@pytest.mark.parametrize("kind", sorted(KIND_PARTS))
+async def test_close_if_fixed_leaves_a_reported_gap_unclosed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], kind: str
+) -> None:
+    """R-11.9: a reported gap is not closed by the invoice getting past the step."""
+    repo = load_config(EXAMPLE).gaps.github.repo
+    invoice_id = await _invoice_id(db_pool)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await _linked_gap(conn, invoice_id, kind, state="reported", issue_url=ISSUE_URL)
+        await close_if_fixed(conn, invoice_id, kind, repo)
+
+    async with db_pool.connection() as conn:
+        state = await _gap_state(conn, kind)
+        rows = await _github_payloads(conn)
+    assert state == "reported"
+    assert rows == []
+
+
 async def test_raising_twice_queues_one_github_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -164,6 +278,29 @@ async def test_raising_twice_queues_one_github_row(
 
     assert second.count == 2
     assert count_row == (1,)
+
+
+async def test_a_portal_broken_sighting_stores_the_portal_digest(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D157: raising a PORTAL_BROKEN gap stores the portal's digest in gaps.raised_with."""
+    portal = Portal(key=BROKEN_PORTAL_KEY, adapter="generic_form", status="active")
+    ctx = _context(github_enabled=True)
+    sighting = GapSighting(
+        kind="PORTAL_BROKEN",
+        parts=(BROKEN_PORTAL_KEY,),
+        subject=f"Portal {BROKEN_PORTAL_KEY}",
+        invoice_id=None,
+        fields=_fields("PORTAL_BROKEN", BROKEN_FINGERPRINT),
+        raised_with=config_digest(portal),
+    )
+
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, ctx, sighting)
+        cur = await conn.execute("SELECT raised_with FROM gaps WHERE fingerprint = %s", (BROKEN_FINGERPRINT,))
+        stored = await cur.fetchone()
+
+    assert stored == (config_digest(portal),)
 
 
 async def test_a_pending_comment_does_not_block_a_new_create_issue(

@@ -29,6 +29,8 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
+from invoicebot.pipeline.deliver import TEMPLATE_INVALID
+from invoicebot.pipeline.gaps import close_if_fixed
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.pending_auth import GOOGLE, park_for_auth
 from invoicebot.pipeline.route import natural_key
@@ -260,6 +262,8 @@ async def _complete(
             rule_id=rule,
             buttons=[],
         )
+        # The invoice got past the delivery step, so its fixed template gap closes (R-11.9).
+        await close_if_fixed(conn, invoice.job.invoice_id, TEMPLATE_INVALID, context.cfg.gaps.github.repo)
         photos = await take_photo_paths(conn, invoice.job.invoice_id)
     # shortcut: the PDF and XML rows keep their local_path pointing at the files deleted here;
     # no later flow A step reads them (R-9.7).

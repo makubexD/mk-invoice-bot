@@ -28,7 +28,9 @@ from invoicebot.store.gaps import (
     GapRow,
     alert_due,
     get_gap,
+    linked_gap,
     mark_alerted,
+    mark_closed,
     mark_reported,
     unreported_overdue,
     upsert_gap,
@@ -58,6 +60,7 @@ class GapSighting:
     subject: str
     invoice_id: int | None
     fields: IssueFields
+    raised_with: str | None = None
 
 
 async def raise_gap(
@@ -73,7 +76,14 @@ async def raise_gap(
     """
     kind = GAP_KINDS[sighting.kind]
     gap_fingerprint = fingerprint(sighting.kind, *sighting.parts)
-    gap = await upsert_gap(conn, kind, gap_fingerprint, sighting.subject, sighting.invoice_id)
+    gap = await upsert_gap(
+        conn,
+        kind,
+        gap_fingerprint,
+        sighting.subject,
+        sighting.invoice_id,
+        raised_with=sighting.raised_with,
+    )
     if gap.state == "ignored":
         return gap
     if not gap.raised_now and not await _alert_is_due(conn, ctx, gap):
@@ -125,6 +135,33 @@ async def daily_digest(pool: Pool, profiles: Mapping[str, Profile], gaps_cfg: Ga
     async with pool.connection() as conn, conn.transaction():
         await _queue_digest(conn, profiles, gaps_cfg)
         await _queue_overdue(conn, profiles, gaps_cfg)
+
+
+async def close_gap(conn: AsyncConnection[Any], gap: GapRow, repo: str) -> None:
+    """Close a fixed gap and queue the row that closes its issue, if any (D157).
+
+    Does not commit; the caller owns the transaction.
+    """
+    await mark_closed(conn, gap.fingerprint)
+    if gap.issue_url is not None:
+        await outbox.add(
+            conn,
+            "github",
+            repo,
+            {"op": "close_issue", "issue_url": gap.issue_url},
+        )
+
+
+async def close_if_fixed(conn: AsyncConnection[Any], invoice_id: int, kind: str, repo: str) -> None:
+    """Close the invoice's linked gap of ``kind`` when it is fixed (R-11.9, D157).
+
+    Called once the invoice gets past the step that failed: a gap
+    ``reevaluate`` marked fixed closes, while an open or reported one stays.
+    Does not commit; the caller owns the transaction.
+    """
+    gap = await linked_gap(conn, invoice_id, kind)
+    if gap is not None and gap.state == "fixed":
+        await close_gap(conn, gap, repo)
 
 
 async def _queue_digest(conn: AsyncConnection[Any], profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:

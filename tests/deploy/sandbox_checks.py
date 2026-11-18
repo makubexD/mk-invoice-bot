@@ -20,6 +20,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
+from typing import Any
 
 from invoicebot.config.loader import load_config
 from invoicebot.pipeline.extract import PIXELS_PER_MEGAPIXEL, helper_argv
@@ -75,14 +76,24 @@ def _image_env() -> dict[str, str]:
     }
 
 
-def _run(argv: Sequence[str], env: Mapping[str, str], timeout_s: float) -> subprocess.CompletedProcess[str]:
-    """Run a fixed argv with a timeout, capturing its output."""
+def _run(
+    argv: Sequence[str],
+    env: Mapping[str, str],
+    timeout_s: float,
+    stdin: bytes | None = None,
+) -> subprocess.CompletedProcess[Any]:
+    """Run a fixed argv with a timeout, capturing its output and feeding ``stdin`` when given.
+
+    Output is text unless binary ``stdin`` is fed, in which case it stays bytes so the input
+    reaches the helper unchanged.
+    """
     return subprocess.run(  # noqa: S603 - fixed argv built here, never a shell
         list(argv),
         capture_output=True,
         check=False,
         env=dict(env),
-        text=True,
+        input=stdin,
+        text=stdin is None,
         timeout=timeout_s,
     )
 
@@ -151,6 +162,21 @@ def check_image_config_hidden() -> None:
         raise CheckFailed(f"ls exited {done.returncode}: {done.stderr.strip()!r}")
     if done.stdout.strip():
         raise CheckFailed(f"{RUNTIME_CONFIG} is visible: {done.stdout.strip()!r}")
+
+
+def check_image_data_masked() -> None:
+    """The image prefix masks the data root, so listing it shows nothing (D158)."""
+    photos = DATA_ROOT / "photos"
+    photos.mkdir(parents=True)
+    (photos / "x.jpg").write_bytes(b"x")
+    try:
+        done = _run([*PREFIXES.image, "ls", "-A", str(DATA_ROOT)], _base_env(), SHORT_TIMEOUT_S)
+    finally:
+        shutil.rmtree(photos, ignore_errors=True)
+    if done.returncode != 0:
+        raise CheckFailed(f"ls exited {done.returncode}: {done.stderr.strip()!r}")
+    if done.stdout.strip():
+        raise CheckFailed(f"{DATA_ROOT} is visible: {done.stdout.strip()!r}")
 
 
 def check_image_oom() -> None:
@@ -232,6 +258,17 @@ def check_browser_data_masked() -> None:
     finally:
         for fixture in fixtures:
             shutil.rmtree(fixture, ignore_errors=True)
+
+
+def check_browser_out_dir_parent() -> None:
+    """The browser prefix refuses an out dir with a ``..`` component (D150)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        env = {**_browser_env(tmpdir), "HELPER_OUT_DIR": f"{DATA_ROOT}/../x"}
+        done = _run([*PREFIXES.browser, "true"], env, SHORT_TIMEOUT_S)
+    if done.returncode == 0:
+        raise CheckFailed("an out dir with .. was accepted")
+    if "out dir has .." not in done.stderr:
+        raise CheckFailed(f"no 'out dir has ..' in stderr: {done.stderr.strip()!r}")
 
 
 #: A helper that drops its parent-death signal and leaves the process group, then waits.
@@ -354,29 +391,29 @@ def check_no_orphan_chromium() -> None:
 
 
 def check_extract_helper() -> None:
-    """The image prefix reads the golden set's first image and prints one JSON line."""
+    """The image prefix reads the golden set's first image from stdin and prints one JSON line."""
     config = load_config(CONFIG / "example.yaml")
     image = sorted(GOLDEN.glob("*.json"))[0].with_suffix(".jpg")
-    argv = helper_argv(
-        str(image), "photo", config.extraction, config.limits.media, CONFIG / "parsing_rules.yaml"
-    )
-    done = _run([*PREFIXES.image, *argv], _image_env(), HELPER_TIMEOUT_S)
+    argv = helper_argv("photo", config.extraction, config.limits.media, CONFIG / "parsing_rules.yaml")
+    done = _run([*PREFIXES.image, *argv], _image_env(), HELPER_TIMEOUT_S, stdin=image.read_bytes())
     if done.returncode != 0:
-        raise CheckFailed(f"helper exited {done.returncode}: {done.stderr.strip()!r}")
+        raise CheckFailed(f"helper exited {done.returncode}: {done.stderr!r}")
     try:
         json.loads(done.stdout)
     except json.JSONDecodeError:
-        raise CheckFailed(f"stdout is not JSON: {done.stdout.strip()!r}") from None
+        raise CheckFailed(f"stdout is not JSON: {done.stdout!r}") from None
 
 
 CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "image-no-network": check_image_no_network,
     "image-no-proc": check_image_no_proc,
     "image-config-hidden": check_image_config_hidden,
+    "image-data-masked": check_image_data_masked,
     "image-oom": check_image_oom,
     "browser-config-hidden-oom": check_browser_config_hidden_oom,
     "browser-tmp-cap": check_browser_tmp_cap,
     "browser-data-masked": check_browser_data_masked,
+    "browser-out-dir-parent": check_browser_out_dir_parent,
     "image-umount-refused": check_image_umount_refused,
     "browser-umount-refused": check_browser_umount_refused,
     "image-no-escape": check_image_no_escape,

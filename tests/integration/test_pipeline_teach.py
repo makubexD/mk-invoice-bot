@@ -515,12 +515,16 @@ async def _wait_for_a_lock_wait(pool: AsyncConnectionPool[AsyncConnection[Any]])
     """Return once some session waits on a row lock, or fail after LOCK_WAIT_TIMEOUT_S."""
     async with asyncio.timeout(LOCK_WAIT_TIMEOUT_S), pool.connection() as conn:
         await conn.set_autocommit(True)
-        while True:
-            cur = await conn.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
-            row = await cur.fetchone()
-            if row is not None and row[0] > 0:
-                return
-            await asyncio.sleep(0.02)
+        try:
+            while True:
+                cur = await conn.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
+                row = await cur.fetchone()
+                if row is not None and row[0] > 0:
+                    return
+                await asyncio.sleep(0.02)
+        finally:
+            # A pooled connection goes back as it came, or later tests lose their transaction.
+            await conn.set_autocommit(False)
 
 
 async def test_press_approve_while_the_create_is_sent_comments_on_the_new_issue(

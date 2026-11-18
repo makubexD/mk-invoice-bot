@@ -174,10 +174,10 @@ def test_health_degraded_when_db_ping_raises() -> None:
     assert response.json() == {"status": "degraded", "db": "down"}
 
 
-async def test_sighup_logs_reload_request_and_keeps_running(
+async def test_sighup_without_a_runtime_is_ignored_and_keeps_running(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """R-9.6: SIGHUP requests a config reload without terminating the process."""
+    """R-9.6, D155: SIGHUP in health-only mode has no config to reload and does not end the process."""
     monkeypatch.delenv("DATABASE_URL", raising=False)
     caplog.set_level(logging.INFO, logger="invoicebot.app")
 
@@ -186,4 +186,4 @@ async def test_sighup_logs_reload_request_and_keeps_running(
         await asyncio.sleep(0.1)
 
     os.kill(os.getpid(), 0)  # the process still exists after SIGHUP
-    assert "config reload requested (SIGHUP)" in caplog.text
+    assert "config reload ignored: no runtime config is loaded" in caplog.text

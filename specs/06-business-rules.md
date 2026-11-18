@@ -83,6 +83,7 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 | BR-F09 | The XML is unsafe or invalid (`DOCTYPE`, over 2 MB, does not parse) | Discard it; next fetcher | *(only in F07)* `• {fetcher}: el XML no es válido` |
 | BR-F11 | The store has no website (`portal: manual`, D73) | Skipped; the chain goes on | *(only in F07)* `• {comercio}: no tiene portal; pídele los archivos al comercio` |
 | BR-F10 | *(post-MVP, D57)* An XML from email or a user upload has no valid XMLDSig signature, or the signer's RUC ≠ `ruc_emisor` | Kept as a **hint**: the file is stored and delivered, but its values don't replace the read data | *(one line in the summary)* `ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos.` |
+| BR-F12 | A fixed gap re-enqueued the invoice (R-11.9, D157) | Notice only; the invoice is already back at its fetch or delivery step | `🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.` |
 | BR-F07 | Every fetcher failed | `MANUAL_REQUIRED` (auto-resumable when a linked gap is fixed) | `❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:` + one `•` line per fetcher + `Puedes enviarme {manual_docs_desc} aquí y lo completo. {gap_line}` |
 
 **Texts outside the catalog** (`rules/messages_es.py` constants, not rules of their own):
@@ -152,6 +153,7 @@ BR-S06's owner answers (D118), outside the catalog: [Aprobar] sets the link `app
 | BR-O02 | Disk usage on the data volume is above 80% | Alert, rate-limited | `💾 El disco está al {pct}%.` |
 | BR-O03 | A channel token is rejected (WhatsApp 401/190, Telegram 401) | Alert; sends on that channel wait in the outbox | `🔑 El token de {channel} no funciona. Renuévalo.` |
 | BR-O04 | The nightly backup failed or wasn't uploaded | Alert | `🗄️ Falló la copia de seguridad de anoche ({reason_desc}).` |
+| BR-O05 | A `SIGHUP` reload found an invalid config (R-9.6, D155) | Alert, admins only; the bot keeps the old config | `⚙️ La nueva configuración no es válida; sigo con la anterior ({reason}).` |
 
 Owner gap commands (S8.9, D139), admin-only and outside the catalog: `/gaps` answers `Brechas abiertas:` and one line per open or reported gap, newest `last_seen` first, at most 20 then `…`: `{fingerprint} · {kind} · {subject} · {count}×{issue}` (`{issue}` is ` · <issue url>` or empty); with none it answers `No hay brechas abiertas.` `/gap ignorar <fingerprint>` answers `Listo, ignoro la brecha {fingerprint}.` or `No encuentro la brecha {fingerprint}.` A non-admin gets the unknown-command answer, and `/ayuda` lists these two only to admins.
 
@@ -163,7 +165,7 @@ A **gap** is a missing capability that only a change to the repository can fix. 
 | Kind | Fingerprint | Raised by | Raised at (D115) | GitHub (ops repo) | Owner alert (chat) | `kind_desc` — subject | Auto-resume when |
 |---|---|---|---|---|---|---|---|
 | `PORTAL_MISSING` | `portal_missing:{ruc_emisor}` | BR-F02, only when the chain ended in `MANUAL_REQUIRED` | 1st | Issue, with the approved taught URL if any | Yes | `portal de descarga desconocido` — `RUC {ruc_emisor}` | A deployed store directory has the RUC with an `active` portal |
-| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | 1st | Issue; the owner sets the entry to `status: broken` | Yes | `portal con fallas` — `{portal_key}` | The entry is `active` again and the version has changed |
+| `PORTAL_BROKEN` | `portal_broken:{portal_key}` | BR-F03 | 1st | Issue; the owner sets the entry to `status: broken` | Yes | `portal con fallas` — `{portal_key}` | The entry is `active` and has changed since the last failure (D157) |
 | `TEMPLATE_INVALID` | `template_invalid:{flow}:{sink}` | BR-D02 | 1st | Issue | Yes | `plantilla inválida` — `{flow}/{sink}` | The config reloads and passes validation |
 | `PARSER_MISS` | `parser_miss:{ruc_emisor}` | BR-E06 | 2nd | Issue | Digest only | `no puedo leer los comprobantes de un emisor` — `RUC {ruc_emisor}` | — (the user already typed the data) |
 | `UNROUTED_BUYER` | `unrouted:{num_doc_adq}` | BR-R06 | 3rd within 30 days | Issue ("add a routing rule or a new flow?") | Digest only | `RUC comprador sin flujo` — `RUC {num_doc_adq}` | — |
