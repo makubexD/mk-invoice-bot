@@ -19,7 +19,7 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 8   | `flow-a` (done 2026-11-17)                                                         | E9, S10.6 (D128–D135); landed: Google auth and `google-setup`, Drive and Sheets sinks, Gmail `email_inbox`, `sunat_sol` fetcher (`todo` until S0.4)                          | M6         | S0.4, Google OAuth app in production status (both for the live check only)       |
 | 9a  | `ops-harden` (done 2026-11-17)                                                     | S8.9 (D139); code leftovers marked `ops-harden` below (D136–D140); landed: `/gaps` and `/gap ignorar`, daily GitHub App check, `auth-google` pinned mailboxes, all leftovers | part of M7 | Nothing                                                                          |
 | 9b  | `flows-config` (done 2026-11-17; plan: `docs/plan-mvp-flows-config.md`, D142–D145) | flow A requires only the PDF; a third flow for the owner's boletas against their DNI (BR-R row, Sheets sink); checked against the real config (D141)                         | part of M7 | the DNI flow's sheet                                                             |
-| 9c  | `ops-host` (plan: `docs/plan-mvp-ops-host.md`, D146–D149)                          | host leftovers marked `ops-host` below, applied to the local Ubuntu machine (D141); first deploy (D136)                                                                      | M7         | Tailscale signed in, Funnel allowed (first deploy only; D146)                    |
+| 9c  | `ops-host` (done 2026-11-18; plan: `docs/plan-mvp-ops-host.md`, D146–D149)         | host leftovers marked `ops-host` below, applied to the local Ubuntu machine (D141); first deploy (D136)                                                                      | M7         | Tailscale signed in, Funnel allowed (first deploy only; D146)                    |
 | 9d  | `ops-live`                                                                         | live runs: flow A first, then flow B; the 9a review findings below; S12.7 (repo private), then S16.2 (D136, D141)                                                            | M7         | Meta verification; the Google and Entra apps; the owner's word for S12.7         |
 | 9e  | `ops-reload`                                                                       | S8.7, S10.8 `SIGHUP`, S12.1, S12.4, S12.5 (D136); after the live runs (D141)                                                                                                 | part of M7 | Nothing                                                                          |
 | 9f  | `windows`                                                                          | run through the container image or WSL2 and document it; no native port (D141)                                                                                               | —          | a Windows machine to test on                                                     |
@@ -193,6 +193,11 @@ The specs run ahead of the code in these places; each has a named story that clo
 - `routing`: S4.5 also owns the reply to `EXTRACT_FAILED` (a better photo or `campo=valor`); today a new photo creates a new invoice.
 - `widen-b-gaps-ops`: E8 owns BR-E06 and BR-R06 (D105).
 - `file-b`: the R-8.2 failure message is specified in S9.4 (flow A); E11 must cover it for flow B.
+
+## Carried over from the `ops-host` review
+
+- **`ops-live`:** the browser helper keeps the network and can read all of `/data`, filed photos included; its downloads land there, so a mask would break fetching. Give each fetch its own download dir and mask the rest of `/data`, or record the exposure under D147 (py-security-auditor, 2026-11-18).
+- **Later:** the browser helper sees the container's real `/proc` (other processes' command lines; `environ` and `root` are denied). A fresh procfs is refused under rootless Podman (py-security-auditor, 2026-11-18).
 
 ## Carried over from the `flows-config` review
 
