@@ -3,7 +3,7 @@
 ## 1. Architecture overview
 
 ```
- WhatsApp Cloud API / Telegram ──HTTPS──► Cloudflare Tunnel ──► app (single Python process, asyncio) ◄── Postgres
+ WhatsApp Cloud API / Telegram ──HTTPS──► Cloudflare Tunnel (VPS) or Tailscale Funnel (local host, D146) ──► app (single Python process, asyncio) ◄── Postgres
                                                       │
    ┌──────────────────────────────────────────────────┼───────────────────────────────────────────┐
    │ channels/        ← port: Channel (whatsapp, telegram), canonical in/out messages (PT-1)      │
@@ -59,8 +59,8 @@
 | Auth | Google OAuth refresh token (manual HTTP), `msal` token cache for Graph | |
 | Padrón RUC | Postgres table `padron(ruc bigint PRIMARY KEY, razon_social, estado, condicion)`, refreshed weekly by streaming the ZIP into `COPY` on a staging table, then swapping. SUNAT updates the ZIP daily; it is ~395 MB, so a weekly refresh costs ~1.6 GB/month of bandwidth and needs ~0.4 GB of free disk while it streams (see §8) | Indexed lookup, ~0 app RAM |
 | LLM fallback | Optional adapter behind an `LLMExtractor` port; thin `httpx` call to an OpenAI-compatible endpoint. Default **DeepSeek `deepseek-flash`** (accepts images, ~1,024 tokens per image), **per-flow opt-in, never flow B** (D43). Usage recorded in `llm_usage` | D24, D43, R-2.11 |
-| Secrets | One file encrypted with `age` (or `systemd-creds`), decrypted into memory at start; `.env` for non-secret settings only | R-9.9 |
-| Deploy | Docker Compose: `app` (mem_limit 900m) + `postgres` (mem_limit 300m, `shared_buffers=64MB`) + `cloudflared`; 1–2 GB swapfile on host. **One path (D46):** green CI on `main` builds the image and deploys code and config (§15). Local dev uses the same Compose file (D31) | |
+| Secrets | One file encrypted with `age` (or `systemd-creds`), decrypted into memory at start; `.env` for non-secret settings only. The live database password is a file outside the repo, read through `passfile` (D148) | R-9.9 |
+| Deploy | Docker Compose: `app` (mem_limit 900m) + `postgres` (mem_limit 300m, `shared_buffers=64MB`) + `cloudflared` on the VPS; on the local MVP host (D141) a separate Compose project `invoicebot-live` (D148) behind Tailscale Funnel (D146); 1–2 GB swapfile on host. **One path (D46):** green CI on `main` builds the image and deploys code and config (§15). Local dev uses the same Compose file (D31) | |
 | n8n | **Optional** event subscriber (R-12.4) | See below |
 
 ### Note on n8n (open question Q1)
@@ -328,7 +328,7 @@ microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 - **Browser lifecycle (D82):** no `BrowserPool`. Each fetch starts `python -m invoicebot.fetchers.browser`, which launches Chromium's headless shell with one context and exits with it, so Chromium is never resident while idle (S0.9: 224 MB peak, about 4 s cold start).
   - Launch flags: `--disable-dev-shm-usage --no-zygote --renderer-process-limit=1 --disable-gpu --blink-settings=imagesEnabled=false` (images are re-enabled only for captcha pages).
   - Block fonts, media and analytics with route interception.
-- **Heavy libraries stay out of the bot process:** image reading runs in a helper process per photo (`python -m invoicebot.extract`, D78), like Tesseract and Chromium, so `cv2` and `zxingcpp` are never imported by the app and their memory returns to the system. The same rule applies to any later heavy library (Playwright, the OCR preprocessing). Idle RSS target: about 60 MB, to be measured in `ops` (S12.1).
+- **Heavy libraries stay out of the bot process:** image reading runs in a helper process per photo (`python -m invoicebot.extract`, D78), like Tesseract and Chromium, so `cv2` and `zxingcpp` are never imported by the app and their memory returns to the system. The same rule applies to any later heavy library (Playwright, the OCR preprocessing). Idle RSS target: about 60 MB, to be measured in `ops` (S12.1). In the image, each helper runs in `unshare` namespaces (D147): the extract helper with no network, an empty `/proc` and the runtime config hidden; the browser helpers with a size-capped `$TMPDIR`, the runtime config hidden and Chromium's own sandbox on.
 - **Bounded queues:** at most 20 queued jobs per sender profile. Over the limit, the new message is stored but not enqueued, and the sender gets BR-S01.
 - **Postgres:** small footprint (`shared_buffers=64MB`, `max_connections=20`, app pool of 5), indices on `invoices(state)`, `jobs(run_after)`, `invoices(natural_key)`. The worker sleeps on `LISTEN jobs` instead of polling.
 - **Files:** stream downloads to `/data/tmp/{invoice_id}/`, using SHA-256 for dedup of identical photos. Purge after `DONE` (flow B: only once the batch is `sent`, never while `BATCHED`), plus a nightly housekeeping cron.
