@@ -1,0 +1,17 @@
+# Live stack override (D148): a separate Compose project, its own volumes and a
+# real database password kept outside the repo. The password files live in
+# DB_SECRETS_DIR, created by deploy.sh when COMPOSE_OVERRIDE points here.
+name: invoicebot-live
+services:
+  app:
+    environment:
+      DATABASE_URL: postgresql://invoicebot@postgres:5432/invoicebot?passfile=/run/invoicebot/pgpass
+    volumes:
+      - ${DB_SECRETS_DIR:?}/pgpass:/run/invoicebot/pgpass:ro
+  postgres:
+    environment:
+      POSTGRES_PASSWORD: !reset null
+      POSTGRES_PASSWORD_FILE: /run/invoicebot/postgres-password
+    volumes:
+      - ${DB_SECRETS_DIR:?}/postgres-password:/run/invoicebot/postgres-password:ro
+    ports: !reset []
