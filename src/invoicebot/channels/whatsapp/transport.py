@@ -40,6 +40,7 @@ PERMANENT_META_CODES = frozenset({100, 131009, 131026, 131051})
 #: Rules whose out-of-window message has an approved template (R-1.10, BR-S04).
 TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-F07": "manual_required",
+    "BR-F12": "resume_notice",
     "BR-D16": "completion",
     "BR-D17": "completion",
     "BR-D18": "completion",
@@ -57,6 +58,7 @@ TEMPLATE_SLOT_BY_RULE: dict[str, str] = {
     "BR-O02": "admin_alert",
     "BR-O03": "admin_alert",
     "BR-O04": "admin_alert",
+    "BR-O05": "admin_alert",
     "BR-D05": "admin_alert",
 }
 
