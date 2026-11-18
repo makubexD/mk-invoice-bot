@@ -261,6 +261,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             ]
         ),
         settings.helper_tmp_mb,
+        settings.data_dir,
     )
     # Fail fast: a host without the namespaces rolls back instead of running bare helpers (D147).
     await check_sandbox(prefixes, SANDBOX_CHECK_TIMEOUT_S)
