@@ -63,6 +63,9 @@ QUIET_LOGGERS = ("httpx", "httpcore")
 #: Attributes the logging machinery owns; anything else came from ``extra=``.
 _STANDARD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
 
+#: Keys the formatter writes; an ``extra=`` value never replaces one.
+_OUTPUT_FIELDS = frozenset({"ts", "level", "event", "logger", "exc", *EXTRA_FIELDS})
+
 _logger = logging.getLogger(__name__)
 
 
@@ -144,6 +147,13 @@ class JsonFormatter(logging.Formatter):
             exc_text = _format_exception(record.exc_info)
         if exc_text:
             payload["exc"] = _redact(exc_text, self._secret_re)
+
+        for key, value in record.__dict__.items():
+            if key in _STANDARD_ATTRS or key in _OUTPUT_FIELDS:
+                continue
+            if not isinstance(value, (str, int, float, bool)) and value is not None:
+                value = str(value)
+            payload[key] = _redact_value(value, self._secret_re)
 
         return json.dumps(payload, ensure_ascii=False)
 

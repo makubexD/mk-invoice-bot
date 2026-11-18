@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from invoicebot.logging import PROPAGATING_LOGGERS, configure_logging, step_timer
+from invoicebot.logging import PROPAGATING_LOGGERS, JsonFormatter, configure_logging, step_timer
 
 
 @pytest.fixture
@@ -150,6 +150,44 @@ def test_short_value_is_not_a_secret(log_stream: io.StringIO) -> None:
     logging.getLogger("invoicebot.demo").info("value %s", "abc12")
 
     assert "abc12" in log_stream.getvalue()
+
+
+def test_extra_field_is_rendered(log_stream: io.StringIO) -> None:
+    """R-9.5: an extra= key that is not a standard attribute appears under its own key."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").warning("backup failed", extra={"reason": "dump"})
+
+    assert _records(log_stream)[-1]["reason"] == "dump"
+
+
+def test_extra_string_value_is_redacted() -> None:
+    """R-9.5: a secret in an extra string is redacted by the formatter itself."""
+    secret = "synthetic-" + "secret-value-42"
+    record = logging.LogRecord("invoicebot.demo", logging.INFO, "", 0, "failed", (), None)
+    record.__dict__["detail"] = f"token {secret}"
+
+    line = JsonFormatter(secret_values=[secret]).format(record)
+
+    assert json.loads(line)["detail"] == "token ***"
+
+
+def test_extra_number_stays_a_number(log_stream: io.StringIO) -> None:
+    """R-9.5: an extra= int value is emitted as a JSON number, not a string."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("backup done", extra={"count": 3})
+
+    assert _records(log_stream)[-1]["count"] == 3
+
+
+def test_extra_does_not_replace_a_formatter_field(log_stream: io.StringIO) -> None:
+    """R-9.5: an extra= key equal to a formatter field leaves the field unchanged."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("real event", extra={"event": "spoofed"})
+
+    assert _records(log_stream)[-1]["event"] == "real event"
 
 
 def test_configure_logging_twice_keeps_one_handler(log_stream: io.StringIO) -> None:
