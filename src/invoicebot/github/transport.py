@@ -4,10 +4,10 @@ A ``create_issue`` row first lists the repo's gap issues, at most five pages, an
 reuses the issue whose body carries the row fingerprint's hidden marker, so a
 lost database row does not open a second issue. Otherwise it renders the typed
 issue text and creates one. A ``comment`` row posts a taught portal link to an
-existing issue. The daily write budget, a token failure (BR-D05), a 5xx, a
-timeout and a rejected token reschedule the row with :class:`SendLater`; only a
-4xx that a retry cannot fix, or a payload that can never be sent, raises
-:class:`PermanentSendError`.
+existing issue. A ``close_issue`` row comments on the issue and closes it. The
+daily write budget, a token failure (BR-D05), a 5xx, a timeout and a rejected
+token reschedule the row with :class:`SendLater`; only a 4xx that a retry cannot
+fix, or a payload that can never be sent, raises :class:`PermanentSendError`.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import httpx
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.github.app_token import GITHUB_API_BASE_URL, GitHubTokenError
 from invoicebot.github.issue_text import (
+    CLOSE_COMMENT,
     IssueFields,
     issue_marker,
     render_hint_comment,
@@ -96,7 +97,7 @@ def make_github_transport(
     budget: int,
     hooks: GitHubHooks,
 ) -> Transport:
-    """Build the outbox transport that writes one gap issue or comment per row (R-11.5, D117)."""
+    """Build the outbox transport that writes one gap issue, comment or close per row (R-11.5, D117)."""
     client = _Client(app, http, repo, tuple(labels), budget, hooks)
 
     async def transport(row: OutboxRow) -> str | None:
@@ -106,16 +107,22 @@ def make_github_transport(
 
 
 async def _transport(client: _Client, row: OutboxRow) -> str | None:
-    """Send one row: a create-issue write, or a comment on an existing issue."""
+    """Send one row: a create-issue write, a comment, or a close on an existing issue."""
     op = row.payload.get("op")
-    if op not in ("create_issue", "comment"):
+    if op not in ("create_issue", "comment", "close_issue"):
         raise PermanentSendError(f"unknown github op: {op!r}")
     if await client.hooks.writes_today() >= client.budget:
         raise SendLater(BUDGET_DELAY, "budget")
-    fingerprint = _payload_text(row.payload, "fingerprint")
     if op == "create_issue":
+        fingerprint = _payload_text(row.payload, "fingerprint")
         token = await _access_token(client)
         return await _create_issue(client, token, fingerprint, _issue_fields(row.payload.get("fields")))
+    if op == "close_issue":
+        number = _issue_number(_payload_text(row.payload, "issue_url"))
+        token = await _access_token(client)
+        await _close_issue(client, token, number)
+        return None
+    fingerprint = _payload_text(row.payload, "fingerprint")
     hint_url = _payload_text(row.payload, "hint_url")
     issue_url = await _comment_issue_url(client, fingerprint, row.payload)
     token = await _access_token(client)
@@ -237,6 +244,17 @@ async def _comment(client: _Client, token: str, issue_url: str, hint_url: str) -
         token,
         _Request("POST", f"{_api_url(client)}/issues/{number}/comments", json_body={"body": body}),
     )
+
+
+async def _close_issue(client: _Client, token: str, number: str) -> None:
+    """Post the close comment and close the issue (R-11.9)."""
+    issue_url = f"{_api_url(client)}/issues/{number}"
+    await _send(
+        client,
+        token,
+        _Request("POST", f"{issue_url}/comments", json_body={"body": CLOSE_COMMENT}),
+    )
+    await _send(client, token, _Request("PATCH", issue_url, json_body={"state": "closed"}))
 
 
 def _api_url(client: _Client) -> str:

@@ -11,6 +11,7 @@ import httpx
 import pytest
 
 from invoicebot.github.app_token import GitHubTokenError
+from invoicebot.github.issue_text import CLOSE_COMMENT
 from invoicebot.github.transport import GitHubHooks, make_github_transport
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater
 
@@ -346,3 +347,55 @@ async def test_a_token_rejected_on_the_issue_search_drops_the_cache() -> None:
 
     assert tokens.invalidated == 1
     assert raised.value.delay == timedelta(minutes=15)
+
+
+async def test_close_issue_posts_the_close_comment_then_closes_the_issue() -> None:
+    """R-11.9: a close_issue row comments and then patches state closed on its issue number."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={})
+
+    payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/42"}
+    result = await _run(handler, payload, Recorder())
+
+    assert result is None
+    assert [request.method for request in requests] == ["POST", "PATCH"]
+    assert str(requests[0].url) == f"{ISSUES_URL}/42/comments"
+    assert json.loads(requests[0].content) == {"body": CLOSE_COMMENT}
+    assert str(requests[1].url) == f"{ISSUES_URL}/42"
+    assert json.loads(requests[1].content) == {"state": "closed"}
+
+
+async def test_close_issue_with_a_non_numeric_last_segment_is_permanent() -> None:
+    """R-11.9: an issue_url whose last path segment is not digits is never retried."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a malformed issue URL makes no request")
+
+    tokens = FakeTokenSource()
+    payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/not-a-number"}
+    with pytest.raises(PermanentSendError):
+        await _run(handler, payload, Recorder(), tokens=tokens)
+
+    assert tokens.calls == 0
+
+
+async def test_close_issue_server_error_on_the_patch_reschedules() -> None:
+    """R-11.9: a 5xx on the closing PATCH reschedules the row like any other write."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.method == "PATCH":
+            return httpx.Response(502, json={})
+        return httpx.Response(201, json={})
+
+    payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/42"}
+    with pytest.raises(SendLater) as raised:
+        await _run(handler, payload, Recorder())
+
+    assert raised.value.delay == timedelta(minutes=15)
+    assert raised.value.reason == "github 502"
+    assert [request.method for request in requests] == ["POST", "PATCH"]

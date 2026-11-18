@@ -28,6 +28,9 @@ _MARKER_PUNCTUATION = frozenset("-_:")
 
 _URL_RE = re.compile(r"^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._~/-]*)?$")
 
+#: The comment posted before a fixed gap's issue is closed (R-11.9).
+CLOSE_COMMENT = "Fixed and verified by the bot: an affected invoice got past the failing step."
+
 
 @dataclass(frozen=True)
 class IssueFields:
