@@ -30,6 +30,7 @@ from invoicebot.fetchers.sunat_sol import SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
+from invoicebot.sandbox import HelperPrefixes
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
@@ -302,14 +303,16 @@ def test_todo_sol_site_registers_no_fetcher() -> None:
     """R-5.2: a todo SOL site leaves the sunat_sol fetcher unregistered."""
     cfg = load_config(EXAMPLE)
 
-    assert _sol_fetcher(cfg, _sol_directory("todo"), _sol_store("20000000010")) is None
+    assert (
+        _sol_fetcher(cfg, _sol_directory("todo"), _sol_store("20000000010"), HelperPrefixes((), ())) is None
+    )
 
 
 def test_active_sol_site_with_matching_secrets_registers_the_fetcher() -> None:
     """R-5.2: an active site with matching SOL secrets builds the fetcher."""
     cfg = _with_owner_ruc(load_config(EXAMPLE), "20000000010")
 
-    fetcher = _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000010"))
+    fetcher = _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000010"), HelperPrefixes((), ()))
 
     assert isinstance(fetcher, SunatSolFetcher)
 
@@ -319,7 +322,7 @@ def test_mismatched_sol_ruc_stops_startup_naming_only_the_key() -> None:
     cfg = _with_owner_ruc(load_config(EXAMPLE), "20000000010")
 
     with pytest.raises(ValueError, match="sol_ruc") as raised:
-        _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000028"))
+        _sol_fetcher(cfg, _sol_directory("active"), _sol_store("20000000028"), HelperPrefixes((), ()))
 
     assert "20000000010" not in str(raised.value)
     assert "20000000028" not in str(raised.value)

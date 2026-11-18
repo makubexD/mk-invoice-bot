@@ -8,9 +8,15 @@
 # All container calls go through CONTAINER_ENGINE (default: podman if on PATH,
 # else docker). Rollback means redeploying the previous image; migrations are
 # expand/contract and are never downgraded.
+#
+# COMPOSE_PROJECT names the Compose project (default: invoicebot). When
+# COMPOSE_OVERRIDE is set, compose() adds that file after the base compose file
+# and DB_SECRETS_DIR must point at the directory where the live database
+# password files live or are created (deploy/compose.live.yml, D148).
 set -euo pipefail
 
-COMPOSE_PROJECT=invoicebot
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-invoicebot}"
+COMPOSE_OVERRIDE="${COMPOSE_OVERRIDE:-}"
 TAG_RE='^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'
 
 # --- engine ------------------------------------------------------------------
@@ -51,11 +57,18 @@ log() {
 
 usage() {
     log "usage: deploy.sh <image_tag> | deploy.sh --config <candidate.yaml>"
+    log "env: COMPOSE_PROJECT (default: invoicebot), COMPOSE_OVERRIDE (optional compose override),"
+    log "     DB_SECRETS_DIR (required when COMPOSE_OVERRIDE is set)"
     exit 2
 }
 
 compose() {
-    "$ENGINE" compose -f "$COMPOSE_FILE" "$@"
+    local -a compose_files
+    compose_files=(-f "$COMPOSE_FILE")
+    if [[ -n "${COMPOSE_OVERRIDE:-}" ]]; then
+        compose_files+=(-f "$COMPOSE_OVERRIDE")
+    fi
+    "$ENGINE" compose -p "$COMPOSE_PROJECT" "${compose_files[@]}" "$@"
 }
 
 service_container() {
@@ -92,6 +105,44 @@ write_current_tag() {
     printf '%s\n' "$tag" >"$tmp"
     chmod 644 "$tmp"
     mv -f "$tmp" "$CURRENT_TAG_FILE"
+}
+
+ensure_db_secrets() {
+    [[ -n "${COMPOSE_OVERRIDE:-}" ]] || return 0
+    if [[ -z "${DB_SECRETS_DIR:-}" ]]; then
+        log "DB_SECRETS_DIR is required when COMPOSE_OVERRIDE is set"
+        exit 1
+    fi
+
+    mkdir -p "$DB_SECRETS_DIR"
+    chmod 700 "$DB_SECRETS_DIR"
+
+    local pw_file="$DB_SECRETS_DIR/postgres-password"
+    local pgpass="$DB_SECRETS_DIR/pgpass"
+
+    if [[ ! -f "$pw_file" ]]; then
+        # The password stays in shell memory only: it is generated through a
+        # pipe and written with a builtin under umask 077, never an argv or a log.
+        local password
+        password="$(od -An -tx1 -N32 /dev/urandom | tr -d ' \n')"
+        (
+            umask 077
+            printf '%s\n' "$password" >"$pw_file"
+            printf '*:*:*:invoicebot:%s\n' "$password" >"$pgpass"
+        )
+        chmod 600 "$pw_file" "$pgpass"
+    fi
+
+    # pgpass is read by the container's bot user (uid 10001), so it must be
+    # owned by that uid in the host namespace.
+    if [[ "$ENGINE" == podman ]]; then
+        podman unshare chown 10001:10001 "$pgpass"
+    else
+        if ! chown 10001:10001 "$pgpass" 2>/dev/null; then
+            log "run as root once: chown 10001:10001 $pgpass"
+            exit 1
+        fi
+    fi
 }
 
 ensure_postgres() {
@@ -150,6 +201,7 @@ deploy_tag() {
     mkdir -p "$STATE_DIR"
     log "deploying $image (previous: ${previous:-none})"
 
+    ensure_db_secrets
     if ! ensure_postgres; then
         log "deploy aborted: postgres is not healthy"
         exit 1

@@ -266,6 +266,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             cfg.limits.media,
             PARSING_RULES_PATH,
             GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
+            helper_prefix=(),
         )(_job(extract_job, invoice_id, EXTRACT_STEP))
         async with db_pool.connection() as conn:
             cur = await conn.execute(

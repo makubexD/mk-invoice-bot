@@ -41,6 +41,13 @@ chmod 755 "$TMP_ROOT" "$CONFIG_DIR"
 export CONTAINER_ENGINE="$ENGINE"
 export APP_IMAGE_REPO BACKUP_DIR STATE_DIR CONFIG_DIR HEALTH_URL HEALTH_TIMEOUT_S
 
+# Live override case (D148): its own project and a throwaway secrets dir. The
+# dir holds a pgpass chowned to the container's bot subuid, so it is removed
+# with `podman unshare rm -rf` rather than a plain rm -rf.
+LIVE_PROJECT="invoicebot-deploytest"
+LIVE_OVERRIDE="$REPO_DIR/deploy/compose.live.yml"
+LIVE_DB_SECRETS_DIR="$(mktemp -d)"
+
 FAILURES=0
 
 pass() {
@@ -99,7 +106,21 @@ cleanup() {
     done
     rm -rf "$TMP_ROOT"
 }
-trap cleanup EXIT
+
+live_cleanup() {
+    set +e
+    if [[ -n "${LIVE_DB_SECRETS_DIR:-}" ]]; then
+        # The override refuses to parse without DB_SECRETS_DIR, so `down` needs it too.
+        DB_SECRETS_DIR="$LIVE_DB_SECRETS_DIR" \
+            "$ENGINE" compose -p "$LIVE_PROJECT" -f "$COMPOSE_FILE" -f "$LIVE_OVERRIDE" down -v >/dev/null 2>&1
+        if [[ "$ENGINE" == podman ]]; then
+            podman unshare rm -rf "$LIVE_DB_SECRETS_DIR" 2>/dev/null
+        else
+            rm -rf "$LIVE_DB_SECRETS_DIR"
+        fi
+    fi
+}
+trap 'live_cleanup; cleanup' EXIT
 
 # --- fixtures ----------------------------------------------------------------
 postgres_id="$(service_container postgres)"
@@ -221,6 +242,50 @@ if wait_health; then
     pass "case 4: app is healthy after SIGHUP"
 else
     fail "case 4: app is not healthy after SIGHUP ($(http_code))"
+fi
+
+# --- case 5: live override with database secrets ------------------------------
+echo "case 5: deploy with the live override and a real database password"
+# Both stacks publish the loopback 8080 port; free it from the dev app first.
+compose stop app >/dev/null 2>&1 || true
+
+rc=0
+COMPOSE_PROJECT="$LIVE_PROJECT" COMPOSE_OVERRIDE="$LIVE_OVERRIDE" \
+    DB_SECRETS_DIR="$LIVE_DB_SECRETS_DIR" \
+    bash "$REPO_DIR/deploy/deploy.sh" t-good2 || rc=$?
+if ((rc == 0)); then
+    pass "case 5: live deploy exited 0"
+else
+    fail "case 5: live deploy exited $rc"
+fi
+
+if wait_health; then
+    pass "case 5: live app is healthy through the passfile"
+else
+    fail "case 5: live app is not healthy ($(http_code))"
+fi
+
+pw_file="$LIVE_DB_SECRETS_DIR/postgres-password"
+pw_mode="$(stat -c '%a' "$pw_file" 2>/dev/null || true)"
+if [[ "$pw_mode" == "600" ]]; then
+    pass "case 5: postgres-password is mode 600"
+else
+    fail "case 5: postgres-password mode is ${pw_mode:-missing}, expected 600"
+fi
+
+live_pg_id="$("$ENGINE" ps -q \
+    --filter "label=com.docker.compose.project=$LIVE_PROJECT" \
+    --filter "label=com.docker.compose.service=postgres" |
+    sed -n '1p')"
+if [[ -n "$live_pg_id" ]]; then
+    published="$("$ENGINE" port "$live_pg_id" 2>/dev/null || true)"
+    if [[ -z "$published" ]]; then
+        pass "case 5: live postgres publishes no port"
+    else
+        fail "case 5: live postgres publishes a port: $published"
+    fi
+else
+    fail "case 5: live postgres is not running"
 fi
 
 # --- result ------------------------------------------------------------------

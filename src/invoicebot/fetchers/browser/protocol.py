@@ -6,6 +6,7 @@ bot can import it without loading a browser.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -13,6 +14,26 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from invoicebot.config.models import MediaMaxBytes, Portal, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
+
+#: The one argument a sandboxed helper accepts: run Chromium's own sandbox (D147).
+CHROMIUM_SANDBOX_FLAG = "--chromium-sandbox"
+
+
+class BadRequest(Exception):
+    """The helper's stdin or its arguments are not one valid request."""
+
+
+def parse_helper_args(argv: Sequence[str]) -> bool:
+    """Return whether the helper runs Chromium with its sandbox (D147).
+
+    Raises:
+        BadRequest: the arguments are not empty and not exactly ``CHROMIUM_SANDBOX_FLAG``.
+    """
+    if not argv:
+        return False
+    if list(argv) == [CHROMIUM_SANDBOX_FLAG]:
+        return True
+    raise BadRequest
 
 
 class HelperRequest(BaseModel):

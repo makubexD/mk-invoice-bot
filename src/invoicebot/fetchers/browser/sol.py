@@ -19,9 +19,14 @@ from playwright.async_api import Page
 from invoicebot.config.models import MediaMaxBytes, Portal
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.browser.form import fill_and_download
-from invoicebot.fetchers.browser.protocol import HelperOutput, SolCredentialsIn, SolRequest
-from invoicebot.fetchers.browser.session import (
+from invoicebot.fetchers.browser.protocol import (
     BadRequest,
+    HelperOutput,
+    SolCredentialsIn,
+    SolRequest,
+    parse_helper_args,
+)
+from invoicebot.fetchers.browser.session import (
     browse,
     emit,
     limit_resources,
@@ -59,6 +64,7 @@ async def run_sol(page: Page, request: SolRequest, fill: Fill = fill_and_downloa
 def main() -> int:
     """Read the request, run one SOL fetch and print its result (S10.1)."""
     try:
+        chromium_sandbox = parse_helper_args(sys.argv[1:])
         request = read_request(SolRequest)
     except BadRequest:
         emit(HelperOutput(reason=FetchReason.TECHNICAL))
@@ -70,6 +76,7 @@ def main() -> int:
                 request.site.query,
                 request.page_timeout_ms,
                 lambda page: run_sol(page, request),
+                chromium_sandbox=chromium_sandbox,
             )
         )
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)

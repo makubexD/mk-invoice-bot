@@ -19,9 +19,13 @@ import sys
 
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.browser.form import fill_and_download
-from invoicebot.fetchers.browser.protocol import HelperOutput, HelperRequest
-from invoicebot.fetchers.browser.session import (
+from invoicebot.fetchers.browser.protocol import (
     BadRequest,
+    HelperOutput,
+    HelperRequest,
+    parse_helper_args,
+)
+from invoicebot.fetchers.browser.session import (
     browse,
     emit,
     limit_resources,
@@ -35,13 +39,14 @@ logger = logging.getLogger(__name__)
 def main() -> int:
     """Read the request, run one fetch and print its result (S10.1)."""
     try:
+        chromium_sandbox = parse_helper_args(sys.argv[1:])
         request = _read_request()
     except BadRequest:
         emit(HelperOutput(reason=FetchReason.TECHNICAL))
         return 0
     limit_resources(request.max_bytes)
     try:
-        asyncio.run(_run_browser(request))
+        asyncio.run(_run_browser(request, chromium_sandbox))
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
         logger.error("browser helper failed: %s", type(error).__name__)
         emit(HelperOutput(reason=FetchReason.TECHNICAL))
@@ -53,13 +58,14 @@ def _read_request() -> HelperRequest:
     return read_request(HelperRequest)
 
 
-async def _run_browser(request: HelperRequest) -> None:
-    """Launch Chromium behind the guard proxy and print the result (S10.1)."""
+async def _run_browser(request: HelperRequest, chromium_sandbox: bool) -> None:
+    """Launch Chromium behind the guard proxy and print the result (S10.1, D147)."""
     portal = request.portal
     result = await browse(
         portal,
         request.page_timeout_ms,
         lambda page: fill_and_download(page, portal, request.invoice, request.out_dir, request.max_bytes),
+        chromium_sandbox=chromium_sandbox,
     )
     emit(output(result))
 

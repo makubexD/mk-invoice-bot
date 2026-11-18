@@ -451,7 +451,9 @@ async def browser_proxy() -> AsyncIterator[GuardProxy]:
 async def browser(browser_proxy: GuardProxy) -> AsyncIterator[Browser]:
     """A headless Chromium launched with the helper's options through the proxy."""
     async with async_playwright() as playwright:
-        launched = await playwright.chromium.launch(**launch_options(_portal(), browser_proxy.port))
+        launched = await playwright.chromium.launch(
+            **launch_options(_portal(), browser_proxy.port, chromium_sandbox=False)
+        )
         try:
             yield launched
         finally:

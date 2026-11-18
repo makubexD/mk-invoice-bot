@@ -53,7 +53,8 @@ RUN chmod -R a+rX /app/alembic.ini /app/migrations /app/scripts /app/config
 RUN mkdir -p /data && chown bot:bot /data
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    HELPER_SANDBOX=1
 
 USER bot
 

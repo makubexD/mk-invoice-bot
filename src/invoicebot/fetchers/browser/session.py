@@ -19,7 +19,7 @@ from pydantic import BaseModel
 
 from invoicebot.config.models import MediaMaxBytes, Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
-from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput
+from invoicebot.fetchers.browser.protocol import BadRequest, HelperFile, HelperOutput
 from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.fetchers.browser.routing import RouteGuard
 from invoicebot.net.guard import GuardReason, SystemResolver
@@ -42,10 +42,6 @@ LAUNCH_ARGS: tuple[str, ...] = (
 IMAGES_OFF = "--blink-settings=imagesEnabled=false"
 #: Results a blocked navigation turns into ``guard_blocked``; a not-found page keeps its reason.
 BLOCKABLE_REASONS = frozenset({FetchReason.TECHNICAL, FetchReason.TIMEOUT})
-
-
-class BadRequest(Exception):
-    """The helper's stdin is not one valid request."""
 
 
 type BrowserWork = Callable[[Page], Awaitable[FetchResult]]
@@ -78,12 +74,19 @@ def limit_resources(max_bytes: MediaMaxBytes) -> None:
     # memory cap is the app container's mem_limit (R-9.1); for ops.
 
 
-async def browse(portal: Portal, page_timeout_ms: int, work: BrowserWork) -> FetchResult:
+async def browse(
+    portal: Portal,
+    page_timeout_ms: int,
+    work: BrowserWork,
+    *,
+    chromium_sandbox: bool,
+) -> FetchResult:
     """Run ``work`` on one guarded page and return its result (S10.1, R-9.1, R-5.10).
 
     ``portal`` supplies the launch flags, the one allowed ``http`` host and whether
-    images load. Every request goes through the guard proxy, and a refused host the
-    page navigated to promotes a technical or timed-out result to ``guard_blocked``.
+    images load. ``chromium_sandbox`` runs Chromium's own sandbox (D147). Every
+    request goes through the guard proxy, and a refused host the page navigated to
+    promotes a technical or timed-out result to ``guard_blocked``.
     """
     guard = RouteGuard(allow_images=_allow_images(portal))
     async with (
@@ -94,7 +97,9 @@ async def browse(portal: Portal, page_timeout_ms: int, work: BrowserWork) -> Fet
             idle_timeout_s=page_timeout_ms / 1000,
         ) as proxy,
     ):
-        browser = await playwright.chromium.launch(**launch_options(portal, proxy.port))
+        browser = await playwright.chromium.launch(
+            **launch_options(portal, proxy.port, chromium_sandbox=chromium_sandbox)
+        )
         try:
             context = await browser.new_context(accept_downloads=True, service_workers="block")
             context.set_default_timeout(page_timeout_ms)
@@ -144,16 +149,18 @@ def _launch_args(portal: Portal) -> list[str]:
     return args
 
 
-def launch_options(portal: Portal, proxy_port: int) -> dict[str, Any]:
+def launch_options(portal: Portal, proxy_port: int, chromium_sandbox: bool) -> dict[str, Any]:
     """Chromium's launch keyword arguments, with every connection through the proxy.
 
     Playwright already adds ``--proxy-bypass-list=<-loopback>`` for a launch proxy, so
     loopback goes through the proxy too; passing that flag again would duplicate it.
+    ``chromium_sandbox`` turns Chromium's own sandbox on (D147).
     """
     return {
         "headless": True,
         "args": _launch_args(portal),
         "proxy": {"server": f"http://127.0.0.1:{proxy_port}"},
+        "chromium_sandbox": chromium_sandbox,
     }
 
 
