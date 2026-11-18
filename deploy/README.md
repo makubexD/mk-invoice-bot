@@ -161,8 +161,9 @@ podman build -f deploy/Dockerfile -t localhost/invoicebot-app:$(git rev-parse --
 ### 3. Start on boot
 
 Let the user manager start without a login session, and enable the Podman
-restart unit. Containers with `restart: unless-stopped` come back after a
-reboot:
+restart unit. That unit starts only containers with `restart: always`, so
+`compose.live.yml` sets it on the live app and Postgres; `unless-stopped`
+containers stay down after a reboot:
 
 ```sh
 loginctl enable-linger "$USER"

@@ -4,11 +4,14 @@
 name: invoicebot-live
 services:
   app:
+    # podman-restart.service starts only `always` containers after a reboot.
+    restart: always
     environment:
       DATABASE_URL: postgresql://invoicebot@postgres:5432/invoicebot?passfile=/run/invoicebot/pgpass
     volumes:
       - ${DB_SECRETS_DIR:?}/pgpass:/run/invoicebot/pgpass:ro
   postgres:
+    restart: always
     environment:
       POSTGRES_PASSWORD: !reset null
       POSTGRES_PASSWORD_FILE: /run/invoicebot/postgres-password
