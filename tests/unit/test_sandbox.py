@@ -24,10 +24,17 @@ from invoicebot.sandbox import (
 
 def test_image_prefix_hides_dirs_and_drops_the_network() -> None:
     """D147: the extract helper gets user, mount, net and pid namespaces."""
-    prefix = image_prefix([Path("/a"), Path("/b")])
+    prefix = image_prefix([Path("/a"), Path("/b")], Path("/data"))
 
-    assert prefix[-4:] == ("sandbox", "/a", "/b", "--")
+    assert prefix[-3:] == ("/a", "/b", "--")
     assert "--net" in prefix
+
+
+def test_image_prefix_places_the_data_root_right_after_the_script() -> None:
+    """D158: the data root argument follows the script, before the hidden dirs and `--`."""
+    prefix = image_prefix([Path("/a"), Path("/b")], Path("/data"))
+
+    assert prefix[-5:] == ("sandbox", "/data", "/a", "/b", "--")
 
 
 def test_browser_prefix_keeps_the_network_and_caps_tmp() -> None:
@@ -116,13 +123,13 @@ def test_helper_prefixes_on_builds_both_prefixes() -> None:
     assert browser_command(prefixes, ("py", "-m", "x"))[-4:] == ("py", "-m", "x", "--chromium-sandbox")
 
 
-def test_helper_prefixes_passes_data_dir_to_the_browser_prefix_only() -> None:
-    """D150: only the browser prefix masks the data root; the image prefix is unchanged."""
+def test_helper_prefixes_masks_the_data_root_in_both_prefixes() -> None:
+    """D158: the image and browser prefixes both get the data root to mask."""
     hidden = [Path("/c")]
     prefixes = helper_prefixes(True, hidden, 256, Path("/data"))
 
+    assert prefixes.image[-4:] == ("sandbox", "/data", "/c", "--")
     assert prefixes.browser[-5:] == ("sandbox", "256", "/data", "/c", "--")
-    assert "/data" not in prefixes.image
     assert "--net" in prefixes.image
     assert "--net" not in prefixes.browser
 

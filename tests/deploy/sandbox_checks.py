@@ -164,6 +164,21 @@ def check_image_config_hidden() -> None:
         raise CheckFailed(f"{RUNTIME_CONFIG} is visible: {done.stdout.strip()!r}")
 
 
+def check_image_data_masked() -> None:
+    """The image prefix masks the data root, so listing it shows nothing (D158)."""
+    photos = DATA_ROOT / "photos"
+    photos.mkdir(parents=True)
+    (photos / "x.jpg").write_bytes(b"x")
+    try:
+        done = _run([*PREFIXES.image, "ls", "-A", str(DATA_ROOT)], _base_env(), SHORT_TIMEOUT_S)
+    finally:
+        shutil.rmtree(photos, ignore_errors=True)
+    if done.returncode != 0:
+        raise CheckFailed(f"ls exited {done.returncode}: {done.stderr.strip()!r}")
+    if done.stdout.strip():
+        raise CheckFailed(f"{DATA_ROOT} is visible: {done.stdout.strip()!r}")
+
+
 def check_image_oom() -> None:
     """The image prefix scores its helper 1000, so the kernel kills it before the app."""
     process = subprocess.Popen(  # noqa: S603 - fixed argv built here, never a shell
@@ -393,6 +408,7 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "image-no-network": check_image_no_network,
     "image-no-proc": check_image_no_proc,
     "image-config-hidden": check_image_config_hidden,
+    "image-data-masked": check_image_data_masked,
     "image-oom": check_image_oom,
     "browser-config-hidden-oom": check_browser_config_hidden_oom,
     "browser-tmp-cap": check_browser_tmp_cap,
