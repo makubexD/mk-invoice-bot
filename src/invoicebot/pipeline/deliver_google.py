@@ -214,6 +214,17 @@ async def _park_auth(context: GoogleDeliverContext, invoice: _Invoice, required:
         )
 
 
+def _razon_social(ruc_emisor: object, razon_social: object) -> object:
+    """Return the issuer's name, or ``RUC {ruc_emisor}`` when it has none (BR-D18).
+
+    A QR-only boleta has no XML and no readable name, so BR-D16, BR-D17 and BR-D18 alike
+    show the issuer's RUC rather than ``None``.
+    """
+    if razon_social is None or razon_social == "":
+        return f"RUC {ruc_emisor}"
+    return razon_social
+
+
 async def _complete(
     context: GoogleDeliverContext, invoice: _Invoice, values: dict[str, object], sinks: _Sinks
 ) -> None:
@@ -233,7 +244,7 @@ async def _complete(
     text = MESSAGES[rule].format(
         serie=values["serie"],
         numero=values["numero"],
-        razon_social=values["razon_social"],
+        razon_social=_razon_social(values["ruc_emisor"], values["razon_social"]),
         total=values["total"],
         link_row=values[LINK_ROW],
         link_folder=values.get(LINK_FOLDER, ""),

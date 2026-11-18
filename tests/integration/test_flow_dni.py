@@ -325,6 +325,8 @@ async def test_a_dni_boleta_routes_to_its_sheet_and_ends_done_with_br_d18(
     completion = await _outbox(db_pool, invoice_id, "BR-D18")
     assert len(completion) == 1
     assert completion[0].startswith(f"✅ Registrado {SERIE_BOLETA}-{numero}")
+    assert f"de RUC {ISSUER_RUC}" in completion[0]
+    assert "None" not in completion[0]
     assert f"Fila: {row_link}" in completion[0]
 
 
