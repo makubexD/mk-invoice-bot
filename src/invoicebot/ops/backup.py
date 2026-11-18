@@ -61,6 +61,14 @@ class BackupError(Exception):
 
 
 @dataclass(frozen=True)
+class BackupSizes:
+    """The sizes of the two encrypted artifacts a backup uploaded (R-9.11)."""
+
+    dump_bytes: int
+    config_bytes: int
+
+
+@dataclass(frozen=True)
 class BackupJob:
     """The inputs of one backup run (D119)."""
 
@@ -74,8 +82,12 @@ class BackupJob:
     max_bytes: int
 
 
-async def run_backup(job: BackupJob, drive: Drive, today: date) -> None:
-    """Dump, tar, encrypt and upload both artifacts, or raise :class:`BackupError` (R-9.11, D119)."""
+async def run_backup(job: BackupJob, drive: Drive, today: date) -> BackupSizes:
+    """Dump, tar, encrypt and upload both artifacts, or raise :class:`BackupError` (R-9.11, D119).
+
+    Returns:
+        The sizes of the encrypted dump and config payloads that were uploaded.
+    """
     dump = await _dump(job)
     config = await asyncio.to_thread(_config_tarball, job)
     encrypted_dump = await asyncio.to_thread(_encrypt, dump, job.recipient)
@@ -90,6 +102,7 @@ async def run_backup(job: BackupJob, drive: Drive, today: date) -> None:
         except Exception:
             # The Drive port has no shared error type, so this boundary maps every adapter failure.
             raise BackupError("upload") from None
+    return BackupSizes(dump_bytes=len(encrypted_dump), config_bytes=len(encrypted_config))
 
 
 async def _dump(job: BackupJob) -> bytes:

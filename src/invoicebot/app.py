@@ -781,10 +781,15 @@ async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive)
     """Back up once, alerting BR-O04 by stage instead of retrying or raising (BR-O04)."""
     today = await _owner_today(pool, cfg.owner.timezone)
     try:
-        await run_backup(_backup_job(settings, cfg), drive, today)
+        sizes = await run_backup(_backup_job(settings, cfg), drive, today)
     except BackupError as error:
         logger.warning("backup failed", extra={"reason": error.reason})
         await _alert_backup_failure(pool, cfg, error.reason)
+        return
+    logger.info(
+        "backup uploaded",
+        extra={"dump_bytes": sizes.dump_bytes, "config_bytes": sizes.config_bytes},
+    )
 
 
 async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -> None:
