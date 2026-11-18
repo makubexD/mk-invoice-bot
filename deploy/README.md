@@ -288,6 +288,7 @@ Record each run:
 |---|---|---|
 | _before go-live_ | | |
 | 2026-11-18 | none | Skipped: no backup can run yet. The live host has no Microsoft sign-in (`tokens/personal.msal.age` is missing), so there is no OneDrive target, and `ops.backup.age_recipient` is still the placeholder, with no off-host `age` key pair. Rerun once both exist. |
+| 2026-11-18 | `db-2026-11-18.dump.age` (44 KB, first live backup) | Pass: restored into an empty `invoicebot_drill` on the dev Postgres, `invoices: 0`. It found that the Microsoft token lookup never matched a real sign-in (fixed the same day). |
 
 ## Uptime check (R-9.14)
 

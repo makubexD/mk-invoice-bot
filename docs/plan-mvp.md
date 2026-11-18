@@ -214,6 +214,11 @@ Not a priority; after everything else.
 - **Later:** an `existing` sheet's header is checked only by `google-setup`; a later column edit by the owner, or a changed `tab`, makes the bot write misaligned rows. Check the header once per process for `existing` sinks, or document that a config edit means running `google-setup` again (py-security-auditor, 2026-11-17).
 - **Later (optional):** the sink kind literals (`"google_drive"`, `"google_sheets"`) live in `config/models.py` and `app.py`; one home. A header cell starting `=`, `+` or `-` is escaped on write, so `ensure_tab` would then always report a mismatch; note it or compare escaped (py-code-reviewer, 2026-11-17).
 
+## Found by the `ops-live` backup (2026-11-18)
+
+- **`ops-reload`:** the JSON log formatter drops `extra=` fields, so `backup failed` and `channel token rejected` reach the log without their `reason` or `channel`. Render `extra` in the JSON line (never secrets: the keys in use are reasons, channels, task keys and counts) and test it.
+- **`ops-reload`:** a successful backup logs nothing; log `backup uploaded` with the two sizes, so the owner can see the nightly run.
+
 ## Carried over from the `ops-harden` review
 
 Found by `py-code-reviewer` and `py-security-auditor` on 2026-11-17; by the owner's decision (D141) they wait for the live runs and go into the `ops-live` plan unless named otherwise.
