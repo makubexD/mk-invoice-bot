@@ -814,6 +814,22 @@ async def test_missing_file_raises_so_the_queue_retries(
     assert route_jobs == 0
 
 
+async def test_file_over_the_media_cap_raises_unread_so_the_queue_retries(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.11: a photo larger than the image cap is refused before it is read or sent to the helper."""
+    photo = _write_blank_photo(tmp_path / f"big{PNG}")
+    invoice_id, _ = await _invoice_with_photo(db_pool, photo)
+    tiny = MEDIA.model_copy(update={"max_bytes": MEDIA.max_bytes.model_copy(update={"image": 1})})
+
+    with pytest.raises(RuntimeError, match="exceeds the media cap"):
+        await _run_handler(db_pool, invoice_id, media=tiny)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+    assert (state, rule_id) == ("EXTRACTING", None)
+
+
 async def test_helper_timeout_is_killed_and_fails_with_br_e01(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

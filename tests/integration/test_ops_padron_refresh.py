@@ -135,3 +135,26 @@ async def test_refresh_reports_a_bad_status_and_keeps_the_old_rows(
         estado="ACTIVO",
         condicion="HABIDO",
     )
+
+
+async def test_refresh_refuses_a_header_only_padron_and_keeps_the_old_rows(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """S12.4, R-2.5: a padrón under half the current rows raises the rows reason and swaps nothing."""
+    body = _padron_zip([f"{FIRST_RUC}|EMPRESA UNO|ACTIVO|HABIDO"])
+    async with httpx.AsyncClient(transport=_ok(body)) as http:
+        await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
+    async with httpx.AsyncClient(transport=_ok(_padron_zip([]))) as http:
+        with pytest.raises(PadronRefreshError, match="rows") as raised:
+            await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
+    assert raised.value.reason == "rows"
+    assert not (tmp_path / "padron" / "padron_reducido_ruc.zip").exists()
+    async with db_pool.connection() as conn:
+        kept = await lookup(conn, FIRST_RUC)
+        cur = await conn.execute("SELECT to_regclass('padron_staging')")
+        staging = (await cur.fetchone())[0]
+    assert kept is not None
+    assert staging is None

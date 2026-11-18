@@ -243,8 +243,9 @@ async def _run_helper(
     Raises:
         TimeoutError: when the helper outlives ``helper_timeout_s``; it is killed and
             reaped first.
-        RuntimeError: when the input file cannot be read, the helper exits non-zero, prints
-            more than ``MAX_HELPER_OUTPUT_BYTES`` or prints malformed JSON.
+        RuntimeError: when the input file cannot be read or is over the media cap, the
+            helper exits non-zero, prints more than ``MAX_HELPER_OUTPUT_BYTES`` or prints
+            malformed JSON.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
@@ -253,15 +254,25 @@ async def _run_helper(
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
     }
-    try:
-        # The intake already capped the file at the media limit (R-1.11).
-        data = await asyncio.to_thread(Path(path).read_bytes)
-    except OSError as err:
-        raise RuntimeError("extract input cannot be read") from err
+    data = await asyncio.to_thread(_read_capped, Path(path), max_bytes_for(kind, media))
     argv = [*helper_prefix, *helper_argv(kind, extraction_cfg, media, rules_path)]
     async with HEAVY:
         stdout = await run_helper(argv, data, env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
     return _parse_result(stdout)
+
+
+def _read_capped(path: Path, max_bytes: int) -> bytes:
+    """Read the extract input, refusing it unread when it is over the media cap (R-1.11).
+
+    Raises:
+        RuntimeError: when the file cannot be read or is larger than ``max_bytes``.
+    """
+    try:
+        if path.stat().st_size > max_bytes:
+            raise RuntimeError("extract input exceeds the media cap")
+        return path.read_bytes()
+    except OSError as err:
+        raise RuntimeError("extract input cannot be read") from err
 
 
 def helper_argv(

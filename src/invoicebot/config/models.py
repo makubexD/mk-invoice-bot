@@ -171,6 +171,14 @@ class Padron(BaseModel):
         _parse_refresh_cron(value)
         return value
 
+    @field_validator("url")
+    @classmethod
+    def _is_https(cls, value: HttpUrl) -> HttpUrl:
+        """S12.4: the padrón replaces every RUC, so it is only downloaded over https."""
+        if value.scheme != "https":
+            raise ValueError("padron.url must use https")
+        return value
+
     @property
     def at(self) -> time:
         """S12.4: the time of day the weekly refresh runs."""

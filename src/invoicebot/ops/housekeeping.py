@@ -40,7 +40,11 @@ async def _remove_stale_tmp(pool: Pool, data_dir: Path) -> int:
     root = data_dir / TMP_DIRECTORY
     if not root.is_dir():
         return 0
-    folders = {int(entry.name): entry for entry in root.iterdir() if entry.name.isdigit() and entry.is_dir()}
+    folders = {
+        int(entry.name): entry
+        for entry in root.iterdir()
+        if entry.name.isdigit() and entry.is_dir() and not entry.is_symlink()
+    }
     if not folders:
         return 0
     async with pool.connection() as conn:

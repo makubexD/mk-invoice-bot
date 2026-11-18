@@ -87,6 +87,24 @@ async def test_housekeep_removes_tmp_folders_of_terminal_and_unknown_invoices(
         await _delete_invoices(db_pool, [done_id, active_id])
 
 
+async def test_housekeep_skips_a_symlink_named_like_an_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7: a digit-named symlink in tmp is left alone and its target is untouched."""
+    target = tmp_path / "outside"
+    target.mkdir()
+    (target / "keep.txt").write_text("keep", encoding="utf-8")
+    tmp = tmp_path / "tmp"
+    tmp.mkdir()
+    link = tmp / str(UNKNOWN_ID)
+    link.symlink_to(target, target_is_directory=True)
+
+    await housekeep(db_pool, tmp_path)
+
+    assert link.is_symlink()
+    assert (target / "keep.txt").is_file()
+
+
 async def test_housekeep_deletes_expired_jobs_of_terminal_invoices_only(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

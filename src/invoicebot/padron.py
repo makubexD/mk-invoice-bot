@@ -31,6 +31,13 @@ _MAX_ZIP_RATIO = 50
 _RUC_PATTERN = re.compile(r"[0-9]{11}")
 #: psycopg 3.3 never flushes libpq's send buffer during one COPY on Linux, so each batch is its own COPY.
 _COPY_BATCH_ROWS = 10_000
+#: A new padrón smaller than this share of the current one is refused, so a truncated or
+#: header-only file never empties the RUC lookup (R-2.5).
+MIN_KEPT_SHARE = 0.5
+
+
+class PadronShrankError(ValueError):
+    """The new padrón has under ``MIN_KEPT_SHARE`` of the current rows; the old one stays (R-2.5)."""
 
 
 @dataclass
@@ -102,7 +109,8 @@ async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportRes
     The staging table is dropped and recreated from ``padron``, so this replaces
     every row. The caller's connection must be in autocommit: the COPY commits on
     its own, and the swap runs in one transaction. A failure while copying leaves
-    the old padrón in place. Each batch of rows is its own ``COPY``, whose end
+    the old padrón in place, and so does a new one under ``MIN_KEPT_SHARE`` of the
+    current rows, which raises :class:`PadronShrankError`. Each batch of rows is its own ``COPY``, whose end
     flushes libpq's send buffer, so memory stays flat.
     """
     skipped = Skipped()
@@ -117,8 +125,19 @@ async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportRes
                 for ruc, razon_social, estado, condicion in batch:
                     await copy.write_row((int(ruc), razon_social, estado, condicion))
                     imported += 1
+    await _refuse_if_shrunk(conn, imported)
     async with conn.transaction():
         await conn.execute("DROP TABLE padron")
         await conn.execute("ALTER TABLE padron_staging RENAME TO padron")
         await conn.execute("ALTER INDEX padron_staging_pkey RENAME TO padron_pkey")
     return ImportResult(rows=imported, skipped=skipped.count)
+
+
+async def _refuse_if_shrunk(conn: AsyncConnection[Any], imported: int) -> None:
+    """Drop the staging table and raise when ``imported`` is under the kept share (R-2.5)."""
+    cur = await conn.execute("SELECT count(*) FROM padron")
+    row = await cur.fetchone()
+    current = int(row[0]) if row is not None else 0
+    if imported < current * MIN_KEPT_SHARE:
+        await conn.execute("DROP TABLE padron_staging")
+        raise PadronShrankError(f"new padron has {imported} rows, current has {current}")

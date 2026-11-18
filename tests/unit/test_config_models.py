@@ -1119,3 +1119,9 @@ def test_padron_takes_the_default_url_and_size_cap() -> None:
 
     assert str(padron.url) == "https://www2.sunat.gob.pe/padron_reducido_ruc.zip"
     assert padron.max_mb == 600
+
+
+def test_padron_url_over_plain_http_is_rejected() -> None:
+    """S12.4: a padrón URL that is not https fails validation."""
+    with pytest.raises(ValidationError, match=r"padron\.url must use https"):
+        Padron(refresh_cron="0 4 * * 0", url="http://example.test/padron.zip")

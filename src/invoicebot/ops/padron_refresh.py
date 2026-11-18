@@ -2,7 +2,7 @@
 
 The download is capped by ``padron.max_mb`` and the ZIP is deleted whatever the
 outcome, so a failed refresh leaves neither a partial file nor a stale one. A
-non-200 answer and an oversized body raise :class:`PadronRefreshError` whose
+non-200 answer, an oversized body and a padrón that shrank by half raise :class:`PadronRefreshError` whose
 ``reason`` says which; the daily loop logs it and the owner retries by hand.
 """
 
@@ -15,7 +15,7 @@ from typing import Literal
 import httpx
 
 from invoicebot.config.models import Padron
-from invoicebot.padron import ImportResult, import_padron
+from invoicebot.padron import ImportResult, PadronShrankError, import_padron
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
@@ -27,11 +27,11 @@ PADRON_DIRECTORY = "padron"
 ZIP_NAME = "padron_reducido_ruc.zip"
 
 #: The stage that failed; the daily loop logs it as the warning's reason.
-PadronReason = Literal["status", "size"]
+PadronReason = Literal["status", "size", "rows"]
 
 
 class PadronRefreshError(Exception):
-    """The padrón download failed; ``reason`` says whether the status or the size did."""
+    """The padrón refresh failed; ``reason`` says whether the status, the size or the row count did."""
 
     def __init__(self, reason: PadronReason) -> None:
         super().__init__(f"padron refresh failed: {reason}")
@@ -80,5 +80,7 @@ async def _import(pool: Pool, zip_path: Path) -> ImportResult:
         await conn.set_autocommit(True)
         try:
             return await import_padron(conn, zip_path)
+        except PadronShrankError as err:
+            raise PadronRefreshError("rows") from err
         finally:
             await conn.set_autocommit(False)

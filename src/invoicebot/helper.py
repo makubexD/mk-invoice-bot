@@ -43,8 +43,11 @@ async def run_helper(
         async with asyncio.timeout(timeout_s):
             if stdin:
                 stdin_stream = cast(asyncio.StreamWriter, process.stdin)
-                stdin_stream.write(stdin)
-                await stdin_stream.drain()
+                # A helper that exits before reading all its input closes the pipe; its exit
+                # code, checked below, says what went wrong.
+                with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+                    stdin_stream.write(stdin)
+                    await stdin_stream.drain()
                 stdin_stream.close()
             stdout_stream = cast(asyncio.StreamReader, process.stdout)
             chunks: list[bytes] = []
