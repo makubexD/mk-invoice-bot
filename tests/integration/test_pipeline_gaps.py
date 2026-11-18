@@ -247,8 +247,34 @@ async def test_issue_opened_reports_and_alerts_with_the_link(
         alerts = await _outbox_rows(conn, "whatsapp")
 
     assert gap_row == ("reported", ISSUE_URL)
-    assert {recipient for recipient, _ in alerts} == {"segundo", "yo"}
+    assert sorted(recipient for recipient, _ in alerts) == ["segundo", "yo"]
     assert all(ISSUE_URL in text for _, text in alerts)
+
+
+async def test_issue_opened_on_an_ignored_gap_stores_the_url_without_alerting(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D139: an ignored gap with a queued issue keeps its state, stores the URL and alerts nobody."""
+    ctx = _context(github_enabled=True)
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, ctx, _portal_sighting())
+        await conn.execute(
+            "UPDATE gaps SET state = 'ignored' WHERE fingerprint = %s",
+            (GAP_FINGERPRINT,),
+        )
+
+    await issue_opened(db_pool, ctx.profiles, ctx.gaps_cfg, GAP_FINGERPRINT, ISSUE_URL)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT state, issue_url FROM gaps WHERE fingerprint = %s",
+            (GAP_FINGERPRINT,),
+        )
+        gap_row = await cur.fetchone()
+        alerts = await _rule_rows(conn, "GAP_admin")
+
+    assert gap_row == ("ignored", ISSUE_URL)
+    assert alerts == []
 
 
 async def test_a_realdert_after_the_window_alerts_again(

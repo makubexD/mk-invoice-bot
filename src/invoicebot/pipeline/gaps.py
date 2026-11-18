@@ -94,12 +94,17 @@ async def issue_opened(
     Called by the GitHub transport after it creates or reuses an issue. A kind
     in ``gaps.digest_kinds`` is reported but never alerted one by one. A repeated
     call for a URL already stored, as when the outbox row is retried after this
-    commit, alerts nothing.
+    commit, alerts nothing. An ignored gap gets its URL but no alert (D139).
     """
     async with pool.connection() as conn, conn.transaction():
         gap = await get_gap(conn, gap_fingerprint)
         await mark_reported(conn, gap_fingerprint, issue_url)
-        if gap is None or gap.issue_url == issue_url or gap.kind in gaps_cfg.digest_kinds:
+        if (
+            gap is None
+            or gap.state == "ignored"
+            or gap.issue_url == issue_url
+            or gap.kind in gaps_cfg.digest_kinds
+        ):
             return
         await queue_admin_alert(
             conn,
