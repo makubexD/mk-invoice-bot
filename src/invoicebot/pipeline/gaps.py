@@ -29,6 +29,7 @@ from invoicebot.store.gaps import (
     alert_due,
     get_gap,
     mark_alerted,
+    mark_closed,
     mark_reported,
     unreported_overdue,
     upsert_gap,
@@ -133,6 +134,21 @@ async def daily_digest(pool: Pool, profiles: Mapping[str, Profile], gaps_cfg: Ga
     async with pool.connection() as conn, conn.transaction():
         await _queue_digest(conn, profiles, gaps_cfg)
         await _queue_overdue(conn, profiles, gaps_cfg)
+
+
+async def close_gap(conn: AsyncConnection[Any], gap: GapRow, repo: str) -> None:
+    """Close a fixed gap and queue the row that closes its issue, if any (D157).
+
+    Does not commit; the caller owns the transaction.
+    """
+    await mark_closed(conn, gap.fingerprint)
+    if gap.issue_url is not None:
+        await outbox.add(
+            conn,
+            "github",
+            repo,
+            {"op": "close_issue", "issue_url": gap.issue_url},
+        )
 
 
 async def _queue_digest(conn: AsyncConnection[Any], profiles: Mapping[str, Profile], gaps_cfg: Gaps) -> None:
