@@ -66,6 +66,13 @@ _STANDARD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict
 #: Keys the formatter writes; an ``extra=`` value never replaces one.
 _OUTPUT_FIELDS = frozenset({"ts", "level", "event", "logger", "exc", *EXTRA_FIELDS})
 
+#: ``extra=`` keys whose values are personal data (R-9.5, R-9.12): a sender id is logged only as a
+#: hash, and names, phone numbers, RUCs and e-mail addresses are not logged at all.
+_PERSONAL_KEYS = frozenset({"sender", "sender_id", "phone", "wa_id", "ruc", "razon_social", "email", "name"})
+
+#: Replacement for a value under a personal-data key (R-9.5, R-9.12).
+_PERSONAL_REDACTED = "[redacted]"
+
 _logger = logging.getLogger(__name__)
 
 
@@ -150,6 +157,9 @@ class JsonFormatter(logging.Formatter):
 
         for key, value in record.__dict__.items():
             if key in _STANDARD_ATTRS or key in _OUTPUT_FIELDS:
+                continue
+            if key.lower() in _PERSONAL_KEYS:
+                payload[key] = _PERSONAL_REDACTED
                 continue
             if not isinstance(value, (str, int, float, bool)) and value is not None:
                 value = str(value)

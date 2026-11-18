@@ -161,10 +161,14 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
         processed = preprocess(gray)
-    except (ImageUnreadable, cv2.error):
+    except (ImageUnreadable, cv2.error, MemoryError):
         return _unreadable(ocr=False)
-    text = read_text(processed, ocr_cfg)
-    ocr_reading = None if text is None else parse_ocr(text, rules).reading
+    try:
+        text = read_text(processed, ocr_cfg)
+        ocr_reading = None if text is None else parse_ocr(text, rules).reading
+    except MemoryError:
+        # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
+        text, ocr_reading = None, None
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     return _payload(reading, hit, ocr_ran=text is not None)
 

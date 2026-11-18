@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import zipfile
 from collections.abc import AsyncIterator, Sequence
@@ -63,6 +64,20 @@ def _ok(body: bytes) -> httpx.MockTransport:
     return httpx.MockTransport(handler)
 
 
+def _stalled(first: bytes, second: bytes, delay_s: float) -> httpx.MockTransport:
+    """Serve a body that stalls ``delay_s`` between two chunks, staying under any size cap."""
+
+    async def chunks() -> AsyncIterator[bytes]:
+        yield first
+        await asyncio.sleep(delay_s)
+        yield second
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=chunks())
+
+    return httpx.MockTransport(handler)
+
+
 def _status(code: int) -> httpx.MockTransport:
     """Serve ``code`` with an empty body to any request."""
 
@@ -110,6 +125,50 @@ async def test_refresh_aborts_a_body_over_the_cap(
             await refresh_padron(db_pool, http, _cfg(max_mb=1), tmp_path)
 
     assert raised.value.reason == "size"
+    assert not list((tmp_path / "padron").iterdir())
+
+
+async def test_refresh_aborts_a_download_past_its_deadline_and_keeps_the_old_rows(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """S12.4: a download stalled past ``download_timeout_s`` raises the timeout reason; old rows survive.
+
+    The stalled body stays under any size cap, and no ZIP may be left behind.
+    """
+    body = _padron_zip([f"{FIRST_RUC}|EMPRESA UNO|ACTIVO|HABIDO"])
+    async with httpx.AsyncClient(transport=_ok(body)) as http:
+        await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
+    async with httpx.AsyncClient(transport=_stalled(b"P", b"K", 1)) as http:
+        with pytest.raises(PadronRefreshError, match="timeout") as raised:
+            await refresh_padron(db_pool, http, _cfg(download_timeout_s=0.05), tmp_path)
+
+    assert raised.value.reason == "timeout"
+    assert not list((tmp_path / "padron").iterdir())
+    async with db_pool.connection() as conn:
+        kept = await lookup(conn, FIRST_RUC)
+    assert kept == PadronRow(
+        ruc=FIRST_RUC,
+        razon_social="EMPRESA UNO",
+        estado="ACTIVO",
+        condicion="HABIDO",
+    )
+
+
+async def test_refresh_lets_a_timeout_error_inside_the_deadline_propagate(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """S12.4: a TimeoutError raised before the deadline is not reported as the timeout reason."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise TimeoutError("disk stalled")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(TimeoutError, match="disk stalled"):
+            await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
     assert not list((tmp_path / "padron").iterdir())
 
 

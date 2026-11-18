@@ -14,8 +14,13 @@ import pytest
 import yaml
 
 from invoicebot.app import (
+    GITHUB_APP_PRIVATE_KEY,
     GOOGLE_CLIENT_SECRET,
+    LAPTOP_ADAPTER,
+    LAPTOP_AGENT_KEY,
+    WHATSAPP_SECRETS,
     DailyRuns,
+    _check_reload_candidate,
     _daily_tasks,
     _deliver_registry,
     _fetch_schedules,
@@ -23,6 +28,7 @@ from invoicebot.app import (
     _google_secrets,
     _google_tokens,
     _log_reload_failure,
+    _secret_problem,
     _sol_fetcher,
     _validation_handlers,
     _validation_secrets,
@@ -34,6 +40,7 @@ from invoicebot.fetchers.sunat_sol import SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
+from invoicebot.runtime_config import ConfigRejected
 from invoicebot.sandbox import HelperPrefixes
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.settings import Settings
@@ -113,6 +120,28 @@ def _sol_store(sol_ruc: str) -> SecretStore:
             "sol_password": "synthetic-password",
         }
     )
+
+
+def _base_secrets() -> dict[str, str]:
+    """Return synthetic values for the secrets the example config always needs (R-9.6)."""
+    return {**dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"), GITHUB_APP_PRIVATE_KEY: "synthetic-pem"}
+
+
+def _with_laptop_mode(tmp_path: Path) -> Config:
+    """Load the example config, minus Google, whose mailer also lists the laptop mode (R-7.14)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["google"]
+    _drop_dni_flow(document)
+    flow = document["flows"]["personal_google"]
+    flow["sinks"] = []
+    flow["email_inbox"]["provider"] = "graph"
+    for candidate in document["flows"].values():
+        for sink in candidate["sinks"]:
+            if sink["kind"] == "mailer":
+                sink["modes"] = [*sink["modes"], LAPTOP_ADAPTER]
+    path = tmp_path / "laptop.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    return load_config(path)
 
 
 def _with_backup_at(cfg: Config, at: time) -> Config:
@@ -343,6 +372,163 @@ def test_mismatched_sol_ruc_stops_startup_naming_only_the_key() -> None:
 
     assert "20000000010" not in str(raised.value)
     assert "20000000028" not in str(raised.value)
+
+
+def test_secret_problem_with_every_needed_secret_is_none(tmp_path: Path) -> None:
+    """R-9.6: a candidate whose enabled features have their secrets raises no problem."""
+    cfg = _without_google(tmp_path)
+    store = SecretStore(_base_secrets())
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) is None
+
+
+def test_secret_problem_without_the_whatsapp_token_is_whatsapp(tmp_path: Path) -> None:
+    """R-9.6: a candidate missing a WhatsApp secret is refused as secrets:whatsapp."""
+    cfg = _without_google(tmp_path)
+    values = _base_secrets()
+    del values["whatsapp_token"]
+    store = SecretStore(values)
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:whatsapp"
+
+
+def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path: Path) -> None:
+    """R-9.6: validation switched on without the SUNAT keys is refused as secrets:sunat_validez."""
+    cfg = _sunat_config(tmp_path, enabled=True)
+    store = SecretStore(_base_secrets())
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:sunat_validez"
+
+
+def test_secret_problem_with_google_and_no_client_secret_is_google() -> None:
+    """R-9.6: a candidate with google config but no client secret is refused as secrets:google."""
+    cfg = load_config(EXAMPLE)
+    store = SecretStore(_base_secrets())
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:google"
+
+
+def test_secret_problem_with_an_active_sol_site_whose_ruc_differs_is_sunat_sol(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site signing in as another RUC is refused as secrets:sunat_sol."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    values = _base_secrets()
+    values.update(
+        {"sol_ruc": "20000000028", "sol_user": "synthetic-user", "sol_password": "synthetic-password"}
+    )
+    store = SecretStore(values)
+
+    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+
+
+def test_secret_problem_with_an_active_sol_site_and_no_sol_keys_is_sunat_sol(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site without its keys is refused, as startup would be (R-9.10)."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    store = SecretStore(_base_secrets())
+
+    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+
+
+def test_secret_problem_with_an_active_sol_site_and_matching_keys_is_none(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site signing in as the owner raises no problem."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    values = _base_secrets()
+    values.update(
+        {"sol_ruc": "20000000010", "sol_user": "synthetic-user", "sol_password": "synthetic-password"}
+    )
+
+    assert _secret_problem(cfg, _sol_directory("active"), SecretStore(values)) is None
+
+
+def test_secret_problem_with_github_on_and_no_app_key_is_github(tmp_path: Path) -> None:
+    """R-9.6: GitHub gaps switched on without the App's private key is refused as secrets:github."""
+    values = _base_secrets()
+    del values[GITHUB_APP_PRIVATE_KEY]
+
+    assert _secret_problem(_without_google(tmp_path), _sol_directory("todo"), SecretStore(values)) == (
+        "secrets:github"
+    )
+
+
+def test_secret_problem_with_a_laptop_mode_and_no_agent_key_is_laptop(tmp_path: Path) -> None:
+    """R-9.6: a flow listing laptop_outlook without the agent key is refused as secrets:laptop."""
+    cfg = _with_laptop_mode(tmp_path)
+
+    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(_base_secrets())) == "secrets:laptop"
+
+
+def test_secret_problem_with_a_laptop_mode_and_its_agent_key_is_none(tmp_path: Path) -> None:
+    """R-9.6: a flow listing laptop_outlook with the agent key raises no problem."""
+    cfg = _with_laptop_mode(tmp_path)
+    store = SecretStore({**_base_secrets(), LAPTOP_AGENT_KEY: "synthetic-key"})
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) is None
+
+
+def _reload_settings(tmp_path: Path, plaintext: bytes) -> Settings:
+    """Return settings whose age store decrypts to ``plaintext`` (R-9.6)."""
+    identity = pyrage.x25519.Identity.generate()
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(identity) + "\n", encoding="utf-8")
+    secrets_path = tmp_path / "secrets.age"
+    secrets_path.write_bytes(pyrage.encrypt(plaintext, [identity.to_public()]))
+    return Settings(
+        config_path=EXAMPLE,
+        parsing_rules_path=ROOT / "config" / "parsing_rules.yaml",
+        secrets_path=secrets_path,
+        age_identity_path=identity_path,
+        data_dir=tmp_path,
+    )
+
+
+def test_check_reload_candidate_with_every_secret_returns_the_runtime(tmp_path: Path) -> None:
+    """R-9.6: a candidate whose secrets are all present is accepted and returned."""
+    values = {**_base_secrets(), GOOGLE_CLIENT_SECRET: "synthetic-secret"}
+
+    runtime = _check_reload_candidate(_reload_settings(tmp_path, yaml.safe_dump(values).encode("utf-8")))
+
+    assert runtime.cfg.owner.ruc == load_config(EXAMPLE).owner.ruc
+
+
+def test_check_reload_candidate_without_the_google_secret_is_google(tmp_path: Path) -> None:
+    """R-9.6: a candidate missing the Google client secret is rejected as secrets:google."""
+    plaintext = yaml.safe_dump(_base_secrets()).encode("utf-8")
+
+    with pytest.raises(ConfigRejected) as raised:
+        _check_reload_candidate(_reload_settings(tmp_path, plaintext))
+
+    assert raised.value.reason == "secrets:google"
+
+
+def test_check_reload_candidate_with_malformed_plaintext_hides_it(tmp_path: Path) -> None:
+    """R-9.6, R-9.16: a secrets plaintext that is not YAML is rejected without quoting it."""
+    plaintext = b"whatsapp_token: synthetic-leak\n  bad: [unclosed\n"
+
+    with pytest.raises(ConfigRejected) as raised:
+        _check_reload_candidate(_reload_settings(tmp_path, plaintext))
+
+    assert raised.value.reason == "secrets"
+    assert raised.value.__cause__ is not None
+    assert "synthetic-leak" not in str(raised.value.__cause__)
+    assert raised.value.__cause__.__cause__ is None
+
+
+def test_check_reload_candidate_without_a_secrets_file_is_rejected(tmp_path: Path) -> None:
+    """R-9.6: a candidate whose secrets file is missing is rejected with reason secrets."""
+    identity = pyrage.x25519.Identity.generate()
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(identity) + "\n", encoding="utf-8")
+    settings = Settings(
+        config_path=EXAMPLE,
+        parsing_rules_path=ROOT / "config" / "parsing_rules.yaml",
+        secrets_path=tmp_path / "missing.age",
+        age_identity_path=identity_path,
+        data_dir=tmp_path,
+    )
+
+    with pytest.raises(ConfigRejected) as raised:
+        _check_reload_candidate(settings)
+
+    assert raised.value.reason == "secrets"
 
 
 def test_sunat_sol_schedule_comes_from_the_site_file() -> None:

@@ -349,23 +349,77 @@ async def test_a_token_rejected_on_the_issue_search_drops_the_cache() -> None:
     assert raised.value.delay == timedelta(minutes=15)
 
 
-async def test_close_issue_posts_the_close_comment_then_closes_the_issue() -> None:
-    """R-11.9: a close_issue row comments and then patches state closed on its issue number."""
+async def test_close_issue_closes_the_issue_then_posts_the_close_comment() -> None:
+    """R-11.9: an open issue is patched closed first and then gets the close comment."""
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
+        if request.method == "GET":
+            return httpx.Response(200, json={"state": "open"})
         return httpx.Response(201, json={})
 
     payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/42"}
     result = await _run(handler, payload, Recorder())
 
     assert result is None
-    assert [request.method for request in requests] == ["POST", "PATCH"]
-    assert str(requests[0].url) == f"{ISSUES_URL}/42/comments"
-    assert json.loads(requests[0].content) == {"body": CLOSE_COMMENT}
+    assert [request.method for request in requests] == ["GET", "PATCH", "POST"]
     assert str(requests[1].url) == f"{ISSUES_URL}/42"
     assert json.loads(requests[1].content) == {"state": "closed"}
+    assert str(requests[2].url) == f"{ISSUES_URL}/42/comments"
+    assert json.loads(requests[2].content) == {"body": CLOSE_COMMENT}
+
+
+async def test_close_issue_already_closed_writes_nothing() -> None:
+    """R-11.9: an issue already closed makes no write, so a retried close is idempotent."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"state": "closed"})
+
+    payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/42"}
+    result = await _run(handler, payload, Recorder())
+
+    assert result is None
+    assert [request.method for request in requests] == ["GET"]
+
+
+@pytest.mark.parametrize(
+    "issue_url",
+    [
+        "https://github.com/other/repo/issues/42",
+        f"{ISSUE_URL}/1/../../x/y/issues/9",
+        f"{ISSUE_URL}/42?state=open",
+        "https://github.com/maku/ops-other/issues/42",
+    ],
+)
+async def test_close_issue_outside_the_configured_repo_is_permanent(issue_url: str) -> None:
+    """R-11.9: an issue URL that is not exactly one of the repo's issues makes no request."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an issue in another repo makes no request")
+
+    tokens = FakeTokenSource()
+    payload = {"op": "close_issue", "issue_url": issue_url}
+    with pytest.raises(PermanentSendError, match="not in the configured repo"):
+        await _run(handler, payload, Recorder(), tokens=tokens)
+
+    assert tokens.calls == 0
+
+
+async def test_close_issue_matches_the_repo_ignoring_case() -> None:
+    """R-11.9: GitHub's canonical casing of the repo still closes the configured repo's issue."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"state": "closed"})
+
+    payload = {"op": "close_issue", "issue_url": f"https://github.com/{REPO.upper()}/issues/42"}
+    await _run(handler, payload, Recorder())
+
+    assert [str(request.url) for request in requests] == [f"{ISSUES_URL}/42"]
 
 
 async def test_close_issue_with_a_non_numeric_last_segment_is_permanent() -> None:
@@ -383,14 +437,14 @@ async def test_close_issue_with_a_non_numeric_last_segment_is_permanent() -> Non
 
 
 async def test_close_issue_server_error_on_the_patch_reschedules() -> None:
-    """R-11.9: a 5xx on the closing PATCH reschedules the row like any other write."""
+    """R-11.9: a 5xx on the closing PATCH reschedules the row and posts no comment."""
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         if request.method == "PATCH":
             return httpx.Response(502, json={})
-        return httpx.Response(201, json={})
+        return httpx.Response(200, json={"state": "open"})
 
     payload = {"op": "close_issue", "issue_url": f"{ISSUE_URL}/42"}
     with pytest.raises(SendLater) as raised:
@@ -398,4 +452,4 @@ async def test_close_issue_server_error_on_the_patch_reschedules() -> None:
 
     assert raised.value.delay == timedelta(minutes=15)
     assert raised.value.reason == "github 502"
-    assert [request.method for request in requests] == ["POST", "PATCH"]
+    assert [request.method for request in requests] == ["GET", "PATCH"]

@@ -172,6 +172,27 @@ def test_extra_string_value_is_redacted() -> None:
     assert json.loads(line)["detail"] == "token ***"
 
 
+@pytest.mark.parametrize("key", ["sender", "Sender", "PHONE"])
+def test_personal_extra_key_is_redacted(log_stream: io.StringIO, key: str) -> None:
+    """R-9.12: an extra= value under a personal-data key, in any case, is written as [redacted]."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={key: "51999999999"})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1][key] == "[redacted]"
+    assert "51999999999" not in output
+
+
+def test_non_personal_extra_key_is_written(log_stream: io.StringIO) -> None:
+    """R-9.12: an extra= key outside the personal-data set is written as is."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"reason": "status"})
+
+    assert _records(log_stream)[-1]["reason"] == "status"
+
+
 def test_extra_number_stays_a_number(log_stream: io.StringIO) -> None:
     """R-9.5: an extra= int value is emitted as a JSON number, not a string."""
     configure_logging(stream=log_stream)
