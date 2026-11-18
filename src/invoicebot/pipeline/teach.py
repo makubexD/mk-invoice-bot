@@ -216,22 +216,36 @@ async def _record_hint(
 ) -> None:
     """Store an approved link as the portal gap's hint and put it on the gap's issue (D118).
 
-    A pending ``create_issue`` row takes the hint in its fields, so it reaches the issue
-    body. When that row was already picked up, an enabled GitHub repo gets a ``comment``
-    row instead, which resolves the issue at send time (D118).
+    One of three outcomes: a pending ``create_issue`` row takes the hint in its fields,
+    so it reaches the issue body; a gap whose issue URL is known gets a ``comment`` row
+    with that URL; otherwise nothing is queued and the hint waits on the gap for the
+    next ``create_issue``.
     """
     gap_fingerprint = fingerprint(PORTAL_MISSING, str(ruc_emisor))
     await set_hint(conn, gap_fingerprint, url)
     gap = await get_gap(conn, gap_fingerprint)
     if gap is None:
         return
-    payload: dict[str, str] = {"op": "comment", "fingerprint": gap_fingerprint, "hint_url": url}
-    if gap.issue_url is not None:
-        payload["issue_url"] = gap.issue_url
-    elif await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0 or gap.raised_at is None:
-        return
+    issue_url = gap.issue_url
+    if issue_url is None:
+        if await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0:
+            return
+        current = await get_gap(conn, gap_fingerprint)
+        issue_url = None if current is None else current.issue_url
+        if issue_url is None:
+            return
     if setup.github_repo is not None:
-        await outbox.add(conn, "github", setup.github_repo, payload)
+        await outbox.add(
+            conn,
+            "github",
+            setup.github_repo,
+            {
+                "op": "comment",
+                "fingerprint": gap_fingerprint,
+                "issue_url": issue_url,
+                "hint_url": url,
+            },
+        )
 
 
 def _owner_text(

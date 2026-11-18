@@ -449,7 +449,7 @@ async def test_press_approve_marks_the_link_and_the_gap_hint(
 async def test_press_approve_queues_one_comment_on_the_issue(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-S06: with an issue and GitHub enabled, [Aprobar] queues exactly one comment row."""
+    """D118: with an issue and GitHub enabled, [Aprobar] queues exactly one comment row with its issue_url."""
     async with db_pool.connection() as conn:
         assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
         await _insert_gap(conn, issue_url=ISSUE_URL)
@@ -464,6 +464,22 @@ async def test_press_approve_queues_one_comment_on_the_issue(
             "hint_url": GOOD_URL,
         }
     ]
+
+
+async def test_press_approve_with_no_issue_or_pending_row_queues_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: with no issue and no pending create_issue, [Aprobar] queues no github row and keeps the hint."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await _insert_gap(conn, raised=True)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+        rows = await _github_rows(conn)
+        gap = await get_gap(conn, GAP_FINGERPRINT)
+
+    assert rows == []
+    assert gap is not None
+    assert gap.hint_url == GOOD_URL
 
 
 async def test_press_approve_sets_the_pending_issue_hint(
@@ -491,10 +507,10 @@ async def test_press_approve_sets_the_pending_issue_hint(
     assert rows[0]["fields"]["hint_url"] == GOOD_URL
 
 
-async def test_press_approve_while_the_issue_is_sending_queues_a_comment(
+async def test_press_approve_after_the_create_was_sent_queues_a_comment_with_the_issue_url(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D118: [Aprobar] after the create_issue row was picked up queues one comment without issue_url."""
+    """D118: [Aprobar] after the create_issue row was sent reads the stored issue_url and comments on it."""
     fields: dict[str, Any] = {
         "kind": "PORTAL_MISSING",
         "fingerprint": GAP_FINGERPRINT,
@@ -515,11 +531,22 @@ async def test_press_approve_while_the_issue_is_sending_queues_a_comment(
             WHERE channel = 'github' AND payload_json->>'op' = 'create_issue'
             """
         )
+        await conn.execute(
+            "UPDATE gaps SET issue_url = %s WHERE fingerprint = %s",
+            (ISSUE_URL, GAP_FINGERPRINT),
+        )
         await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
         rows = await _github_rows(conn)
 
     comments = [row for row in rows if row.get("op") == "comment"]
-    assert comments == [{"op": "comment", "fingerprint": GAP_FINGERPRINT, "hint_url": GOOD_URL}]
+    assert comments == [
+        {
+            "op": "comment",
+            "fingerprint": GAP_FINGERPRINT,
+            "issue_url": ISSUE_URL,
+            "hint_url": GOOD_URL,
+        }
+    ]
 
 
 async def test_press_approve_while_the_issue_row_is_pending_writes_the_hint(

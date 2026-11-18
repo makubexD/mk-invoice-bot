@@ -22,6 +22,7 @@ from invoicebot.pipeline.gaps import (
     raise_gap,
     writes_today,
 )
+from invoicebot.queue import outbox
 from invoicebot.store.gaps import upsert_gap
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -34,6 +35,7 @@ SUBJECT = f"RUC {ISSUER_RUC}"
 GAP_FINGERPRINT = f"portal_missing:{ISSUER_RUC}"
 PARSER_FINGERPRINT = f"parser_miss:{ISSUER_RUC}"
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
+HINT_URL = "https://portal.example.pe/consulta"
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -127,6 +129,25 @@ async def _insert_raised_gap(
     )
 
 
+async def _github_ops(conn: AsyncConnection[Any]) -> list[str]:
+    """Return the github outbox rows' ``op`` values, oldest first."""
+    cur = await conn.execute("SELECT payload_json->>'op' FROM outbox WHERE channel = 'github' ORDER BY id")
+    return [str(op) for (op,) in await cur.fetchall()]
+
+
+async def _create_issue_payload(conn: AsyncConnection[Any]) -> dict[str, Any]:
+    """Return the only github ``create_issue`` row's payload."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json FROM outbox
+        WHERE channel = 'github' AND payload_json->>'op' = 'create_issue'
+        """
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return dict(row[0])
+
+
 async def test_raising_twice_queues_one_github_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -143,6 +164,46 @@ async def test_raising_twice_queues_one_github_row(
 
     assert second.count == 2
     assert count_row == (1,)
+
+
+async def test_a_pending_comment_does_not_block_a_new_create_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: a pending comment row for the fingerprint still lets a new sighting queue create_issue."""
+    ctx = _context(github_enabled=True)
+    async with db_pool.connection() as conn:
+        await outbox.add(
+            conn,
+            "github",
+            str(ctx.gaps_cfg.github.repo),
+            {
+                "op": "comment",
+                "fingerprint": GAP_FINGERPRINT,
+                "issue_url": ISSUE_URL,
+                "hint_url": HINT_URL,
+            },
+        )
+        await raise_gap(conn, ctx, _portal_sighting())
+        ops = await _github_ops(conn)
+
+    assert ops == ["comment", "create_issue"]
+
+
+async def test_a_new_create_issue_carries_the_gaps_stored_hint(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: a gap that already has a hint_url puts it in the new create_issue fields."""
+    ctx = _context(github_enabled=True)
+    async with db_pool.connection() as conn:
+        await _insert_raised_gap(conn, "PORTAL_MISSING", GAP_FINGERPRINT, SUBJECT)
+        await conn.execute(
+            "UPDATE gaps SET hint_url = %s WHERE fingerprint = %s",
+            (HINT_URL, GAP_FINGERPRINT),
+        )
+        await raise_gap(conn, ctx, _portal_sighting())
+        payload = await _create_issue_payload(conn)
+
+    assert payload["fields"]["hint_url"] == HINT_URL
 
 
 async def test_github_disabled_alerts_each_admin_once(

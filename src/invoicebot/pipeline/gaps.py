@@ -12,7 +12,7 @@ transport's callback.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -189,6 +189,9 @@ async def _queue_alert(
     """
     if ctx.gaps_cfg.github.enabled and gap.issue_url is None:
         if not await _issue_queued(conn, gap_fingerprint):
+            fields = sighting.fields
+            if fields.hint_url is None and gap.hint_url is not None:
+                fields = replace(fields, hint_url=gap.hint_url)
             await outbox.add(
                 conn,
                 "github",
@@ -196,7 +199,7 @@ async def _queue_alert(
                 {
                     "op": "create_issue",
                     "fingerprint": gap_fingerprint,
-                    "fields": _issue_payload(sighting.fields),
+                    "fields": _issue_payload(fields),
                 },
             )
         return
@@ -218,6 +221,7 @@ async def _issue_queued(conn: AsyncConnection[Any], gap_fingerprint: str) -> boo
         SELECT 1
         FROM outbox
         WHERE channel = 'github' AND state = 'pending'
+          AND payload_json->>'op' = 'create_issue'
           AND payload_json->>'fingerprint' = %s
         LIMIT 1
         """,
