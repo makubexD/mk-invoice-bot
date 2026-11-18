@@ -242,29 +242,20 @@ Test: `uv run pytest -q tests/integration/test_import_padron.py`.
 
 Test: the record exists, and the peak RSS meets the target, or the miss is recorded and the owner is told.
 
-## Step 12: S0.4, SOL received invoices `[inline: the owner's SOL login in a real browser]`
+## Step 12: Take `sunat_sol` out of flow A (D153) `[inline: edits the private config]`
 
-1. The owner logs in to SOL "Consulta de comprobantes" by hand. Does it give the XML of a **received** invoice? Record yes or no with screenshots (kept private) in `specs/spikes/portals.md`.
-2. Record every host the login and the query reach (devtools network tab: redirects, websockets, static hosts). Store the list in `specs/spikes/portals.md` for step 13.
-3. **Yes:** fill `config/sunat_sol.yaml`'s selectors (watch for frames in SOL's menu), keep it `todo` until step 13 lands, then `active`. **No:** record it, keep the file `todo`, and drop `sunat_sol` from flow A's default chain in `config/example.yaml` and the private config.
+The owner deferred S0.4 to the last backlog item (D153): flow A needs only the PDF, and `sunat_sol` downloads the XML.
 
-Test: the record exists; `scripts/check_config.py` exits 0.
+1. Drop `sunat_sol` from `personal_google`'s `fetchers` in `config/example.yaml` and in the private config on the
+   host. `config/sunat_sol.yaml` stays `todo`.
+2. Restart the live app and check that it starts.
 
-## Step 13: SOL host allowlist in the guard proxy (D152) `[worker]`
+Test: `uv run python scripts/check_config.py config/example.yaml` and the same on the private config exit 0.
 
-Only if step 12 found that SOL gives the XML. Otherwise skip it and say so in the step's commit (`Route: inline: skipped, S0.4 no`).
+## Step 13: SOL host allowlist in the guard proxy (D152) `[inline: skipped, deferred by D153]`
 
-Files: `src/invoicebot/fetchers/browser/proxy.py`, `src/invoicebot/fetchers/browser/sol.py`, `tests/unit/test_browser_proxy.py`.
-
-- `GuardProxy` takes `allowed_hosts: frozenset[str] | None = None`. When it is set, a `CONNECT` or `GET` to a host not in the set (exact match, lower-cased) gets 403, before any DNS lookup. `None` keeps today's behavior for portals.
-- `sol.py` builds its proxy with `allowed_hosts=SOL_HOSTS`. That is a `frozenset` constant in `invoicebot/sunat_origins.py` (the one home of the SUNAT origins), filled with the step 12 list. It installs the page route before the first `page.goto`.
-
-Tests (unit; docstrings start with `D152`):
-
-1. Allowlisted proxy: `CONNECT` to a listed host passes on to the existing guard; `CONNECT` and `GET` to `evil.example` get 403 and no resolver call.
-2. Proxy without the allowlist: unchanged (existing tests pass untouched).
-
-Test: `uv run pytest -q tests/unit/test_browser_proxy.py tests/unit/test_fetchers_sunat_sol.py`.
+Deferred with S0.4 (D153). Skip it and say so in the step's commit (`Route: inline: skipped, deferred by D153`). The
+allowlist design stays in D152 for when S0.4 runs.
 
 ## Step 14: Meta goes live `[inline: Meta business settings and secrets]`
 
@@ -287,7 +278,7 @@ Test: one inbound and one outbound message in the live log; no 131031.
 3. **DNI boleta (D143):** a real boleta to the owner's DNI routes to `personal_dni` and writes one row with BR-D18. Record how many boleta photos carry a QR with the DNI.
 4. **Gmail:** forward a store's invoice mail to the dedicated Gmail; `email_inbox` finds its XML.
 5. **WhatsApp PDF (read-more):** a store PDF sent as a document is read from its text layer.
-6. **SOL:** if step 12 said yes, one invoice goes through `sunat_sol`.
+6. **SOL:** deferred with S0.4 (D153); skip it.
 7. **BR-D01:** remove the app's access in the Google account, send a photo, and confirm `PENDING_AUTH` plus the admin alert. Sign in again and confirm the invoice finishes.
 8. Record M6 in `specs/04-tasks.md`.
 

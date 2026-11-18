@@ -106,7 +106,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   2. **`portal_registry`:** look up the issuer RUC → portal definition (generic YAML form adapter or custom adapter).
   3. **`sunat_sol`:** *(only when the buyer is the RUC of the SOL account; today flow A)* log into SOL with the owner's secondary user, query received CPE, and download the XML.
   4. **`email_inbox`:** search the configured mailbox (Gmail or Outlook) for `serie-numero` / issuer RUC and download the XML/PDF attachments.
-  - The list order is only the default for flow A (`qr_url, portal_registry, sunat_sol, email_inbox, manual`); each flow sets its own order.
+  - The list order is only the default for flow A (`qr_url, portal_registry, email_inbox, manual`; `sunat_sol` joins after S0.4, D153); each flow sets its own order.
   5. **`paid_api`:** *(optional, off by default)* Factiliza, json.pe or similar.
   6. **`manual`:** always the last step.
 - **R-5.3 (M)** WHEN a portal shows an image captcha, THE SYSTEM SHALL first try local OCR (≤ 2 attempts). It SHALL then send the captcha image to the user and wait up to 5 min for a text reply.

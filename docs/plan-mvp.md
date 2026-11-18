@@ -189,6 +189,13 @@ The specs run ahead of the code in these places; each has a named story that clo
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
+## Last (owner, D153)
+
+Not a priority; after everything else.
+
+- S0.4: does SOL "Consulta de comprobantes" give a received invoice's XML or PDF? If it does, fill `config/sunat_sol.yaml`, build D152's host allowlist (the 9d plan's old step 13), and add `sunat_sol` back to flow A's chain.
+- Nubefact's public "Busca tu comprobante" page as a `portal_registry` entry for invoices issued through Nubefact.
+
 ## Notes for later phase plans
 
 - `routing`: S4.5 also owns the reply to `EXTRACT_FAILED` (a better photo or `campo=valor`); today a new photo creates a new invoice.
