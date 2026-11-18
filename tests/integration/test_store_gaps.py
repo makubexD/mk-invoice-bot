@@ -11,6 +11,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
 from invoicebot.gaps.kinds import GAP_KINDS
+from invoicebot.pipeline.manual_message import RULE_EXHAUSTED
 from invoicebot.states import DONE, MANUAL_REQUIRED
 from invoicebot.store.gaps import (
     alert_due,
@@ -316,6 +317,23 @@ async def test_a_sighting_on_a_fixed_gap_reopens_it_without_raising_it(
     assert without_issue.raised_at is not None
 
 
+async def test_a_sighting_on_a_closed_gap_reopens_it_without_raising_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D157: a new failure moves a closed gap back to reported, with no second raise."""
+    async with db_pool.connection() as conn:
+        await upsert_gap(conn, PORTAL_MISSING, FIXED_ISSUE_FP, SUBJECT, None)
+        await conn.execute(
+            "UPDATE gaps SET issue_url = 'https://example.test/issues/1' WHERE fingerprint = %s",
+            (FIXED_ISSUE_FP,),
+        )
+        await mark_closed(conn, FIXED_ISSUE_FP)
+        reopened = await upsert_gap(conn, PORTAL_MISSING, FIXED_ISSUE_FP, SUBJECT, None)
+
+    assert reopened.state == "reported"
+    assert reopened.raised_now is False
+
+
 async def test_fixable_gaps_returns_only_the_three_kinds_in_open_or_reported(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -345,16 +363,27 @@ async def test_fixable_gaps_returns_only_the_three_kinds_in_open_or_reported(
 async def test_stuck_invoices_returns_only_linked_manual_required_invoices(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.9: stuck_invoices returns the linked MANUAL_REQUIRED invoice and skips a linked DONE one."""
+    """R-11.9: stuck_invoices returns the linked MANUAL_REQUIRED invoice under the rule only.
+
+    A linked DONE invoice and a linked one waiting under another rule (an old link) are skipped.
+    """
     async with db_pool.connection() as conn:
         stuck = await create_invoice(conn, "yo", CHANNEL)
         done = await create_invoice(conn, "yo", CHANNEL)
-        await upsert_gap(conn, PORTAL_MISSING, STUCK_FP, SUBJECT, stuck)
-        await upsert_gap(conn, PORTAL_MISSING, STUCK_FP, SUBJECT, done)
-        await conn.execute("UPDATE invoices SET state = %s WHERE id = %s", (MANUAL_REQUIRED, stuck))
+        other_rule = await create_invoice(conn, "yo", CHANNEL)
+        for invoice_id in (stuck, done, other_rule):
+            await upsert_gap(conn, PORTAL_MISSING, STUCK_FP, SUBJECT, invoice_id)
+        await conn.execute(
+            "UPDATE invoices SET state = %s, rule_id = %s WHERE id = %s",
+            (MANUAL_REQUIRED, RULE_EXHAUSTED, stuck),
+        )
         await conn.execute("UPDATE invoices SET state = %s WHERE id = %s", (DONE, done))
-        ids = await stuck_invoices(conn, STUCK_FP)
-        unknown = await stuck_invoices(conn, PORTAL_FP)
+        await conn.execute(
+            "UPDATE invoices SET state = %s, rule_id = %s WHERE id = %s",
+            (MANUAL_REQUIRED, "BR-D02", other_rule),
+        )
+        ids = await stuck_invoices(conn, STUCK_FP, RULE_EXHAUSTED)
+        unknown = await stuck_invoices(conn, PORTAL_FP, RULE_EXHAUSTED)
 
     assert ids == [stuck]
     assert unknown == []

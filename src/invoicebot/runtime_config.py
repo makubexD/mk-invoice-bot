@@ -19,6 +19,8 @@ from invoicebot.extract.parsing_rules import load_rules
 from invoicebot.routing.router import CompiledRule, compile_rules
 from invoicebot.settings import Settings
 
+#: A config file cannot be read (missing mid-edit, no permission).
+REASON_FILE = "file"
 #: The file is not valid YAML, or its document shape breaks a loader invariant.
 REASON_YAML = "yaml"
 #: The file fails pydantic validation.
@@ -67,6 +69,8 @@ def _load_cfg(settings: Settings) -> Config:
         raise ConfigRejected(REASON_VALIDATION) from err
     except (yaml.YAMLError, ValueError) as err:
         raise ConfigRejected(REASON_YAML) from err
+    except OSError as err:
+        raise ConfigRejected(REASON_FILE) from err
 
 
 def _load_directory(settings: Settings) -> StoreDirectory:
@@ -76,6 +80,8 @@ def _load_directory(settings: Settings) -> StoreDirectory:
         raise ConfigRejected(REASON_VALIDATION) from err
     except (yaml.YAMLError, ValueError) as err:
         raise ConfigRejected(REASON_YAML) from err
+    except OSError as err:
+        raise ConfigRejected(REASON_FILE) from err
 
 
 def _load_parsing_rules(settings: Settings) -> None:
@@ -83,6 +89,8 @@ def _load_parsing_rules(settings: Settings) -> None:
         load_rules(settings.parsing_rules_path)
     except (yaml.YAMLError, ValueError) as err:
         raise ConfigRejected(REASON_PARSING_RULES) from err
+    except OSError as err:
+        raise ConfigRejected(REASON_FILE) from err
 
 
 def _compile_rules(cfg: Config) -> tuple[CompiledRule, ...]:

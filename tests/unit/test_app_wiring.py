@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import time
 from pathlib import Path
@@ -20,6 +22,7 @@ from invoicebot.app import (
     _google_deliver_handler,
     _google_secrets,
     _google_tokens,
+    _log_reload_failure,
     _sol_fetcher,
     _validation_handlers,
     _validation_secrets,
@@ -350,3 +353,18 @@ def test_sunat_sol_schedule_comes_from_the_site_file() -> None:
 
     assert directory.sunat_sol is not None
     assert schedule(cast(Any, None), cast(Any, None)) == directory.sunat_sol.query.retry_schedule
+
+
+async def test_a_reload_task_that_raises_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    """R-9.6: a reload that raises instead of rejecting logs one error, so it never fails silently."""
+
+    async def _boom() -> bool:
+        raise OSError("gone")
+
+    task = asyncio.create_task(_boom())
+    await asyncio.wait([task])
+
+    with caplog.at_level(logging.ERROR, logger="invoicebot.app"):
+        _log_reload_failure(task)
+
+    assert [record.getMessage() for record in caplog.records] == ["config reload failed"]

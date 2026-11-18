@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from invoicebot.runtime_config import (
+    REASON_FILE,
     REASON_VALIDATION,
     REASON_YAML,
     ConfigRejected,
@@ -65,6 +66,17 @@ def test_yaml_syntax_error_is_rejected_as_yaml(tmp_path: Path) -> None:
     assert info.value.reason == REASON_YAML
     assert info.value.args == (REASON_YAML,)
     assert str(info.value) == REASON_YAML
+
+
+def test_missing_config_file_is_rejected_as_file(tmp_path: Path) -> None:
+    """R-9.6: a config file that cannot be read (gone mid-edit) rejects the config with the file reason."""
+    settings = _settings(tmp_path)
+    settings.config_path.unlink()
+
+    with pytest.raises(ConfigRejected) as info:
+        load_runtime_config(settings)
+
+    assert info.value.reason == REASON_FILE
 
 
 def test_pydantic_error_is_rejected_as_validation(tmp_path: Path) -> None:

@@ -10,7 +10,7 @@ waiting invoice closes at once.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -18,7 +18,9 @@ from psycopg import AsyncConnection
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import Config, StoreDirectory
 from invoicebot.gaps.kinds import GAP_KINDS
+from invoicebot.pipeline.deliver import RULE_TEMPLATE_INVALID
 from invoicebot.pipeline.gaps import close_gap
+from invoicebot.pipeline.manual_message import RULE_EXHAUSTED
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.resume import resume_delivery, retry_documents
 from invoicebot.rules.messages_es import MESSAGES
@@ -38,6 +40,9 @@ _TEMPLATE_INVALID = GAP_KINDS["TEMPLATE_INVALID"].kind
 
 #: One gap kind's rule for whether the loaded config fixed it (D157).
 type FixRule = Callable[[GapRow, Config, StoreDirectory], bool]
+
+#: Sends one waiting invoice back to the step its gap's kind failed at (D157).
+type Resume = Callable[[AsyncConnection[Any], int], Awaitable[object]]
 
 
 def _fingerprint_parts(gap: GapRow) -> tuple[str, ...]:
@@ -83,6 +88,20 @@ _FIX_RULES: Mapping[str, FixRule] = {
 }
 
 
+async def _retry_fetch(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Send a manual invoice back to its fetch step (D157)."""
+    return await retry_documents(conn, invoice_id, MANUAL_REQUIRED)
+
+
+#: Per kind: the rule its failing step leaves the invoice under, and how to resume it (D157).
+#: The rule keeps an invoice linked to an old gap, now waiting for another reason, where it is.
+_RESUME: Mapping[str, tuple[str, Resume]] = {
+    _PORTAL_MISSING: (RULE_EXHAUSTED, _retry_fetch),
+    _PORTAL_BROKEN: (RULE_EXHAUSTED, _retry_fetch),
+    _TEMPLATE_INVALID: (RULE_TEMPLATE_INVALID, resume_delivery),
+}
+
+
 async def reevaluate(pool: Pool, cfg: Config, directory: StoreDirectory) -> int:
     """Fix the gaps the loaded config resolves and resume their invoices (R-11.9, D157).
 
@@ -99,24 +118,17 @@ async def reevaluate(pool: Pool, cfg: Config, directory: StoreDirectory) -> int:
             if not _FIX_RULES[gap.kind](gap, cfg, directory):
                 continue
             await mark_fixed(conn, gap.fingerprint)
-            invoice_ids = await stuck_invoices(conn, gap.fingerprint)
+            rule_id, resume = _RESUME[gap.kind]
+            invoice_ids = await stuck_invoices(conn, gap.fingerprint, rule_id)
             for invoice_id in invoice_ids:
-                await _resume_invoice(conn, invoice_id, gap.kind)
+                await resume(conn, invoice_id)
+                await _queue_resumed(conn, invoice_id)
                 resumed += 1
             if not invoice_ids:
                 await close_gap(conn, gap, cfg.gaps.github.repo)
             fixed += 1
     logger.info("gaps reevaluated", extra={"fixed": fixed, "resumed": resumed})
     return fixed
-
-
-async def _resume_invoice(conn: AsyncConnection[Any], invoice_id: int, kind: str) -> None:
-    """Send one waiting invoice back to its failing step and tell its sender (R-11.9, BR-F12)."""
-    if kind == _TEMPLATE_INVALID:
-        await resume_delivery(conn, invoice_id)
-    else:
-        await retry_documents(conn, invoice_id, MANUAL_REQUIRED)
-    await _queue_resumed(conn, invoice_id)
 
 
 async def _queue_resumed(conn: AsyncConnection[Any], invoice_id: int) -> None:

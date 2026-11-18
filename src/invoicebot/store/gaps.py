@@ -73,7 +73,7 @@ async def upsert_gap(
     COMMITTED two writers racing on the same new fingerprint serialize on the
     row lock, and only the one that re-checks ``raised_at IS NULL`` after the
     other commits sees the row, so ``raised_now`` is true for exactly one of
-    them. A sighting of a ``fixed`` gap reopens it: ``reported`` when it has an
+    them. A sighting of a ``fixed`` or ``closed`` gap reopens it: ``reported`` when it has an
     issue, else ``open``, keeping ``raised_at`` so it is not raised again
     (D157). ``raised_with`` is the digest of the config entry this sighting
     failed on, written on every sighting. The row and its ``invoice_gaps`` link
@@ -100,8 +100,8 @@ async def upsert_gap(
             last_seen = now(),
             raised_with = %(raised_with)s,
             state = CASE
-                WHEN g.state = 'fixed' AND g.issue_url IS NOT NULL THEN 'reported'
-                WHEN g.state = 'fixed' THEN 'open'
+                WHEN g.state IN ('fixed', 'closed') AND g.issue_url IS NOT NULL THEN 'reported'
+                WHEN g.state IN ('fixed', 'closed') THEN 'open'
                 ELSE g.state
             END
         RETURNING g.fingerprint, g.kind, g.subject, g.state, g.count,
@@ -306,9 +306,11 @@ async def mark_closed(conn: AsyncConnection[Any], fingerprint: str) -> None:
     await conn.execute("UPDATE gaps SET state = 'closed' WHERE fingerprint = %s", (fingerprint,))
 
 
-async def stuck_invoices(conn: AsyncConnection[Any], fingerprint: str) -> list[int]:
-    """Return the gap's invoices still waiting in ``MANUAL_REQUIRED``, locked (R-11.9).
+async def stuck_invoices(conn: AsyncConnection[Any], fingerprint: str, rule_id: str) -> list[int]:
+    """Return the gap's invoices still waiting in ``MANUAL_REQUIRED`` under ``rule_id``, locked (R-11.9).
 
+    ``rule_id`` is the rule the gap's failing step leaves the invoice under, so an
+    invoice linked to this gap long ago but now waiting for another reason stays put.
     Locks each invoice row ``FOR UPDATE OF invoices`` so the caller moves them
     in the same transaction. Does not commit.
     """
@@ -317,10 +319,10 @@ async def stuck_invoices(conn: AsyncConnection[Any], fingerprint: str) -> list[i
         SELECT invoices.id
         FROM invoice_gaps
         JOIN invoices ON invoices.id = invoice_gaps.invoice_id
-        WHERE invoice_gaps.fingerprint = %s AND invoices.state = %s
+        WHERE invoice_gaps.fingerprint = %s AND invoices.state = %s AND invoices.rule_id = %s
         ORDER BY invoices.id
         FOR UPDATE OF invoices
         """,
-        (fingerprint, MANUAL_REQUIRED),
+        (fingerprint, MANUAL_REQUIRED, rule_id),
     )
     return [int(row[0]) for row in await cur.fetchall()]

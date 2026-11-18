@@ -435,6 +435,13 @@ def _start_config_reload(
     )
     reloads.add(task)
     task.add_done_callback(reloads.discard)
+    task.add_done_callback(_log_reload_failure)
+
+
+def _log_reload_failure(task: asyncio.Task[bool]) -> None:
+    """Log a reload that raised instead of rejecting, so it never fails silently (R-9.6)."""
+    if not task.cancelled() and (err := task.exception()) is not None:
+        logger.error("config reload failed", exc_info=err)
 
 
 def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
