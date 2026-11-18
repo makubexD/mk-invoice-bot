@@ -104,11 +104,13 @@ def make_extract_handler(
     media: MediaLimits,
     rules_path: Path,
     gaps: GapContext,
+    helper_prefix: Sequence[str],
 ) -> Handler:
     """Build the handler that reads an invoice's photo or PDF and queues its routing (S3.11).
 
     ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
     ``gaps`` is who hears about an issuer whose invoices keep being unreadable (BR-E06).
+    ``helper_prefix`` is prepended to the helper's argv; empty outside the image (D147).
     The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no
     photo or PDF file ends with BR-E01 and a message asking for a photo or typed data. A PDF
     over the page cap ends ``CANCELLED`` with BR-E07 ``too_many_pages`` through
@@ -140,7 +142,7 @@ def make_extract_handler(
                 return
 
         try:
-            result = await _run_helper(path, kind, extraction_cfg, media, rules_path)
+            result = await _run_helper(path, kind, extraction_cfg, media, rules_path, helper_prefix)
         except TimeoutError:
             await _finish(
                 pool,
@@ -220,12 +222,18 @@ async def _file_to_read(conn: AsyncConnection[Any], invoice_id: int) -> tuple[st
 
 
 async def _run_helper(
-    path: str, kind: AttachmentKind, extraction_cfg: Extraction, media: MediaLimits, rules_path: Path
+    path: str,
+    kind: AttachmentKind,
+    extraction_cfg: Extraction,
+    media: MediaLimits,
+    rules_path: Path,
+    helper_prefix: Sequence[str],
 ) -> _HelperResult:
     """Run the extract helper under the heavy slot and return its validated result.
 
-    The helper receives the input kind, that kind's byte cap, the PDF caps, the OCR config
-    and ``rules_path`` as arguments. It runs with a minimal environment and an import path
+    ``helper_prefix`` is prepended to the helper's argv (D147). The helper receives the input
+    kind, that kind's byte cap, the PDF caps, the OCR config and ``rules_path`` as arguments.
+    It runs with a minimal environment and an import path
     that does not include the working directory, and its whole process group is killed and
     reaped on every exit — timeout, crash or cancellation — so no decode process or child it
     started outlives its job (R-9.2).
@@ -243,7 +251,7 @@ async def _run_helper(
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
     }
-    argv = helper_argv(path, kind, extraction_cfg, media, rules_path)
+    argv = [*helper_prefix, *helper_argv(path, kind, extraction_cfg, media, rules_path)]
     async with HEAVY:
         stdout = await run_helper(argv, b"", env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
     return _parse_result(stdout)

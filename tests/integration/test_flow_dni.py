@@ -202,6 +202,7 @@ async def _read_photo(
         cfg.limits.media,
         PARSING_RULES_PATH,
         GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
+        helper_prefix=(),
     )(_job(extract_job, invoice_id, EXTRACT_STEP))
     return invoice_id
 

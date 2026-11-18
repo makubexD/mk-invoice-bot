@@ -272,6 +272,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
                 settings.parsing_rules_path,
                 GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
+                helper_prefix=(),
             ),
             ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(

@@ -12,6 +12,7 @@ import ctypes
 import hashlib
 import logging
 import os
+import shlex
 import signal
 import sys
 from collections.abc import AsyncIterator, Callable, Sequence
@@ -319,6 +320,7 @@ async def _run_handler(
     *,
     helper_timeout_s: float = HELPER_TIMEOUT_S,
     media: MediaLimits = MEDIA,
+    helper_prefix: Sequence[str] = (),
 ) -> None:
     """Run the extract handler once for invoice_id."""
     await make_extract_handler(
@@ -327,6 +329,7 @@ async def _run_handler(
         media,
         RULES_PATH,
         _gap_context(),
+        helper_prefix=helper_prefix,
     )(_job(invoice_id))
 
 
@@ -465,6 +468,44 @@ async def test_valid_qr_photo_saves_the_reading_and_queues_routing(
     assert reading == parse_qr_payload(VALID_PAYLOAD)
     assert route_jobs == 1
     assert unreadable == []
+
+
+def _write_prefix_script(tmp_path: Path) -> tuple[Path, Path]:
+    """Write a fake helper prefix that records its argv then runs the helper (D147).
+
+    Returns the script and the marker file it appends each argument to, one per line.
+    """
+    marker = tmp_path / "prefix-argv.txt"
+    script = tmp_path / "sandbox-prefix.sh"
+    script.write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$@" >> {shlex.quote(str(marker))}\nexec "$@"\n')
+    script.chmod(0o755)
+    return script, marker
+
+
+async def test_helper_prefix_wraps_the_extract_helper(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D147: the helper prefix runs before the extract helper and the invoice still routes."""
+    photo = _write_qr_photo(VALID_PAYLOAD, tmp_path / f"prefixed{PNG}")
+    invoice_id, profile_id = await _invoice_with_photo(db_pool, photo)
+    script, marker = _write_prefix_script(tmp_path)
+
+    await _run_handler(db_pool, invoice_id, helper_prefix=(str(script),))
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+        route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
+        unreadable = await _outbox_rows(conn, profile_id, "BR-E01")
+
+    assert (state, rule_id) == ("ROUTING", None)
+    assert reading == parse_qr_payload(VALID_PAYLOAD)
+    assert route_jobs == 1
+    assert unreadable == []
+    recorded = marker.read_text().splitlines()
+    assert str(photo) in recorded
+    assert "-m" in recorded
+    assert recorded[recorded.index("-m") + 1] == "invoicebot.extract"
 
 
 async def test_text_only_photo_routes_with_ocr_fields(
