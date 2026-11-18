@@ -97,7 +97,7 @@ Test: `uv run pytest -q tests/unit/test_sandbox.py`, then `bash tests/deploy/tes
 
 ## Step 5: The extract helper reads its input from stdin `[worker]`
 
-Files: `src/invoicebot/extract/__main__.py`, `src/invoicebot/pipeline/extract.py`, `tests/unit/test_extract_main.py` (the unit file for the helper's `main`; use the existing one).
+Files: `src/invoicebot/extract/__main__.py`, `src/invoicebot/pipeline/extract.py`, `tests/unit/test_extract_pdf.py` and `tests/unit/test_extract_qr.py` (they hold the helper-`main` tests and pass a path today), `tests/unit/test_golden_set.py` and `scripts/accuracy_report.py` (they run the helper as a subprocess with a path; pass the bytes as `input=`), `tests/integration/test_pipeline_extract.py`, and `tests/deploy/sandbox_checks.py` only where it runs the extract helper with a path.
 
 - The helper's argv drops the input path. `main` reads at most `max_bytes + 1` bytes from `sys.stdin.buffer`. More than `max_bytes` gives the same "unreadable" result as the size check today. The image and PDF readers take the bytes: `cv2.imdecode` for images, `pypdfium2.PdfDocument(bytes)` for PDFs. Keep every other argument in its position minus the path.
 - `pipeline/extract._run_helper` reads the file in `asyncio.to_thread` (it already knows the size from the media limit) and passes the bytes as `run_helper`'s `stdin`.
@@ -109,7 +109,7 @@ Tests (docstrings start with `D158`):
 2. Input of `max_bytes + 1` bytes prints the unreadable payload with exit 0.
 3. A synthetic PDF on stdin is read.
 
-Test: `uv run pytest -q tests/unit/test_extract_main.py tests/integration/test_pipeline_extract.py` (use the files that cover the helper and the extract handler).
+Test: `uv run pytest -q tests/unit/test_extract_pdf.py tests/unit/test_extract_qr.py tests/unit/test_golden_set.py tests/unit/test_accuracy_scripts.py tests/integration/test_pipeline_extract.py`.
 
 ## Step 6: The image wrapper masks the data root `[worker]`
 
