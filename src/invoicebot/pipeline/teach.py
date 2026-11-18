@@ -220,32 +220,29 @@ async def _record_hint(
     so it reaches the issue body; a gap whose issue URL is known gets a ``comment`` row
     with that URL; otherwise nothing is queued and the hint waits on the gap for the
     next ``create_issue``.
+
+    The outbox row comes first: the sender holds a ``create_issue`` row while its issue
+    callback updates the gap, so locking the gap before waiting on that row would hang
+    both on separate connections, where Postgres sees no deadlock. Once the wait ends,
+    the gap read sees the issue URL the callback committed.
     """
     gap_fingerprint = fingerprint(PORTAL_MISSING, str(ruc_emisor))
+    hint_in_pending_issue = await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0
     await set_hint(conn, gap_fingerprint, url)
     gap = await get_gap(conn, gap_fingerprint)
-    if gap is None:
+    if hint_in_pending_issue or gap is None or gap.issue_url is None or setup.github_repo is None:
         return
-    issue_url = gap.issue_url
-    if issue_url is None:
-        if await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0:
-            return
-        current = await get_gap(conn, gap_fingerprint)
-        issue_url = None if current is None else current.issue_url
-        if issue_url is None:
-            return
-    if setup.github_repo is not None:
-        await outbox.add(
-            conn,
-            "github",
-            setup.github_repo,
-            {
-                "op": "comment",
-                "fingerprint": gap_fingerprint,
-                "issue_url": issue_url,
-                "hint_url": url,
-            },
-        )
+    await outbox.add(
+        conn,
+        "github",
+        setup.github_repo,
+        {
+            "op": "comment",
+            "fingerprint": gap_fingerprint,
+            "issue_url": gap.issue_url,
+            "hint_url": url,
+        },
+    )
 
 
 def _owner_text(

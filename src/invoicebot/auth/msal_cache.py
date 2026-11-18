@@ -77,7 +77,8 @@ class TokenProvider:
     def login_device_code(self, show: Callable[[str], None]) -> None:
         """Sign the account in with the device-code flow and save the cache.
 
-        An unreadable existing cache is replaced rather than blocking the sign-in.
+        The sign-in starts from an empty cache and overwrites the file, so the file
+        holds only the account just signed in; an unreadable old cache never blocks it.
 
         Args:
             show: called once with the instruction message for the person
@@ -86,12 +87,9 @@ class TokenProvider:
         Raises:
             AuthRequired: the flow could not start or the sign-in failed.
         """
-        try:
-            cache = self._load_cache()
-        except AuthRequired:
-            # A cache this identity cannot decrypt must not block a fresh sign-in:
-            # the new sign-in overwrites the file.
-            cache = msal.SerializableTokenCache()
+        # A fresh cache: a second sign-in, say after the wrong mailbox, must not leave
+        # two accounts behind, since `_token` accepts exactly one.
+        cache = msal.SerializableTokenCache()
         app = self._application(cache)
         flow = app.initiate_device_flow(scopes=self._scopes)
         if "user_code" not in flow:

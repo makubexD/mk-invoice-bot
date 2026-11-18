@@ -15,6 +15,7 @@ from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 #: The config's account name; MSAL knows the account by its mailbox, which differs (R-7.9).
 ACCOUNT = "personal"
 MAILBOX = "owner@example.test"
+OTHER_MAILBOX = "other@example.test"
 CLIENT_ID = "synthetic-client-id"
 #: MSAL adds offline_access, openid and profile itself and rejects them as input.
 SCOPES = ("Files.ReadWrite", "Mail.Send")
@@ -45,6 +46,7 @@ class FakeHttpClient:
         self._account = account
         self.access_token_lifetime_s = access_token_lifetime_s
         self.invalid_grant = False
+        self.mailbox = MAILBOX
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
 
     def get(self, url: str, **kwargs: Any) -> FakeResponse:
@@ -111,7 +113,7 @@ class FakeHttpClient:
             "expires_in": 3600 if is_refresh else self.access_token_lifetime_s,
             "access_token": REFRESHED_ACCESS if is_refresh else SIGNED_IN_ACCESS,
             "refresh_token": ("synthetic-refresh-token-2" if is_refresh else "synthetic-refresh-token-1"),
-            "id_token": _id_token(MAILBOX),
+            "id_token": _id_token(self.mailbox),
         }
 
 
@@ -123,7 +125,7 @@ def _b64url(payload: dict[str, Any]) -> str:
 def _id_token(mailbox: str) -> str:
     """Build an unsigned JWT whose claims give MSAL the mailbox as its username."""
     header = _b64url({"alg": "none", "typ": "JWT"})
-    claims = _b64url({"sub": "synthetic-subject", "preferred_username": mailbox})
+    claims = _b64url({"sub": f"synthetic-{mailbox}", "preferred_username": mailbox})
     return f"{header}.{claims}."
 
 
@@ -253,6 +255,21 @@ async def test_login_over_an_unreadable_cache_succeeds(tmp_path: Path) -> None:
 
     saved = pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8")
     assert SIGNED_IN_ACCESS in saved
+    assert await provider.token() == SIGNED_IN_ACCESS
+
+
+async def test_second_sign_in_replaces_the_first_account(tmp_path: Path) -> None:
+    """R-7.9: signing in again, as after the wrong mailbox, leaves one account, so the token works."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, identity, cache_path = _provider(tmp_path, fake)
+    _login(provider)
+    fake.mailbox = OTHER_MAILBOX
+
+    _login(provider)
+
+    saved = pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8")
+    assert OTHER_MAILBOX in saved
+    assert MAILBOX not in saved
     assert await provider.token() == SIGNED_IN_ACCESS
 
 

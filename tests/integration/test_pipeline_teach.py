@@ -1,5 +1,6 @@
 """Integration tests for teaching a portal link and BR-S06's owner review (R-10.2, R-11.4)."""
 
+import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +18,7 @@ from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.net.guard import Resolver
+from invoicebot.pipeline.gaps import issue_opened
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -45,6 +47,8 @@ GITHUB_REPO = "owner/mk-invoice-bot-ops"
 #: The synthetic issue the PORTAL_MISSING gap was reported to.
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 GAP_FINGERPRINT = fingerprint("PORTAL_MISSING", str(ISSUER_RUC))
+#: How long a lock wait or a released lock may take before the test calls it a hang.
+LOCK_WAIT_TIMEOUT_S = 5.0
 MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
 
 
@@ -505,6 +509,57 @@ async def test_press_approve_sets_the_pending_issue_hint(
 
     assert len(rows) == 1
     assert rows[0]["fields"]["hint_url"] == GOOD_URL
+
+
+async def _wait_for_a_lock_wait(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+    """Return once some session waits on a row lock, or fail after LOCK_WAIT_TIMEOUT_S."""
+    async with asyncio.timeout(LOCK_WAIT_TIMEOUT_S), pool.connection() as conn:
+        await conn.set_autocommit(True)
+        while True:
+            cur = await conn.execute("SELECT count(*) FROM pg_locks WHERE NOT granted")
+            row = await cur.fetchone()
+            if row is not None and row[0] > 0:
+                return
+            await asyncio.sleep(0.02)
+
+
+async def test_press_approve_while_the_create_is_sent_comments_on_the_new_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D118: [Aprobar] while the sender holds the create_issue row neither hangs nor loses the link."""
+    fields: dict[str, Any] = {"kind": "PORTAL_MISSING", "fingerprint": GAP_FINGERPRINT, "hint_url": None}
+    cfg = load_config(EXAMPLE)
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await _insert_gap(conn, raised=True)
+        await outbox.add(
+            conn,
+            "github",
+            GITHUB_REPO,
+            {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": fields},
+        )
+
+    async def press() -> None:
+        async with db_pool.connection() as conn, conn.transaction():
+            await handle_press(conn, _press(ADMIN, approved=True), _setup(github_repo=GITHUB_REPO))
+
+    async with db_pool.connection() as sender:
+        async with sender.transaction():
+            await sender.execute("SELECT id FROM outbox WHERE channel = 'github' FOR UPDATE")
+            pressing = asyncio.create_task(press())
+            await _wait_for_a_lock_wait(db_pool)
+            # The sender's issue callback runs while it still holds the row, as in OutboxSender.
+            async with asyncio.timeout(LOCK_WAIT_TIMEOUT_S):
+                await issue_opened(db_pool, cfg.profiles, cfg.gaps, GAP_FINGERPRINT, ISSUE_URL)
+            await sender.execute("UPDATE outbox SET state = 'sent' WHERE channel = 'github'")
+        async with asyncio.timeout(LOCK_WAIT_TIMEOUT_S):
+            await pressing
+        rows = await _github_rows(sender)
+
+    comments = [row for row in rows if row.get("op") == "comment"]
+    assert comments == [
+        {"op": "comment", "fingerprint": GAP_FINGERPRINT, "issue_url": ISSUE_URL, "hint_url": GOOD_URL}
+    ]
 
 
 async def test_press_approve_after_the_create_was_sent_queues_a_comment_with_the_issue_url(
