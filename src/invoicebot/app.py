@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
+from pathlib import Path
 from typing import cast
 
 import httpx
@@ -64,6 +65,7 @@ from invoicebot.net.http import GuardedTransport
 from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, pg_environment, run_backup
 from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.housekeeping import housekeep
+from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
@@ -370,11 +372,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             pg_environment(database_url)
         daily_tasks = _daily_tasks(
             cfg,
-            partial(_run_backup, settings, cfg, pool, drive),
-            partial(_run_retention, pool, cfg),
-            partial(housekeep, pool, settings.data_dir),
-            partial(daily_digest, pool, cfg.profiles, cfg.gaps),
-            None if github_app is None else partial(_github_health, github_app, pool, cfg),
+            DailyRuns(
+                backup=partial(_run_backup, settings, cfg, pool, drive),
+                retention=partial(_run_retention, pool, cfg),
+                housekeeping=partial(housekeep, pool, settings.data_dir),
+                padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
+                digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
+                github_health=None if github_app is None else partial(_github_health, github_app, pool, cfg),
+            ),
         )
         background: dict[str, TaskFactory] = {
             "worker": worker.run,
@@ -775,20 +780,27 @@ async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
         )
 
 
-def _daily_tasks(
-    cfg: Config,
-    backup: Callable[[], Awaitable[None]],
-    retention: Callable[[], Awaitable[None]],
-    housekeeping: Callable[[], Awaitable[None]],
-    digest: Callable[[], Awaitable[None]],
-    github_health: Callable[[], Awaitable[None]] | None,
-) -> list[DailyTask]:
+@dataclass(frozen=True)
+class DailyRuns:
+    """What each daily task runs; ``_daily_tasks`` takes their times from the config (R-9.11)."""
+
+    backup: Callable[[], Awaitable[None]]
+    retention: Callable[[], Awaitable[None]]
+    housekeeping: Callable[[], Awaitable[None]]
+    padron: Callable[[], Awaitable[None]]
+    digest: Callable[[], Awaitable[None]]
+    github_health: Callable[[], Awaitable[None]] | None
+
+
+def _daily_tasks(cfg: Config, runs: DailyRuns) -> list[DailyTask]:
     """Build the daily tasks, failing on an unknown target (R-9.11, BR-D05).
 
     Retention runs ``RETENTION_DELAY`` after the backup; the sum is taken on a
     ``date.min`` base so a late backup wraps to the next day's early time.
-    Housekeeping runs at the retention time. The GitHub App health check runs at
-    the digest time only when GitHub is configured.
+    Housekeeping runs at the retention time. The padrón refresh runs at its
+    configured weekly time, its task checking the weekday when it runs (S12.4).
+    The GitHub App health check runs at the digest time only when GitHub is
+    configured.
     """
     kind = cfg.ops.backup.target.kind
     if kind != BACKUP_TARGET_KIND:
@@ -798,13 +810,14 @@ def _daily_tasks(
     backup_at = cfg.ops.backup.at
     retention_at = (datetime.combine(date.min, backup_at) + RETENTION_DELAY).time()
     tasks = [
-        DailyTask(key="backup", at=backup_at, run=backup),
-        DailyTask(key="retention", at=retention_at, run=retention),
-        DailyTask(key="housekeeping", at=retention_at, run=housekeeping),
-        DailyTask(key="digest", at=cfg.gaps.digest_at, run=digest),
+        DailyTask(key="backup", at=backup_at, run=runs.backup),
+        DailyTask(key="retention", at=retention_at, run=runs.retention),
+        DailyTask(key="housekeeping", at=retention_at, run=runs.housekeeping),
+        DailyTask(key="padron", at=cfg.sunat.padron.at, run=runs.padron),
+        DailyTask(key="digest", at=cfg.gaps.digest_at, run=runs.digest),
     ]
-    if github_health is not None:
-        tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=github_health))
+    if runs.github_health is not None:
+        tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=runs.github_health))
     return tasks
 
 
@@ -856,6 +869,17 @@ async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive)
         "backup uploaded",
         extra={"dump_bytes": sizes.dump_bytes, "config_bytes": sizes.config_bytes},
     )
+
+
+async def _run_padron_refresh(pool: Pool, http: httpx.AsyncClient, cfg: Config, data_dir: Path) -> None:
+    """Refresh the padrón on its configured weekday, logging a failed download (S12.4)."""
+    today = await _owner_today(pool, cfg.owner.timezone)
+    if today.weekday() != cfg.sunat.padron.weekday:
+        return
+    try:
+        await refresh_padron(pool, http, cfg.sunat.padron, data_dir)
+    except PadronRefreshError as error:
+        logger.warning("padron refresh failed", extra={"reason": error.reason})
 
 
 async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -> None:

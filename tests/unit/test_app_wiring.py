@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import time
 from pathlib import Path
 from typing import Any, cast
@@ -13,6 +13,7 @@ import yaml
 
 from invoicebot.app import (
     GOOGLE_CLIENT_SECRET,
+    DailyRuns,
     _daily_tasks,
     _deliver_registry,
     _fetch_schedules,
@@ -43,6 +44,18 @@ SOL_SITE = ROOT / "config" / "sunat_sol.yaml"
 
 async def _noop() -> None:
     """A daily task that does nothing, so these tests need no database."""
+
+
+def _runs(github_health: Callable[[], Awaitable[None]] | None = None) -> DailyRuns:
+    """Return daily runs that all do nothing, with the GitHub check only when given."""
+    return DailyRuns(
+        backup=_noop,
+        retention=_noop,
+        housekeeping=_noop,
+        padron=_noop,
+        digest=_noop,
+        github_health=github_health,
+    )
 
 
 def _sunat_config(tmp_path: Path, *, enabled: bool) -> Config:
@@ -153,15 +166,16 @@ def _without_google_sinks(tmp_path: Path) -> Config:
 
 
 def test_daily_tasks_have_their_keys_at_their_times() -> None:
-    """R-9.11: backup runs at its configured time, retention and housekeeping 30 min later, digest at 8."""
+    """R-9.11: backup at 3, retention and housekeeping 30 min later, padrón at 4, digest at 8."""
     cfg = load_config(EXAMPLE)
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop, _noop, None)
+    tasks = _daily_tasks(cfg, _runs())
 
-    assert {task.key for task in tasks} == {"backup", "retention", "housekeeping", "digest"}
+    assert {task.key for task in tasks} == {"backup", "retention", "housekeeping", "padron", "digest"}
     by_key = {task.key: task.at for task in tasks}
     assert by_key["backup"] == cfg.ops.backup.at == time(3, 0)
     assert by_key["retention"] == by_key["housekeeping"] == time(3, 30)
+    assert by_key["padron"] == cfg.sunat.padron.at == time(4, 0)
     assert by_key["digest"] == cfg.gaps.digest_at == time(8, 0)
 
 
@@ -169,7 +183,7 @@ def test_daily_tasks_retention_wraps_past_midnight() -> None:
     """R-9.11: a 23:45 backup wraps retention to 00:15 rather than staying past midnight."""
     cfg = _with_backup_at(load_config(EXAMPLE), time(23, 45))
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop, _noop, None)
+    tasks = _daily_tasks(cfg, _runs())
 
     assert {task.key: task.at for task in tasks}["retention"] == time(0, 15)
 
@@ -182,14 +196,14 @@ def test_daily_tasks_with_another_backup_target_kind_raise() -> None:
     unsupported = cfg.model_copy(update={"ops": cfg.ops.model_copy(update={"backup": backup})})
 
     with pytest.raises(ValueError, match="s3"):
-        _daily_tasks(unsupported, _noop, _noop, _noop, _noop, None)
+        _daily_tasks(unsupported, _runs())
 
 
 def test_daily_tasks_with_github_health_add_it_at_the_digest_time() -> None:
     """BR-D05: with GitHub configured the daily list checks the App at the digest time."""
     cfg = load_config(EXAMPLE)
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop, _noop, _noop)
+    tasks = _daily_tasks(cfg, _runs(github_health=_noop))
 
     by_key = {task.key: task.at for task in tasks}
     assert by_key["github_health"] == cfg.gaps.digest_at
@@ -199,7 +213,7 @@ def test_daily_tasks_without_github_health_add_no_check() -> None:
     """BR-D05: with GitHub disabled the daily list has no GitHub App health check."""
     cfg = load_config(EXAMPLE)
 
-    tasks = _daily_tasks(cfg, _noop, _noop, _noop, _noop, None)
+    tasks = _daily_tasks(cfg, _runs())
 
     assert "github_health" not in {task.key for task in tasks}
 
