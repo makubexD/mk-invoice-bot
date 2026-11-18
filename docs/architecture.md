@@ -166,3 +166,130 @@ flowchart LR
   them through Outlook classic and writes signed receipts back (R-7.14).
 - Backups are `age`-encrypted before they leave the host (D119).
 - `/health` answers 200 or, with Postgres down, 503 (R-9.14, R-9.15).
+
+## Invoice state machine
+
+Every transition is one Postgres transaction: the state, the rule ID that caused
+it, the next job and the outgoing message (spec 03 §4). The states are in
+`src/invoicebot/states.py`; the moves below are the ones the code makes.
+
+```mermaid
+stateDiagram-v2
+    [*] --> RECEIVED: photo, PDF or XML arrives
+    RECEIVED --> EXTRACTING: extract job
+    RECEIVED --> CANCELLED: unsupported media (BR-E07)
+    EXTRACTING --> ROUTING: fields read
+    EXTRACTING --> EXTRACT_FAILED: unreadable or bad RUC (BR-E01)
+    EXTRACTING --> CANCELLED: unsupported type
+    EXTRACT_FAILED --> EXTRACTING: better photo
+    EXTRACT_FAILED --> ROUTING: campo=valor edit
+    ROUTING --> VALIDATING: flow decided
+    ROUTING --> CONFIRMING: needs a question (BR-R03, BR-E03, BR-D06, confirm_mode)
+    ROUTING --> CANCELLED: rejected or duplicate (BR-R07, BR-E04)
+    CONFIRMING --> ROUTING: answer or edit
+    VALIDATING --> FETCHING_DOCS: valid, outage or validation off
+    VALIDATING --> CONFIRM_INVALID: estadoCp 2 or 4 (BR-V02, BR-V06)
+    CONFIRM_INVALID --> FETCHING_DOCS: user continues
+    FETCHING_DOCS --> DELIVERING: documents fetched
+    FETCHING_DOCS --> WAITING_CAPTCHA: captcha (not built yet, D99)
+    WAITING_CAPTCHA --> FETCHING_DOCS: answered or timed out
+    FETCHING_DOCS --> MANUAL_REQUIRED: fetcher chain exhausted (BR-F07)
+    MANUAL_REQUIRED --> DELIVERING: user uploads the files, or template fixed
+    MANUAL_REQUIRED --> FETCHING_DOCS: gap fixed or /reprocesar
+    DELIVERING --> PENDING_AUTH: token expired (BR-D01)
+    PENDING_AUTH --> DELIVERING: account signed in again
+    DELIVERING --> MANUAL_REQUIRED: Excel template invalid (BR-D02)
+    DELIVERING --> DONE: flow A and personal_dni
+    DELIVERING --> BATCHED: flow B, added to its batch
+    BATCHED --> DONE: batch sent (R-7.8)
+    BATCHED --> DELIVERING: /reprocesar after a failed batch
+    FAILED --> FETCHING_DOCS: /reprocesar
+    EXTRACT_FAILED --> PENDING_USER: no answer (BR-S08)
+    CONFIRMING --> PENDING_USER: no answer (BR-S08)
+    CONFIRM_INVALID --> PENDING_USER: no answer (BR-S08)
+    PENDING_USER --> CONFIRMING: user answers
+    PENDING_USER --> EXTRACT_FAILED: user answers
+    PENDING_USER --> CONFIRM_INVALID: user answers
+    DONE --> [*]
+    CANCELLED --> [*]
+    FAILED --> [*]
+```
+
+Not drawn, to keep the picture readable:
+
+- **Cancel:** `/cancelar` moves any state in `CANCELLABLE` (every state before
+  `DELIVERING`, plus `PENDING_AUTH`) to `CANCELLED`.
+- **Edit:** a `campo=valor` edit in any `EDITABLE` state goes back to
+  `ROUTING`; a `PENDING_USER` invoice is resumed first (D94, D97).
+- **Dead job:** a job that fails 5 times or kills the worker twice moves its
+  invoice to `FAILED` (BR-S03).
+- **Waiting:** `WAITING_FOR_USER` is `CONFIRMING`, `EXTRACT_FAILED` and
+  `CONFIRM_INVALID`; `PENDING_USER` stores which one it left in
+  `waiting_state` and returns to it.
+- **Terminal:** `DONE`, `CANCELLED` and `FAILED`; only `FAILED` can be
+  reprocessed. Payment is not a state: `/pagado` links a payment to a `DONE`
+  flow B invoice (R-7.12).
+
+## Flow A (RK EXPORT, Google)
+
+The owner's company invoices. Only the PDF is required (D142); the result goes
+to Google Drive and a Sheets row.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant WA as WhatsApp
+    participant Bot as app (Worker)
+    participant SUNAT
+    participant Src as qr_url, portal or Gmail inbox
+    participant Google as Drive and Sheets
+
+    User->>WA: photo of the invoice
+    WA->>Bot: webhook
+    Bot-->>User: acknowledgement
+    Bot->>Bot: extract (QR, OCR or PDF), route by buyer RUC
+    opt validation on
+        Bot->>SUNAT: validez check
+    end
+    Bot-->>User: summary with the flow
+    Bot->>Src: fetch the official PDF
+    Src-->>Bot: PDF
+    Bot->>Google: upload to the flow's folder, upsert the Sheets row
+    Bot-->>User: done, with the links (BR-D16)
+```
+
+## Flow B (CIGNIUM, Microsoft)
+
+The owner's employer reimbursements. The PDF and the XML are required; the
+result is a OneDrive folder, a row in the Excel template and a mail to HR.
+
+```mermaid
+sequenceDiagram
+    actor User
+    participant WA as WhatsApp
+    participant Bot as app (Worker)
+    participant Src as qr_url, portal or Outlook inbox
+    participant MS as OneDrive and Excel
+    participant Mail as Graph mail or laptop agent
+
+    User->>WA: photo of the invoice
+    WA->>Bot: webhook
+    Bot-->>User: acknowledgement
+    Bot->>Bot: extract, route by buyer RUC, check the reimbursement cap
+    Bot-->>User: summary with the flow
+    Bot->>Src: fetch the PDF and XML
+    alt documents found
+        Src-->>Bot: PDF and XML
+    else chain exhausted (BR-F07)
+        Bot-->>User: asks for the files
+        User->>Bot: sends them
+    end
+    Bot->>MS: create the invoice folder, fill the Excel template
+    Bot->>Mail: send the batch to HR (Graph, or a signed laptop job)
+    Mail-->>Bot: sent, or laptop receipt
+    Bot-->>User: done (BATCHED to DONE)
+    User->>Bot: /pagado later links the payment (R-7.12)
+```
+
+A third flow, `personal_dni`, takes boletas issued to the owner's DNI: it
+fetches nothing and writes only a Sheets row (D143, D144).
