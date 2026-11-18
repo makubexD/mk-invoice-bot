@@ -118,7 +118,7 @@ flows:
   personal_google:
     label: "Mi empresa (Google)"
     accepted_tipos: ["01", "03"]
-    fetchers: [qr_url, portal_registry, sunat_sol, email_inbox, manual]   # a fetcher's final failure passes to the next
+    fetchers: [qr_url, portal_registry, email_inbox, manual]   # final failure passes to the next; sunat_sol waits for S0.4 (D153)
     email_inbox:
       provider: gmail                   # gmail | graph; prefer a dedicated invoice mailbox (R-6.5)
       account: invoices_a               # the mailbox the fetcher searches (D98)
