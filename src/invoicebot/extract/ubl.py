@@ -20,7 +20,7 @@ from enum import StrEnum
 from lxml import etree  # parser hardened in parse_invoice_xml (R-2.12)
 
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading, finite_decimal
-from invoicebot.extract.qr_payload import canonical_numero
+from invoicebot.extract.qr_payload import NUM_DOC_ADQ_PATTERN, canonical_numero
 
 MAX_XML_BYTES = 2 * 1024 * 1024
 DOCTYPE_MARKER = b"<!doctype"
@@ -220,7 +220,9 @@ def _read_fields(root: etree._Element) -> dict[str, Field]:
     _add(fields, "razon_social", _text(_party_legal_name(supplier)))
 
     customer_id = _party_id(_child(root, "AccountingCustomerParty"))
-    _add(fields, "num_doc_adq", _text(customer_id))
+    customer_id_text = _text(customer_id)
+    if customer_id_text is not None and NUM_DOC_ADQ_PATTERN.fullmatch(customer_id_text):
+        _add(fields, "num_doc_adq", customer_id_text)
     if customer_id is not None:
         _add(fields, "tipo_doc_adq", _attribute(customer_id, "schemeID"))
 
