@@ -163,6 +163,8 @@ class Padron(BaseModel):
     refresh_cron: str
     url: HttpUrl = HttpUrl("https://www2.sunat.gob.pe/padron_reducido_ruc.zip")
     max_mb: int = Field(600, gt=0)
+    #: S12.4: the whole download's deadline in seconds, not just one read's.
+    download_timeout_s: float = Field(1800, gt=0)
 
     @field_validator("refresh_cron")
     @classmethod
