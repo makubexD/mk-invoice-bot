@@ -5,7 +5,7 @@ Roadmap: `docs/plan-mvp.md` row 9e (D136, D154). It runs while Meta verification
 **Goal:**
 
 - A `SIGHUP` validates the new config. A bad one keeps the bot running on the old config and alerts the admins (BR-O05). A good one restarts the process cleanly, so the new config is in force.
-- At every start, open gaps are re-checked. A fixed gap re-enqueues its stuck invoices and tells their senders (BR-F10). The gap is closed, with its GitHub issue, once one of them gets past the failing step.
+- At every start, open gaps are re-checked. A fixed gap re-enqueues its stuck invoices and tells their senders (BR-F12). The gap is closed, with its GitHub issue, once one of them gets past the failing step.
 - Housekeeping keeps the disk bounded: stale temp folders and dead jobs go, and the padrón refreshes itself weekly.
 - CI fails when 10 queued invoices push the peak memory over 800 MB or miss the latency targets.
 - The JSON log carries `extra=` fields, a good backup logs one line, and neither helper can read `/data` beyond what it is handed.
@@ -30,7 +30,7 @@ Step 1 writes these into spec 05. They are proposals for the owner's review of t
   - Without that, the first restart after BR-F03 would "fix" a broken portal whose entry still says `active`, and a TEMPLATE_INVALID would be retried on every restart.
   - A new column, `gaps.raised_with`, holds a digest of the config entry the fix must change: the portal entry for PORTAL_BROKEN and the flow's sink entry for TEMPLATE_INVALID. It is null for PORTAL_MISSING, whose fix is the new store entry itself. Each sighting stores the current digest.
   - Fixed when: PORTAL_MISSING, the RUC has a store whose portal is `active`. PORTAL_BROKEN, the portal is `active` and its digest differs from `raised_with`. TEMPLATE_INVALID, the sink's digest differs from `raised_with`. PARSER_MISS and UNROUTED_BUYER never auto-resume (spec 06 §3).
-  - A fixed gap's linked invoices in `MANUAL_REQUIRED` are re-enqueued: the portal kinds to `FETCHING_DOCS`, TEMPLATE_INVALID to `DELIVERING`. Each sender gets BR-F10. With none left to re-enqueue, the gap is closed at once.
+  - A fixed gap's linked invoices in `MANUAL_REQUIRED` are re-enqueued: the portal kinds to `FETCHING_DOCS`, TEMPLATE_INVALID to `DELIVERING`. Each sender gets BR-F12. With none left to re-enqueue, the gap is closed at once.
   - When a re-enqueued invoice gets past the failing step, the gap is `closed` and its issue gets a comment and is closed. If it fails at the same step again, the sighting moves the gap back to `reported` (or `open` without an issue). `raised_at` stays set, so there is no second issue or alert.
 - **D158 · The extract helper reads its input from stdin and sees none of `/data`.**
   - The `ops-live` review assumed the helper already reads stdin. It does not: it opens the photo by path (`extract/__main__.py`). Binding a single file back, the way D150 binds the browser's folder, needs a staging mount the image wrapper does not have.
@@ -42,16 +42,16 @@ Step 1 writes these into spec 05. They are proposals for the owner's review of t
   - `scripts/memprofile.py` pushes 10 synthetic invoices through the real pipeline (fake channel, real Postgres, real helpers). It reports peak memory as the process's own max RSS plus the largest helper's, and, per invoice, the time to the acknowledgement and to the summary.
   - It exits 1 when the peak is over 800 MB (R-9.1), an acknowledgement takes 5 s or more, or a summary takes 60 s or more (R-9.2). CI runners have more than one vCPU, so the 1-vCPU number for R-9.2 comes from the live host (step 21).
 
-## Step 1: Record D155–D160, BR-O05 and BR-F10 `[inline: spec text and user-facing copy the owner reviews with this plan]`
+## Step 1: Record D155–D160, BR-O05 and BR-F12 `[inline: spec text and user-facing copy the owner reviews with this plan]`
 
 Files: `specs/05-open-questions.md`, `specs/06-business-rules.md` (the spec 06 file), `docs/plan-mvp.md`, `src/invoicebot/rules/catalog.py`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/channels/whatsapp/transport.py`.
 
 - Spec 05: rows D155–D160 with the text of "Design choices" above, each marked "(9e plan, proposed)".
 - Spec 06:
   - BR-O05: "A `SIGHUP` reload found an invalid config" | "Alert, admins only; the bot keeps the old config" | `⚙️ La nueva configuración no es válida; sigo con la anterior ({reason}).`
-  - BR-F10: "A fixed gap re-enqueued an invoice (R-11.9)" | "`MANUAL_REQUIRED` → `FETCHING_DOCS` or `DELIVERING`" | `🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.`
+  - BR-F12: "A fixed gap re-enqueued an invoice (R-11.9)" | "`MANUAL_REQUIRED` → `FETCHING_DOCS` or `DELIVERING`" | `🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.`
   - §3, the PORTAL_BROKEN "Auto-resume when" cell: "The entry is `active` and has changed since the last failure (D157)".
-- Catalog and messages: both rules, in the shape of their neighbors. `BR-O05` is an admin rule, so it maps to the `admin_alert` template like the other `*_admin` rules. `BR-F10` maps to the `resume_notice` template in `transport.py`, next to `"BR-F07": "manual_required"`.
+- Catalog and messages: both rules, in the shape of their neighbors. `BR-O05` is an admin rule, so it maps to the `admin_alert` template like the other `*_admin` rules. `BR-F12` maps to the `resume_notice` template in `transport.py`, next to `"BR-F07": "manual_required"`.
 - Roadmap row 9e: plan `docs/plan-mvp-ops-reload.md`, D155–D160.
 
 Test: `uv run pytest -q tests/unit/test_rules_catalog.py` (the parity test; use the file that holds it) and `npx prettier --check docs/plan-mvp.md specs/05-open-questions.md`.
@@ -182,16 +182,16 @@ Files: `src/invoicebot/pipeline/reevaluate.py` (new), `src/invoicebot/pipeline/g
   - PORTAL_MISSING `portal_missing:<ruc>`: `directory` has a store with that RUC and its portal's `status == "active"`.
   - PORTAL_BROKEN `portal_broken:<key>`: the portal exists, is `active`, and `config_digest(portal) != gap.raised_with`.
   - TEMPLATE_INVALID `template_invalid:<flow>:<sink>`: the flow and sink still exist and `config_digest(sink) != gap.raised_with`. A sink that no longer exists is not fixed.
-- For a fixed gap: `mark_fixed`, then for each id in `stuck_invoices`: the portal kinds call `retry_documents(conn, id, MANUAL_REQUIRED)`, TEMPLATE_INVALID calls `resume_delivery`; then queue BR-F10 to the invoice's sender through the outbox, the way BR-F07 is queued in `fetch.py`, with `{id}`.
+- For a fixed gap: `mark_fixed`, then for each id in `stuck_invoices`: the portal kinds call `retry_documents(conn, id, MANUAL_REQUIRED)`, TEMPLATE_INVALID calls `resume_delivery`; then queue BR-F12 to the invoice's sender through the outbox, the way BR-F07 is queued in `fetch.py`, with `{id}`.
 - A fixed gap with no stuck invoice is closed at once through `close_gap`.
 - Fingerprint parts are split on `:` with the prefixes from `gaps/kinds.py`; no new string literals for kinds.
 
 Tests (integration, real Postgres; docstrings start with `R-11.9` or `D157`):
 
-1. PORTAL_MISSING gap, invoice in `MANUAL_REQUIRED`; the directory has the RUC with an `active` portal: gap `fixed`, invoice `FETCHING_DOCS` with one `fetch` job, one BR-F10 outbox row to its sender.
+1. PORTAL_MISSING gap, invoice in `MANUAL_REQUIRED`; the directory has the RUC with an `active` portal: gap `fixed`, invoice `FETCHING_DOCS` with one `fetch` job, one BR-F12 outbox row to its sender.
 2. Same, but the portal is `todo`: nothing changes.
 3. PORTAL_BROKEN with `raised_with` equal to the current digest: not fixed. With a different digest and `active`: fixed and the invoice resumed.
-4. TEMPLATE_INVALID with a changed sink: invoice `DELIVERING` with one `deliver` job, BR-F10 queued.
+4. TEMPLATE_INVALID with a changed sink: invoice `DELIVERING` with one `deliver` job, BR-F12 queued.
 5. A fixed gap with an issue whose only linked invoice is `DONE`: the gap is `closed` and one `close_issue` row is queued.
 6. PARSER_MISS and UNROUTED_BUYER gaps are untouched.
 7. An `ignored` gap is untouched.
@@ -267,7 +267,7 @@ Files: `tests/integration/test_gap_resume_flow.py` (new).
 The S8.7 end-to-end test, with the fake channel and real Postgres (docstring starts with `R-11.9`):
 
 1. An invoice reaches `MANUAL_REQUIRED` with a PORTAL_MISSING gap reported with an issue URL.
-2. The store directory gains the RUC with an `active` portal (temp copy of the fixture directory). `reevaluate` runs: the invoice is `FETCHING_DOCS` and the sender has a BR-F10 row.
+2. The store directory gains the RUC with an `active` portal (temp copy of the fixture directory). `reevaluate` runs: the invoice is `FETCHING_DOCS` and the sender has a BR-F12 row.
 3. The fetch job runs against an `httpx.MockTransport` portal that returns the XML: the invoice moves past `FETCHING_DOCS`, the gap is `closed`, and a `close_issue` row is queued.
 
 Test: `uv run pytest -q tests/integration/test_gap_resume_flow.py`.
