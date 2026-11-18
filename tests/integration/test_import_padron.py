@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import os
+import sys
 import tracemalloc
 import zipfile
 from collections.abc import AsyncIterator, Sequence
@@ -15,6 +18,7 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot import padron
 from invoicebot.padron import ImportResult, import_padron
 from invoicebot.store.padron import PadronRow, lookup
 
@@ -37,6 +41,40 @@ _MIN_UNCOMPRESSED_BYTES = 20 * 1024 * 1024
 _CHUNK_ROWS = 500
 #: The import must not hold the 20 MB text in memory (R-2.5).
 _MAX_PEAK_BYTES = 10 * 1024 * 1024
+#: Two rows per COPY proves every batch, not just the first, reaches the staging table (R-2.5).
+_TINY_BATCH_ROWS = 2
+_TINY_BATCH_ROWS_COUNT = 5
+#: The child RSS test's rows: unique 11-digit RUCs, one per line.
+CHILD_BASE = 30000000000
+CHILD_ROWS = 150_000
+#: 900 characters of razón social put about 135 MB through COPY (R-2.5).
+_RAZON_SOCIAL_CHARS = 900
+#: The child's peak RSS must stay under 100 MB; one COPY grows libpq's buffer past it (R-2.5).
+_MAX_CHILD_RSS_KB = 100 * 1024
+#: Run as `python -c` with the ZIP path as argv[1]; the DSN comes from the environment, never argv.
+#: `ru_maxrss` survives exec, so it would report the pytest parent's high-water mark; `VmHWM`
+#: belongs to the child's own address space, so the child prints that, in KB.
+_CHILD_IMPORT = """
+import asyncio
+import os
+import sys
+from pathlib import Path
+
+from psycopg import AsyncConnection
+
+from invoicebot.padron import import_padron
+
+
+async def main() -> None:
+    conn = await AsyncConnection.connect(os.environ["DATABASE_URL"], autocommit=True)
+    async with conn:
+        await import_padron(conn, Path(sys.argv[1]))
+    status = Path("/proc/self/status").read_text(encoding="ascii")
+    print(next(line.split()[1] for line in status.splitlines() if line.startswith("VmHWM:")))
+
+
+asyncio.run(main())
+"""
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -68,6 +106,24 @@ def _write_large_zip(path: Path) -> None:
             ruc = LARGE_BASE + index
             line = f"{ruc}|EMPRESA {index}|ACTIVO|HABIDO|{_LINE_PADDING}\n"
             chunk += line.encode("iso-8859-1")
+            if (index + 1) % _CHUNK_ROWS == 0:
+                member.write(chunk)
+                chunk.clear()
+        member.write(chunk)
+
+
+def _write_child_zip(path: Path) -> None:
+    """Write the ~135 MB uncompressed padrón member the child RSS test imports, in chunks."""
+    razon_social = "X" * _RAZON_SOCIAL_CHARS
+    with (
+        zipfile.ZipFile(path, "w", compression=zipfile.ZIP_STORED) as archive,
+        archive.open(MEMBER, "w") as member,
+    ):
+        member.write(f"{HEADER}\n".encode("iso-8859-1"))
+        chunk = bytearray()
+        for index in range(CHILD_ROWS):
+            ruc = CHILD_BASE + index
+            chunk += f"{ruc}|{razon_social}|ACTIVO|HABIDO\n".encode("iso-8859-1")
             if (index + 1) % _CHUNK_ROWS == 0:
                 member.write(chunk)
                 chunk.clear()
@@ -193,3 +249,51 @@ async def test_import_streams_a_large_zip_under_the_memory_cap(
 
     assert result == ImportResult(rows=LARGE_ROWS, skipped=0)
     assert peak < _MAX_PEAK_BYTES
+
+
+async def test_tiny_copy_batches_import_every_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-2.5: with two-row COPY batches, all five rows of the ZIP reach the padrón."""
+    monkeypatch.setattr(padron, "_COPY_BATCH_ROWS", _TINY_BATCH_ROWS)
+    rucs = [str(CHILD_BASE + index) for index in range(_TINY_BATCH_ROWS_COUNT)]
+    zip_path = _write_zip(
+        tmp_path / "batched.zip",
+        [f"{ruc}|EMPRESA {index}|ACTIVO|HABIDO" for index, ruc in enumerate(rucs)],
+    )
+
+    result = await _import(zip_path, db_pool)
+
+    assert result == ImportResult(rows=_TINY_BATCH_ROWS_COUNT, skipped=0)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT ruc FROM padron ORDER BY ruc")
+        stored = [str(row[0]) for row in await cur.fetchall()]
+    assert stored == rucs
+
+
+async def test_import_keeps_child_rss_flat(
+    tmp_path: Path,
+    test_database_url: str,
+) -> None:
+    """R-2.5: a child importing ~135 MB through COPY peaks under 100 MB RSS."""
+    zip_path = tmp_path / "child.zip"
+    _write_child_zip(zip_path)
+    env = {**os.environ, "DATABASE_URL": test_database_url}
+
+    child = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-c",
+        _CHILD_IMPORT,
+        str(zip_path),
+        env=env,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await child.communicate()
+    zip_path.unlink()
+
+    assert child.returncode == 0, stderr.decode()
+    peak_kb = int(stdout)
+    assert peak_kb < _MAX_CHILD_RSS_KB, f"child peak RSS {peak_kb} KB >= {_MAX_CHILD_RSS_KB} KB"

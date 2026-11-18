@@ -9,6 +9,7 @@ into a staging table and swaps it in without holding them in memory.
 from __future__ import annotations
 
 import io
+import itertools
 import re
 import zipfile
 from collections.abc import Iterable, Iterator
@@ -28,6 +29,8 @@ _TEXT_SUFFIX = ".txt"
 _MAX_ZIP_ENTRIES = 20
 _MAX_ZIP_RATIO = 50
 _RUC_PATTERN = re.compile(r"[0-9]{11}")
+#: psycopg 3.3 never flushes libpq's send buffer during one COPY on Linux, so each batch is its own COPY.
+_COPY_BATCH_ROWS = 10_000
 
 
 @dataclass
@@ -99,19 +102,21 @@ async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportRes
     The staging table is dropped and recreated from ``padron``, so this replaces
     every row. The caller's connection must be in autocommit: the COPY commits on
     its own, and the swap runs in one transaction. A failure while copying leaves
-    the old padrón in place.
+    the old padrón in place. Each batch of rows is its own ``COPY``, whose end
+    flushes libpq's send buffer, so memory stays flat.
     """
     skipped = Skipped()
     imported = 0
     await conn.execute("DROP TABLE IF EXISTS padron_staging")
     await conn.execute("CREATE TABLE padron_staging (LIKE padron INCLUDING ALL)")
-    async with conn.cursor().copy(
-        "COPY padron_staging (ruc, razon_social, estado, condicion) FROM STDIN"
-    ) as copy:
-        with open_member(zip_path) as lines:
-            for ruc, razon_social, estado, condicion in rows(lines, skipped):
-                await copy.write_row((int(ruc), razon_social, estado, condicion))
-                imported += 1
+    with open_member(zip_path) as lines:
+        for batch in itertools.batched(rows(lines, skipped), _COPY_BATCH_ROWS):
+            async with conn.cursor().copy(
+                "COPY padron_staging (ruc, razon_social, estado, condicion) FROM STDIN"
+            ) as copy:
+                for ruc, razon_social, estado, condicion in batch:
+                    await copy.write_row((int(ruc), razon_social, estado, condicion))
+                    imported += 1
     async with conn.transaction():
         await conn.execute("DROP TABLE padron")
         await conn.execute("ALTER TABLE padron_staging RENAME TO padron")
