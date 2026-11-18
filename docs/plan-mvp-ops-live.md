@@ -12,8 +12,8 @@ Roadmap: `docs/plan-mvp.md` row 9d (D136, D141). The bot runs for real on this m
 **Needs from the owner first:**
 
 - Steps 1–7: nothing.
-- Steps 8–10: the Google OAuth client. The owner set it up on 2026-11-18, and `google.client_id` is in the private config. They also need the owner at the keyboard for the browser sign-ins and the SOL login.
-- Steps 12–16: Meta business verification approved. On 2026-11-18 it was still in review, so the WABA cannot send. The Entra app exists (`microsoft.client_id` is set). Step 14 also needs S0.11 and the bot's Outlook.com mailbox. Step 15 needs S0.10. Step 16 needs S0.1 (≥ 30 pairs) and S0.5, and records what is missing if they are not ready.
+- Steps 8, 9 and 12: the Google OAuth client. The owner set it up on 2026-11-18, and `google.client_id` is in the private config. They also need the owner at the keyboard for the browser sign-ins and the SOL login.
+- Steps 14–18: Meta business verification approved. On 2026-11-18 it was still in review, so the WABA cannot send. The Entra app exists (`microsoft.client_id` is set). Step 16 also needs S0.11 and the bot's Outlook.com mailbox. Step 17 needs S0.10. Step 18 needs S0.1 (≥ 30 pairs) and S0.5, and records what is missing if they are not ready.
 
 **Moved out by the owner (2026-11-18):** S12.7 (repo private) is "not yet". S16.2 waits for it (D52), so both leave this phase. Step 1 records that in the roadmap.
 
@@ -30,9 +30,9 @@ Step 1 writes these into spec 05. They are proposals for the owner's review of t
   - The extract helper is unchanged: it must read the photo, and it has no network.
 - **D151 · Live runs start with the chat-free checks while Meta verification is pending.**
   - The WABA cannot send until verification. So Google setup, the backup and restore drill, the padrón import and SOL (S0.4) run first: none of them needs a chat reply.
-  - Every check that needs a reply waits for the Meta step (step 12). That covers BR-D16, buttons, `/reprocesar` and `/pagado`.
+  - Every check that needs a reply waits for the Meta step (step 14). That covers BR-D16, buttons, `/reprocesar` and `/pagado`.
 - **D152 · The SOL session allows only the SUNAT hosts the live login used.**
-  - Step 10 records the hosts the live SOL login and query reach. Step 11 gives `GuardProxy` an allowlist of exactly those hosts for the SOL helper (`CONNECT` and `GET`), and installs the page route before the first `goto`.
+  - Step 12 records the hosts the live SOL login and query reach. Step 13 gives `GuardProxy` an allowlist of exactly those hosts for the SOL helper (`CONNECT` and `GET`), and installs the page route before the first `goto`.
   - Portal fetches keep today's guard. Websockets and redirect hops to any other host are refused at the proxy.
 
 ## Step 1: Record D150–D152 and the S12.7 deferral `[inline: spec and roadmap text the owner reviews with this plan]`
@@ -198,26 +198,66 @@ Test: `scripts/check_config.py` exits 0 on the live config; `/health` 200.
 
 1. **Backup and restore drill (R-9.11):** with the `age` key pair and the OneDrive backup folder (S0.10, D119) ready, set `ops.backup.at` a few minutes ahead and confirm two `.age` files land. Then run `scripts/restore_drill.sh` with the private key into an empty Postgres, and record the drill in `deploy/README.md`. If S0.10 is not ready, record that and skip.
 2. **Padrón (S3.4):** download `padron_reducido_ruc.zip` and run `scripts/import_padron.py` under `/usr/bin/time -v`. Record peak RSS (target < 50 MB) and peak disk in `specs/spikes/accuracy.md`.
-3. **GitHub gaps (6e):** only if S0.10 is ready. Fill `gaps.github` on the host and put `github_app_private_key` in the age store. Run the daily GitHub App check by hand and confirm it passes. The issue part runs in step 15.
+3. **GitHub gaps (6e):** only if S0.10 is ready. Fill `gaps.github` on the host and put `github_app_private_key` in the age store. Run the daily GitHub App check by hand and confirm it passes. The issue part runs in step 17.
 
 Test: the checks above, by hand.
 
-## Step 10: S0.4, SOL received invoices `[inline: the owner's SOL login in a real browser]`
+## Step 10: The padrón COPY keeps memory flat `[worker]`
+
+Step 9 measured 598 MB peak RSS on the real ZIP (target < 50 MB). psycopg 3.3 never flushes libpq's send buffer during
+one `COPY` on Linux (`PREFER_FLUSH` is macOS only), so the buffer grows while Postgres falls behind. Measured on 3M
+synthetic rows: one `COPY` peaks at 158 MB, a new `COPY` every 100,000 rows at 39 MB (35 MB baseline). The existing
+test missed it because `tracemalloc` does not see libpq's C buffer.
+
+Files: `src/invoicebot/padron.py`, `tests/integration/test_import_padron.py`.
+
+- `padron.py`: a constant `_COPY_BATCH_ROWS = 100_000`, with a comment giving the reason above in one line.
+- `import_padron`: open the member once, then for each `itertools.batched(rows(lines, skipped), _COPY_BATCH_ROWS)`
+  run one `COPY padron_staging (ruc, razon_social, estado, condicion) FROM STDIN` that writes that batch's rows. The
+  staging table, the swap and the `ImportResult` stay as they are. Docstring: add "Each batch of rows is its own
+  `COPY`, whose end flushes libpq's send buffer, so memory stays flat."
+
+Tests (integration, real Postgres; docstrings start with `R-2.5`):
+
+1. The existing tests pass unchanged.
+2. With `_COPY_BATCH_ROWS` monkeypatched to 2, a ZIP of 5 valid rows imports `rows == 5`, and all 5 RUCs are in
+   `padron`.
+3. Peak RSS in a child process: write a ZIP of 300,000 rows whose razón social is 900 `X` characters (about 270 MB
+   through `COPY`; write it in chunks like `_write_large_zip`). Run the import in a child with
+   `asyncio.create_subprocess_exec(sys.executable, "-c", <code>, <zip path>)`. The child inherits `DATABASE_URL` from
+   the test environment (never on argv), runs `import_padron` on a fresh autocommit connection, and prints
+   `resource.getrusage(resource.RUSAGE_SELF).ru_maxrss`. Assert the exit code is 0 and the value is under
+   `_MAX_CHILD_RSS_KB = 100 * 1024`. This test must fail without the batching: check it with the `padron.py` change
+   stashed.
+
+Test: `uv run pytest -q tests/integration/test_import_padron.py`.
+
+## Step 11: Re-measure the padrón import on the real ZIP `[inline: downloads SUNAT's ZIP and measures on this host]`
+
+1. Download `padron_reducido_ruc.zip` to the scratchpad and run
+   `/usr/bin/time -v uv run python scripts/import_padron.py <zip>` with `CONFIG_PATH=config/example.yaml` and the dev
+   database's `DATABASE_URL`. Delete the ZIP afterwards.
+2. In `specs/spikes/accuracy.md` § "Padrón import", add the new peak RSS (target < 50 MB) and keep the 598 MB line as
+   the "before". The live container gets the fix with the next deploy.
+
+Test: the record exists, and the peak RSS meets the target, or the miss is recorded and the owner is told.
+
+## Step 12: S0.4, SOL received invoices `[inline: the owner's SOL login in a real browser]`
 
 1. The owner logs in to SOL "Consulta de comprobantes" by hand. Does it give the XML of a **received** invoice? Record yes or no with screenshots (kept private) in `specs/spikes/portals.md`.
-2. Record every host the login and the query reach (devtools network tab: redirects, websockets, static hosts). Store the list in `specs/spikes/portals.md` for step 11.
-3. **Yes:** fill `config/sunat_sol.yaml`'s selectors (watch for frames in SOL's menu), keep it `todo` until step 11 lands, then `active`. **No:** record it, keep the file `todo`, and drop `sunat_sol` from flow A's default chain in `config/example.yaml` and the private config.
+2. Record every host the login and the query reach (devtools network tab: redirects, websockets, static hosts). Store the list in `specs/spikes/portals.md` for step 13.
+3. **Yes:** fill `config/sunat_sol.yaml`'s selectors (watch for frames in SOL's menu), keep it `todo` until step 13 lands, then `active`. **No:** record it, keep the file `todo`, and drop `sunat_sol` from flow A's default chain in `config/example.yaml` and the private config.
 
 Test: the record exists; `scripts/check_config.py` exits 0.
 
-## Step 11: SOL host allowlist in the guard proxy (D152) `[worker]`
+## Step 13: SOL host allowlist in the guard proxy (D152) `[worker]`
 
-Only if step 10 found that SOL gives the XML. Otherwise skip it and say so in the step's commit (`Route: inline: skipped, S0.4 no`).
+Only if step 12 found that SOL gives the XML. Otherwise skip it and say so in the step's commit (`Route: inline: skipped, S0.4 no`).
 
 Files: `src/invoicebot/fetchers/browser/proxy.py`, `src/invoicebot/fetchers/browser/sol.py`, `tests/unit/test_browser_proxy.py`.
 
 - `GuardProxy` takes `allowed_hosts: frozenset[str] | None = None`. When it is set, a `CONNECT` or `GET` to a host not in the set (exact match, lower-cased) gets 403, before any DNS lookup. `None` keeps today's behavior for portals.
-- `sol.py` builds its proxy with `allowed_hosts=SOL_HOSTS`. That is a `frozenset` constant in `invoicebot/sunat_origins.py` (the one home of the SUNAT origins), filled with the step 10 list. It installs the page route before the first `page.goto`.
+- `sol.py` builds its proxy with `allowed_hosts=SOL_HOSTS`. That is a `frozenset` constant in `invoicebot/sunat_origins.py` (the one home of the SUNAT origins), filled with the step 12 list. It installs the page route before the first `page.goto`.
 
 Tests (unit; docstrings start with `D152`):
 
@@ -226,9 +266,9 @@ Tests (unit; docstrings start with `D152`):
 
 Test: `uv run pytest -q tests/unit/test_browser_proxy.py tests/unit/test_fetchers_sunat_sol.py`.
 
-## Step 12: Meta goes live `[inline: Meta business settings and secrets]`
+## Step 14: Meta goes live `[inline: Meta business settings and secrets]`
 
-Waits for Meta business verification. Until then, stop here and push-notify the owner that steps 1–11 are done.
+Waits for Meta business verification. Until then, stop here and push-notify the owner that steps 1–13 are done.
 
 The steps follow the `live-trial-meta-setup` memory. Do not create a second app or portfolio.
 
@@ -240,26 +280,26 @@ The steps follow the `live-trial-meta-setup` memory. Do not create a second app 
 
 Test: one inbound and one outbound message in the live log; no 131031.
 
-## Step 13: Flow A live (M6) `[inline: the owner's real invoices and Google account]`
+## Step 15: Flow A live (M6) `[inline: the owner's real invoices and Google account]`
 
 1. **M6:** a personal invoice photo leads to files in `{root}/{YYYY}/{MM}/`, one Sheet row, and BR-D16 with working links. Send it again after `/reprocesar`: the row is updated, not duplicated.
 2. **PDF only (D142):** an invoice from a store that gives only the PDF completes.
 3. **DNI boleta (D143):** a real boleta to the owner's DNI routes to `personal_dni` and writes one row with BR-D18. Record how many boleta photos carry a QR with the DNI.
 4. **Gmail:** forward a store's invoice mail to the dedicated Gmail; `email_inbox` finds its XML.
 5. **WhatsApp PDF (read-more):** a store PDF sent as a document is read from its text layer.
-6. **SOL:** if step 10 said yes, one invoice goes through `sunat_sol`.
+6. **SOL:** if step 12 said yes, one invoice goes through `sunat_sol`.
 7. **BR-D01:** remove the app's access in the Google account, send a photo, and confirm `PENDING_AUTH` plus the admin alert. Sign in again and confirm the invoice finishes.
 8. Record M6 in `specs/04-tasks.md`.
 
 Test: the checks above, by hand.
 
-## Step 14: Flow B live (M3, 6d) `[inline: the owner's work invoices, OneDrive and mailboxes]`
+## Step 16: Flow B live (M3, 6d) `[inline: the owner's work invoices, OneDrive and mailboxes]`
 
 Follow `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" and then `docs/plan-mvp-widen-b-deliver.md` § "Deferred: live check": `inbox_rule`, the laptop agent, `/pagado` and the go-live import dry run. The import's real run waits for the owner's go. Set `mail.send_enabled` back to `false` after each run, and record M3 and the 6d part of M4 in `specs/04-tasks.md`.
 
 Test: the checks in those two sections, by hand.
 
-## Step 15: Gaps and self-alerts live (6e) `[inline: GitHub App on the ops repo and the owner's chat]`
+## Step 17: Gaps and self-alerts live (6e) `[inline: GitHub App on the ops repo and the owner's chat]`
 
 Follow `docs/plan-mvp-widen-b-gaps-ops.md` § "Deferred: live check" (GitHub and self-alerts; the backup part was step 9). Also check this plan's fixes:
 
@@ -270,7 +310,7 @@ Record M4 in `specs/04-tasks.md`.
 
 Test: the checks above, by hand.
 
-## Step 16: Read checks and the M7 record (M5, M7) `[inline: the owner's private samples and SUNAT credentials]`
+## Step 18: Read checks and the M7 record (M5, M7) `[inline: the owner's private samples and SUNAT credentials]`
 
 1. **S0.5:** with the SUNAT API credentials in the age store and `validez_api.enabled: true`, send a work invoice. Confirm the token URL and request fields against the real API (fix the config defaults if they differ) and that `sunat_status_json` holds `estado_cp` 1.
 2. **S0.1:** with ≥ 30 private pairs, run `scripts/accuracy_report.py --set <private dir> --write` and record the numbers. Check `_fix_serie` against any serie with D, O, Q, I or L in its last three characters.
