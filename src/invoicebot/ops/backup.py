@@ -42,12 +42,13 @@ EXCLUDED_NAMES = ("secrets*", "*.age")
 #: The stage that failed; BR-O04 maps each to its description.
 BackupReason = Literal["dump", "too_large", "encrypt", "upload"]
 
-#: The database URL query keys the dump accepts, each mapped to the child's environment name (R-9.14).
+#: The database URL query keys the dump accepts, each mapped to the child's environment name (R-9.14, D148).
 PG_ENVIRONMENT_BY_QUERY_KEY = {
     "sslmode": "PGSSLMODE",
     "sslrootcert": "PGSSLROOTCERT",
     "connect_timeout": "PGCONNECT_TIMEOUT",
     "application_name": "PGAPPNAME",
+    "passfile": "PGPASSFILE",
 }
 
 
@@ -101,7 +102,7 @@ async def _dump(job: BackupJob) -> bytes:
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env=_pg_environment(job.database_url),
+                env=pg_environment(job.database_url),
             )
             if process.stdout is None or process.stderr is None:
                 raise BackupError("dump")
@@ -151,8 +152,13 @@ def _netloc_host(netloc: str) -> str | None:
     return host or None
 
 
-def _pg_environment(database_url: str) -> dict[str, str]:
-    """Return the child's environment: PATH plus the libpq connection keys (D119, R-9.14, R-9.16)."""
+def pg_environment(database_url: str) -> dict[str, str]:
+    """Return the child's environment: PATH plus the libpq connection keys (D119, R-9.14, R-9.16).
+
+    Raises:
+        ValueError: when the URL has a query key the dump cannot pass on, naming the key
+            and never its value.
+    """
     parts = urlsplit(database_url)
     values = {
         "PGHOST": _netloc_host(parts.netloc),

@@ -63,7 +63,7 @@ from invoicebot.github.transport import GitHubHooks, TokenSource, make_github_tr
 from invoicebot.logging import configure_logging
 from invoicebot.net.guard import SystemResolver
 from invoicebot.net.http import GuardedTransport
-from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, run_backup
+from invoicebot.ops.backup import BackupError, BackupJob, BackupReason, pg_environment, run_backup
 from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.commands import PaymentFlow
@@ -341,6 +341,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         }
         sender = OutboxSender(pool, transports)
         drive = _personal_drive(settings, cfg, http)
+        # Fail fast: a query key the dump cannot pass on would fail every nightly backup,
+        # so the URL is checked when the job is wired, not at backup time (D148, R-9.11).
+        database_url = settings.database_url
+        if database_url is not None:
+            pg_environment(database_url)
         daily_tasks = _daily_tasks(
             cfg,
             partial(_run_backup, settings, cfg, pool, drive),
