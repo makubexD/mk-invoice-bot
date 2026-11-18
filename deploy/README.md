@@ -426,7 +426,9 @@ lands in the Inbox, not Junk.
 ## Config-only mode
 
 The app reloads its config on `SIGHUP`, so a config change does not need a new
-image:
+image. A valid candidate restarts the process, and the container's restart
+policy brings it back on the new config; an invalid one is refused, the old
+config keeps running and the admins get BR-O05 (D155):
 
 ```sh
 ./deploy/deploy.sh --config /path/to/candidate.yaml

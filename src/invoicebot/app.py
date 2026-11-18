@@ -83,6 +83,7 @@ from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
+from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
@@ -91,6 +92,7 @@ from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
+from invoicebot.reload import reload_config
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
 from invoicebot.runtime_config import ConfigRejected, RuntimeConfig, load_runtime_config
 from invoicebot.sandbox import (
@@ -159,10 +161,14 @@ BACKUP_TARGET_KIND = "onedrive"
 PG_DUMP_CMD = ("pg_dump",)
 #: BR-O04's alert ceiling: at most one backup-failure alert per twelve hours.
 BACKUP_ALERT_EVERY = timedelta(hours=12)
+#: BR-O05's alert ceiling: at most one rejected-config alert per hour.
+CONFIG_ALERT_EVERY = timedelta(hours=1)
 #: Retention runs half an hour after the backup, so it prunes what the dump kept (S15.1).
 RETENTION_DELAY = timedelta(minutes=30)
 #: The rule id and rate-limit key of the backup-failure alert (BR-O04).
 RULE_BACKUP_ALERT = "BR-O04"
+#: The rule id and rate-limit key of the rejected-config alert (BR-O05).
+RULE_CONFIG_ALERT = "BR-O05"
 
 
 @dataclass(frozen=True)
@@ -181,11 +187,6 @@ async def _no_db_ping() -> bool:
     return False
 
 
-def _log_config_reload_request() -> None:
-    """Acknowledge SIGHUP; the actual config reload arrives in a later phase."""
-    logger.info("config reload requested (SIGHUP)")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """Open the pool, install SIGHUP and run the runtime until shutdown."""
@@ -196,10 +197,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await pool.open(wait=False)
         app.state.db_ping = partial(ping, pool)
 
+    app.state.reload = None
     loop = asyncio.get_running_loop()
     sighup_installed = False
     try:
-        loop.add_signal_handler(signal.SIGHUP, _log_config_reload_request)
+        loop.add_signal_handler(signal.SIGHUP, _on_sighup, app)
         sighup_installed = True
     except (NotImplementedError, RuntimeError, ValueError):
         # Platforms or threads without signal support still start normally.
@@ -213,6 +215,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             loop.remove_signal_handler(signal.SIGHUP)
         if pool is not None:
             await pool.close()
+
+
+def _on_sighup(app: FastAPI) -> None:
+    """Hand SIGHUP to the runtime's reload, or ignore it when no runtime is wired (R-9.6, D155).
+
+    Health-only mode has no config to reload, so the signal must not end the process.
+    """
+    reload: Callable[[], None] | None = app.state.reload
+    if reload is None:
+        logger.info("config reload ignored: no runtime config is loaded")
+        return
+    reload()
 
 
 def _load_runtime(settings: Settings) -> RuntimeConfig:
@@ -364,6 +378,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             "worker": worker.run,
             "outbox": partial(_send_forever, sender),
             "park": partial(_park_forever, pool, cfg.limits.question_timeout_h),
+            "reevaluate": partial(_reevaluate_at_start, pool, cfg, directory),
         }
         background["daily"] = partial(daily_forever, pool, cfg.owner.timezone, daily_tasks)
         background["selfcheck"] = partial(
@@ -371,8 +386,48 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         )
         if deliver is not None and deliver.laptop is not None:
             background["laptop"] = deliver.laptop
-        async with _background(background):
+        async with _reload_ready(app, settings, pool, cfg), _background(background):
             yield
+
+
+async def _reevaluate_at_start(pool: Pool, cfg: Config, directory: StoreDirectory) -> None:
+    """Re-check the gaps once at this start, then idle (D156).
+
+    A reload is a start, so a deploy or config change that fixes a gap is seen here. It runs
+    as a supervised task, so a database that is down at startup neither blocks the app nor
+    skips the check: the supervisor retries it until it succeeds.
+    """
+    await reevaluate(pool, cfg, directory)
+    await asyncio.Event().wait()
+
+
+@asynccontextmanager
+async def _reload_ready(app: FastAPI, settings: Settings, pool: Pool, cfg: Config) -> AsyncIterator[None]:
+    """Accept a SIGHUP config reload while the runtime runs (R-9.6, D155)."""
+    reloads: set[asyncio.Task[bool]] = set()
+    app.state.reload = partial(_start_config_reload, reloads, settings, pool, cfg)
+    try:
+        yield
+    finally:
+        app.state.reload = None
+
+
+def _start_config_reload(
+    reloads: set[asyncio.Task[bool]], settings: Settings, pool: Pool, cfg: Config
+) -> None:
+    """Start one config reload task, ignoring a SIGHUP while one is running (R-9.6, D155)."""
+    if reloads:
+        logger.info("config reload already running")
+        return
+    task = asyncio.create_task(
+        reload_config(
+            partial(load_runtime_config, settings),
+            partial(_alert_config_rejected, pool, cfg),
+            partial(os.kill, os.getpid(), signal.SIGTERM),
+        )
+    )
+    reloads.add(task)
+    task.add_done_callback(reloads.discard)
 
 
 def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
@@ -804,6 +859,15 @@ async def _alert_backup_failure(pool: Pool, cfg: Config, reason: BackupReason) -
     async with pool.connection() as conn, conn.transaction():
         await queue_rate_limited_alert(
             conn, cfg.profiles, RULE_BACKUP_ALERT, BACKUP_ALERT_EVERY, RULE_BACKUP_ALERT, text
+        )
+
+
+async def _alert_config_rejected(pool: Pool, cfg: Config, reason: str) -> None:
+    """Queue BR-O05's rate-limited admin alert for a rejected config reload (BR-O05, D155)."""
+    text = MESSAGES[RULE_CONFIG_ALERT].format(reason=reason)
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn, cfg.profiles, RULE_CONFIG_ALERT, CONFIG_ALERT_EVERY, RULE_CONFIG_ALERT, text
         )
 
 
