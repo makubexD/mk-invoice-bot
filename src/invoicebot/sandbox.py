@@ -18,16 +18,23 @@ DEFAULT_PATH = "/usr/local/bin:/usr/bin:/bin"
 CHECK_OUTPUT_BYTES = 4 * 1024
 
 #: Runs inside the first namespace: an empty `/proc`, the hidden dirs masked, no network.
+#: The helper runs with no capabilities, so it cannot unmount a mask. This shell stays
+#: PID 1 of the namespace instead of exec'ing: a helper that leaves the process group
+#: still dies with it, because the kernel kills the whole namespace when PID 1 exits.
+#: `<&0` keeps stdin, which a background command would otherwise read from /dev/null.
 IMAGE_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
 mount -t tmpfs -o size=4k,mode=0555 none /proc
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
-exec "$@"
+setpriv --bounding-set=-all --inh-caps=-all --no-new-privs -- "$@" <&0 &
+wait $!
 """
 
 #: Runs inside the first namespace: a capped `$TMPDIR`, the hidden dirs masked, the network kept.
+#: The helper runs as an unprivileged user in a nested namespace, and this shell stays PID 1,
+#: for the same reasons as in `IMAGE_SCRIPT`.
 BROWSER_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
@@ -35,7 +42,8 @@ mount -t tmpfs -o "size=$1m,mode=0700" none "$TMPDIR"
 shift
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
-exec unshare --user --map-user=1000 --map-group=1000 "$@"
+unshare --user --map-user=1000 --map-group=1000 "$@" <&0 &
+wait $!
 """
 
 
@@ -114,11 +122,14 @@ def browser_command(prefixes: HelperPrefixes, base: Sequence[str]) -> tuple[str,
 
 
 def passfile_path(database_url: str | None) -> Path | None:
-    """Return the ``passfile`` the database URL names, or None when it names none (D148)."""
+    """Return the ``passfile`` the database URL names, or None when it names none (D148).
+
+    A repeated key gives its last value, the one libpq and the backup dump use.
+    """
     if database_url is None:
         return None
     values = parse_qs(urlsplit(database_url).query).get("passfile")
-    return Path(values[0]) if values else None
+    return Path(values[-1]) if values else None
 
 
 async def check_sandbox(prefixes: HelperPrefixes, timeout_s: float) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from invoicebot.settings import Settings
 
@@ -27,3 +28,12 @@ def test_settings_helper_sandbox_reads_env(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert settings.helper_sandbox is True
     assert settings.helper_tmp_mb == 64
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_settings_helper_tmp_mb_below_one_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    """D147: a temp cap below 1 MB fails at startup, not at the first browser fetch."""
+    monkeypatch.setenv("HELPER_TMP_MB", value)
+
+    with pytest.raises(ValidationError, match="helper_tmp_mb"):
+        Settings()

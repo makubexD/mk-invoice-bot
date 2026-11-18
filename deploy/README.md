@@ -181,7 +181,8 @@ in `unshare` namespaces:
   capped at `HELPER_TMP_MB` (default 256), the config and secrets directories
   hidden and Chromium's own sandbox.
 
-Both set `oom_score_adj` to 1000. The app refuses to start if the namespaces are
+Both set `oom_score_adj` to 1000, run the helper without the privileges to
+unmount a mask, and kill every process it started when the job ends. The app refuses to start if the namespaces are
 unavailable. Docker's default seccomp profile blocks `unshare`, so the image
 needs Podman, or Docker with a profile that allows it. The check is:
 

@@ -1,10 +1,11 @@
 """Run the helper sandbox checks inside the app image (D147).
 
 Every check runs the real argv prefix from :mod:`invoicebot.sandbox` and asserts what the
-namespace wrapper isolates: no network, an empty ``/proc``, hidden config, a hard OOM score,
-a capped ``TMPDIR``, Chromium's own sandbox, no orphaned browser and a working extract
-helper. The script prints one ``ok <name>`` or ``FAIL <name>: <why>`` line per check and
-exits non-zero when any of them failed; one broken check never stops the rest.
+namespace wrapper isolates: no network, an empty ``/proc``, hidden config that stays hidden,
+a hard OOM score, a capped ``TMPDIR``, no helper outliving its job, Chromium's own sandbox,
+no orphaned browser and a working extract helper. The script prints one ``ok <name>`` or
+``FAIL <name>: <why>`` line per check and exits non-zero when any of them failed; one broken
+check never stops the rest.
 """
 
 from __future__ import annotations
@@ -194,6 +195,71 @@ def check_browser_tmp_cap() -> None:
         raise CheckFailed("writing 80 MiB to $TMPDIR succeeded")
 
 
+#: A helper that drops its parent-death signal and leaves the process group, then waits.
+ESCAPE_SNIPPET = (
+    "import ctypes, os, time\n"
+    "libc = ctypes.CDLL(None)\n"
+    "libc.prctl(1, 0, 0, 0, 0)  # PR_SET_PDEATHSIG off\n"
+    "libc.prctl(15, b'escapee', 0, 0, 0)  # PR_SET_NAME\n"
+    "os.setsid()\n"
+    "time.sleep(60)\n"
+)
+
+
+def _check_umount_refused(prefix: Sequence[str]) -> None:
+    """A helper under ``prefix`` cannot unmount the mask over the runtime-config dir."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        script = f"umount {RUNTIME_CONFIG}; ls -A {RUNTIME_CONFIG}"
+        done = _run([*prefix, "sh", "-c", script], _browser_env(tmpdir), SHORT_TIMEOUT_S)
+    if done.stdout.strip():
+        raise CheckFailed(f"umount revealed {RUNTIME_CONFIG}: {done.stdout.strip()!r}")
+    if "must be superuser" not in done.stderr:
+        raise CheckFailed(f"umount was not refused: {done.stderr.strip()!r}")
+
+
+def check_image_umount_refused() -> None:
+    """The extract helper runs without capabilities, so its masks stay on."""
+    _check_umount_refused(PREFIXES.image)
+
+
+def check_browser_umount_refused() -> None:
+    """The browser helper runs unprivileged, so its masks stay on."""
+    _check_umount_refused(PREFIXES.browser)
+
+
+def _check_no_escape(prefix: Sequence[str]) -> None:
+    """Killing the wrapper's process group kills a helper that left it (R-9.2)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv built here, never a shell
+            [*prefix, sys.executable, "-P", "-c", ESCAPE_SNIPPET],
+            env=_browser_env(tmpdir),
+            start_new_session=True,
+            stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+        )
+        try:
+            if not _wait_until(lambda: "escapee" in _all_comms(), SHORT_TIMEOUT_S):
+                raise CheckFailed("the escaping helper never started")
+            os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=SHORT_TIMEOUT_S)
+            if not _wait_until(lambda: "escapee" not in _all_comms(), SHORT_TIMEOUT_S):
+                raise CheckFailed("a helper that left its process group outlived the job")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.wait(timeout=SHORT_TIMEOUT_S)
+
+
+def check_image_no_escape() -> None:
+    """An extract helper that calls setsid still dies with its job."""
+    _check_no_escape(PREFIXES.image)
+
+
+def check_browser_no_escape() -> None:
+    """A browser helper that calls setsid still dies with its job."""
+    _check_no_escape(PREFIXES.browser)
+
+
 def check_chromium_sandbox() -> None:
     """Chromium starts with its own sandbox inside the browser prefix and renders text."""
     snippet = (
@@ -271,6 +337,10 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "image-oom": check_image_oom,
     "browser-config-hidden-oom": check_browser_config_hidden_oom,
     "browser-tmp-cap": check_browser_tmp_cap,
+    "image-umount-refused": check_image_umount_refused,
+    "browser-umount-refused": check_browser_umount_refused,
+    "image-no-escape": check_image_no_escape,
+    "browser-no-escape": check_browser_no_escape,
     "chromium-sandbox": check_chromium_sandbox,
     "no-orphan-chromium": check_no_orphan_chromium,
     "extract-helper": check_extract_helper,

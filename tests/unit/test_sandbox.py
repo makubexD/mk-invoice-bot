@@ -101,6 +101,13 @@ def test_passfile_path_reads_the_query_key() -> None:
     assert passfile_path("postgresql://u@h/db?passfile=/run/x/pgpass") == Path("/run/x/pgpass")
 
 
+def test_passfile_path_repeated_key_gives_the_last_value() -> None:
+    """D148: a repeated passfile gives the last value, the one libpq and the dump read."""
+    url = "postgresql://u@h/db?passfile=/a/decoy&passfile=/run/x/pgpass"
+
+    assert passfile_path(url) == Path("/run/x/pgpass")
+
+
 @pytest.mark.parametrize(
     "url",
     [None, "postgresql://u@h/db", "postgresql://u@h/db?sslmode=require"],

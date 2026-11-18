@@ -7,6 +7,7 @@ a secret suffix, so the startup guard never trips on these variables.
 
 from pathlib import Path
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 #: Where Compose mounts the runtime config directory.
@@ -28,7 +29,7 @@ class Settings(BaseSettings):
     #: Wrap helpers in namespaces, D147; only works in the image.
     helper_sandbox: bool = False
     #: tmpfs cap of a browser helper's temp folder, D147.
-    helper_tmp_mb: int = 256
+    helper_tmp_mb: int = Field(default=256, ge=1)
 
     def runtime_files_present(self) -> bool:
         """True when both the config and the secrets file exist on disk."""
