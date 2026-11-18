@@ -24,6 +24,7 @@ from typing import Any, cast
 from psycopg import AsyncConnection
 
 from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
+from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -291,8 +292,9 @@ async def _raise_broken_gap(
 
 
 def _broken_sighting(inputs: _Inputs, reading: Reading, portal_key: str, reason: FetchReason) -> GapSighting:
-    """Build one PORTAL_BROKEN sighting from the result and the reading (BR-F03, R-11.12)."""
+    """Build one PORTAL_BROKEN sighting from the result and the reading (BR-F03, R-11.12, D157)."""
     ruc_emisor = reading.value("ruc_emisor")
+    portal = inputs.directory.portals.get(portal_key)
     return GapSighting(
         kind=PORTAL_BROKEN,
         parts=(portal_key,),
@@ -308,6 +310,7 @@ def _broken_sighting(inputs: _Inputs, reading: Reading, portal_key: str, reason:
             portal_key=portal_key,
             hint_url=None,
         ),
+        raised_with=None if portal is None else config_digest(portal),
     )
 
 

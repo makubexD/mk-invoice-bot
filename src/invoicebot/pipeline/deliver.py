@@ -42,6 +42,7 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.auth.providers import GMAIL_PROVIDER, GRAPH_MODE
 from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
     Config,
     ExcelTemplateSink,
@@ -847,8 +848,9 @@ async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_nam
 
 
 def _template_sighting(invoice: _Invoice, sink_name: str) -> GapSighting:
-    """Build one TEMPLATE_INVALID sighting from the invoice's flow and failing sink (BR-D02, R-11.12)."""
+    """Build one TEMPLATE_INVALID sighting from the flow and failing sink (BR-D02, R-11.12, D157)."""
     ruc_emisor = invoice.reading.value("ruc_emisor")
+    sink = next((entry for entry in invoice.flow.sinks if entry.kind == sink_name), None)
     return GapSighting(
         kind=TEMPLATE_INVALID,
         parts=(invoice.flow_name, sink_name),
@@ -864,6 +866,7 @@ def _template_sighting(invoice: _Invoice, sink_name: str) -> GapSighting:
             portal_key=None,
             hint_url=None,
         ),
+        raised_with=None if sink is None else config_digest(sink),
     )
 
 

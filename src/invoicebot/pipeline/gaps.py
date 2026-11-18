@@ -58,6 +58,7 @@ class GapSighting:
     subject: str
     invoice_id: int | None
     fields: IssueFields
+    raised_with: str | None = None
 
 
 async def raise_gap(
@@ -73,7 +74,14 @@ async def raise_gap(
     """
     kind = GAP_KINDS[sighting.kind]
     gap_fingerprint = fingerprint(sighting.kind, *sighting.parts)
-    gap = await upsert_gap(conn, kind, gap_fingerprint, sighting.subject, sighting.invoice_id)
+    gap = await upsert_gap(
+        conn,
+        kind,
+        gap_fingerprint,
+        sighting.subject,
+        sighting.invoice_id,
+        raised_with=sighting.raised_with,
+    )
     if gap.state == "ignored":
         return gap
     if not gap.raised_now and not await _alert_is_due(conn, ctx, gap):

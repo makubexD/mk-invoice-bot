@@ -9,8 +9,9 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.config.digest import config_digest
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Profile
+from invoicebot.config.models import Portal, Profile
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.github.issue_text import IssueFields
@@ -34,6 +35,8 @@ ISSUER_RUC_INT = 20000000001
 SUBJECT = f"RUC {ISSUER_RUC}"
 GAP_FINGERPRINT = f"portal_missing:{ISSUER_RUC}"
 PARSER_FINGERPRINT = f"parser_miss:{ISSUER_RUC}"
+BROKEN_PORTAL_KEY = "synthetic_portal"
+BROKEN_FINGERPRINT = f"portal_broken:{BROKEN_PORTAL_KEY}"
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 HINT_URL = "https://portal.example.pe/consulta"
 
@@ -164,6 +167,29 @@ async def test_raising_twice_queues_one_github_row(
 
     assert second.count == 2
     assert count_row == (1,)
+
+
+async def test_a_portal_broken_sighting_stores_the_portal_digest(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D157: raising a PORTAL_BROKEN gap stores the portal's digest in gaps.raised_with."""
+    portal = Portal(key=BROKEN_PORTAL_KEY, adapter="generic_form", status="active")
+    ctx = _context(github_enabled=True)
+    sighting = GapSighting(
+        kind="PORTAL_BROKEN",
+        parts=(BROKEN_PORTAL_KEY,),
+        subject=f"Portal {BROKEN_PORTAL_KEY}",
+        invoice_id=None,
+        fields=_fields("PORTAL_BROKEN", BROKEN_FINGERPRINT),
+        raised_with=config_digest(portal),
+    )
+
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, ctx, sighting)
+        cur = await conn.execute("SELECT raised_with FROM gaps WHERE fingerprint = %s", (BROKEN_FINGERPRINT,))
+        stored = await cur.fetchone()
+
+    assert stored == (config_digest(portal),)
 
 
 async def test_a_pending_comment_does_not_block_a_new_create_issue(
