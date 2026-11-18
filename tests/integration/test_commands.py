@@ -34,6 +34,7 @@ from invoicebot.pipeline.commands import (
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.resume import resume_delivery
 from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
@@ -739,6 +740,23 @@ async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
     assert head.state == "FAILED"
     assert jobs == []
     assert replies == [(expected, None)]
+
+
+async def test_resume_delivery_sends_a_manual_invoice_back_to_deliver(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.9: resume_delivery moves a MANUAL_REQUIRED invoice to DELIVERING with one deliver job."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await resume_delivery(conn, invoice_id)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert head is not None
+    assert head.state == "DELIVERING"
+    assert jobs == ["deliver"]
 
 
 @pytest.mark.parametrize("command", ["cancelar", "reprocesar"])

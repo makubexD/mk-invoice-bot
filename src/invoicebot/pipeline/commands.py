@@ -18,13 +18,12 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.pipeline.actions import cancel_invoice
-from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPARED_BATCH_STATE
-from invoicebot.pipeline.fetch import FETCH_STEP
+from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
+from invoicebot.pipeline.resume import retry_delivery, retry_documents
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
-from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
@@ -61,22 +60,17 @@ from invoicebot.rules.messages_es import (
 from invoicebot.states import (
     BATCHED,
     CANCELLABLE,
-    DELIVERING,
     FAILED,
-    FETCHING_DOCS,
     MANUAL_REQUIRED,
     PENDING_USER,
 )
-from invoicebot.store.flow_b import get_batch_state
 from invoicebot.store.gaps import GapRow, ignore_gap, open_gaps
 from invoicebot.store.invoices import (
     InvoiceHead,
     PendingRow,
     get_state_rule,
     list_pending,
-    load_flow,
     load_invoice_head,
-    set_state,
 )
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
@@ -291,28 +285,10 @@ async def _reprocesar(
 async def _requeue(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
     """Queue the step the invoice's state needs, returning whether there is one (S4.9, D96)."""
     if state in (FAILED, MANUAL_REQUIRED):
-        return await _retry_documents(conn, invoice_id, state)
+        return await retry_documents(conn, invoice_id, state)
     if state == BATCHED:
-        return await _retry_delivery(conn, invoice_id)
+        return await retry_delivery(conn, invoice_id)
     return False
-
-
-async def _retry_documents(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
-    """Send a failed or manual invoice back to its fetch step, if it has a flow (S4.9, D96)."""
-    if state == FAILED and await load_flow(conn, invoice_id) is None:
-        return False
-    await set_state(conn, invoice_id, FETCHING_DOCS, expected=state)
-    await enqueue(conn, invoice_id, FETCH_STEP)
-    return True
-
-
-async def _retry_delivery(conn: AsyncConnection[Any], invoice_id: int) -> bool:
-    """Send an invoice whose batch failed back to deliver, which resends it (S4.9, D96)."""
-    if await get_batch_state(conn, invoice_id) != FAILED_BATCH_STATE:
-        return False
-    await set_state(conn, invoice_id, DELIVERING, expected=BATCHED)
-    await enqueue(conn, invoice_id, DELIVER_STEP)
-    return True
 
 
 async def _pendientes(
