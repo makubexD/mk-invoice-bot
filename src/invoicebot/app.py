@@ -55,9 +55,9 @@ from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
 from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import GraphMailbox
-from invoicebot.fetchers.portal import PortalFetcher
+from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
-from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SECRETS, SOL_HELPER_COMMAND, SunatSolFetcher
 from invoicebot.github.app_token import GitHubApp, GitHubTokenError
 from invoicebot.github.transport import GitHubHooks, TokenSource, make_github_transport
 from invoicebot.logging import configure_logging
@@ -95,6 +95,14 @@ from invoicebot.queue.outbox import OutboxSender, Transport
 from invoicebot.queue.worker import Handler, Worker
 from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import BACKUP_REASON_DESC, MESSAGES
+from invoicebot.sandbox import (
+    HelperPrefixes,
+    browser_command,
+    check_sandbox,
+    helper_prefixes,
+    hidden_dirs,
+    passfile_path,
+)
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets, load_identity
 from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
@@ -141,6 +149,8 @@ GOOGLE_SHEETS_KIND = "google_sheets"
 ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
+#: How long each helper wrapper gets to start once at startup (D147).
+SANDBOX_CHECK_TIMEOUT_S = 10.0
 #: Pause between two laptop sweeps: receipts first, then the overdue alerts (R-7.8, R-7.14).
 LAPTOP_SWEEP_S = 300.0
 #: Pause before a background task that died is started again.
@@ -240,6 +250,20 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         logger.error("sunat validation disabled: missing %s", sorted(sunat_secrets.missing))
         yield
         return
+    prefixes = helper_prefixes(
+        settings.helper_sandbox,
+        hidden_dirs(
+            [
+                settings.config_path,
+                settings.secrets_path,
+                settings.age_identity_path,
+                passfile_path(settings.database_url),
+            ]
+        ),
+        settings.helper_tmp_mb,
+    )
+    # Fail fast: a host without the namespaces rolls back instead of running bare helpers (D147).
+    await check_sandbox(prefixes, SANDBOX_CHECK_TIMEOUT_S)
     async with (
         httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http,
         httpx.AsyncClient(
@@ -272,7 +296,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 cfg.limits.media,
                 settings.parsing_rules_path,
                 GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
-                helper_prefix=(),
+                helper_prefix=prefixes.image,
             ),
             ROUTE_STEP: make_route_handler(pool, cfg, directory, rules),
             FETCH_STEP: make_fetch_handler(
@@ -285,7 +309,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                     directory,
                     guarded_http,
                     _InboxDeps(http, google_tokens),
-                    _sol_fetcher(cfg, directory, store),
+                    _BrowserDeps(_sol_fetcher(cfg, directory, store, prefixes), prefixes),
                 ),
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
@@ -799,7 +823,20 @@ class _InboxDeps:
     google_tokens: Mapping[str, GoogleTokens]
 
 
-def _sol_fetcher(cfg: Config, directory: StoreDirectory, store: SecretStore) -> SunatSolFetcher | None:
+@dataclass(frozen=True)
+class _BrowserDeps:
+    """What the browser-backed fetchers share: the SOL fetcher and the sandbox prefixes (D147)."""
+
+    sol: SunatSolFetcher | None
+    prefixes: HelperPrefixes
+
+
+def _sol_fetcher(
+    cfg: Config,
+    directory: StoreDirectory,
+    store: SecretStore,
+    prefixes: HelperPrefixes,
+) -> SunatSolFetcher | None:
     """Build the SOL fetcher once the site is active, or None until then (S10.1, R-5.2).
 
     A missing secret or a ``sol_ruc`` that is not the owner's RUC stops startup, naming
@@ -811,7 +848,13 @@ def _sol_fetcher(cfg: Config, directory: StoreDirectory, store: SecretStore) -> 
     secrets = store.scoped(SUNAT_SOL, set(SECRETS))
     if secrets.enabled and not hmac.compare_digest(secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()):
         raise ValueError("sunat_sol: secret sol_ruc does not match owner.ruc (R-9.10)")
-    return SunatSolFetcher(site, secrets, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
+    return SunatSolFetcher(
+        site,
+        secrets,
+        cfg.limits.media.max_bytes,
+        cfg.retrieval.portal_timeout_s,
+        helper_command=browser_command(prefixes, SOL_HELPER_COMMAND),
+    )
 
 
 def _fetch_registries(
@@ -820,10 +863,10 @@ def _fetch_registries(
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
     inbox: _InboxDeps,
-    sol: SunatSolFetcher | None,
+    browser: _BrowserDeps,
 ) -> dict[str, dict[str, Fetcher]]:
     """Return each flow's fetcher registry, sharing one instance where it can (S7.1, D98)."""
-    builders = _fetcher_builders(settings, cfg, directory, guarded_http, inbox, sol)
+    builders = _fetcher_builders(settings, cfg, directory, guarded_http, inbox, browser)
     return {name: _flow_registry(name, flow, builders) for name, flow in cfg.flows.items()}
 
 
@@ -833,10 +876,15 @@ def _fetcher_builders(
     directory: StoreDirectory,
     guarded_http: httpx.AsyncClient,
     inbox: _InboxDeps,
-    sol: SunatSolFetcher | None,
+    browser: _BrowserDeps,
 ) -> dict[str, _FetcherBuilder]:
     """Return a builder per fetcher this build runs; adding a fetcher adds an entry (S7.1)."""
-    portal = PortalFetcher(directory, cfg.limits.media.max_bytes, cfg.retrieval.portal_timeout_s)
+    portal = PortalFetcher(
+        directory,
+        cfg.limits.media.max_bytes,
+        cfg.retrieval.portal_timeout_s,
+        helper_command=browser_command(browser.prefixes, DEFAULT_HELPER_COMMAND),
+    )
     qr_url = QrUrlFetcher(
         guarded_http,
         allowed_hosts(directory),
@@ -847,7 +895,7 @@ def _fetcher_builders(
         PORTAL_FETCHER: lambda _name, _flow: portal,
         QR_URL_FETCHER: lambda _name, _flow: qr_url,
         EMAIL_INBOX_FETCHER: lambda name, flow: _email_inbox_fetcher(name, flow, settings, cfg, inbox),
-        SUNAT_SOL: lambda _name, _flow: sol,
+        SUNAT_SOL: lambda _name, _flow: browser.sol,
     }
 
 
