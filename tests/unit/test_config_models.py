@@ -19,6 +19,7 @@ from invoicebot.config.models import (
     FlowInbox,
     GoogleDriveSink,
     GoogleSheetsSink,
+    Padron,
     PickField,
     Portal,
     WhatsAppChannel,
@@ -1093,3 +1094,28 @@ def test_owner_dni_with_a_letter_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match=r"owner\.dni must be 8 digits"):
         load_config(path)
+
+
+def test_padron_refresh_cron_parses_time_and_sunday() -> None:
+    """S12.4: "0 4 * * 0" is Sunday 04:00 in Python's Monday-0 weekday."""
+    padron = Padron(refresh_cron="0 4 * * 0")
+
+    assert padron.at == time(4, 0)
+    assert padron.weekday == 6
+
+
+@pytest.mark.parametrize("refresh_cron", ["*/5 * * * *", "0 4 1 * *", "0 25 * * 0"])
+def test_padron_refresh_cron_outside_m_h_star_star_d_fails(refresh_cron: str) -> None:
+    """S12.4: a step, a day-of-month and an out-of-range hour are refused, naming the value."""
+    with pytest.raises(ValidationError) as excinfo:
+        Padron(refresh_cron=refresh_cron)
+
+    assert refresh_cron in str(excinfo.value)
+
+
+def test_padron_takes_the_default_url_and_size_cap() -> None:
+    """S12.4: a padrón config without url or max_mb takes the SUNAT URL and 600 MiB cap."""
+    padron = Padron(refresh_cron="0 4 * * 0")
+
+    assert str(padron.url) == "https://www2.sunat.gob.pe/padron_reducido_ruc.zip"
+    assert padron.max_mb == 600

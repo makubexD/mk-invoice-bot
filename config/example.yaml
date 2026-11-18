@@ -54,7 +54,10 @@ sunat:
     api_url: "https://api.sunat.gob.pe/v1/contribuyente/contribuyentes/{ruc}/validarcomprobante"
     timeout_s: 10
   sol: { enabled: true }                # secrets: SOL_RUC / SOL_USER / SOL_PASSWORD (secondary user; sunat_sol only)
-  padron: { refresh_cron: "0 4 * * 0" } # weekly Sunday 04:00 (ZIP ~395 MB, updated daily by SUNAT)
+  padron:                               # weekly Sunday 04:00 (ZIP ~395 MB, updated daily by SUNAT)
+    refresh_cron: "0 4 * * 0"
+    # url: "https://www2.sunat.gob.pe/padron_reducido_ruc.zip"
+    # max_mb: 600
 
 extraction:
   max_image_px: 2000
