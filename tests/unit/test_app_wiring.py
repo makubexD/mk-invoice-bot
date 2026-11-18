@@ -15,7 +15,9 @@ import yaml
 
 from invoicebot.app import (
     GOOGLE_CLIENT_SECRET,
+    WHATSAPP_SECRETS,
     DailyRuns,
+    _check_reload_candidate,
     _daily_tasks,
     _deliver_registry,
     _fetch_schedules,
@@ -23,6 +25,7 @@ from invoicebot.app import (
     _google_secrets,
     _google_tokens,
     _log_reload_failure,
+    _secret_problem,
     _sol_fetcher,
     _validation_handlers,
     _validation_secrets,
@@ -34,6 +37,7 @@ from invoicebot.fetchers.sunat_sol import SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
+from invoicebot.runtime_config import ConfigRejected
 from invoicebot.sandbox import HelperPrefixes
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.settings import Settings
@@ -343,6 +347,90 @@ def test_mismatched_sol_ruc_stops_startup_naming_only_the_key() -> None:
 
     assert "20000000010" not in str(raised.value)
     assert "20000000028" not in str(raised.value)
+
+
+def test_secret_problem_with_every_needed_secret_is_none(tmp_path: Path) -> None:
+    """R-9.6: a candidate whose enabled features have their secrets raises no problem."""
+    cfg = _without_google(tmp_path)
+    store = SecretStore(dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"))
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) is None
+
+
+def test_secret_problem_without_the_whatsapp_token_is_whatsapp(tmp_path: Path) -> None:
+    """R-9.6: a candidate missing a WhatsApp secret is refused as secrets:whatsapp."""
+    cfg = _without_google(tmp_path)
+    values = dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value")
+    del values["whatsapp_token"]
+    store = SecretStore(values)
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:whatsapp"
+
+
+def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path: Path) -> None:
+    """R-9.6: validation switched on without the SUNAT keys is refused as secrets:sunat_validez."""
+    cfg = _sunat_config(tmp_path, enabled=True)
+    store = SecretStore(dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"))
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:sunat_validez"
+
+
+def test_secret_problem_with_google_and_no_client_secret_is_google() -> None:
+    """R-9.6: a candidate with google config but no client secret is refused as secrets:google."""
+    cfg = load_config(EXAMPLE)
+    store = SecretStore(dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"))
+
+    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:google"
+
+
+def test_secret_problem_with_an_active_sol_site_whose_ruc_differs_is_sunat_sol(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site signing in as another RUC is refused as secrets:sunat_sol."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    values = dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value")
+    values.update(
+        {"sol_ruc": "20000000028", "sol_user": "synthetic-user", "sol_password": "synthetic-password"}
+    )
+    store = SecretStore(values)
+
+    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+
+
+def test_secret_problem_with_an_active_sol_site_and_no_sol_keys_is_sunat_sol(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site without its keys is refused, as startup would be (R-9.10)."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    store = SecretStore(dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"))
+
+    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+
+
+def test_secret_problem_with_an_active_sol_site_and_matching_keys_is_none(tmp_path: Path) -> None:
+    """R-9.6: an active SOL site signing in as the owner raises no problem."""
+    cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
+    values = dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value")
+    values.update(
+        {"sol_ruc": "20000000010", "sol_user": "synthetic-user", "sol_password": "synthetic-password"}
+    )
+
+    assert _secret_problem(cfg, _sol_directory("active"), SecretStore(values)) is None
+
+
+def test_check_reload_candidate_without_a_secrets_file_is_rejected(tmp_path: Path) -> None:
+    """R-9.6: a candidate whose secrets file is missing is rejected with reason secrets."""
+    identity = pyrage.x25519.Identity.generate()
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(identity) + "\n", encoding="utf-8")
+    settings = Settings(
+        config_path=EXAMPLE,
+        parsing_rules_path=ROOT / "config" / "parsing_rules.yaml",
+        secrets_path=tmp_path / "missing.age",
+        age_identity_path=identity_path,
+        data_dir=tmp_path,
+    )
+
+    with pytest.raises(ConfigRejected) as raised:
+        _check_reload_candidate(settings)
+
+    assert raised.value.reason == "secrets"
 
 
 def test_sunat_sol_schedule_comes_from_the_site_file() -> None:

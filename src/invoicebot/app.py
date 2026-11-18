@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import cast
 
 import httpx
+import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
@@ -428,7 +429,7 @@ def _start_config_reload(
         return
     task = asyncio.create_task(
         reload_config(
-            partial(load_runtime_config, settings),
+            partial(_check_reload_candidate, settings),
             partial(_alert_config_rejected, pool, cfg),
             partial(os.kill, os.getpid(), signal.SIGTERM),
         )
@@ -436,6 +437,23 @@ def _start_config_reload(
     reloads.add(task)
     task.add_done_callback(reloads.discard)
     task.add_done_callback(_log_reload_failure)
+
+
+def _check_reload_candidate(settings: Settings) -> RuntimeConfig:
+    """Load a candidate config and the secrets it needs, rejecting either problem (R-9.6, D155).
+
+    The config loader alone cannot see a feature switched on without its secret, so the
+    candidate is checked against the age store too, before the restart into it.
+    """
+    runtime = load_runtime_config(settings)
+    try:
+        store = _load_secrets(settings)
+    except (OSError, ValueError, pyrage.DecryptError) as err:
+        raise ConfigRejected("secrets") from err
+    problem = _secret_problem(runtime.cfg, runtime.directory, store)
+    if problem is not None:
+        raise ConfigRejected(problem)
+    return runtime
 
 
 def _log_reload_failure(task: asyncio.Task[bool]) -> None:
@@ -594,6 +612,36 @@ def _deliver_registry(
 def _google_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
     return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+
+
+def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) -> str | None:
+    """Return the first secret the candidate config needs but the store lacks (R-9.6, R-9.9, R-9.10, D155).
+
+    Startup keeps its own fail-closed checks; this one lets a reload refuse the same
+    candidate before it restarts into a crash. Only the problem code is returned, never
+    a key or a value.
+    """
+    if _whatsapp_channel(cfg) is None or not store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS)).enabled:
+        return "secrets:whatsapp"
+    validation = _validation_secrets(cfg, store)
+    if validation is not None and not validation.enabled:
+        return "secrets:sunat_validez"
+    if cfg.google is not None and not _google_secrets(store).enabled:
+        return "secrets:google"
+    if _sol_secrets_unusable(cfg, directory, store):
+        return "secrets:sunat_sol"
+    return None
+
+
+def _sol_secrets_unusable(cfg: Config, directory: StoreDirectory, store: SecretStore) -> bool:
+    """Return whether an active SOL site lacks its keys or names another taxpayer (R-9.10)."""
+    site = directory.sunat_sol
+    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+        return False
+    secrets = store.scoped(SUNAT_SOL, set(SECRETS))
+    return not secrets.enabled or not hmac.compare_digest(
+        secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()
+    )
 
 
 def _google_tokens(
