@@ -287,6 +287,7 @@ Record each run:
 | Date | Dump | Result |
 |---|---|---|
 | _before go-live_ | | |
+| 2026-11-18 | none | Skipped: no backup can run yet. The live host has no Microsoft sign-in (`tokens/personal.msal.age` is missing), so there is no OneDrive target, and `ops.backup.age_recipient` is still the placeholder, with no off-host `age` key pair. Rerun once both exist. |
 
 ## Uptime check (R-9.14)
 
