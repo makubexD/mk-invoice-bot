@@ -4,6 +4,9 @@
 health check, rolls back to the previous image when the new one does not become
 healthy, and installs config-only changes with a `SIGHUP` (R-9.13, D46).
 
+Day-to-day procedures on the live host (re-auth, portals, secrets, gaps, restore,
+outages, the padrón) are in the [runbook](../docs/runbook.md).
+
 Everything works the same with Podman and Docker. The script picks the engine from
 `CONTAINER_ENGINE`; when it is unset it uses `podman` if present, else `docker`.
 
@@ -42,15 +45,15 @@ uv run python -c "import playwright.async_api"   # the Python package loads
 
 ## Environment variables
 
-| Variable | Default | Purpose |
-|---|---|---|
-| `CONTAINER_ENGINE` | `podman` if on `PATH`, else `docker` | Container engine for every call |
-| `APP_IMAGE_REPO` | `localhost/invoicebot-app` | Image repository; the tag is appended |
-| `BACKUP_DIR` | `/data/backups` | `pg_dump` output, `pre-<tag>.sql.gz` |
-| `STATE_DIR` | `/data/deploy` | Holds `current_tag`, the last healthy tag |
-| `CONFIG_DIR` | `<repo>/config` | Runtime config directory mounted into `app` |
-| `HEALTH_URL` | `http://localhost:8080/health` | Endpoint polled after deploy |
-| `HEALTH_TIMEOUT_S` | `60` | Health wait for postgres and the app |
+| Variable           | Default                              | Purpose                                     |
+| ------------------ | ------------------------------------ | ------------------------------------------- |
+| `CONTAINER_ENGINE` | `podman` if on `PATH`, else `docker` | Container engine for every call             |
+| `APP_IMAGE_REPO`   | `localhost/invoicebot-app`           | Image repository; the tag is appended       |
+| `BACKUP_DIR`       | `/data/backups`                      | `pg_dump` output, `pre-<tag>.sql.gz`        |
+| `STATE_DIR`        | `/data/deploy`                       | Holds `current_tag`, the last healthy tag   |
+| `CONFIG_DIR`       | `<repo>/config`                      | Runtime config directory mounted into `app` |
+| `HEALTH_URL`       | `http://localhost:8080/health`       | Endpoint polled after deploy                |
+| `HEALTH_TIMEOUT_S` | `60`                                 | Health wait for postgres and the app        |
 
 Exit codes: `0` success, `1` deploy or validation failure, `2` usage error.
 
@@ -126,12 +129,12 @@ passes the arguments through unchanged.
 Everything lives under `LIVE_ROOT`, `$HOME/.local/share/invoicebot` by default
 (mode `700`). Each variable keeps a value already set in the environment:
 
-| Directory | Default | Holds |
-|---|---|---|
-| `CONFIG_DIR` | `$LIVE_ROOT/config` | `config.yaml`, `secrets.age`, `age-identity.txt` |
-| `BACKUP_DIR` | `$LIVE_ROOT/backups` | `pre-<tag>.sql.gz` dumps |
-| `STATE_DIR` | `$LIVE_ROOT/deploy` | `current_tag`, the last healthy tag |
-| `DB_SECRETS_DIR` | `$LIVE_ROOT/db` | `postgres-password` and `pgpass` |
+| Directory        | Default              | Holds                                            |
+| ---------------- | -------------------- | ------------------------------------------------ |
+| `CONFIG_DIR`     | `$LIVE_ROOT/config`  | `config.yaml`, `secrets.age`, `age-identity.txt` |
+| `BACKUP_DIR`     | `$LIVE_ROOT/backups` | `pre-<tag>.sql.gz` dumps                         |
+| `STATE_DIR`      | `$LIVE_ROOT/deploy`  | `current_tag`, the last healthy tag              |
+| `DB_SECRETS_DIR` | `$LIVE_ROOT/db`      | `postgres-password` and `pgpass`                 |
 
 Live runtime config goes in `$LIVE_ROOT/config`, not in the repo's `config/`.
 `DB_SECRETS_DIR` is created by the first `deploy-live.sh` run, which generates
@@ -284,11 +287,11 @@ than the Postgres 16 server always adds.
 
 Record each run:
 
-| Date | Dump | Result |
-|---|---|---|
-| _before go-live_ | | |
-| 2026-11-18 | none | Skipped: no backup can run yet. The live host has no Microsoft sign-in (`tokens/personal.msal.age` is missing), so there is no OneDrive target, and `ops.backup.age_recipient` is still the placeholder, with no off-host `age` key pair. Rerun once both exist. |
-| 2026-11-18 | `db-2026-11-18.dump.age` (44 KB, first live backup) | Pass: restored into an empty `invoicebot_drill` on the dev Postgres, `invoices: 0`. It found that the Microsoft token lookup never matched a real sign-in (fixed the same day). |
+| Date             | Dump                                                | Result                                                                                                                                                                                                                                                           |
+| ---------------- | --------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| _before go-live_ |                                                     |                                                                                                                                                                                                                                                                  |
+| 2026-11-18       | none                                                | Skipped: no backup can run yet. The live host has no Microsoft sign-in (`tokens/personal.msal.age` is missing), so there is no OneDrive target, and `ops.backup.age_recipient` is still the placeholder, with no off-host `age` key pair. Rerun once both exist. |
+| 2026-11-18       | `db-2026-11-18.dump.age` (44 KB, first live backup) | Pass: restored into an empty `invoicebot_drill` on the dev Postgres, `invoices: 0`. It found that the Microsoft token lookup never matched a real sign-in (fixed the same day).                                                                                  |
 
 ## Uptime check (R-9.14)
 
@@ -315,12 +318,12 @@ worker and the outbox sender. Downloaded media goes to the `appdata` volume at
 The channel needs four secrets in the encrypted file (never in the environment
 or `.env`; startup refuses secret-looking variables, R-9.9):
 
-| Key | What it is |
-|---|---|
-| `whatsapp_token` | Graph API access token of the business number |
-| `whatsapp_app_secret` | Meta app secret, used to check `X-Hub-Signature-256` |
-| `whatsapp_verify_token` | Generate with `openssl rand -hex 32`; Meta echoes it in the handshake |
-| `sender_hash_key` | Generate with `openssl rand -hex 32`; keys the hash under which unknown senders are logged (R-9.12). Changing it changes every logged digest |
+| Key                     | What it is                                                                                                                                   |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `whatsapp_token`        | Graph API access token of the business number                                                                                                |
+| `whatsapp_app_secret`   | Meta app secret, used to check `X-Hub-Signature-256`                                                                                         |
+| `whatsapp_verify_token` | Generate with `openssl rand -hex 32`; Meta echoes it in the handshake                                                                        |
+| `sender_hash_key`       | Generate with `openssl rand -hex 32`; keys the hash under which unknown senders are logged (R-9.12). Changing it changes every logged digest |
 
 If any of them is missing the webhook is not mounted and one error is logged.
 
