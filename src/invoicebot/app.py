@@ -448,7 +448,7 @@ def _check_reload_candidate(settings: Settings) -> RuntimeConfig:
     runtime = load_runtime_config(settings)
     try:
         store = _load_secrets(settings)
-    except (OSError, ValueError, pyrage.DecryptError) as err:
+    except (OSError, ValueError, pyrage.DecryptError, pyrage.IdentityError) as err:
         raise ConfigRejected("secrets") from err
     problem = _secret_problem(runtime.cfg, runtime.directory, store)
     if problem is not None:
@@ -621,16 +621,19 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     candidate before it restarts into a crash. Only the problem code is returned, never
     a key or a value.
     """
-    if _whatsapp_channel(cfg) is None or not store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS)).enabled:
-        return "secrets:whatsapp"
     validation = _validation_secrets(cfg, store)
-    if validation is not None and not validation.enabled:
-        return "secrets:sunat_validez"
-    if cfg.google is not None and not _google_secrets(store).enabled:
-        return "secrets:google"
-    if _sol_secrets_unusable(cfg, directory, store):
-        return "secrets:sunat_sol"
-    return None
+    failed = {
+        "secrets:whatsapp": _whatsapp_channel(cfg) is None
+        or not store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS)).enabled,
+        "secrets:sunat_validez": validation is not None and not validation.enabled,
+        "secrets:google": cfg.google is not None and not _google_secrets(store).enabled,
+        "secrets:github": cfg.gaps.github.enabled
+        and not store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).enabled,
+        "secrets:laptop": _laptop_flow(cfg) is not None
+        and not store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).enabled,
+        "secrets:sunat_sol": _sol_secrets_unusable(cfg, directory, store),
+    }
+    return next((code for code, problem in failed.items() if problem), None)
 
 
 def _sol_secrets_unusable(cfg: Config, directory: StoreDirectory, store: SecretStore) -> bool:

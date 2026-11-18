@@ -118,10 +118,7 @@ async def _transport(client: _Client, row: OutboxRow) -> str | None:
         token = await _access_token(client)
         return await _create_issue(client, token, fingerprint, _issue_fields(row.payload.get("fields")))
     if op == "close_issue":
-        issue_url = _payload_text(row.payload, "issue_url")
-        if not issue_url.startswith(f"https://github.com/{client.repo}/issues/"):
-            raise PermanentSendError("github issue url is not in the configured repo")
-        number = _issue_number(issue_url)
+        number = _configured_issue_number(client, _payload_text(row.payload, "issue_url"))
         token = await _access_token(client)
         await _close_issue(client, token, number)
         return None
@@ -294,6 +291,19 @@ def _issue_fields(raw: object) -> IssueFields:
         return IssueFields(**values)
     except (TypeError, ValueError) as exc:
         raise PermanentSendError(f"invalid github issue fields: {exc}") from exc
+
+
+def _configured_issue_number(client: _Client, issue_url: str) -> str:
+    """Return the number of an issue in the configured repo, or fail permanently (R-11.9).
+
+    The whole URL must match, ignoring case as GitHub does, so a trailing ``..`` or a
+    second ``/issues/`` cannot point the close at another issue.
+    """
+    pattern = rf"https://github\.com/{re.escape(client.repo)}/issues/(\d+)"
+    match = re.fullmatch(pattern, issue_url, re.IGNORECASE)
+    if match is None:
+        raise PermanentSendError("github issue url is not in the configured repo")
+    return match.group(1)
 
 
 def _issue_number(issue_url: str) -> str:

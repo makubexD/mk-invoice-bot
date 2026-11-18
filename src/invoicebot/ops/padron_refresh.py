@@ -55,10 +55,13 @@ async def refresh_padron(
     zip_path = data_dir / PADRON_DIRECTORY / ZIP_NAME
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     try:
+        deadline = asyncio.timeout(padron_cfg.download_timeout_s)
         try:
-            async with asyncio.timeout(padron_cfg.download_timeout_s):
+            async with deadline:
                 await _download(http, str(padron_cfg.url), zip_path, padron_cfg.max_mb)
         except TimeoutError as err:
+            if not deadline.expired():
+                raise
             raise PadronRefreshError("timeout") from err
         result = await _import(pool, zip_path)
     finally:

@@ -119,7 +119,11 @@ class SecretStore:
         identity = load_identity(Path(identity_path))
         ciphertext = Path(path_age).read_bytes()
         plaintext = pyrage.decrypt(ciphertext, [identity])
-        document = yaml.safe_load(plaintext.decode("utf-8"))
+        try:
+            document = yaml.safe_load(plaintext.decode("utf-8"))
+        except yaml.YAMLError:
+            # PyYAML quotes the offending plaintext line, so the cause is dropped (R-9.16).
+            raise ValueError("secrets plaintext is not valid YAML") from None
         return cls(_validate_mapping(document))
 
     def scoped(self, adapter_name: str, declared: set[str]) -> Secrets:

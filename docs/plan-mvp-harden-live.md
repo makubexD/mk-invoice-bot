@@ -24,7 +24,9 @@ Today `_start_config_reload` passes `partial(load_runtime_config, settings)` as 
    - `"secrets:whatsapp"` when `_whatsapp_channel(cfg)` is `None`, or `store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))` is not `enabled`;
    - `"secrets:sunat_validez"` when `_validation_secrets(cfg, store)` is not `None` and not `enabled`;
    - `"secrets:google"` when `cfg.google` is not `None` and `_google_secrets(store)` is not `enabled`;
-   - `"secrets:sunat_sol"` when the SOL site is active (the same condition `_sol_fetcher` uses: `cfg.sunat.sol.enabled`, `directory.sunat_sol` set and `status == "active"`), the scoped SOL view is `enabled`, and `sol_ruc` does not match `cfg.owner.ruc` (`hmac.compare_digest`, as in `_sol_fetcher`).
+   - `"secrets:github"` when `cfg.gaps.github.enabled` and the GitHub App key's view is not `enabled` (added in the finish review);
+   - `"secrets:laptop"` when a flow lists `laptop_outlook` and the agent key's view is not `enabled` (added in the finish review);
+   - `"secrets:sunat_sol"` when the SOL site is active (the same condition `_sol_fetcher` uses: `cfg.sunat.sol.enabled`, `directory.sunat_sol` set and `status == "active"`) and either the scoped SOL view is not `enabled` (startup fails on missing keys too, `SunatSolFetcher.__init__`) or `sol_ruc` does not match `cfg.owner.ruc` (`hmac.compare_digest`, as in `_sol_fetcher`).
 
    Its docstring cites R-9.6, R-9.9, R-9.10 and D155, and says that startup keeps its own fail-closed checks. Reuse the existing constants and helpers; repeat no secret key names.
 

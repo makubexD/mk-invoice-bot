@@ -167,7 +167,8 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
         text = read_text(processed, ocr_cfg)
         ocr_reading = None if text is None else parse_ocr(text, rules).reading
     except MemoryError:
-        return _unreadable(ocr=False)
+        # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
+        text, ocr_reading = None, None
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     return _payload(reading, hit, ocr_ran=text is not None)
 

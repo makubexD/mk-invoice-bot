@@ -221,6 +221,28 @@ def test_helper_read_text_memory_error_reports_unreadable_and_exits_zero(
     assert json.loads(capsys.readouterr().out) == helper._unreadable(ocr=False)
 
 
+def test_helper_read_text_memory_error_keeps_the_qr_reading(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """R-2.1, BR-E01: an OCR allocation failure on a QR photo still answers the QR reading."""
+
+    def explode(_image: np.ndarray, _ocr: object) -> None:
+        raise MemoryError
+
+    canvas = _paste(_canvas(*CANVAS), _code(PAYLOAD), 100, 100)
+    monkeypatch.setattr(helper, "_limit_resources", lambda: None)
+    monkeypatch.setattr(helper, "load_gray", lambda _data, _max_px: canvas)
+    monkeypatch.setattr(helper, "read_text", explode)
+    _feed_stdin(monkeypatch, b"not an image")
+
+    assert helper.main(_argv()) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error"] is None
+    assert payload["ocr"] is False
+    assert reading_from_json(payload["reading"]) == EXPECTED
+
+
 def test_helper_reads_a_qr_photo_from_stdin(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -156,6 +156,22 @@ async def test_refresh_aborts_a_download_past_its_deadline_and_keeps_the_old_row
     )
 
 
+async def test_refresh_lets_a_timeout_error_inside_the_deadline_propagate(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """S12.4: a TimeoutError raised before the deadline is not reported as the timeout reason."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise TimeoutError("disk stalled")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        with pytest.raises(TimeoutError, match="disk stalled"):
+            await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
+    assert not list((tmp_path / "padron").iterdir())
+
+
 async def test_refresh_reports_a_bad_status_and_keeps_the_old_rows(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,

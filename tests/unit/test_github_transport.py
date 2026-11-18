@@ -385,18 +385,41 @@ async def test_close_issue_already_closed_writes_nothing() -> None:
     assert [request.method for request in requests] == ["GET"]
 
 
-async def test_close_issue_outside_the_configured_repo_is_permanent() -> None:
-    """R-11.9: an issue URL in another repo is never closed, and makes no request."""
+@pytest.mark.parametrize(
+    "issue_url",
+    [
+        "https://github.com/other/repo/issues/42",
+        f"{ISSUE_URL}/1/../../x/y/issues/9",
+        f"{ISSUE_URL}/42?state=open",
+        "https://github.com/maku/ops-other/issues/42",
+    ],
+)
+async def test_close_issue_outside_the_configured_repo_is_permanent(issue_url: str) -> None:
+    """R-11.9: an issue URL that is not exactly one of the repo's issues makes no request."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         raise AssertionError("an issue in another repo makes no request")
 
     tokens = FakeTokenSource()
-    payload = {"op": "close_issue", "issue_url": "https://github.com/other/repo/issues/42"}
+    payload = {"op": "close_issue", "issue_url": issue_url}
     with pytest.raises(PermanentSendError, match="not in the configured repo"):
         await _run(handler, payload, Recorder(), tokens=tokens)
 
     assert tokens.calls == 0
+
+
+async def test_close_issue_matches_the_repo_ignoring_case() -> None:
+    """R-11.9: GitHub's canonical casing of the repo still closes the configured repo's issue."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"state": "closed"})
+
+    payload = {"op": "close_issue", "issue_url": f"https://github.com/{REPO.upper()}/issues/42"}
+    await _run(handler, payload, Recorder())
+
+    assert [str(request.url) for request in requests] == [f"{ISSUES_URL}/42"]
 
 
 async def test_close_issue_with_a_non_numeric_last_segment_is_permanent() -> None:

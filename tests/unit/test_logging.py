@@ -172,14 +172,15 @@ def test_extra_string_value_is_redacted() -> None:
     assert json.loads(line)["detail"] == "token ***"
 
 
-def test_personal_extra_key_is_redacted(log_stream: io.StringIO) -> None:
-    """R-9.12: an extra= value under a personal-data key is written as [redacted]."""
+@pytest.mark.parametrize("key", ["sender", "Sender", "PHONE"])
+def test_personal_extra_key_is_redacted(log_stream: io.StringIO, key: str) -> None:
+    """R-9.12: an extra= value under a personal-data key, in any case, is written as [redacted]."""
     configure_logging(stream=log_stream)
 
-    logging.getLogger("invoicebot.demo").info("x", extra={"sender": "51999999999"})
+    logging.getLogger("invoicebot.demo").info("x", extra={key: "51999999999"})
 
     output = log_stream.getvalue()
-    assert _records(log_stream)[-1]["sender"] == "[redacted]"
+    assert _records(log_stream)[-1][key] == "[redacted]"
     assert "51999999999" not in output
 
 

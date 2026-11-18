@@ -158,7 +158,7 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key in _STANDARD_ATTRS or key in _OUTPUT_FIELDS:
                 continue
-            if key in _PERSONAL_KEYS:
+            if key.lower() in _PERSONAL_KEYS:
                 payload[key] = _PERSONAL_REDACTED
                 continue
             if not isinstance(value, (str, int, float, bool)) and value is not None:
