@@ -12,7 +12,7 @@ transport's callback.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -94,12 +94,17 @@ async def issue_opened(
     Called by the GitHub transport after it creates or reuses an issue. A kind
     in ``gaps.digest_kinds`` is reported but never alerted one by one. A repeated
     call for a URL already stored, as when the outbox row is retried after this
-    commit, alerts nothing.
+    commit, alerts nothing. An ignored gap gets its URL but no alert (D139).
     """
     async with pool.connection() as conn, conn.transaction():
         gap = await get_gap(conn, gap_fingerprint)
         await mark_reported(conn, gap_fingerprint, issue_url)
-        if gap is None or gap.issue_url == issue_url or gap.kind in gaps_cfg.digest_kinds:
+        if (
+            gap is None
+            or gap.state == "ignored"
+            or gap.issue_url == issue_url
+            or gap.kind in gaps_cfg.digest_kinds
+        ):
             return
         await queue_admin_alert(
             conn,
@@ -184,6 +189,9 @@ async def _queue_alert(
     """
     if ctx.gaps_cfg.github.enabled and gap.issue_url is None:
         if not await _issue_queued(conn, gap_fingerprint):
+            fields = sighting.fields
+            if fields.hint_url is None and gap.hint_url is not None:
+                fields = replace(fields, hint_url=gap.hint_url)
             await outbox.add(
                 conn,
                 "github",
@@ -191,7 +199,7 @@ async def _queue_alert(
                 {
                     "op": "create_issue",
                     "fingerprint": gap_fingerprint,
-                    "fields": _issue_payload(sighting.fields),
+                    "fields": _issue_payload(fields),
                 },
             )
         return
@@ -213,6 +221,7 @@ async def _issue_queued(conn: AsyncConnection[Any], gap_fingerprint: str) -> boo
         SELECT 1
         FROM outbox
         WHERE channel = 'github' AND state = 'pending'
+          AND payload_json->>'op' = 'create_issue'
           AND payload_json->>'fingerprint' = %s
         LIMIT 1
         """,

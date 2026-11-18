@@ -112,6 +112,9 @@ elif MODE in ("tmp", "tmp_sleep"):
         time.sleep(10)
     else:
         report("technical", [])
+elif MODE == "out_env":
+    Path(sys.argv[2]).write_text(os.environ.get("HELPER_OUT_DIR", ""))
+    report("technical", [])
 elif MODE == "match":
     report("ok", [
         write("xml", "invoice.xml", xml_bytes()),
@@ -404,6 +407,16 @@ async def test_fetch_helper_uses_its_own_tmp_dir_and_removes_it(tmp_path: Path) 
     assert helper_tmp.name.startswith("invoicebot-browser-")
     assert helper_tmp != Path(tempfile.gettempdir())
     _assert_missing(helper_tmp)
+
+
+async def test_fetch_helper_env_carries_the_fetch_folder(tmp_path: Path) -> None:
+    """R-9.2: the helper's env carries the fetch folder as HELPER_OUT_DIR (D150)."""
+    record = tmp_path / "helper_out_dir.txt"
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    await _fetcher(tmp_path, "out_env", extra_args=(str(record),)).fetch(_invoice(), out_dir)
+
+    assert record.read_text(encoding="utf-8") == str(out_dir)
 
 
 async def test_fetch_helper_tmp_dir_is_removed_when_it_times_out(tmp_path: Path) -> None:

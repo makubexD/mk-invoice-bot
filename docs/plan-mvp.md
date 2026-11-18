@@ -20,9 +20,11 @@ Source of truth: `specs/` (constitution, requirements, design, backlog in `specs
 | 9a  | `ops-harden` (done 2026-11-17)                                                     | S8.9 (D139); code leftovers marked `ops-harden` below (D136–D140); landed: `/gaps` and `/gap ignorar`, daily GitHub App check, `auth-google` pinned mailboxes, all leftovers | part of M7 | Nothing                                                                          |
 | 9b  | `flows-config` (done 2026-11-17; plan: `docs/plan-mvp-flows-config.md`, D142–D145) | flow A requires only the PDF; a third flow for the owner's boletas against their DNI (BR-R row, Sheets sink); checked against the real config (D141)                         | part of M7 | the DNI flow's sheet                                                             |
 | 9c  | `ops-host` (done 2026-11-18; plan: `docs/plan-mvp-ops-host.md`, D146–D149)         | host leftovers marked `ops-host` below, applied to the local Ubuntu machine (D141); first deploy (D136)                                                                      | M7         | Tailscale signed in, Funnel allowed (first deploy only; D146)                    |
-| 9d  | `ops-live`                                                                         | live runs: flow A first, then flow B; the 9a review findings below; S12.7 (repo private), then S16.2 (D136, D141)                                                            | M7         | Meta verification; the Google and Entra apps; the owner's word for S12.7         |
-| 9e  | `ops-reload`                                                                       | S8.7, S10.8 `SIGHUP`, S12.1, S12.4, S12.5 (D136); after the live runs (D141)                                                                                                 | part of M7 | Nothing                                                                          |
+| 9d  | `ops-live` (done 2026-11-18; plan: `docs/plan-mvp-ops-live.md`, D150–D152)        | the 9a and 9c review findings; chat-free live checks; backup drill (D150–D154)                                                                                    | M7         | Meta verification; the Google and Entra apps                                     |
+| 9d2 | `live-chat` (plan: `docs/plan-mvp-live-chat.md`, D154)                              | live runs that need a chat reply: flow A, then flow B; gaps live; read checks (M3–M7); when Meta verification is approved |
+| 9e  | `ops-reload`                                                                       | S8.7, S10.8 `SIGHUP`, S12.1, S12.4, S12.5 (D136); before 9d2, while Meta is pending (D154)                                                                                           | part of M7 | Nothing                                                                          |
 | 9f  | `windows`                                                                          | run through the container image or WSL2 and document it; no native port (D141)                                                                                               | —          | a Windows machine to test on                                                     |
+| 9g  | `private`                                                                          | S12.7 (repo private), then S16.2 (D52)                                                                                                                                       | M7         | the owner's word for S12.7 (not yet on 2026-11-18)                               |
 | –   | v1.1 `contract`                                                                    | E13, E14                                                                                                                                                                     | M8         | —                                                                                |
 | –   | optional `llm-fallback`                                                            | E3b                                                                                                                                                                          | —          | DeepSeek key; flows opted in (never flow B, D43)                                 |
 
@@ -188,6 +190,13 @@ The specs run ahead of the code in these places; each has a named story that clo
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).
 
+## Last (owner, D153)
+
+Not a priority; after everything else.
+
+- S0.4: does SOL "Consulta de comprobantes" give a received invoice's XML or PDF? If it does, fill `config/sunat_sol.yaml`, build D152's host allowlist (the 9d plan's old step 13), and add `sunat_sol` back to flow A's chain.
+- Nubefact's public "Busca tu comprobante" page as a `portal_registry` entry for invoices issued through Nubefact.
+
 ## Notes for later phase plans
 
 - `routing`: S4.5 also owns the reply to `EXTRACT_FAILED` (a better photo or `campo=valor`); today a new photo creates a new invoice.
@@ -205,6 +214,11 @@ The specs run ahead of the code in these places; each has a named story that clo
 - **Later:** an `existing` sheet's header is checked only by `google-setup`; a later column edit by the owner, or a changed `tab`, makes the bot write misaligned rows. Check the header once per process for `existing` sinks, or document that a config edit means running `google-setup` again (py-security-auditor, 2026-11-17).
 - **Later (optional):** the sink kind literals (`"google_drive"`, `"google_sheets"`) live in `config/models.py` and `app.py`; one home. A header cell starting `=`, `+` or `-` is escaped on write, so `ensure_tab` would then always report a mismatch; note it or compare escaped (py-code-reviewer, 2026-11-17).
 
+## Found by the `ops-live` backup (2026-11-18)
+
+- **`ops-reload`:** the JSON log formatter drops `extra=` fields, so `backup failed` and `channel token rejected` reach the log without their `reason` or `channel`. Render `extra` in the JSON line (never secrets: the keys in use are reasons, channels, task keys and counts) and test it.
+- **`ops-reload`:** a successful backup logs nothing; log `backup uploaded` with the two sizes, so the owner can see the nightly run.
+
 ## Carried over from the `ops-harden` review
 
 Found by `py-code-reviewer` and `py-security-auditor` on 2026-11-17; by the owner's decision (D141) they wait for the live runs and go into the `ops-live` plan unless named otherwise.
@@ -215,3 +229,12 @@ Found by `py-code-reviewer` and `py-security-auditor` on 2026-11-17; by the owne
 - **`ops-live`:** `scripts/restore_drill.sh` drops the URL query (`sslmode` falls back to `prefer`) and lowercases the host; map the same keys as `PG_ENVIRONMENT_BY_QUERY_KEY` and refuse others.
 - **VPS (deferred by D149, the local host is `x86_64`):** `deploy/Dockerfile` may pin the python base to its amd64 image digest, not the multi-arch index; pin the index digest if the host is not amd64.
 - **Later (optional):** one home for the Google account derivation (`config/models._google_accounts_in` copies `auth/providers`); revoke the grant of a refused wrong-mailbox sign-in; compare-and-delete the SUNAT token on a 401; one shared DNS executor instead of one per browser session; a wiring test for the `github_health` choice; `/gaps` fetches 21 to show `…` only when cut, with its text in `messages_es.py`; one email normalization (`lower` vs `casefold`).
+
+## Carried over from the `ops-live` review
+
+Found by `py-code-reviewer` and `py-security-auditor` on 2026-11-18. The two Required findings, the `_record_hint` lock order and a sign-in that left two accounts in the cache, were fixed on the branch.
+
+- **`ops-reload`:** the image helper still sees all of `/data` (`IMAGE_SCRIPT`); give it the browser helper's data-root mask, since it reads its input from stdin, or record why it is exempt under D150 (py-security-auditor).
+- **`ops-reload`:** the sandbox checks `HELPER_OUT_DIR` against the data root as text, so `$data/../x` passes; reject `..` components in the shell and in `browser_prefix`, with a test (both reviewers). Today both paths come from the app and the operator.
+- **Later:** `TokenProvider` uses the cache's one account without checking it is the configured mailbox; a wrong-mailbox device-code sign-in goes unnoticed. Store and compare the signed-in account, or match a configured mailbox (py-security-auditor).
+- **Later (optional):** `scripts/restore_drill.sh` repeats the allowed `PG*` keys of `PG_ENVIRONMENT_BY_QUERY_KEY`; let the Python side print only allowed keys (py-code-reviewer).

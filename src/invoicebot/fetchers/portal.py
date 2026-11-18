@@ -94,6 +94,7 @@ class PortalFetcher:
             request.model_dump_json().encode(),
             self._helper_timeout_s,
             portal.key,
+            out_dir,
         )
 
 
@@ -102,11 +103,13 @@ async def run_browser_job(
     payload: bytes,
     timeout_s: float,
     fetcher_name: str,
+    out_dir: Path,
 ) -> HelperOutput | FetchResult:
     """Run one browser-helper job in its own temp folder and validate its one JSON line.
 
     The helper runs with a minimal environment whose temp files stay in a scratch folder
     removed after the run, and its output is capped at ``MAX_HELPER_OUTPUT_BYTES`` (R-9.2).
+    The fetch folder reaches the sandbox wrapper as ``HELPER_OUT_DIR`` (D150).
     ``fetcher_name`` becomes the ``portal_key`` of a failure result, so each fetcher reports
     itself (R-5.7).
 
@@ -124,7 +127,7 @@ async def run_browser_job(
             stdout = await run_helper(
                 command,
                 payload,
-                helper_env(Path(scratch)),
+                helper_env(Path(scratch)) | {"HELPER_OUT_DIR": str(out_dir)},
                 timeout_s,
                 MAX_HELPER_OUTPUT_BYTES,
             )

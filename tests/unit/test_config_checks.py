@@ -201,6 +201,8 @@ def test_flow_listing_sunat_sol_with_sol_disabled_warns() -> None:
     """R-5.8: a flow that lists sunat_sol while SOL is off gets a non-blocking warning."""
     cfg = load_config(EXAMPLE)
     cfg.sunat.sol.enabled = False
+    # The example leaves sunat_sol out of every flow until S0.4 (D153), so the test lists it.
+    cfg.flows["personal_google"].fetchers.insert(1, "sunat_sol")
 
     problems = run_checks(cfg, _directory(), changed_portals=frozenset())
 

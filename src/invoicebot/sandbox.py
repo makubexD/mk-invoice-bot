@@ -35,11 +35,26 @@ wait $!
 #: Runs inside the first namespace: a capped `$TMPDIR`, the hidden dirs masked, the network kept.
 #: The helper runs as an unprivileged user in a nested namespace, and this shell stays PID 1,
 #: for the same reasons as in `IMAGE_SCRIPT`.
+#: The data root is masked read-only; only `HELPER_OUT_DIR` is bound back (D150). The read-only
+#: flag goes on the mount point (`remount,bind`): a tmpfs superblock remount fails in the userns.
 BROWSER_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
 mount -t tmpfs -o "size=$1m,mode=0700" none "$TMPDIR"
-shift
+data=$2
+shift 2
+out=${HELPER_OUT_DIR:-}
+if [ -n "$out" ]; then
+  case "$out" in "$data"/*) ;; *) echo "out dir outside data root" >&2; exit 1 ;; esac
+  mkdir "$TMPDIR/.out"
+  mount --bind "$out" "$TMPDIR/.out"
+fi
+mount -t tmpfs -o size=4k,mode=0755 none "$data"
+if [ -n "$out" ]; then
+  mkdir -p "$out"
+  mount --move "$TMPDIR/.out" "$out"
+fi
+mount -o remount,bind,ro "$data"
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
 unshare --user --map-user=1000 --map-group=1000 "$@" <&0 &
@@ -67,10 +82,12 @@ def image_prefix(hidden_dirs: Sequence[Path]) -> tuple[str, ...]:
     )
 
 
-def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int) -> tuple[str, ...]:
-    """Return the argv prefix that sandboxes a browser helper (D147)."""
+def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int, data_dir: Path) -> tuple[str, ...]:
+    """Return the argv prefix that sandboxes a browser helper, masking the data root (D147, D150)."""
     if tmp_mb < 1:
         raise ValueError("tmp_mb must be at least 1")
+    if not data_dir.is_absolute() or data_dir == Path("/"):
+        raise ValueError("data_dir must be absolute and not /")
     return (
         "unshare",
         "--user",
@@ -84,6 +101,7 @@ def browser_prefix(hidden_dirs: Sequence[Path], tmp_mb: int) -> tuple[str, ...]:
         BROWSER_SCRIPT,
         "sandbox",
         str(tmp_mb),
+        str(data_dir),
         *map(str, hidden_dirs),
         "--",
     )
@@ -107,11 +125,11 @@ class SandboxUnavailable(RuntimeError):
     """The host cannot run a sandboxed helper, so the app must refuse to start (D147)."""
 
 
-def helper_prefixes(enabled: bool, hidden: Sequence[Path], tmp_mb: int) -> HelperPrefixes:
-    """Return the prefixes for the enabled sandbox, or empty ones when it is off (D147)."""
+def helper_prefixes(enabled: bool, hidden: Sequence[Path], tmp_mb: int, data_dir: Path) -> HelperPrefixes:
+    """Return the prefixes for the enabled sandbox, or empty ones when it is off (D147, D150)."""
     if not enabled:
         return HelperPrefixes((), ())
-    return HelperPrefixes(image_prefix(hidden), browser_prefix(hidden, tmp_mb))
+    return HelperPrefixes(image_prefix(hidden), browser_prefix(hidden, tmp_mb, data_dir))
 
 
 def browser_command(prefixes: HelperPrefixes, base: Sequence[str]) -> tuple[str, ...]:

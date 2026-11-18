@@ -124,9 +124,14 @@ async def upsert_gap(
 
 
 async def mark_reported(conn: AsyncConnection[Any], fingerprint: str, issue_url: str) -> None:
-    """Store the issue URL and move the gap to reported (D116); does not commit."""
+    """Store the issue URL and move the gap to reported unless it is ignored (D116, D139); does not commit."""
     await conn.execute(
-        "UPDATE gaps SET state = 'reported', issue_url = %s WHERE fingerprint = %s",
+        """
+        UPDATE gaps
+        SET state = CASE WHEN state = 'ignored' THEN state ELSE 'reported' END,
+            issue_url = %s
+        WHERE fingerprint = %s
+        """,
         (issue_url, fingerprint),
     )
 

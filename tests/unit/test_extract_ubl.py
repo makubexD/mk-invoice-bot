@@ -161,6 +161,28 @@ def test_parse_reduced_rate_invoice_without_charges() -> None:
     assert "discounts" not in reading.fields
 
 
+def test_parse_invoice_xml_reads_a_valid_customer_id() -> None:
+    """R-2.7: a customer id of the payload shape is stored as num_doc_adq."""
+    reading = parse_invoice_xml(_invoice_xml(num_doc_adq=SYNTHETIC_RUC_OTHER).encode())
+
+    assert reading.value("num_doc_adq") == SYNTHETIC_RUC_OTHER
+
+
+@pytest.mark.parametrize(
+    "customer_id",
+    [
+        pytest.param("201234\n56789", id="embedded-newline"),
+        pytest.param("https://x.example", id="url"),
+        pytest.param("ABCDEFGHIJKLMNOP", id="sixteen-characters"),
+    ],
+)
+def test_parse_invoice_xml_drops_a_customer_id_of_the_wrong_shape(customer_id: str) -> None:
+    """R-2.7: a customer id outside the payload shape leaves num_doc_adq out."""
+    reading = parse_invoice_xml(_invoice_xml(num_doc_adq=customer_id).encode())
+
+    assert "num_doc_adq" not in reading.fields
+
+
 XXE_XML = b"""<?xml version="1.0"?>
 <!DOCTYPE Invoice [
   <!ENTITY xxe SYSTEM "file:///etc/passwd">

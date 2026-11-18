@@ -58,14 +58,14 @@ class SunatSolFetcher:
             page_timeout_ms=PAGE_TIMEOUT_MS,
             credentials=_credentials(self._secrets),
         )
-        output = await self._run(_payload(request))
+        output = await self._run(_payload(request), out_dir)
         if isinstance(output, FetchResult):
             return output
         return result_from(output, out_dir, invoice, self._max_bytes, SUNAT_SOL)
 
-    async def _run(self, payload: bytes) -> HelperOutput | FetchResult:
+    async def _run(self, payload: bytes, out_dir: Path) -> HelperOutput | FetchResult:
         """Run the helper in its own temp folder and validate its one JSON line (R-9.2, R-9.10)."""
-        return await run_browser_job(self._helper_command, payload, self._timeout_s, SUNAT_SOL)
+        return await run_browser_job(self._helper_command, payload, self._timeout_s, SUNAT_SOL, out_dir)
 
 
 def _credentials(secrets: Secrets) -> SolCredentialsIn:

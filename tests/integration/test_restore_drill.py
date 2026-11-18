@@ -123,10 +123,18 @@ def _as_url(dsn: str) -> str:
 
 
 async def _run_drill(
-    identity_file: Path, dump_file: Path, database_url: str, path: str | None = None
+    identity_file: Path,
+    dump_file: Path,
+    database_url: str,
+    *,
+    query: str = "",
+    path: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the drill script as the operator would and collect its output."""
-    env = {**os.environ, "RESTORE_DATABASE_URL": _as_url(database_url)}
+    url = _as_url(database_url)
+    if query:
+        url = f"{url}?{query}"
+    env = {**os.environ, "RESTORE_DATABASE_URL": url}
     if path is not None:
         env["PATH"] = path
     return await asyncio.to_thread(
@@ -167,6 +175,34 @@ async def test_restore_drill_restores_a_backup_into_a_fresh_database(
 
     assert completed.returncode == 0, completed.stderr
     assert "invoices: " in completed.stdout
+
+
+async def test_restore_drill_passes_the_url_query_keys_to_libpq(
+    job: BackupJob, identity: pyrage.x25519.Identity, tmp_path: Path, fresh_database_url: str
+) -> None:
+    """R-9.11: a URL with ?sslmode=disable restores, the same keys the backup accepts."""
+    identity_file, dump_file = await _write_backup(job, identity, tmp_path)
+
+    completed = await _run_drill(identity_file, dump_file, fresh_database_url, query="sslmode=disable")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "invoices: " in completed.stdout
+
+
+async def test_restore_drill_rejects_an_unknown_url_key_without_the_password(
+    job: BackupJob, identity: pyrage.x25519.Identity, tmp_path: Path, test_database_url: str
+) -> None:
+    """R-9.11: an unknown URL key fails the drill naming the key and never the password."""
+    identity_file, dump_file = await _write_backup(job, identity, tmp_path)
+    password = str(conninfo.conninfo_to_dict(test_database_url)["password"])
+
+    completed = await _run_drill(identity_file, dump_file, test_database_url, query="foo=1")
+
+    assert completed.returncode != 0
+    assert "cannot parse RESTORE_DATABASE_URL" in completed.stderr
+    assert "foo" in completed.stderr
+    assert password not in completed.stdout
+    assert password not in completed.stderr
 
 
 async def test_restore_drill_refuses_a_target_that_already_has_invoices(

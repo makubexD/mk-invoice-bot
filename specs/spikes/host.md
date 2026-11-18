@@ -10,18 +10,18 @@ The procedure is in `deploy/README.md` § "Local MVP host".
 
 ## Results
 
-| Check | Result |
-|---|---|
-| `check_config.py` on the live config | pass (warnings only: portals with status `todo`) |
-| `deploy-live.sh <tag>` | exit 0, `/health` 200 with `db: ok` |
-| Database secrets (D148) | `postgres-password` and `pgpass` mode 600, `pgpass` owned by the container's `bot` user; the app connects through the passfile |
-| Live Postgres ports | none published; the app listens on `127.0.0.1:8080` only |
-| Helper sandbox (D147) | `HELPER_SANDBOX=1`; startup ran `check_sandbox` (it raises when the namespaces are missing) and the app came up; nested `unshare` works in the container |
-| Start on boot | linger on, `podman-restart.service` enabled; a restart of the unit brought the app back healthy in about 4 s |
-| Funnel `/health` | 200 |
-| Funnel `/`, `/docs` | 404 from Funnel |
-| Funnel `/webhook/whatsapp` (plain GET) | 403: no verify token, as expected |
-| Funnel from outside the tailnet | to check by the owner (phone off Wi-Fi); public DNS already resolves to Funnel relay addresses |
+| Check                                  | Result                                                                                                                                                   |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `check_config.py` on the live config   | pass (warnings only: portals with status `todo`)                                                                                                         |
+| `deploy-live.sh <tag>`                 | exit 0, `/health` 200 with `db: ok`                                                                                                                      |
+| Database secrets (D148)                | `postgres-password` and `pgpass` mode 600, `pgpass` owned by the container's `bot` user; the app connects through the passfile                           |
+| Live Postgres ports                    | none published; the app listens on `127.0.0.1:8080` only                                                                                                 |
+| Helper sandbox (D147)                  | `HELPER_SANDBOX=1`; startup ran `check_sandbox` (it raises when the namespaces are missing) and the app came up; nested `unshare` works in the container |
+| Start on boot                          | linger on, `podman-restart.service` enabled; a restart of the unit brought the app back healthy in about 4 s                                             |
+| Funnel `/health`                       | 200                                                                                                                                                      |
+| Funnel `/`, `/docs`                    | 404 from Funnel                                                                                                                                          |
+| Funnel `/webhook/whatsapp` (plain GET) | 403: no verify token, as expected                                                                                                                        |
+| Funnel from outside the tailnet        | to check by the owner (phone off Wi-Fi); public DNS already resolves to Funnel relay addresses                                                           |
 
 ## Found during the deploy
 
@@ -42,3 +42,19 @@ The procedure is in `deploy/README.md` § "Local MVP host".
 - `invoicebot auth-google` signs in through a loopback redirect on a random port, which the live container cannot
   receive, and the live Postgres has no published port: the sign-in needs its own recipe.
 - Meta callback URL is set once the WABA leaves restriction.
+
+## Google sign-in (9d `ops-live`, step 8, 2026-11-18)
+
+- Branding completed (home page and privacy policy on the owner's GitHub Pages site, authorized domain added, no
+  logo so no verification review) and the app published to production. The consent screen warns that the app is
+  unverified; "Advanced → Go to invoicebot" continues.
+- Google shows each scope as its own checkbox and may leave it unticked; an unticked `drive.file` is refused with
+  "Google did not grant …". Granted: `owner` = `openid email drive.file`, `invoices_a` = `openid email
+gmail.readonly`, both pinned to the same mailbox (D138).
+- Sign-in recipe for the local host: run `auth-google` and `google-setup` on the host with `DATA_DIR` set to a staging
+  dir (mode `0700`) and `DATABASE_URL` set to the dev database (only for the resume query; nothing was waiting).
+  Then `podman cp` the `tokens/*.google.age` files into the live app's `/data/tokens` (owner `bot`, mode `0600`),
+  copy the config, and restart the app.
+- `google-setup` created the Drive root folder and both sheets (`personal_google`, `personal_dni`); their ids are in
+  the private config, and `scripts/check_config.py` passes. The live app restarted healthy.
+- Still open: rotate the Google client secret (it was shared in a chat session).
