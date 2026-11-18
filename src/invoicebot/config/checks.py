@@ -24,7 +24,6 @@ from invoicebot.config.models import (
     StoreDirectory,
 )
 from invoicebot.rules import RULES
-from invoicebot.sinks.drive_files import LINK_FOLDER, LINK_PDF, LINK_PHOTO, LINK_XML
 from invoicebot.sunat_origins import SUNAT_SOL
 
 PORTAL_ADAPTER_PACKAGE = "invoicebot.fetchers.portals."
@@ -54,8 +53,6 @@ _FLOW_TEMPLATE_NAMES = frozenset(
 )
 _DESCRIPTION_FORBIDDEN_NAMES = frozenset({"motivo", "descripcion"})
 _DESCRIPTION_TEMPLATE_NAMES = _FLOW_TEMPLATE_NAMES - _DESCRIPTION_FORBIDDEN_NAMES
-#: D144: the link names a Drive sink writes for the later sinks and the message.
-_DRIVE_LINK_NAMES = frozenset({LINK_FOLDER, LINK_PHOTO, LINK_PDF, LINK_XML})
 _FORMATTER = string.Formatter()
 
 _FLOW_TEMPLATE_CODE = "FLOW_TEMPLATE_UNKNOWN_NAME"
@@ -97,18 +94,22 @@ def run_checks(cfg: Config, directory: StoreDirectory, *, changed_portals: froze
     return problems
 
 
-def flow_problems(cfg: Config, *, field_names: Callable[[str], frozenset[str]]) -> list[Problem]:
-    """Return every problem in a flow B sink template (BR-D02, R-7.1).
+def flow_problems(
+    cfg: Config, *, field_names: Callable[[str], frozenset[str]], drive_links: frozenset[str]
+) -> list[Problem]:
+    """Return every problem in a flow's sink templates (BR-D02, R-7.1, D144).
 
-    ``field_names`` is the safe template parser (``invoicebot.sinks.expr.field_names``),
-    passed in rather than imported here. Each problem's path names the flow, the sink
-    index and the field, such as ``flows.work.sinks[0].folder``.
+    ``field_names`` is the safe template parser (``invoicebot.sinks.expr.field_names``) and
+    ``drive_links`` the link names a Drive sink writes (``invoicebot.sinks.drive_files``),
+    both passed in because ``config`` may not import the sinks. Each problem's path names
+    the flow, the sink index and the field, such as ``flows.work.sinks[0].folder``.
     """
     problems: list[Problem] = []
     for flow_name, flow in cfg.flows.items():
         has_drive = any(isinstance(sink, GoogleDriveSink) for sink in flow.sinks)
+        missing_links = frozenset() if has_drive else drive_links
         for index, sink in enumerate(flow.sinks):
-            problems.extend(_sink_problems(flow_name, index, sink, field_names, has_drive=has_drive))
+            problems.extend(_sink_problems(flow_name, index, sink, field_names, missing_links=missing_links))
         problems.extend(_mail_attach_problems(flow_name, flow.sinks))
     return problems
 
@@ -167,7 +168,7 @@ def _sink_problems(
     sink: Sink,
     field_names: Callable[[str], frozenset[str]],
     *,
-    has_drive: bool,
+    missing_links: frozenset[str],
 ) -> list[Problem]:
     if isinstance(sink, OneDriveFolderSink):
         return _folder_sink_problems(flow_name, index, sink, field_names)
@@ -176,7 +177,7 @@ def _sink_problems(
     if isinstance(sink, MailerSink):
         return _mailer_sink_problems(flow_name, index, sink, field_names)
     if isinstance(sink, GoogleSheetsSink):
-        return _sheets_sink_problems(flow_name, index, sink, field_names, has_drive=has_drive)
+        return _sheets_sink_problems(flow_name, index, sink, field_names, missing_links=missing_links)
     return []
 
 
@@ -186,11 +187,13 @@ def _sheets_sink_problems(
     sink: GoogleSheetsSink,
     field_names: Callable[[str], frozenset[str]],
     *,
-    has_drive: bool,
+    missing_links: frozenset[str],
 ) -> list[Problem]:
-    """D144: a Sheets column names a Drive link only when the flow has a Drive sink."""
-    if has_drive:
-        return []
+    """D144: a Sheets column names a Drive link only when the flow has a Drive sink.
+
+    ``missing_links`` holds the Drive link names this flow cannot fill: all of them
+    without a Drive sink, none with one.
+    """
     problems: list[Problem] = []
     for header, template in sink.columns.items():
         try:
@@ -198,7 +201,7 @@ def _sheets_sink_problems(
         except ValueError:
             # shortcut: a malformed column template is not this check's concern (D144).
             continue
-        links = names & _DRIVE_LINK_NAMES
+        links = names & missing_links
         if links:
             problems.append(
                 _problem(

@@ -266,10 +266,10 @@ def _auth_google(
 
 @dataclass(frozen=True)
 class _SetupTarget:
-    """The flow's sheets sink to create or check, and whether it has a Drive sink (D145)."""
+    """The flow's sheets sink to create or check, and its Drive sink when it has one (D145)."""
 
     sink: GoogleSheetsSink
-    has_drive: bool
+    drive: GoogleDriveSink | None
 
 
 def _setup_target(flow: Flow) -> _SetupTarget | None:
@@ -277,8 +277,8 @@ def _setup_target(flow: Flow) -> _SetupTarget | None:
     sink = next((other for other in flow.sinks if isinstance(other, GoogleSheetsSink)), None)
     if sink is None:
         return None
-    has_drive = any(isinstance(other, GoogleDriveSink) for other in flow.sinks)
-    return _SetupTarget(sink, has_drive)
+    drive = next((other for other in flow.sinks if isinstance(other, GoogleDriveSink)), None)
+    return _SetupTarget(sink, drive)
 
 
 def _google_setup(
@@ -314,8 +314,8 @@ def _google_setup(
     )
     try:
         lines = asyncio.run(_create_google_setup(settings, cfg, args, target, client_secret, transport))
-    except AuthRequired:
-        sys.stderr.write(f"sign-in needed: run invoicebot auth-google --account {target.sink.account}\n")
+    except AuthRequired as required:
+        sys.stderr.write(f"sign-in needed: run invoicebot auth-google --account {required.account}\n")
         return 1
     except (GoogleError, httpx.HTTPError) as error:
         sys.stderr.write(f"google-setup failed: {error}\n")
@@ -335,7 +335,7 @@ async def _create_google_setup(
 ) -> list[str]:
     """Create or check the flow's folder and sheet; return the lines to print (R-6.2, D129, D145).
 
-    A flow with a Drive sink gets a root folder. A sheet the sink does not mark
+    A flow with a Drive sink gets a root folder in that sink's account. A sheet the sink does not mark
     ``existing`` is created with the header; an existing sheet has its tab added
     or its header checked, and nothing else is written.
 
@@ -353,22 +353,22 @@ async def _create_google_setup(
     header = [SHEETS_KEY_COLUMN, *sink.columns]
     lines: list[str] = []
     async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as http:
-        tokens = GoogleTokens(
-            http,
-            google.client_id,
-            client_secret,
-            sink.account,
-            google_token_path(settings.data_dir, sink.account),
-            load_identity(identity_path),
-            google.timeout_s,
-        )
-        if target.has_drive:
-            drive = GoogleDrive(http, tokens, google.timeout_s, account=sink.account)
+        identity = load_identity(identity_path)
+
+        def tokens_for(account: str) -> GoogleTokens:
+            token_path = google_token_path(settings.data_dir, account)
+            return GoogleTokens(
+                http, google.client_id, client_secret, account, token_path, identity, google.timeout_s
+            )
+
+        if target.drive is not None:
+            account = target.drive.account
+            drive = GoogleDrive(http, tokens_for(account), google.timeout_s, account=account)
             folder_id = await drive.ensure_folder("root", args.folder_name)
             lines.append(f"root_folder_id: {folder_id}")
         sheets = GoogleSheets(
             http,
-            tokens,
+            tokens_for(sink.account),
             google.timeout_s,
             account=sink.account,
             max_rows=google.max_rows,

@@ -60,6 +60,7 @@ forbidden_modules =
     invoicebot.queue
     invoicebot.store
     invoicebot.channels
+    invoicebot.sinks
 
 [importlinter:contract:gaps-is-leaf]
 name = Gaps imports only config and fetchers.base from the app (R-11.2, D117)

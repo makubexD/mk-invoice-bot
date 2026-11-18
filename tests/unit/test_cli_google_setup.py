@@ -174,6 +174,25 @@ def test_setup_sheets_only_flow_prints_only_the_spreadsheet_id(
     assert len(transport.header_writes) == 1
 
 
+def test_setup_creates_the_folder_with_the_drive_sinks_own_account(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D145: the root folder is created with the Drive sink's account, not the sheets sink's."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE_CONFIG.read_text(encoding="utf-8"))
+    document["google"]["accounts"]["drive_only"] = "drive@example.com"
+    drive = next(sink for sink in document["flows"][FLOW]["sinks"] if sink["kind"] == "google_drive")
+    drive["account"] = "drive_only"
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    transport = GoogleTransport()
+
+    assert _run(_settings(tmp_path, config_path=config_path), transport) == 1
+
+    assert "auth-google --account drive_only" in capsys.readouterr().err
+    assert transport.drive_requests() == []
+
+
 def test_setup_existing_sheet_with_matching_header_prints_checked(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -196,7 +215,7 @@ def test_setup_existing_sheet_with_a_different_header_exits_one(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """D145: an existing tab whose first row differs exits 1 and names the expected header."""
+    """D145, R-9.16: an existing tab whose first row differs exits 1 without printing its cells."""
     config_path = _sheets_only_config(tmp_path, existing=True)
     transport = GoogleTransport(existing_header=["Clave", "Otra"])
 
@@ -205,6 +224,7 @@ def test_setup_existing_sheet_with_a_different_header_exits_one(
     error = capsys.readouterr().err
     assert error.startswith("google-setup failed: ")
     assert "expected header" in error
+    assert "Otra" not in error
     assert transport.header_writes == []
 
 

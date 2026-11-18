@@ -2,8 +2,8 @@
 
 :func:`make_google_deliver_handler` builds the handler of the ``deliver`` job step for a
 Google flow. It acts only on an invoice in ``DELIVERING`` (R-9.4): it reads the invoice and
-its local files in one short connection, runs the flow's Drive and Sheets sinks in config
-order with no connection held, then in one transaction moves the invoice to ``DONE``, queues
+its local files in one short connection, runs the flow's Drive sink, then its Sheets sink,
+with no connection held, then in one transaction moves the invoice to ``DONE``, queues
 its completion message and clears the photo paths. A flow with no Drive sink writes only its
 row and completes with BR-D18 (D144). Only after that transaction commits are the photo, PDF
 and XML files deleted (R-9.7). A revoked Google token parks the invoice in ``PENDING_AUTH``
@@ -193,6 +193,7 @@ async def _run_sinks(context: GoogleDeliverContext, invoice: _Invoice, sinks: _S
     if key is None:
         raise RuntimeError(f"invoice {invoice.job.invoice_id} has no natural key")
     values = dict(invoice.base)
+    values["razon_social"] = _razon_social(values["ruc_emisor"], values["razon_social"])
     if sinks.drive is not None:
         values.update(
             await file_to_drive(sinks.drive, context.drives[sinks.drive.account], invoice.files, values)
@@ -217,8 +218,8 @@ async def _park_auth(context: GoogleDeliverContext, invoice: _Invoice, required:
 def _razon_social(ruc_emisor: object, razon_social: object) -> object:
     """Return the issuer's name, or ``RUC {ruc_emisor}`` when it has none (BR-D18).
 
-    A QR-only boleta has no XML and no readable name, so BR-D16, BR-D17 and BR-D18 alike
-    show the issuer's RUC rather than ``None``.
+    A QR-only boleta has no XML and no readable name, so the Sheets row and BR-D16, BR-D17
+    and BR-D18 alike show the issuer's RUC rather than ``None``.
     """
     if razon_social is None or razon_social == "":
         return f"RUC {ruc_emisor}"
@@ -244,7 +245,7 @@ async def _complete(
     text = MESSAGES[rule].format(
         serie=values["serie"],
         numero=values["numero"],
-        razon_social=_razon_social(values["ruc_emisor"], values["razon_social"]),
+        razon_social=values["razon_social"],
         total=values["total"],
         link_row=values[LINK_ROW],
         link_folder=values.get(LINK_FOLDER, ""),

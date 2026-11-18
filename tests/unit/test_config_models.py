@@ -157,6 +157,27 @@ def test_sheets_sink_with_the_key_header_fails(tmp_path: Path) -> None:
         load_config(path)
 
 
+@pytest.mark.parametrize("tab", ["", "x" * 101, "Compras/2026", "Compras[1]", "Compras?"])
+def test_sheets_sink_with_a_tab_title_sheets_refuses_fails(tmp_path: Path, tab: str) -> None:
+    """R-6.2: an empty, too long or forbidden-character tab title fails at load, not at Google."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["sinks"][1]["tab"] = tab
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="tab"):
+        load_config(path)
+
+
+def test_routing_rule_naming_an_unset_owner_dni_fails(tmp_path: Path) -> None:
+    """D143, BR-R10: a rule on {owner.dni} with dni unset fails at load instead of matching "None"."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["owner"]["dni"] = None
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValueError, match=r"owner\.dni"):
+        load_config(path)
+
+
 def test_sheets_sink_without_a_drive_sink_loads(tmp_path: Path) -> None:
     """D144: a sheets sink alone writes the row, so a flow without a drive sink loads."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

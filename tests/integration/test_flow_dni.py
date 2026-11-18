@@ -312,6 +312,7 @@ async def test_a_dni_boleta_routes_to_its_sheet_and_ends_done_with_br_d18(
     assert len(google.rows) == 1
     assert google.rows[0][0] == f"{profile_id}|{ISSUER_RUC}|{TIPO_BOLETA}|{SERIE_BOLETA}|{numero}"
     assert google.rows[0][4] == f"{SERIE_BOLETA}-{numero}"
+    assert google.rows[0][3] == f"RUC {ISSUER_RUC}"
     assert await _fetch_attempts(db_pool, invoice_id) == 0
 
     summary = await _outbox(db_pool, invoice_id, "BR-R10")

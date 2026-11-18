@@ -149,7 +149,11 @@ class SheetHeaderMismatch(GoogleError):
         self.tab = tab
         self.expected = expected
         self.found = found
-        self.args = (f"tab {tab!r} row 1 is {found}, expected header {expected}",)
+        # R-9.16: the message names the tab and the column counts, never the cells,
+        # which may hold the owner's own data.
+        self.args = (
+            f"tab {tab!r} row 1 ({len(found)} cells) is not the expected header ({len(expected)} columns)",
+        )
 
 
 class GoogleSheets:
@@ -203,13 +207,15 @@ class GoogleSheets:
 
         A missing tab is added and gets ``header`` written to row 1; an existing
         tab whose first row is empty gets the same header; a first row equal to
-        ``header`` is left alone. No other tab is touched.
+        ``header`` is left alone. No other tab is touched. Tab titles match ignoring
+        case, as Sheets does.
 
         Raises:
             SheetHeaderMismatch: The tab's first row differs from ``header``.
             GoogleError: Google refuses, or answers with a malformed body.
         """
-        if tab not in await self._tab_titles(spreadsheet_id):
+        titles = {title.casefold() for title in await self._tab_titles(spreadsheet_id)}
+        if tab.casefold() not in titles:
             await self._add_tab(spreadsheet_id, tab)
             await self.update(spreadsheet_id, tab, 1, header)
             return

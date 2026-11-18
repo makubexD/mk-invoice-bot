@@ -309,7 +309,7 @@ async def test_ensure_tab_leaves_a_matching_header_alone() -> None:
 
 
 async def test_ensure_tab_raises_when_the_header_differs() -> None:
-    """D145: a different row 1 raises SheetHeaderMismatch and writes nothing."""
+    """D145, R-9.16: a different row 1 raises SheetHeaderMismatch, writes nothing, never echoes cells."""
     found = ["Otra", "cosa"]
     handler, requests = _ensure_handler(titles=[TAB], values_body={"values": [found]})
 
@@ -318,8 +318,20 @@ async def test_ensure_tab_raises_when_the_header_differs() -> None:
             await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
 
     message = str(raised.value)
-    assert str(HEADER) in message
-    assert str(found) in message
+    assert "Otra" not in message
+    assert "cosa" not in message
+    assert raised.value.found == found
+    assert raised.value.expected == HEADER
+    assert [request.method for request in requests] == ["GET", "GET"]
+
+
+async def test_ensure_tab_matches_a_tab_title_ignoring_case() -> None:
+    """D145: a tab whose title differs only in case is the same tab, so no addSheet."""
+    handler, requests = _ensure_handler(titles=[TAB.lower()], values_body={"values": [HEADER]})
+
+    async with _make_sheets(handler) as sheets:
+        await sheets.ensure_tab(SPREADSHEET_ID, TAB, HEADER)
+
     assert [request.method for request in requests] == ["GET", "GET"]
 
 

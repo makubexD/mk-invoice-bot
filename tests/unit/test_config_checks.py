@@ -20,6 +20,7 @@ from invoicebot.config.models import (
     Store,
     StoreDirectory,
 )
+from invoicebot.sinks.drive_files import DRIVE_LINK_NAMES
 from invoicebot.sinks.expr import field_names
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -448,7 +449,7 @@ def test_example_flow_templates_have_no_problems() -> None:
     """BR-D02, R-7.1: the shipped flow B templates pass every flow check."""
     cfg = load_config(EXAMPLE)
 
-    assert flow_problems(cfg, field_names=field_names) == []
+    assert flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES) == []
 
 
 def test_flow_label_at_the_cap_is_accepted() -> None:
@@ -496,7 +497,7 @@ def test_flow_cell_with_unknown_name_is_reported() -> None:
     assert isinstance(sink, ExcelTemplateSink)
     sink.cells["C16"] = "{nope}"
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert [problem.code for problem in problems] == ["FLOW_TEMPLATE_UNKNOWN_NAME"]
     assert problems[0].path == "flows.work_microsoft.sinks[1].cells.C16"
@@ -511,7 +512,7 @@ def test_flow_cell_with_forbidden_form_is_reported() -> None:
     assert isinstance(sink, ExcelTemplateSink)
     sink.cells["C16"] = "{x[0]}"
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert [problem.code for problem in problems] == ["FLOW_TEMPLATE_UNKNOWN_NAME"]
     assert problems[0].path == "flows.work_microsoft.sinks[1].cells.C16"
@@ -534,7 +535,7 @@ def test_folder_template_missing_part_is_reported(folder: str) -> None:
     assert isinstance(sink, OneDriveFolderSink)
     flow.sinks[0] = sink.model_copy(update={"folder": folder})
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert [problem.code for problem in problems] == ["FLOW_FOLDER_TEMPLATE"]
     assert problems[0].path == "flows.work_microsoft.sinks[0].folder"
@@ -552,7 +553,7 @@ def test_description_default_may_not_use_override_names(template: str) -> None:
         update={"defaults": sink.defaults.model_copy(update={"descripcion": template})}
     )
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert [problem.code for problem in problems] == ["FLOW_DESCRIPTION_TEMPLATE"]
     assert problems[0].path == "flows.work_microsoft.sinks[1].defaults.descripcion"
@@ -564,7 +565,7 @@ def test_mail_attach_without_excel_sink_is_reported() -> None:
     flow = cfg.flows["work_microsoft"]
     flow.sinks = [sink for sink in flow.sinks if not isinstance(sink, ExcelTemplateSink)]
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert [(problem.code, problem.path) for problem in problems] == [
         ("FLOW_MAIL_ATTACH", "flows.work_microsoft.sinks[1].attach")
@@ -610,7 +611,7 @@ def test_sheets_only_flow_column_with_drive_link_is_blocking() -> None:
     cfg = load_config(EXAMPLE)
     cfg.flows = {"personal_dni": _flow_with_columns({"Foto": "{link_photo}"}, drive=False)}
 
-    problems = flow_problems(cfg, field_names=field_names)
+    problems = flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES)
 
     assert _codes(problems) == ["SHEETS_LINK_WITHOUT_DRIVE"]
     assert problems[0].path == "flows.personal_dni.sinks[0].columns.Foto"
@@ -623,7 +624,7 @@ def test_sheets_column_with_drive_link_and_drive_sink_is_accepted() -> None:
     cfg = load_config(EXAMPLE)
     cfg.flows = {"personal_google": _flow_with_columns({"Foto": "{link_photo}"}, drive=True)}
 
-    assert flow_problems(cfg, field_names=field_names) == []
+    assert flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES) == []
 
 
 def test_sheets_only_flow_column_without_drive_link_is_accepted() -> None:
@@ -631,4 +632,4 @@ def test_sheets_only_flow_column_without_drive_link_is_accepted() -> None:
     cfg = load_config(EXAMPLE)
     cfg.flows = {"personal_dni": _flow_with_columns({"Total": "{total}"}, drive=False)}
 
-    assert flow_problems(cfg, field_names=field_names) == []
+    assert flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES) == []

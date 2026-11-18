@@ -345,6 +345,8 @@ class GoogleDriveSink(BaseModel):
 
 #: D130: the sheets column that always holds the invoice's natural key.
 SHEETS_KEY_COLUMN = "Clave"
+#: The longest tab title Google Sheets accepts (R-6.2).
+SHEETS_TAB_MAX_CHARS = 100
 
 
 class GoogleSheetsSink(BaseModel):
@@ -359,7 +361,8 @@ class GoogleSheetsSink(BaseModel):
     kind: Literal["google_sheets"]
     account: str = Field(pattern=r"^[a-z0-9_]+$")
     spreadsheet_id: str
-    tab: str
+    #: R-6.2: Sheets refuses an empty title, one over 100 characters, or one with ``[]*?:/\``.
+    tab: str = Field(min_length=1, max_length=SHEETS_TAB_MAX_CHARS, pattern=r"^[^\[\]*?:/\\]+$")
     columns: dict[str, str] = Field(min_length=1)
     #: D145: true when the sheet is the owner's, not one ``google-setup`` creates.
     existing: bool = False
