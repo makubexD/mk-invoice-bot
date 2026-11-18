@@ -1,6 +1,6 @@
 # Spike S0.2 · QR hit rate
 
-Run on 2026-11-13 against `read_invoice_qr` as of step 12 of `docs/plan-mvp-read.md` (zxing, then OpenCV's detector, over the image variants). The script was throwaway and stayed outside the repo, and the images stayed in the owner's private folder. Only aggregates are recorded here: no RUC, store name or amount.
+Run on 2026-11-13 against `read_invoice_qr` as of step 12 of `docs/archive/plan-mvp-read.md` (zxing, then OpenCV's detector, over the image variants). The script was throwaway and stayed outside the repo, and the images stayed in the owner's private folder. Only aggregates are recorded here: no RUC, store name or amount.
 
 A **hit** is a decoded code that `parse_qr_payload` accepts. Each hit was also compared with the invoice's own XML through `matches_invoice` when that XML could be read.
 

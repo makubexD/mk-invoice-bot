@@ -1,6 +1,6 @@
 # Plan: MVP phase 9d2 · live-chat
 
-Roadmap: `docs/plan-mvp.md` row 9d2 (D154). The live runs that need a chat reply, moved out of `docs/plan-mvp-ops-live.md` so that plan could finish while Meta business verification is pending. The steps are unchanged; step numbers in their text that point at `ops-live` steps refer to that plan.
+Roadmap: `docs/plan-mvp.md` row 9d2 (D154). The live runs that need a chat reply, moved out of `docs/archive/plan-mvp-ops-live.md` so that plan could finish while Meta business verification is pending. The steps are unchanged; step numbers in their text that point at `ops-live` steps refer to that plan.
 
 **Needs from the owner first:** Meta business verification approved. Step 3 also needs S0.11 and the bot's Outlook.com mailbox. Step 4 needs S0.10 (ready). Step 5 needs S0.1 (≥ 30 pairs) and S0.5, and records what is missing if they are not ready.
 
@@ -33,13 +33,13 @@ Test: the checks above, by hand.
 
 ## Step 3: Flow B live (M3, 6d) `[inline: the owner's work invoices, OneDrive and mailboxes]`
 
-Follow `docs/plan-mvp-file-b.md` § "Deferred: live run (M3)" and then `docs/plan-mvp-widen-b-deliver.md` § "Deferred: live check": `inbox_rule`, the laptop agent, `/pagado` and the go-live import dry run. The import's real run waits for the owner's go. Set `mail.send_enabled` back to `false` after each run, and record M3 and the 6d part of M4 in `specs/04-tasks.md`.
+Follow `docs/archive/plan-mvp-file-b.md` § "Deferred: live run (M3)" and then `docs/archive/plan-mvp-widen-b-deliver.md` § "Deferred: live check": `inbox_rule`, the laptop agent, `/pagado` and the go-live import dry run. The import's real run waits for the owner's go. Set `mail.send_enabled` back to `false` after each run, and record M3 and the 6d part of M4 in `specs/04-tasks.md`.
 
 Test: the checks in those two sections, by hand.
 
 ## Step 4: Gaps and self-alerts live (6e) `[inline: GitHub App on the ops repo and the owner's chat]`
 
-Follow `docs/plan-mvp-widen-b-gaps-ops.md` § "Deferred: live check" (GitHub and self-alerts; the backup part was step 9). Also check this plan's fixes:
+Follow `docs/archive/plan-mvp-widen-b-gaps-ops.md` § "Deferred: live check" (GitHub and self-alerts; the backup part was step 9). Also check this plan's fixes:
 
 - `/gap ignorar` on a gap whose issue is queued: the gap stays ignored and gives no `GAP_admin`.
 - `/portal` for a gap with no issue yet: no comment row waits.
