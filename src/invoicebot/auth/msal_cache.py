@@ -105,8 +105,10 @@ class TokenProvider:
     def _token(self) -> str:
         cache = self._load_cache()
         app = self._application(cache)
-        accounts = app.get_accounts(username=self._account)
-        if not accounts:
+        # The cache file is this account's alone; MSAL knows the account by its mailbox,
+        # not by the config's account name, so the one account in it is the one to use.
+        accounts = app.get_accounts()
+        if len(accounts) != 1:
             raise AuthRequired(self._account)
         result = app.acquire_token_silent(self._scopes, account=accounts[0])
         self._save_if_changed(cache)

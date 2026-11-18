@@ -12,7 +12,9 @@ import pytest
 
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
 
-ACCOUNT = "owner@example.test"
+#: The config's account name; MSAL knows the account by its mailbox, which differs (R-7.9).
+ACCOUNT = "personal"
+MAILBOX = "owner@example.test"
 CLIENT_ID = "synthetic-client-id"
 #: MSAL adds offline_access, openid and profile itself and rejects them as input.
 SCOPES = ("Files.ReadWrite", "Mail.Send")
@@ -109,7 +111,7 @@ class FakeHttpClient:
             "expires_in": 3600 if is_refresh else self.access_token_lifetime_s,
             "access_token": REFRESHED_ACCESS if is_refresh else SIGNED_IN_ACCESS,
             "refresh_token": ("synthetic-refresh-token-2" if is_refresh else "synthetic-refresh-token-1"),
-            "id_token": _id_token(self._account),
+            "id_token": _id_token(MAILBOX),
         }
 
 
@@ -118,10 +120,10 @@ def _b64url(payload: dict[str, Any]) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
-def _id_token(account: str) -> str:
-    """Build an unsigned JWT whose claims give MSAL the account username."""
+def _id_token(mailbox: str) -> str:
+    """Build an unsigned JWT whose claims give MSAL the mailbox as its username."""
     header = _b64url({"alg": "none", "typ": "JWT"})
-    claims = _b64url({"sub": "synthetic-subject", "preferred_username": account})
+    claims = _b64url({"sub": "synthetic-subject", "preferred_username": mailbox})
     return f"{header}.{claims}."
 
 
