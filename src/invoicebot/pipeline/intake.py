@@ -94,6 +94,22 @@ class IntakeRoles:
 NO_ROLES = IntakeRoles()
 
 
+@dataclass(frozen=True)
+class IntakeSettings:
+    """The config-derived arguments intake needs for every inbound message (D165).
+
+    ``max_queued_per_sender``, ``media_max_bytes`` and ``timezone`` are the
+    per-message knobs the webhook and the console CLI share; ``roles`` carries
+    the admins, payment flow, laptop flows and teaching setup
+    (:class:`IntakeRoles`).
+    """
+
+    max_queued_per_sender: int
+    media_max_bytes: MediaMaxBytes
+    timezone: str
+    roles: IntakeRoles = NO_ROLES
+
+
 async def handle_inbound(
     conn: AsyncConnection[Any],
     msg: InboundMessage,

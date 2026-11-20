@@ -34,7 +34,7 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.channels.base import MediaSource
-from invoicebot.channels.console import CONSOLE, ConsoleMediaSource, console_transport
+from invoicebot.channels.console import CONSOLE, ConsoleMediaSource, console_channel, console_transport
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -45,7 +45,6 @@ from invoicebot.config.models import (
     GRAPH_MODE,
     PERSONAL_MICROSOFT_ACCOUNT,
     Config,
-    ConsoleChannel,
     Flow,
     FlowInbox,
     GoogleDriveSink,
@@ -88,7 +87,7 @@ from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
-from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.intake import DOWNLOAD_STEP, IntakeRoles, IntakeSettings
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
@@ -477,16 +476,11 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         pool=pool,
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
-        admin_profiles=frozenset(name for name, profile in cfg.profiles.items() if profile.admin),
-        laptop_flows=_laptop_flow_ids(cfg),
-        timezone=cfg.owner.timezone,
+        admin_profiles=_admin_profiles(cfg),
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
-        max_queued_per_sender=cfg.limits.max_queued_per_sender,
-        media_max_bytes=cfg.limits.media.max_bytes,
-        payment_flow=_payment_flow(cfg),
-        teach=_teach_setup(cfg),
+        intake=intake_settings(cfg),
     )
 
 
@@ -510,6 +504,26 @@ def _payment_flow(cfg: Config) -> PaymentFlow | None:
     return None
 
 
+def _admin_profiles(cfg: Config) -> frozenset[str]:
+    """Return the profile ids whose ``admin`` flag is set (R-1.2)."""
+    return frozenset(name for name, profile in cfg.profiles.items() if profile.admin)
+
+
+def intake_settings(cfg: Config) -> IntakeSettings:
+    """Return the intake arguments shared by the webhook and the console CLI (D165)."""
+    return IntakeSettings(
+        max_queued_per_sender=cfg.limits.max_queued_per_sender,
+        media_max_bytes=cfg.limits.media.max_bytes,
+        timezone=cfg.owner.timezone,
+        roles=IntakeRoles(
+            admins=_admin_profiles(cfg),
+            payment_flow=_payment_flow(cfg),
+            laptop_flows=_laptop_flow_ids(cfg),
+            teach=_teach_setup(cfg),
+        ),
+    )
+
+
 def _load_secrets(settings: Settings) -> SecretStore:
     """Decrypt the secrets file, failing fast when the identity is not configured."""
     if settings.secrets_path is None or settings.age_identity_path is None:
@@ -520,19 +534,14 @@ def _load_secrets(settings: Settings) -> SecretStore:
 def _media_sources(cfg: Config, client: WhatsAppClient, data_dir: Path) -> dict[str, MediaSource]:
     """Return the media source of each configured channel, keyed by channel name (R-1.4, D165)."""
     sources: dict[str, MediaSource] = {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
-    if _console_channel(cfg) is not None:
+    if console_channel(cfg) is not None:
         sources[CONSOLE] = ConsoleMediaSource(data_dir)
     return sources
 
 
-def _console_channel(cfg: Config) -> ConsoleChannel | None:
-    """Return the configured console channel, if any (D165)."""
-    return next((channel for channel in cfg.channels if isinstance(channel, ConsoleChannel)), None)
-
-
 def _console_transports(cfg: Config) -> dict[str, Transport]:
     """Return the console outbox transport, or none without a console channel (D165)."""
-    if _console_channel(cfg) is None:
+    if console_channel(cfg) is None:
         return {}
     return {CONSOLE: console_transport()}
 

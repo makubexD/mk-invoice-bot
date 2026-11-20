@@ -16,7 +16,12 @@ import shutil
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from invoicebot.channels.base import AttachmentKind, ChannelName, DownloadedMedia, MediaSource
+from invoicebot.channels.base import (
+    AttachmentKind,
+    ChannelName,
+    DownloadedMedia,
+    MediaSource,
+)
 from invoicebot.channels.media_limits import (
     DIRECTORY_MODE,
     FILE_NAME,
@@ -25,14 +30,17 @@ from invoicebot.channels.media_limits import (
     check_image_header,
     max_bytes_for,
 )
-from invoicebot.config.models import MediaLimits
+from invoicebot.config.models import Config, ConsoleChannel, MediaLimits
 from invoicebot.queue.outbox import OutboxRow, Transport
 
 logger = logging.getLogger(__name__)
 
 CONSOLE: ChannelName = "console"
-_MEDIA_REF_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,64}")
-_MIME_BY_SUFFIX: dict[str, str] = {
+#: Longest ``media_ref`` the console source accepts (D165).
+MEDIA_REF_MAX_CHARS = 64
+_MEDIA_REF_PATTERN = re.compile(rf"[A-Za-z0-9._-]{{1,{MEDIA_REF_MAX_CHARS}}}")
+#: The mime a console file name's extension gives (D165).
+MIME_BY_SUFFIX: dict[str, str] = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
@@ -77,7 +85,7 @@ def _download(
     """Validate, copy, hash and clean up one inbox file; runs in a worker thread."""
     if _MEDIA_REF_PATTERN.fullmatch(media_ref) is None or media_ref.startswith("."):
         raise ValueError("media_ref must be a plain file name")
-    mime = _MIME_BY_SUFFIX.get(Path(media_ref).suffix.lower())
+    mime = MIME_BY_SUFFIX.get(Path(media_ref).suffix.lower())
     if mime is None:
         raise ValueError(f"unsupported media extension: {media_ref!r}")
     source = inbox_dir(data_dir) / media_ref
@@ -135,6 +143,11 @@ def console_transport() -> Transport:
         return f"console-{row.id}"
 
     return deliver
+
+
+def console_channel(cfg: Config) -> ConsoleChannel | None:
+    """Return the configured console channel, if any (D165)."""
+    return next((channel for channel in cfg.channels if isinstance(channel, ConsoleChannel)), None)
 
 
 if TYPE_CHECKING:

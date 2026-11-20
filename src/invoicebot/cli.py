@@ -32,6 +32,8 @@ import httpx
 import yaml
 from pydantic import TypeAdapter, ValidationError
 
+from invoicebot import rehearse
+from invoicebot.app import intake_settings
 from invoicebot.auth.google_consent import (
     STATE_PARAM,
     ConsentError,
@@ -151,6 +153,8 @@ def main(
         return _auth_google(parser, resolved, cfg, args.account, show, google_transport)
     if args.command == "google-setup":
         return _google_setup(parser, resolved, cfg, args, google_transport)
+    if args.command == "rehearse":
+        return _rehearse_send(parser, resolved, cfg, args)
     directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
@@ -188,6 +192,15 @@ def _parser() -> argparse.ArgumentParser:
         help="Drive folder to create under the account's root",
     )
     setup.add_argument("--sheet-title", default=GOOGLE_SETUP_SHEET_TITLE, help="spreadsheet title")
+    rehearse = subparsers.add_parser(
+        "rehearse",
+        help="run the live pipeline through the dev-only console channel (D165)",
+    )
+    rehearse_sub = rehearse.add_subparsers(dest="rehearse_command", required=True)
+    send = rehearse_sub.add_parser("send", help="feed one message, file or button press through intake")
+    send.add_argument("--name", help="file name; its bytes are read from stdin (extension picks kind)")
+    send.add_argument("--text", help="text message, e.g. a command")
+    send.add_argument("--button", help="button id to press")
     return parser
 
 
@@ -322,6 +335,39 @@ def _google_setup(
         return 1
     for line in lines:
         sys.stdout.write(line + "\n")
+    return 0
+
+
+def _rehearse_send(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+) -> int:
+    """Feed one console message through the live intake and return its exit status (D165)."""
+    if args.name is None and args.text is None and args.button is None:
+        parser.error("rehearse send needs one of --name, --text or --button")
+    database_url = settings.database_url
+    if database_url is None:
+        parser.error("DATABASE_URL must be set to rehearse a console message")
+    request = rehearse.RehearseSend(name=args.name, text=args.text, button=args.button)
+    try:
+        result = asyncio.run(
+            rehearse.rehearse_send(
+                settings.data_dir,
+                database_url,
+                cfg,
+                intake_settings(cfg),
+                request,
+                sys.stdin.buffer,
+            )
+        )
+    except rehearse.RehearseError as error:
+        sys.stderr.write(f"{error}\n")
+        return 2
+    _show(f"intake: {result.status}")
+    if result.invoice_id is not None:
+        _show(f"invoice: {result.invoice_id}")
     return 0
 
 
