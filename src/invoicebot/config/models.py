@@ -165,6 +165,8 @@ class Padron(BaseModel):
     max_mb: int = Field(600, gt=0)
     #: S12.4: the whole download's deadline in seconds, not just one read's.
     download_timeout_s: float = Field(1800, gt=0)
+    #: S12.4: the whole import's deadline in seconds (unzip, COPY and swap).
+    import_timeout_s: float = Field(1800, gt=0)
 
     @field_validator("refresh_cron")
     @classmethod

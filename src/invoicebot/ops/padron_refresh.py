@@ -1,11 +1,12 @@
 """The weekly padrón refresh: download SUNAT's ZIP and import it (S12.4, D159).
 
 The download is capped by ``padron.max_mb`` and by ``padron.download_timeout_s``
-as a whole, and the ZIP is deleted whatever the outcome, so a failed refresh
-leaves neither a partial file nor a stale one. A non-200 answer, an oversized
-body, a download that runs past its deadline and a padrón that shrank by half
-raise :class:`PadronRefreshError` whose ``reason`` says which; the daily loop
-logs it and the owner retries by hand.
+as a whole; the import (unzip, COPY and swap) by ``padron.import_timeout_s``.
+The ZIP is deleted whatever the outcome, so a failed refresh leaves neither a
+partial file nor a stale one. A non-200 answer, an oversized body, a download or
+import that runs past its deadline and a padrón that shrank by half raise
+:class:`PadronRefreshError` whose ``reason`` says which; the daily loop logs it
+and the owner retries by hand.
 """
 
 from __future__ import annotations
@@ -48,22 +49,31 @@ async def refresh_padron(
 
     The ZIP streams to ``<data_dir>/padron/padron_reducido_ruc.zip`` and is
     removed in ``finally``. The whole download, not one read, is bounded by
-    ``padron_cfg.download_timeout_s``. The import runs on an autocommit
-    connection, as the script does, because ``import_padron`` commits its COPY
-    batches itself. Logs one INFO line with the imported and skipped row counts.
+    ``padron_cfg.download_timeout_s``, and the whole import, unzip, COPY and
+    swap, by ``padron_cfg.import_timeout_s``; a cancelled import swaps nothing,
+    so the old padrón stays. The import runs on an autocommit connection, as the
+    script does, because ``import_padron`` commits its COPY batches itself. Logs
+    one INFO line with the imported and skipped row counts.
     """
     zip_path = data_dir / PADRON_DIRECTORY / ZIP_NAME
     zip_path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        deadline = asyncio.timeout(padron_cfg.download_timeout_s)
+        download_deadline = asyncio.timeout(padron_cfg.download_timeout_s)
         try:
-            async with deadline:
+            async with download_deadline:
                 await _download(http, str(padron_cfg.url), zip_path, padron_cfg.max_mb)
         except TimeoutError as err:
-            if not deadline.expired():
+            if not download_deadline.expired():
                 raise
             raise PadronRefreshError("timeout") from err
-        result = await _import(pool, zip_path)
+        import_deadline = asyncio.timeout(padron_cfg.import_timeout_s)
+        try:
+            async with import_deadline:
+                result = await _import(pool, zip_path)
+        except TimeoutError as err:
+            if not import_deadline.expired():
+                raise
+            raise PadronRefreshError("timeout") from err
     finally:
         zip_path.unlink(missing_ok=True)
     logger.info("padron refreshed", extra={"rows": result.rows, "skipped": result.skipped})
