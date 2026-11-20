@@ -79,7 +79,7 @@ Tests (same file, the existing capture pattern):
 - `extra={"phone_number": "51999999999"}` → `"[redacted]"`;
 - `extra={"payload": {"ruc": "20000000001", "count": 3}}` → `"payload": {"ruc": "[redacted]", "count": 3}`;
 - `extra={"items": [{"email": "a@example.com"}]}` → `"items": [{"email": "[redacted]"}]`;
-- `extra={"reason": "status", "rucs_checked": 4}` → `"reason": "status"`, and `"rucs_checked": "[redacted]"` (a part match; documents that counts need a key without a personal part);
+- `extra={"reason": "status", "ruc_count": 4, "instructions": "x"}` → `"reason": "status"`, `"ruc_count": "[redacted]"` (a whole-part match; counts need a key without a personal part) and `"instructions": "x"` (no substring match);
 - six nested dict levels → the sixth is `"[nested]"`.
 
 Docstrings start with `R-9.12`.
