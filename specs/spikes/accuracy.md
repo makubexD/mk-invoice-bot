@@ -1,7 +1,7 @@
 # Accuracy report
 
 Synthetic set (`tests/golden`, from `scripts/accuracy_report.py --set tests/golden --write`); the private set's
-numbers come with the live check (`docs/plan-mvp-read-more.md` § "Deferred: live check").
+numbers come with the live check (`docs/archive/plan-mvp-read-more.md` § "Deferred: live check").
 
 - Date: 2026-11-16
 - Set size: 12 pair(s)

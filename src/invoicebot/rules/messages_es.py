@@ -343,7 +343,7 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
     return template.format(num=num_doc)
 
 
-# --- Fetch texts (docs/plan-mvp-fetch.md step 14) ------------------------------------------
+# --- Fetch texts (docs/archive/plan-mvp-fetch.md step 14) ------------------------------------------
 # These are not spec 06 rows, so they stay outside MESSAGES and the parity test does not
 # see them. The copy is pending the owner's review.
 

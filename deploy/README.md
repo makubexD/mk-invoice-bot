@@ -217,12 +217,7 @@ command asks to allow Funnel in the tailnet policy. Turn it off with:
 tailscale funnel reset
 ```
 
-### 6. Uptime check (R-9.14)
-
-Point the external uptime monitor at `https://<machine>.<tailnet>.ts.net/health`
-and alert on any non-200.
-
-### 7. Dev and live side by side
+### 6. Dev and live side by side
 
 Both stacks publish the app on `127.0.0.1:8080`, so only one app runs at a time.
 The dev stack (project `invoicebot`, port `5432`, dev password) stays for its
@@ -298,7 +293,8 @@ Record each run:
 `/health` runs `SELECT 1` and answers `200 {"status": "ok", "db": "ok"}`; when
 Postgres is unreachable it answers `503 {"status": "degraded", "db": "down"}`.
 Point an external uptime monitor (any free service) at the public tunnel URL's
-`/health` and alert on any non-200.
+`/health` and alert on any non-200. On the local MVP host that URL is
+`https://<machine>.<tailnet>.ts.net/health` (D146).
 
 ## Postgres down: the webhook answers 503 (R-9.15)
 
