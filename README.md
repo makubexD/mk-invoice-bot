@@ -1,7 +1,7 @@
 # mk-invoice-bot
 
 A WhatsApp bot that files Peruvian electronic invoices (SUNAT CPE). Send it a
-photo, a PDF or the XML of an invoice and it:
+photo or the PDF of an invoice (the XML can follow) and it:
 
 1. reads the key data deterministically: the QR first, then the XML, the PDF
    text or OCR. An LLM fallback exists only as an opt-in per flow and is never
@@ -69,7 +69,9 @@ The `invoicebot` command (inside the container, or `uv run invoicebot`):
 | `invoicebot auth-google --account <a>`      | Signs a Google account in and resumes the invoices it holds    |
 | `invoicebot google-setup --flow <f>`        | Creates or checks a flow's Drive folder and spreadsheet        |
 
-Scripts in `scripts/`, run with `uv run python scripts/<name>`:
+Scripts in `scripts/`. The Python ones run with `uv run python scripts/<name>`;
+`restore_drill.sh` runs with bash on the host and `laptop_agent.ps1` with
+PowerShell on the laptop:
 
 | Script               | What it does                                                    |
 | -------------------- | --------------------------------------------------------------- |

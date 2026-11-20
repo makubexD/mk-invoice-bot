@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[2]
 ARCHITECTURE = ROOT / "docs" / "architecture.md"
 _MERMAID_OPEN = "```mermaid"
 _FENCE = "```"
-_EXCLUDED_PACKAGES = frozenset({"api", "events"})
+_EXCLUDED_PACKAGES = frozenset({"events"})
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
 _LINK = re.compile(r"\]\(([^)\s]+)\)")
 _DOC_LINKS = ("README.md", "docs/architecture.md", "docs/runbook.md", "deploy/README.md")
@@ -49,6 +49,11 @@ def _first_block(text: str, marker: str) -> str:
 def _names_whole_word(text: str, names: list[str]) -> list[str]:
     """Return the names missing from ``text`` as a whole word."""
     return [name for name in names if re.search(rf"\b{re.escape(name)}\b", text) is None]
+
+
+def _has_node(body: str, name: str) -> bool:
+    """True when ``body`` defines a node with id ``name``, not just a label that mentions it."""
+    return re.search(rf"^\s*{re.escape(name)}\s*[\[(]", body, re.MULTILINE) is not None
 
 
 def _state_names() -> list[str]:
@@ -93,8 +98,8 @@ def test_component_diagram_names_every_package() -> None:
     names = _package_names()
 
     assert names, "no packages found under src/invoicebot"
-    missing = _names_whole_word(body, names)
-    assert not missing, f"packages missing from the diagram: {missing}"
+    missing = [name for name in names if not _has_node(body, name)]
+    assert not missing, f"packages without a node in the diagram: {missing}"
 
 
 def test_readme_lists_every_cli_command() -> None:

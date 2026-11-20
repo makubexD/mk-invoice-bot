@@ -188,6 +188,8 @@ Each item goes into the named phase's plan.
 
 The specs run ahead of the code in these places; each has a named story that closes it.
 
+- Spec 03 §4 says an answer in `CONFIRMING` goes to `VALIDATING` and `/reprocesar` on a failed batch keeps the invoice `BATCHED`; the code re-enters `ROUTING` (which then moves to `VALIDATING`) and moves the invoice back to `DELIVERING` to resend. Same outcome; spec 03 should follow the code (found by the 9i review).
+
 - `scripts/check_config.py` and `config/models.py` still read a single `portals.yaml`: S10.8 moves them to `config/stores/` and `config/portals/`.
 - The `batch_preview` template (S0.7) is only needed for the post-MVP `on_command` mode.
 - S1.2's LLM check names the `work_microsoft` flow, `example.yaml` has an example routing id `BR-R10` with no catalog entry, and `retrieval.email_inbox` is global (widen-b-fetch, step 20: per-flow, D98). The flow config rework in `file-b` replaces them with per-flow settings (D53).

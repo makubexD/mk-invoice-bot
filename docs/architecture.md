@@ -13,8 +13,9 @@ Business rules and the user messages are in
 ## Components
 
 One Python process (FastAPI + asyncio) and Postgres. Arrows point from the
-caller to what it uses; the import contracts in `.importlinter` keep them
-pointing inward.
+caller to what it uses. Solid arrows are imports, which the contracts in
+`.importlinter` keep pointing inward; dotted arrows are runtime calls through a
+port (`Handler`, `Transport`) that `app.py` wires at startup.
 
 ```mermaid
 flowchart LR
@@ -53,9 +54,10 @@ flowchart LR
     events["events (v1.1)"]
 
     meta -- webhook --> api
+    api --> pipeline
+    api --> channels
     api --> store
-    api --> queue
-    queue --> pipeline
+    queue -. runs jobs .-> pipeline
     pipeline --> routing
     pipeline --> rules
     pipeline --> extract
@@ -66,8 +68,8 @@ flowchart LR
     pipeline --> github
     pipeline --> store
     pipeline --> queue
-    queue -- outbox --> channels
-    queue -- outbox --> github
+    queue -. outbox .-> channels
+    queue -. outbox .-> github
     channels --> meta
     extract -. heavy work .-> helpers
     fetchers -. browser .-> helpers
@@ -79,7 +81,6 @@ flowchart LR
     ops --> store
     routing --> config
     config --> rules
-    events -.-> store
 ```
 
 | Package    | Job                                                                                    |
@@ -132,7 +133,7 @@ flowchart LR
             helpers[["helpers in unshare namespaces"]]
             pg[("postgres container")]
         end
-        files[("~/.local/share/invoicebot: config, secrets.age, backups, db password")]
+        files[("~/.local/share/invoicebot: config, secrets.age, db password")]
     end
 
     subgraph cloud["Outbound services"]
@@ -171,17 +172,19 @@ flowchart LR
 
 Every transition is one Postgres transaction: the state, the rule ID that caused
 it, the next job and the outgoing message (spec 03 §4). The states are in
-`src/invoicebot/states.py`; the moves below are the ones the code makes.
+`src/invoicebot/states.py`; the moves below are the ones the code makes, and
+the two the spec describes but the code doesn't make yet are marked.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> RECEIVED: photo, PDF or XML arrives
+    [*] --> RECEIVED: photo or PDF arrives
+    RECEIVED --> EXTRACT_FAILED: no photo or PDF to read (BR-E01)
     RECEIVED --> EXTRACTING: extract job
     RECEIVED --> CANCELLED: unsupported media (BR-E07)
     EXTRACTING --> ROUTING: fields read
     EXTRACTING --> EXTRACT_FAILED: unreadable or bad RUC (BR-E01)
-    EXTRACTING --> CANCELLED: unsupported type
-    EXTRACT_FAILED --> EXTRACTING: better photo
+    EXTRACTING --> CANCELLED: unsupported type or too many pages (BR-E07)
+    EXTRACT_FAILED --> EXTRACTING: better photo (spec only, not built yet)
     EXTRACT_FAILED --> ROUTING: campo=valor edit
     ROUTING --> VALIDATING: flow decided
     ROUTING --> CONFIRMING: needs a question (BR-R03, BR-E03, BR-D06, confirm_mode)
@@ -202,7 +205,7 @@ stateDiagram-v2
     DELIVERING --> DONE: flow A and personal_dni
     DELIVERING --> BATCHED: flow B, added to its batch
     BATCHED --> DONE: batch sent (R-7.8)
-    BATCHED --> DELIVERING: /reprocesar after a failed batch
+    BATCHED --> DELIVERING: /reprocesar after a failed batch, or an edit
     FAILED --> FETCHING_DOCS: /reprocesar
     EXTRACT_FAILED --> PENDING_USER: no answer (BR-S08)
     CONFIRMING --> PENDING_USER: no answer (BR-S08)
@@ -217,7 +220,7 @@ stateDiagram-v2
 
 Not drawn, to keep the picture readable:
 
-- **Cancel:** `/cancelar` moves any state in `CANCELLABLE` (every state before
+- **Cancel:** `/cancelar`, or the [Cancelar] button on a question, moves any state in `CANCELLABLE` (every state before
   `DELIVERING`, plus `PENDING_AUTH`) to `CANCELLED`.
 - **Edit:** a `campo=valor` edit in any `EDITABLE` state goes back to
   `ROUTING`; a `PENDING_USER` invoice is resumed first (D94, D97).
@@ -226,6 +229,10 @@ Not drawn, to keep the picture readable:
 - **Waiting:** `WAITING_FOR_USER` is `CONFIRMING`, `EXTRACT_FAILED` and
   `CONFIRM_INVALID`; `PENDING_USER` stores which one it left in
   `waiting_state` and returns to it.
+- **XML:** an XML only attaches to an open invoice (R-1.5); alone it is
+  refused with BR-E07 and creates nothing.
+- **Today** a new photo after `EXTRACT_FAILED` starts a new invoice; S4.5
+  owns the move back to `EXTRACTING`.
 - **Terminal:** `DONE`, `CANCELLED` and `FAILED`; only `FAILED` can be
   reprocessed. Payment is not a state: `/pagado` links a payment to a `DONE`
   flow B invoice (R-7.12).
