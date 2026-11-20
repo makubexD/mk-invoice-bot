@@ -10,7 +10,13 @@ from typing import Any
 import pyrage
 import pytest
 
-from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
+from invoicebot.auth.msal_cache import AuthRequired, PinnedAccount, TokenProvider, WrongMailbox
+from invoicebot.auth.providers import build_token_provider
+from invoicebot.config.loader import load_config
+from invoicebot.settings import Settings
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
 
 #: The config's account name; MSAL knows the account by its mailbox, which differs (R-7.9).
 ACCOUNT = "personal"
@@ -42,9 +48,16 @@ class FakeResponse:
 class FakeHttpClient:
     """Canned identity-provider answers by URL; records every call, never dials out."""
 
-    def __init__(self, account: str, *, access_token_lifetime_s: int = 3600) -> None:
+    def __init__(
+        self,
+        account: str,
+        *,
+        access_token_lifetime_s: int = 3600,
+        include_id_token: bool = True,
+    ) -> None:
         self._account = account
         self.access_token_lifetime_s = access_token_lifetime_s
+        self.include_id_token = include_id_token
         self.invalid_grant = False
         self.mailbox = MAILBOX
         self.calls: list[tuple[str, str, dict[str, Any]]] = []
@@ -107,14 +120,16 @@ class FakeHttpClient:
 
     def _tokens(self, data: dict[str, Any]) -> dict[str, Any]:
         is_refresh = data.get("grant_type") == "refresh_token"
-        return {
+        tokens = {
             "token_type": "Bearer",
             "scope": " ".join(SCOPES),
             "expires_in": 3600 if is_refresh else self.access_token_lifetime_s,
             "access_token": REFRESHED_ACCESS if is_refresh else SIGNED_IN_ACCESS,
             "refresh_token": ("synthetic-refresh-token-2" if is_refresh else "synthetic-refresh-token-1"),
-            "id_token": _id_token(self.mailbox),
         }
+        if self.include_id_token:
+            tokens["id_token"] = _id_token(self.mailbox)
+        return tokens
 
 
 def _b64url(payload: dict[str, Any]) -> str:
@@ -132,7 +147,7 @@ def _id_token(mailbox: str) -> str:
 def _provider(tmp_path: Path, fake: FakeHttpClient) -> tuple[TokenProvider, pyrage.x25519.Identity, Path]:
     identity = pyrage.x25519.Identity.generate()
     cache_path = tmp_path / "owner.msal.age"
-    provider = TokenProvider(CLIENT_ID, ACCOUNT, SCOPES, cache_path, identity, fake)
+    provider = TokenProvider(CLIENT_ID, PinnedAccount(ACCOUNT, MAILBOX), SCOPES, cache_path, identity, fake)
     return provider, identity, cache_path
 
 
@@ -173,7 +188,9 @@ async def test_offline_access_scope_is_accepted(tmp_path: Path) -> None:
     fake = FakeHttpClient(ACCOUNT)
     identity = pyrage.x25519.Identity.generate()
     scopes = ("offline_access", *SCOPES)
-    provider = TokenProvider(CLIENT_ID, ACCOUNT, scopes, tmp_path / "owner.msal.age", identity, fake)
+    provider = TokenProvider(
+        CLIENT_ID, PinnedAccount(ACCOUNT, MAILBOX), scopes, tmp_path / "owner.msal.age", identity, fake
+    )
     _login(provider)
 
     assert await provider.token() == SIGNED_IN_ACCESS
@@ -212,7 +229,9 @@ async def test_sign_in_creates_the_missing_cache_directory(tmp_path: Path) -> No
     fake = FakeHttpClient(ACCOUNT)
     identity = pyrage.x25519.Identity.generate()
     token_dir = tmp_path / "tokens"
-    provider = TokenProvider(CLIENT_ID, ACCOUNT, SCOPES, token_dir / "x.age", identity, fake)
+    provider = TokenProvider(
+        CLIENT_ID, PinnedAccount(ACCOUNT, MAILBOX), SCOPES, token_dir / "x.age", identity, fake
+    )
 
     _login(provider)
 
@@ -258,19 +277,97 @@ async def test_login_over_an_unreadable_cache_succeeds(tmp_path: Path) -> None:
     assert await provider.token() == SIGNED_IN_ACCESS
 
 
-async def test_second_sign_in_replaces_the_first_account(tmp_path: Path) -> None:
-    """R-7.9: signing in again, as after the wrong mailbox, leaves one account, so the token works."""
+async def test_sign_in_accepts_the_pinned_mailbox_in_another_case(tmp_path: Path) -> None:
+    """R-7.9, D164: the id token may name the pinned mailbox in another case and the cache is saved."""
     fake = FakeHttpClient(ACCOUNT)
+    fake.mailbox = MAILBOX.upper()
     provider, identity, cache_path = _provider(tmp_path, fake)
-    _login(provider)
-    fake.mailbox = OTHER_MAILBOX
 
     _login(provider)
 
     saved = pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8")
-    assert OTHER_MAILBOX in saved
-    assert MAILBOX not in saved
+    assert MAILBOX.upper() in saved
+
+
+async def test_sign_in_as_another_mailbox_is_refused_and_saves_no_cache(tmp_path: Path) -> None:
+    """R-7.9, D164: signing in as another mailbox raises WrongMailbox and writes nothing."""
+    fake = FakeHttpClient(ACCOUNT)
+    fake.mailbox = OTHER_MAILBOX
+    provider, _, cache_path = _provider(tmp_path, fake)
+
+    with pytest.raises(WrongMailbox) as raised:
+        _login(provider)
+
+    assert raised.value.account == ACCOUNT
+    message = str(raised.value)
+    assert MAILBOX not in message
+    assert OTHER_MAILBOX not in message
+    assert not cache_path.exists()
+
+
+async def test_sign_in_as_another_mailbox_leaves_the_existing_cache_untouched(tmp_path: Path) -> None:
+    """R-7.9, D164: a refused sign-in does not overwrite the cache the account already has."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, cache_path = _provider(tmp_path, fake)
+    _login(provider)
+    before = cache_path.read_bytes()
+    fake.mailbox = OTHER_MAILBOX
+
+    with pytest.raises(WrongMailbox):
+        _login(provider)
+
+    assert cache_path.read_bytes() == before
+
+
+async def test_sign_in_without_id_token_claims_is_refused(tmp_path: Path) -> None:
+    """R-7.9, D164: a sign-in that names no mailbox cannot prove the pin, so it is refused."""
+    fake = FakeHttpClient(ACCOUNT, include_id_token=False)
+    provider, _, cache_path = _provider(tmp_path, fake)
+
+    with pytest.raises(WrongMailbox):
+        _login(provider)
+
+    assert not cache_path.exists()
+
+
+async def test_token_refuses_a_cache_signed_in_as_another_mailbox(tmp_path: Path) -> None:
+    """R-7.9, D164: the cache's one account must be the pinned mailbox or a sign-in is needed."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, identity, cache_path = _provider(tmp_path, fake)
+    fake.mailbox = OTHER_MAILBOX
+    elsewhere = TokenProvider(
+        CLIENT_ID, PinnedAccount(ACCOUNT, OTHER_MAILBOX), SCOPES, cache_path, identity, fake
+    )
+    _login(elsewhere)
+    fake.calls.clear()
+
+    with pytest.raises(AuthRequired) as raised:
+        await provider.token()
+
+    assert raised.value.account == ACCOUNT
+    assert fake.token_posts() == []
+
+
+async def test_second_sign_in_keeps_one_account(tmp_path: Path) -> None:
+    """R-7.9, D164: signing in again for the pinned mailbox leaves one account, so the token works."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, identity, cache_path = _provider(tmp_path, fake)
+    _login(provider)
+
+    _login(provider)
+
+    saved = json.loads(pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8"))
+    assert len(saved["Account"]) == 1
     assert await provider.token() == SIGNED_IN_ACCESS
+
+
+def test_build_token_provider_requires_a_pinned_mailbox(tmp_path: Path) -> None:
+    """R-7.9, D164: an account absent from microsoft.accounts stops startup, naming it."""
+    cfg = load_config(EXAMPLE_CONFIG)
+    settings = Settings(age_identity_path=tmp_path / "identity.key", data_dir=tmp_path)
+
+    with pytest.raises(ValueError, match=r"microsoft\.accounts has no mailbox for account 'ghost' \(D164\)"):
+        build_token_provider(settings, cfg, "ghost", SCOPES)
 
 
 async def test_invalid_grant_requires_sign_in(tmp_path: Path) -> None:

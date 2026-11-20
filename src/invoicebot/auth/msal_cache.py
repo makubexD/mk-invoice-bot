@@ -6,15 +6,18 @@ and refreshes tokens here; Graph calls are plain REST (D84).
 
 A missing cache, an unreadable one (wrong identity or corrupt file), an account
 the cache does not hold, or a refused refresh raise :class:`AuthRequired`, which
-the pipeline turns into ``PENDING_AUTH`` (BR-D01). No token, refresh token or
-cache plaintext ever appears in a message or a log (R-9.9).
+the pipeline turns into ``PENDING_AUTH`` (BR-D01). A cache or a sign-in whose
+mailbox is not the one ``microsoft.accounts`` pins is refused the same way
+(:class:`WrongMailbox`, D164). No token, refresh token, mailbox or cache
+plaintext ever appears in a message or a log (R-9.9).
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from secrets import token_hex
 
@@ -34,9 +37,28 @@ class AuthRequired(Exception):
     Carries the account name alone; never a token.
     """
 
+    message = "Microsoft sign-in needed for {account}"
+
     def __init__(self, account: str) -> None:
-        super().__init__(f"Microsoft sign-in needed for {account}")
+        super().__init__(self.message.format(account=account))
         self.account = account
+
+
+class WrongMailbox(AuthRequired):
+    """The signed-in mailbox is not the one ``microsoft.accounts`` pins (D164).
+
+    Names only the account; never either mailbox address.
+    """
+
+    message = "Microsoft account {account} signed in as another mailbox than microsoft.accounts names (D164)"
+
+
+@dataclass(frozen=True)
+class PinnedAccount:
+    """A config account name and the one mailbox it may sign in as (D164)."""
+
+    name: str
+    mailbox: str
 
 
 class TokenProvider:
@@ -49,14 +71,15 @@ class TokenProvider:
     def __init__(
         self,
         client_id: str,
-        account: str,
+        account: PinnedAccount,
         scopes: Sequence[str],
         cache_path: Path,
         identity: pyrage.x25519.Identity,
         http_client: object | None = None,
     ) -> None:
         self._client_id = client_id
-        self._account = account
+        self._account = account.name
+        self._mailbox = account.mailbox.casefold()
         self._scopes = [scope for scope in scopes if scope not in _MSAL_RESERVED_SCOPES]
         self._cache_path = Path(cache_path)
         self._identity = identity
@@ -69,8 +92,8 @@ class TokenProvider:
         synchronous (D84).
 
         Raises:
-            AuthRequired: no cache, an unreadable cache, no matching account, or
-                the refresh failed.
+            AuthRequired: no cache, an unreadable cache, an account that is not the
+                pinned mailbox, or the refresh failed.
         """
         return await asyncio.to_thread(self._token)
 
@@ -86,9 +109,11 @@ class TokenProvider:
 
         Raises:
             AuthRequired: the flow could not start or the sign-in failed.
+            WrongMailbox: the id token names another mailbox than the pinned one;
+                nothing is saved, so an existing cache is left as it was.
         """
-        # A fresh cache: a second sign-in, say after the wrong mailbox, must not leave
-        # two accounts behind, since `_token` accepts exactly one.
+        # A fresh cache: a second sign-in must not leave two accounts behind, since
+        # `_token` accepts exactly one.
         cache = msal.SerializableTokenCache()
         app = self._application(cache)
         flow = app.initiate_device_flow(scopes=self._scopes)
@@ -98,15 +123,29 @@ class TokenProvider:
         result = app.acquire_token_by_device_flow(flow)
         if "error" in result:
             raise AuthRequired(self._account)
+        self._check_signed_in_mailbox(result)
         self._save_if_changed(cache)
+
+    def _check_signed_in_mailbox(self, result: Mapping[str, object]) -> None:
+        """Refuse a sign-in whose id token does not name the pinned mailbox (D164)."""
+        claims = result.get("id_token_claims")
+        if not isinstance(claims, Mapping):
+            raise WrongMailbox(self._account)
+        mailbox = claims.get("preferred_username")
+        if not isinstance(mailbox, str) or mailbox.casefold() != self._mailbox:
+            raise WrongMailbox(self._account)
 
     def _token(self) -> str:
         cache = self._load_cache()
         app = self._application(cache)
         # The cache file is this account's alone; MSAL knows the account by its mailbox,
-        # not by the config's account name, so the one account in it is the one to use.
+        # not by the config's account name, so the one account in it must be the pinned
+        # mailbox (D164).
         accounts = app.get_accounts()
         if len(accounts) != 1:
+            raise AuthRequired(self._account)
+        username = accounts[0].get("username")
+        if not isinstance(username, str) or username.casefold() != self._mailbox:
             raise AuthRequired(self._account)
         result = app.acquire_token_silent(self._scopes, account=accounts[0])
         self._save_if_changed(cache)

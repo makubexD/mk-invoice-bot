@@ -14,7 +14,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from invoicebot.auth.msal_cache import TokenProvider
+from invoicebot.auth.msal_cache import PinnedAccount, TokenProvider
 from invoicebot.config.models import (
     Config,
     GoogleDriveSink,
@@ -68,13 +68,17 @@ def build_token_provider(
     """Build the real provider: client id from config, cache under ``data_dir/tokens`` (D85).
 
     Raises:
-        ValueError: ``AGE_IDENTITY_PATH`` is unset, so no cache can be decrypted.
+        ValueError: ``AGE_IDENTITY_PATH`` is unset, so no cache can be decrypted, or
+            ``account`` has no mailbox in ``microsoft.accounts`` (D164).
     """
     if settings.age_identity_path is None:
         raise ValueError("AGE_IDENTITY_PATH must be set to sign in (R-7.9)")
+    mailbox = cfg.microsoft.accounts.get(account)
+    if mailbox is None:
+        raise ValueError(f"microsoft.accounts has no mailbox for account '{account}' (D164)")
     return TokenProvider(
         client_id=cfg.microsoft.client_id,
-        account=account,
+        account=PinnedAccount(account, mailbox),
         scopes=scopes,
         cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
         identity=load_identity(settings.age_identity_path),
