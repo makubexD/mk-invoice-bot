@@ -51,7 +51,8 @@ To run the bot itself, start from the example config:
    variables (R-9.9).
 3. Build the image and deploy it with `deploy/deploy.sh`, as described in
    [the deploy guide](deploy/README.md). The guide also covers the live host,
-   Tailscale Funnel, the laptop agent and rollback.
+   Tailscale Funnel, the laptop agent and rollback. On Windows, run everything
+   inside WSL2, as the guide's Windows section says.
 
 The app reads these environment variables (names only; see
 `src/invoicebot/settings.py`): `DATABASE_URL`, `CONFIG_PATH`,

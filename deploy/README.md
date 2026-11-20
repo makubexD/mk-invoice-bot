@@ -224,6 +224,74 @@ The dev stack (project `invoicebot`, port `5432`, dev password) stays for its
 Postgres and the tests. The live Postgres publishes no port. Never point
 `TEST_DATABASE_URL` at the live project.
 
+## Windows through WSL2 (D141, D163)
+
+There is no native Windows port. On Windows the same Linux stack runs inside a
+WSL2 Ubuntu 24.04 distro with rootless Podman, so every section above applies
+unchanged once you are inside the distro. Docker Desktop is not supported:
+Docker's default seccomp profile blocks `unshare`, so the app refuses to start
+(see [Helper sandbox](#4-helper-sandbox-d147)).
+
+### Install WSL2
+
+From an administrator PowerShell, then reboot and create the Linux user when
+the distro first opens:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Turn on systemd inside the distro, which Podman's restart unit and Tailscale
+need. Add this to `/etc/wsl.conf`:
+
+```ini
+[boot]
+systemd=true
+```
+
+Then run `wsl --shutdown` from PowerShell and open the distro again.
+`systemctl is-system-running` should print `running` or `degraded`.
+
+### Inside the distro
+
+```sh
+sudo apt update
+sudo apt install podman podman-compose git curl
+```
+
+Install `uv` from its documentation (https://docs.astral.sh/uv/). Clone the
+repository into your Linux home (`~/`), never under `/mnt/c`: Linux git keeps
+LF line endings and file modes there, and the Windows file system is much
+slower. From here, steps 1 to 6 of
+[Local MVP host](#local-mvp-host-d141-d146d148) apply unchanged, Tailscale
+included: install the Linux Tailscale inside the distro, not the Windows app.
+
+`curl -s localhost:8080/health` also answers from Windows PowerShell, because
+WSL2 forwards `localhost` to the distro.
+
+### Start on boot
+
+Windows starts the WSL VM only when something asks for it. Keep linger and
+`podman-restart.service` from step 3, and add a scheduled task that starts the
+distro at log-on (from PowerShell):
+
+```powershell
+schtasks /create /tn "invoicebot WSL" /sc onlogon /tr "wsl.exe -d Ubuntu-24.04 --exec /bin/true"
+```
+
+Whether the stack keeps running with no WSL window open is checked in 9f step 3.
+
+### Memory
+
+The stack's limits (app `900m`, Postgres `300m`) fit inside WSL2's default of
+half the host's RAM. Only on a machine with less than 4 GB, raise the VM's
+share in `%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+memory=2GB
+```
+
 ## What the deploy does
 
 1. Starts `postgres` and waits until it is healthy.
