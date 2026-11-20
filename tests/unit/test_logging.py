@@ -213,6 +213,27 @@ def test_personal_key_as_a_later_part_is_redacted(log_stream: io.StringIO) -> No
     assert _records(log_stream)[-1]["phone_number"] == "[redacted]"
 
 
+@pytest.mark.parametrize(
+    "key", ["phoneNumber", "wa-id", "senderId", "emisor_razon_social", "razonSocial", "buyer_dni"]
+)
+def test_personal_key_in_another_spelling_is_redacted(log_stream: io.StringIO, key: str) -> None:
+    """R-9.12: camelCase, hyphenated and multi-word personal keys match as a run of words."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={key: "51999999999"})
+
+    assert _records(log_stream)[-1][key] == "[redacted]"
+
+
+def test_non_string_dict_key_is_written_as_text(log_stream: io.StringIO) -> None:
+    """R-9.12: a tuple or number key is turned into text, so the line is still written."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": {(1, 2): "a", 3: "b"}})
+
+    assert _records(log_stream)[-1]["payload"] == {"(1, 2)": "a", "3": "b"}
+
+
 def test_personal_key_inside_a_dict_is_redacted(log_stream: io.StringIO) -> None:
     """R-9.12: a dict value is scrubbed key by key instead of being stringified."""
     configure_logging(stream=log_stream)

@@ -6,10 +6,11 @@ and refreshes tokens here; Graph calls are plain REST (D84).
 
 A missing cache, an unreadable one (wrong identity or corrupt file), an account
 the cache does not hold, or a refused refresh raise :class:`AuthRequired`, which
-the pipeline turns into ``PENDING_AUTH`` (BR-D01). A cache or a sign-in whose
-mailbox is not the one ``microsoft.accounts`` pins is refused the same way
-(:class:`WrongMailbox`, D164). No token, refresh token, mailbox or cache
-plaintext ever appears in a message or a log (R-9.9).
+the pipeline turns into ``PENDING_AUTH`` (BR-D01). A cache whose account is not
+the mailbox ``microsoft.accounts`` pins is refused the same way, and a sign-in
+as another mailbox raises :class:`WrongMailbox` and saves nothing (D164). No
+token, refresh token, mailbox or cache plaintext ever appears in a message or a
+log (R-9.9).
 """
 
 from __future__ import annotations

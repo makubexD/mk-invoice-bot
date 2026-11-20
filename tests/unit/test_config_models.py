@@ -148,6 +148,54 @@ def test_example_config_maps_each_microsoft_account_to_its_mailbox() -> None:
     assert microsoft_accounts(cfg) <= set(cfg.microsoft.accounts)
 
 
+@pytest.mark.parametrize(
+    ("account", "change"),
+    [
+        ("bot", "inbox"),
+        ("personal", "drive"),
+        ("personal", "backup"),
+    ],
+)
+def test_microsoft_account_a_flow_or_the_backup_uses_must_be_pinned(
+    tmp_path: Path, account: str, change: str
+) -> None:
+    """R-7.9, D119, D164: a used Microsoft account without a mailbox in microsoft.accounts fails at load.
+
+    ``bot`` is used by the example's Graph inbox; ``personal`` by its OneDrive target and,
+    with no Microsoft flow at all, still by the nightly backup.
+    """
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["microsoft"]["accounts"][account]
+    if change == "backup":
+        document["flows"] = {
+            name: flow for name, flow in document["flows"].items() if name != "work_microsoft"
+        }
+        document["routing"]["rules"] = [
+            rule for rule in document["routing"]["rules"] if rule.get("flow") != "work_microsoft"
+        ]
+        document["microsoft"]["accounts"].pop("bot", None)
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=f"microsoft.accounts has no mailbox for {account}"):
+        load_config(path)
+
+
+def test_microsoft_single_account_without_inbox_rule_loads(tmp_path: Path) -> None:
+    """R-7.9, D164: one pinned ``personal`` account serves the drive, the graph send and the inbox."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["email_inbox"]["account"] = "personal"
+    for sink in flow["sinks"]:
+        if sink["kind"] == "mailer":
+            sink["modes"] = ["graph"]
+    document["microsoft"]["accounts"] = {"personal": "personal@example.com"}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert set(cfg.microsoft.accounts) == {"personal"}
+
+
 def test_microsoft_account_name_not_lowercase_fails() -> None:
     """R-7.9, D164: an account name is a key, so one with an upper-case letter fails."""
     with pytest.raises(ValidationError, match="Bot"):
@@ -434,6 +482,8 @@ def test_gaps_github_repo_in_owner_name_form_loads(repo: str) -> None:
         "a b/c",
         "https://github.com/a/b",
         "-a/b",
+        "a/.",
+        "a/..",
     ],
 )
 def test_gaps_github_repo_that_is_not_owner_name_fails(repo: str) -> None:

@@ -312,12 +312,12 @@ _ACCOUNT_NAME = re.compile(r"^[a-z0-9_]+$")
 
 
 def _account_addresses(value: dict[str, str]) -> dict[str, str]:
-    """R-6.5, R-7.9, D138, D164: an account name is a key and its mailbox one lower-cased address."""
+    """R-6.5, R-7.9, D138, D164: an account name is a key and its mailbox one case-folded address."""
     addresses: dict[str, str] = {}
     for name, address in value.items():
         if _ACCOUNT_NAME.fullmatch(name) is None:
             raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
-        address = address.lower()
+        address = address.casefold()
         if _EMAIL_ADDRESS.fullmatch(address) is None:
             raise ValueError(f"account '{name}' is not an email address")
         addresses[name] = address
@@ -362,7 +362,7 @@ class Microsoft(BaseModel):
     @field_validator("accounts")
     @classmethod
     def _accounts_map_names_to_addresses(cls, value: dict[str, str]) -> dict[str, str]:
-        """R-7.9, D164: each account name is pinned to one lower-cased mailbox address."""
+        """R-7.9, D164: each account name is pinned to one case-folded mailbox address."""
         return _account_addresses(value)
 
 
@@ -384,7 +384,7 @@ class Google(BaseModel):
     @field_validator("accounts")
     @classmethod
     def _accounts_map_names_to_addresses(cls, value: dict[str, str]) -> dict[str, str]:
-        """R-6.5, D138: an account name is a key and its mailbox one lower-cased address."""
+        """R-6.5, D138: an account name is a key and its mailbox one case-folded address."""
         return _account_addresses(value)
 
 
@@ -681,6 +681,14 @@ class GapsGithub(BaseModel):
     labels: list[str]
     daily_write_budget: int
 
+    @field_validator("repo")
+    @classmethod
+    def _repo_name_is_not_a_dot_segment(cls, value: str) -> str:
+        """R-11.5: ``.`` and ``..`` are no repository name; httpx would drop them from the API path."""
+        if value.split("/")[1] in {".", ".."}:
+            raise ValueError(f"gaps.github.repo {value!r} is not owner/name")
+        return value
+
 
 class Gaps(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -790,6 +798,54 @@ def _has_personal_onedrive_sink(flow: Flow) -> bool:
     )
 
 
+#: The Microsoft account flow B files through and the nightly backup uploads with (R-7.1, D119).
+PERSONAL_MICROSOFT_ACCOUNT = "personal"
+#: The mail mode and the inbox provider that go through Microsoft Graph (R-6.5, R-7.6).
+GRAPH_MODE = "graph"
+#: The mail mode that sends through another account's mailbox to the owner's work address (D108).
+INBOX_RULE_MODE = "inbox_rule"
+#: An OneDrive target is this prefix plus the account name (R-7.1).
+ONEDRIVE_TARGET_PREFIX = "onedrive_"
+
+
+def files_accounts(cfg: Config) -> set[str]:
+    """Return the accounts an OneDrive target names across every flow (R-7.1, D98)."""
+    return {
+        target.removeprefix(ONEDRIVE_TARGET_PREFIX)
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+        if isinstance(sink, OneDriveFolderSink)
+        for target in sink.targets
+    }
+
+
+def mail_send_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a Graph mailer sends from across every flow (R-7.6, R-7.7).
+
+    The ``inbox_rule`` mode sends through ``inbox_rule_account``, so that account
+    needs ``Mail.Send`` too (D108).
+    """
+    accounts: set[str] = set()
+    for flow in cfg.flows.values():
+        for sink in flow.sinks:
+            if not isinstance(sink, MailerSink):
+                continue
+            if GRAPH_MODE in sink.modes:
+                accounts.add(sink.account)
+            if INBOX_RULE_MODE in sink.modes:
+                accounts.add(sink.inbox_rule_account)
+    return accounts
+
+
+def mail_read_accounts(cfg: Config) -> set[str]:
+    """Return the accounts a Graph ``email_inbox`` fetcher searches (R-6.5, D98)."""
+    return {
+        flow.email_inbox.account
+        for flow in cfg.flows.values()
+        if flow.email_inbox is not None and flow.email_inbox.provider == GRAPH_MODE
+    }
+
+
 def _google_accounts_in(flow: Flow) -> list[str]:
     """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
     accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
@@ -872,6 +928,18 @@ class Config(BaseModel):
                     raise ValueError(
                         f"flow '{name}' names Google account '{account}' missing from google.accounts"
                     )
+        return self
+
+    @model_validator(mode="after")
+    def _microsoft_accounts_are_pinned(self) -> Self:
+        """R-7.9, D119, D164: every Microsoft account the app signs in has a mailbox in microsoft.accounts.
+
+        ``personal`` always does, because the nightly backup uploads through it.
+        """
+        used = files_accounts(self) | mail_send_accounts(self) | mail_read_accounts(self)
+        missing = sorted((used | {PERSONAL_MICROSOFT_ACCOUNT}) - self.microsoft.accounts.keys())
+        if missing:
+            raise ValueError(f"microsoft.accounts has no mailbox for {', '.join(missing)} (D164)")
         return self
 
     @model_validator(mode="after")

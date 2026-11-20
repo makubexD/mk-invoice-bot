@@ -170,7 +170,7 @@ async def test_refresh_aborts_an_import_past_its_deadline_and_keeps_the_old_rows
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
 ) -> None:
-    """S12.4: an import past ``import_timeout_s`` raises the timeout reason; the old rows survive.
+    """S12.4: an import past ``import_timeout_s`` raises the import timeout reason; the old rows survive.
 
     The download completes before the import deadline starts, and the padrón's
     rows cannot be copied inside one millisecond, so the deadline expires while
@@ -185,7 +185,7 @@ async def test_refresh_aborts_an_import_past_its_deadline_and_keeps_the_old_rows
         with pytest.raises(PadronRefreshError, match="timeout") as raised:
             await refresh_padron(db_pool, http, _cfg(import_timeout_s=TINY_IMPORT_TIMEOUT_S), tmp_path)
 
-    assert raised.value.reason == "timeout"
+    assert raised.value.reason == "import_timeout"
     assert not list((tmp_path / "padron").iterdir())
     async with db_pool.connection() as conn:
         kept = await lookup(conn, FIRST_RUC)

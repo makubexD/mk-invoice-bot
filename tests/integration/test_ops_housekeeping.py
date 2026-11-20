@@ -80,6 +80,7 @@ async def test_housekeep_holds_an_invoice_that_leaves_failed(
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(1):
                     await housekeep(db_pool, tmp_path)
+            assert folder.is_dir()
     finally:
         await blocker.rollback()
         await db_pool.putconn(blocker)
@@ -117,6 +118,70 @@ async def test_housekeep_removes_tmp_folders_of_terminal_and_unknown_invoices(
         assert other_dir.is_dir()
     finally:
         await _delete_invoices(db_pool, [done_id, active_id])
+
+
+async def test_housekeep_does_not_wait_for_a_running_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7: a running invoice's locked row does not hold housekeeping; a DONE folder still goes."""
+    async with db_pool.connection() as conn, conn.transaction():
+        done_id = await _insert_invoice(conn, DONE)
+        active_id = await _insert_invoice(conn, FETCHING_DOCS)
+    tmp = tmp_path / "tmp"
+    done_dir = tmp / str(done_id)
+    active_dir = tmp / str(active_id)
+    for folder in (done_dir, active_dir):
+        folder.mkdir(parents=True)
+    blocker = await db_pool.getconn()
+    try:
+        async with blocker.transaction(force_rollback=True):
+            await blocker.execute("SELECT 1 FROM invoices WHERE id = %s FOR UPDATE", (active_id,))
+            async with asyncio.timeout(5):
+                await housekeep(db_pool, tmp_path)
+
+            assert not done_dir.exists()
+            assert active_dir.is_dir()
+    finally:
+        await blocker.rollback()
+        await db_pool.putconn(blocker)
+        await _delete_invoices(db_pool, [done_id, active_id])
+
+
+@pytest.mark.parametrize("name", ["\u00b2", "9" * 20])
+async def test_housekeep_skips_a_name_that_is_not_an_invoice_id(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, name: str
+) -> None:
+    """R-9.7: a non-ASCII digit or an id past bigint is left alone and does not stop housekeeping."""
+    odd = tmp_path / "tmp" / name
+    unknown_dir = tmp_path / "tmp" / str(UNKNOWN_ID)
+    for folder in (odd, unknown_dir):
+        folder.mkdir(parents=True)
+
+    await housekeep(db_pool, tmp_path)
+
+    assert odd.is_dir()
+    assert not unknown_dir.exists()
+
+
+async def test_housekeep_skips_a_folder_it_cannot_remove(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7: a folder whose removal fails is kept, and the next stale folder still goes."""
+    tmp = tmp_path / "tmp"
+    stuck = tmp / str(UNKNOWN_ID)
+    locked = stuck / "locked"
+    locked.mkdir(parents=True)
+    (locked / "file").write_text("x", encoding="utf-8")
+    locked.chmod(0o500)
+    other = tmp / str(UNKNOWN_ID + 1)
+    other.mkdir()
+    try:
+        await housekeep(db_pool, tmp_path)
+
+        assert stuck.is_dir()
+        assert not other.exists()
+    finally:
+        locked.chmod(0o700)
 
 
 async def test_housekeep_skips_a_symlink_named_like_an_invoice(

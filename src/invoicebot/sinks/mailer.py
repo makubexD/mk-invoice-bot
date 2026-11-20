@@ -209,7 +209,7 @@ def mail_modes(
     cfg: Config,
     dry_run: DryRun,
     graph: GraphSend,
-    bot_mailer: Mailer,
+    bot_mailer: Mailer | None,
     laptop: LaptopOutlook | None,
 ) -> Mapping[str, MailMode]:
     """Return the configured modes, closing real sending when it is off (R-7.7, D89).
@@ -217,13 +217,13 @@ def mail_modes(
     With ``mail.send_enabled`` false, ``graph``, ``inbox_rule`` and
     ``laptop_outlook`` map to the dry run, so no mode can send real mail outside
     production. ``inbox_rule`` is available only when ``mail.owner_work_address``
-    is set, and it sends through ``bot_mailer``, the bot mailbox's mailer (D108).
+    and ``bot_mailer`` are set, and it sends through the bot mailbox's mailer (D108).
     ``laptop_outlook`` is available only when ``laptop`` is given (R-7.14).
     """
     active_graph: MailMode = graph if cfg.mail.send_enabled else dry_run
     modes: dict[str, MailMode] = {"dry_run": dry_run, "graph": active_graph}
     owner_address = cfg.mail.owner_work_address
-    if owner_address is not None:
+    if owner_address is not None and bot_mailer is not None:
         modes["inbox_rule"] = InboxRule(bot_mailer, owner_address) if cfg.mail.send_enabled else dry_run
     if laptop is not None:
         modes["laptop_outlook"] = laptop if cfg.mail.send_enabled else dry_run

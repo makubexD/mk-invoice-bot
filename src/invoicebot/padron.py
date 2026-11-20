@@ -106,12 +106,22 @@ def open_member(zip_path: Path) -> Iterator[TextIO]:
 async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportResult:
     """Stream ``zip_path`` into ``padron`` through a staging table (R-2.5).
 
-    The staging table is dropped and recreated from ``padron``, so this replaces
-    every row. The caller's connection must be in autocommit: the COPY commits on
-    its own, and the swap runs in one transaction. A failure while copying leaves
-    the old padrón in place, and so does a new one under ``MIN_KEPT_SHARE`` of the
-    current rows, which raises :class:`PadronShrankError`. Each batch of rows is its own ``COPY``, whose end
-    flushes libpq's send buffer, so memory stays flat.
+    :func:`load_staging`, then :func:`swap_staging`. The caller's connection must
+    be in autocommit.
+    """
+    result = await load_staging(conn, zip_path)
+    await swap_staging(conn)
+    return result
+
+
+async def load_staging(conn: AsyncConnection[Any], zip_path: Path) -> ImportResult:
+    """Copy ``zip_path`` into a fresh ``padron_staging`` table, leaving ``padron`` untouched (R-2.5).
+
+    The staging table is dropped and recreated from ``padron``. The caller's
+    connection must be in autocommit: each batch of rows is its own ``COPY``,
+    whose end flushes libpq's send buffer, so memory stays flat. A new padrón
+    under ``MIN_KEPT_SHARE`` of the current rows drops the staging table and
+    raises :class:`PadronShrankError`.
     """
     skipped = Skipped()
     imported = 0
@@ -126,11 +136,15 @@ async def import_padron(conn: AsyncConnection[Any], zip_path: Path) -> ImportRes
                     await copy.write_row((int(ruc), razon_social, estado, condicion))
                     imported += 1
     await _refuse_if_shrunk(conn, imported)
+    return ImportResult(rows=imported, skipped=skipped.count)
+
+
+async def swap_staging(conn: AsyncConnection[Any]) -> None:
+    """Replace ``padron`` with ``padron_staging`` in one transaction (R-2.5)."""
     async with conn.transaction():
         await conn.execute("DROP TABLE padron")
         await conn.execute("ALTER TABLE padron_staging RENAME TO padron")
         await conn.execute("ALTER INDEX padron_staging_pkey RENAME TO padron_pkey")
-    return ImportResult(rows=imported, skipped=skipped.count)
 
 
 async def _refuse_if_shrunk(conn: AsyncConnection[Any], imported: int) -> None:

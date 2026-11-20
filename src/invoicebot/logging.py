@@ -69,8 +69,10 @@ _OUTPUT_FIELDS = frozenset({"ts", "level", "event", "logger", "exc", *EXTRA_FIEL
 #: ``extra=`` keys whose values are personal data (R-9.5, R-9.12): a sender id is logged only as a
 #: hash, and names, phone numbers, RUCs and e-mail addresses are not logged at all.
 _PERSONAL_KEYS = frozenset(
-    {"sender", "sender_id", "phone", "wa_id", "ruc", "razon_social", "email", "nombre"}
+    {"sender", "sender_id", "phone", "wa_id", "ruc", "dni", "razon_social", "email", "nombre"}
 )
+#: One word of a key: a run of lower-case letters or digits, an upper-case run, or a capitalized word.
+_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 
 #: Replacement for a value under a personal-data key (R-9.5, R-9.12).
 _PERSONAL_REDACTED = "[redacted]"
@@ -109,13 +111,14 @@ def _format_exception(exc_info: Any) -> str:
 
 
 def _is_personal(key: str) -> bool:
-    """True when ``key``, or one ``_``-separated part of it, names personal data (R-9.12).
+    """True when ``key`` holds a personal key as a run of its words (R-9.12).
 
-    Parts match whole, so ``buyer_ruc`` and ``phone_number`` match while
-    ``instructions`` does not.
+    Words are split at ``_``, ``-`` and camelCase humps, and match whole, so
+    ``buyer_ruc``, ``phoneNumber``, ``wa-id`` and ``emisor_razon_social`` match
+    while ``instructions`` does not.
     """
-    lowered = key.lower()
-    return lowered in _PERSONAL_KEYS or not _PERSONAL_KEYS.isdisjoint(lowered.split("_"))
+    words = "_".join(_KEY_WORD.findall(key)).lower()
+    return any(f"_{personal}_" in f"_{words}_" for personal in _PERSONAL_KEYS)
 
 
 def _scrub(value: Any, secret_re: re.Pattern[str] | None, depth: int = 0) -> Any:
@@ -124,7 +127,9 @@ def _scrub(value: Any, secret_re: re.Pattern[str] | None, depth: int = 0) -> Any
         return _NESTED
     if isinstance(value, dict):
         return {
-            key: _PERSONAL_REDACTED if _is_personal(str(key)) else _scrub(item, secret_re, depth + 1)
+            _redact(str(key), secret_re): (
+                _PERSONAL_REDACTED if _is_personal(str(key)) else _scrub(item, secret_re, depth + 1)
+            )
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):

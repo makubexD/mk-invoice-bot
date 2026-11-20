@@ -1,7 +1,7 @@
 """The weekly padrón refresh: download SUNAT's ZIP and import it (S12.4, D159).
 
 The download is capped by ``padron.max_mb`` and by ``padron.download_timeout_s``
-as a whole; the import (unzip, COPY and swap) by ``padron.import_timeout_s``.
+as a whole; the unzip and COPY by ``padron.import_timeout_s``, the swap after it.
 The ZIP is deleted whatever the outcome, so a failed refresh leaves neither a
 partial file nor a stale one. A non-200 answer, an oversized body, a download or
 import that runs past its deadline and a padrón that shrank by half raise
@@ -19,7 +19,7 @@ from typing import Literal
 import httpx
 
 from invoicebot.config.models import Padron
-from invoicebot.padron import ImportResult, PadronShrankError, import_padron
+from invoicebot.padron import ImportResult, PadronShrankError, load_staging, swap_staging
 from invoicebot.store.db import Pool
 
 logger = logging.getLogger(__name__)
@@ -31,11 +31,11 @@ PADRON_DIRECTORY = "padron"
 ZIP_NAME = "padron_reducido_ruc.zip"
 
 #: The stage that failed; the daily loop logs it as the warning's reason.
-PadronReason = Literal["status", "size", "timeout", "rows"]
+PadronReason = Literal["status", "size", "timeout", "import_timeout", "rows"]
 
 
 class PadronRefreshError(Exception):
-    """The padrón refresh failed; ``reason`` says whether the status, size, deadline or rows did."""
+    """The padrón refresh failed; ``reason`` says whether the status, size, a deadline or the rows did."""
 
     def __init__(self, reason: PadronReason) -> None:
         super().__init__(f"padron refresh failed: {reason}")
@@ -49,11 +49,12 @@ async def refresh_padron(
 
     The ZIP streams to ``<data_dir>/padron/padron_reducido_ruc.zip`` and is
     removed in ``finally``. The whole download, not one read, is bounded by
-    ``padron_cfg.download_timeout_s``, and the whole import, unzip, COPY and
-    swap, by ``padron_cfg.import_timeout_s``; a cancelled import swaps nothing,
-    so the old padrón stays. The import runs on an autocommit connection, as the
-    script does, because ``import_padron`` commits its COPY batches itself. Logs
-    one INFO line with the imported and skipped row counts.
+    ``padron_cfg.download_timeout_s``, and the unzip and COPY into the staging
+    table by ``padron_cfg.import_timeout_s``. The swap runs after that deadline,
+    so a deadline never fires mid-swap: a late import swaps nothing and the old
+    padrón stays. The import runs on an autocommit connection, as the script
+    does, because the COPY batches commit on their own. Logs one INFO line with
+    the imported and skipped row counts.
     """
     zip_path = data_dir / PADRON_DIRECTORY / ZIP_NAME
     zip_path.parent.mkdir(parents=True, exist_ok=True)
@@ -66,14 +67,7 @@ async def refresh_padron(
             if not download_deadline.expired():
                 raise
             raise PadronRefreshError("timeout") from err
-        import_deadline = asyncio.timeout(padron_cfg.import_timeout_s)
-        try:
-            async with import_deadline:
-                result = await _import(pool, zip_path)
-        except TimeoutError as err:
-            if not import_deadline.expired():
-                raise
-            raise PadronRefreshError("timeout") from err
+        result = await _import(pool, zip_path, padron_cfg.import_timeout_s)
     finally:
         zip_path.unlink(missing_ok=True)
     logger.info("padron refreshed", extra={"rows": result.rows, "skipped": result.skipped})
@@ -95,13 +89,27 @@ async def _download(http: httpx.AsyncClient, url: str, zip_path: Path, max_mb: i
                 zip_file.write(chunk)
 
 
-async def _import(pool: Pool, zip_path: Path) -> ImportResult:
-    """Run ``import_padron`` in autocommit, as ``scripts/import_padron.py`` does (S12.4)."""
+async def _import(pool: Pool, zip_path: Path, timeout_s: float) -> ImportResult:
+    """Load the staging table within ``timeout_s``, then swap it in, in autocommit (S12.4).
+
+    A connection a cancelled COPY left broken goes back to the pool as it is; the
+    pool discards it.
+    """
     async with pool.connection() as conn:
         await conn.set_autocommit(True)
         try:
-            return await import_padron(conn, zip_path)
+            deadline = asyncio.timeout(timeout_s)
+            try:
+                async with deadline:
+                    result = await load_staging(conn, zip_path)
+            except TimeoutError as err:
+                if not deadline.expired():
+                    raise
+                raise PadronRefreshError("import_timeout") from err
+            await swap_staging(conn)
+            return result
         except PadronShrankError as err:
             raise PadronRefreshError("rows") from err
         finally:
-            await conn.set_autocommit(False)
+            if not conn.broken:
+                await conn.set_autocommit(False)

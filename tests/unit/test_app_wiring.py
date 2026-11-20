@@ -9,6 +9,7 @@ from datetime import time
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pyrage
 import pytest
 import yaml
@@ -22,6 +23,7 @@ from invoicebot.app import (
     DailyRuns,
     _check_reload_candidate,
     _daily_tasks,
+    _deliver_handlers,
     _deliver_registry,
     _fetch_schedules,
     _github_secrets,
@@ -139,6 +141,7 @@ def _with_laptop_mode(tmp_path: Path) -> Config:
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
+    document["microsoft"]["accounts"][flow["email_inbox"]["account"]] = "invoices@example.com"
     for candidate in document["flows"].values():
         for sink in candidate["sinks"]:
             if sink["kind"] == "mailer":
@@ -172,6 +175,7 @@ def _without_google(tmp_path: Path) -> Config:
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
+    document["microsoft"]["accounts"][flow["email_inbox"]["account"]] = "invoices@example.com"
     path = tmp_path / "no-google.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return load_config(path)
@@ -575,3 +579,27 @@ async def test_a_reload_task_that_raises_is_logged(caplog: pytest.LogCaptureFixt
         _log_reload_failure(task)
 
     assert [record.getMessage() for record in caplog.records] == ["config reload failed"]
+
+
+async def test_single_microsoft_account_builds_flow_b_without_the_bot_mailbox(tmp_path: Path) -> None:
+    """R-7.1, D164: a config that pins only ``personal`` wires flow B and never asks for ``bot``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["email_inbox"]["account"] = "personal"
+    for sink in flow["sinks"]:
+        if sink["kind"] == "mailer":
+            sink["modes"] = ["graph"]
+    document["microsoft"]["accounts"] = {"personal": "personal@example.com"}
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = load_config(config_path)
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(pyrage.x25519.Identity.generate()) + "\n", encoding="utf-8")
+    settings = Settings(age_identity_path=identity_path, data_dir=tmp_path)
+
+    async with httpx.AsyncClient() as http:
+        handlers = _deliver_handlers(
+            settings, cfg, cast(Any, None), http, cast(Any, None), _RecordingStore({})
+        )
+
+    assert handlers is not None

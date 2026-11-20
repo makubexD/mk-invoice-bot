@@ -27,10 +27,10 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_ADAPTER, GoogleTokens
 from invoicebot.auth.providers import (
     GMAIL_PROVIDER,
-    GRAPH_MODE,
     build_token_provider,
     google_accounts,
     google_token_path,
+    microsoft_accounts,
     scopes_for,
 )
 from invoicebot.channels.profiles import ProfileIndex
@@ -40,6 +40,8 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
+    GRAPH_MODE,
+    PERSONAL_MICROSOFT_ACCOUNT,
     Config,
     Flow,
     FlowInbox,
@@ -137,8 +139,8 @@ WHATSAPP_ADAPTER = "whatsapp"
 WHATSAPP_SECRETS = frozenset(
     {"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token", "sender_hash_key"}
 )
-#: The Microsoft account flow B files through (R-7.1); config pins it to ``personal``.
-MICROSOFT_ACCOUNT = "personal"
+#: The Microsoft account flow B files through and the backup uploads with (R-7.1, D119).
+MICROSOFT_ACCOUNT = PERSONAL_MICROSOFT_ACCOUNT
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
 BOT_ACCOUNT = "bot"
 #: The adapter and mail mode that hands the mail to the laptop agent (R-7.14, D108).
@@ -562,8 +564,12 @@ def _deliver_handlers(
     provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
     drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
-    bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
-    bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
+    # Only a flow that lists ``inbox_rule`` signs the bot mailbox in; a single-account
+    # config never pins it (D164).
+    bot_mailer: GraphMailer | None = None
+    if BOT_ACCOUNT in microsoft_accounts(cfg):
+        bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
+        bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
     laptop_flows = _laptop_flow_ids(cfg)
     found = _laptop_root_and_key(cfg, store)
     laptop: LaptopOutlook | None = None
