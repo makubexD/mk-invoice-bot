@@ -33,6 +33,7 @@ from invoicebot.auth.providers import (
     microsoft_accounts,
     scopes_for,
 )
+from invoicebot.channels.base import MediaSource
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -317,7 +318,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         # same token file would race on a refresh (D135).
         google_tokens = _google_tokens(settings, cfg, http, store)
         handlers = {
-            DOWNLOAD_STEP: make_download_handler(pool, client, settings.data_dir, cfg.limits.media),
+            DOWNLOAD_STEP: make_download_handler(
+                pool, _media_sources(client), settings.data_dir, cfg.limits.media
+            ),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -345,7 +348,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             ATTACH_STEP: make_attach_handler(
                 pool,
                 cfg,
-                {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)},
+                _media_sources(client),
                 settings.data_dir,
                 cfg.limits.media,
             ),
@@ -509,6 +512,11 @@ def _load_secrets(settings: Settings) -> SecretStore:
     if settings.secrets_path is None or settings.age_identity_path is None:
         raise ValueError("SECRETS_PATH and AGE_IDENTITY_PATH must both be set")
     return SecretStore.load(settings.secrets_path, settings.age_identity_path)
+
+
+def _media_sources(client: WhatsAppClient) -> dict[str, MediaSource]:
+    """Return the media source of each channel, keyed by channel name (R-1.4)."""
+    return {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
 
 
 def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
