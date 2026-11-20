@@ -34,6 +34,7 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.channels.base import MediaSource
+from invoicebot.channels.console import CONSOLE, ConsoleMediaSource, console_transport
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
@@ -44,6 +45,7 @@ from invoicebot.config.models import (
     GRAPH_MODE,
     PERSONAL_MICROSOFT_ACCOUNT,
     Config,
+    ConsoleChannel,
     Flow,
     FlowInbox,
     GoogleDriveSink,
@@ -319,7 +321,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         google_tokens = _google_tokens(settings, cfg, http, store)
         handlers = {
             DOWNLOAD_STEP: make_download_handler(
-                pool, _media_sources(client), settings.data_dir, cfg.limits.media
+                pool, _media_sources(cfg, client, settings.data_dir), settings.data_dir, cfg.limits.media
             ),
             EXTRACT_STEP: make_extract_handler(
                 pool,
@@ -348,7 +350,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             ATTACH_STEP: make_attach_handler(
                 pool,
                 cfg,
-                _media_sources(client),
+                _media_sources(cfg, client, settings.data_dir),
                 settings.data_dir,
                 cfg.limits.media,
             ),
@@ -369,6 +371,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
             ),
             **_github_transports(cfg, github_app, http, pool),
+            **_console_transports(cfg),
         }
         sender = OutboxSender(pool, transports)
         drive = _personal_drive(settings, cfg, http)
@@ -514,9 +517,24 @@ def _load_secrets(settings: Settings) -> SecretStore:
     return SecretStore.load(settings.secrets_path, settings.age_identity_path)
 
 
-def _media_sources(client: WhatsAppClient) -> dict[str, MediaSource]:
-    """Return the media source of each channel, keyed by channel name (R-1.4)."""
-    return {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
+def _media_sources(cfg: Config, client: WhatsAppClient, data_dir: Path) -> dict[str, MediaSource]:
+    """Return the media source of each configured channel, keyed by channel name (R-1.4, D165)."""
+    sources: dict[str, MediaSource] = {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
+    if _console_channel(cfg) is not None:
+        sources[CONSOLE] = ConsoleMediaSource(data_dir)
+    return sources
+
+
+def _console_channel(cfg: Config) -> ConsoleChannel | None:
+    """Return the configured console channel, if any (D165)."""
+    return next((channel for channel in cfg.channels if isinstance(channel, ConsoleChannel)), None)
+
+
+def _console_transports(cfg: Config) -> dict[str, Transport]:
+    """Return the console outbox transport, or none without a console channel (D165)."""
+    if _console_channel(cfg) is None:
+        return {}
+    return {CONSOLE: console_transport()}
 
 
 def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
