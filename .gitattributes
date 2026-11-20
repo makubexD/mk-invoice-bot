@@ -1,0 +1,2 @@
+# Every text file is LF in the work tree on every OS (D163); git detects binaries itself.
+* text=auto eol=lf

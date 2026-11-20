@@ -247,18 +247,26 @@ async def _run_helper(
             helper exits non-zero, prints more than ``MAX_HELPER_OUTPUT_BYTES`` or prints
             malformed JSON.
     """
-    env = {
+    data = await asyncio.to_thread(_read_capped, Path(path), max_bytes_for(kind, media))
+    argv = [*helper_prefix, *helper_argv(kind, extraction_cfg, media, rules_path)]
+    env = extract_helper_env(media)
+    async with HEAVY:
+        stdout = await run_helper(argv, data, env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
+    return _parse_result(stdout)
+
+
+def extract_helper_env(media: MediaLimits) -> dict[str, str]:
+    """Return the extract helper's minimal environment (R-1.11, R-9.1)."""
+    return {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
         # Cap the pixels OpenCV may decode, so a decompression bomb is refused early (R-1.11).
         "OPENCV_IO_MAX_IMAGE_PIXELS": str(media.max_megapixels * PIXELS_PER_MEGAPIXEL),
         # One Tesseract thread per job on the 2 GB host.
         "OMP_THREAD_LIMIT": "1",
+        # OpenBLAS reserves address space per core when numpy loads; on a 20-core host that
+        # passed the helper's 3 GiB RLIMIT_AS before any byte was read (R-9.1, 9f trial).
+        "OPENBLAS_NUM_THREADS": "1",
     }
-    data = await asyncio.to_thread(_read_capped, Path(path), max_bytes_for(kind, media))
-    argv = [*helper_prefix, *helper_argv(kind, extraction_cfg, media, rules_path)]
-    async with HEAVY:
-        stdout = await run_helper(argv, data, env, extraction_cfg.helper_timeout_s, MAX_HELPER_OUTPUT_BYTES)
-    return _parse_result(stdout)
 
 
 def _read_capped(path: Path, max_bytes: int) -> bytes:

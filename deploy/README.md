@@ -224,6 +224,96 @@ The dev stack (project `invoicebot`, port `5432`, dev password) stays for its
 Postgres and the tests. The live Postgres publishes no port. Never point
 `TEST_DATABASE_URL` at the live project.
 
+## Windows through WSL2 (D141, D163)
+
+There is no native Windows port. On Windows the same Linux stack runs inside a
+WSL2 Ubuntu 24.04 distro with rootless Podman, so every section above applies
+unchanged once you are inside the distro. Docker Desktop is not supported:
+Docker's default seccomp profile blocks `unshare`, so the app refuses to start
+(see [Helper sandbox](#4-helper-sandbox-d147)).
+
+### Install WSL2
+
+From an administrator PowerShell, then reboot and create the Linux user when
+the distro first opens:
+
+```powershell
+wsl --install -d Ubuntu-24.04
+```
+
+Turn on systemd inside the distro, which Podman's restart unit and Tailscale
+need. Add this to `/etc/wsl.conf`:
+
+```ini
+[boot]
+systemd=true
+```
+
+Then run `wsl --shutdown` from PowerShell and open the distro again.
+`systemctl is-system-running` should print `running` or `degraded`.
+
+### Inside the distro
+
+```sh
+sudo apt update
+sudo apt install podman pipx git curl
+pipx install podman-compose==1.6.0
+pipx ensurepath && exec bash -l
+podman-compose --version          # 1.6.0
+```
+
+Do not use the apt `podman-compose` (1.0.6 on Ubuntu 24.04): it cannot read the
+`!reset` tags in `compose.live.yml`, and the live deploy fails.
+
+Install `uv` from its documentation (https://docs.astral.sh/uv/). Clone the
+repository into your Linux home (`~/`), never under `/mnt/c`: Linux git keeps
+LF line endings and file modes there, and the Windows file system is much
+slower. From here, steps 1 to 6 of
+[Local MVP host](#local-mvp-host-d141-d146d148) apply unchanged, Tailscale
+included: install the Linux Tailscale inside the distro, not the Windows app.
+
+`curl -s localhost:8080/health` also answers from Windows PowerShell, because
+WSL2 forwards `localhost` to the distro.
+
+### Start on boot
+
+Windows starts the WSL VM only when something asks for it, and stops the
+distro once no Windows process is attached to it. Keep linger and
+`podman-restart.service` from step 3, and add a batch file to your Startup
+folder that starts the distro at log-on and stays attached. It needs no admin
+rights (a log-on scheduled task does). From PowerShell:
+
+```powershell
+$bat = "$env:LOCALAPPDATA\invoicebot-wsl.cmd"
+@'
+@echo off
+timeout /t 30 /nobreak >nul
+wsl.exe -d Ubuntu-24.04 --exec sleep infinity
+'@ | Set-Content -Encoding ascii $bat
+$lnk = (New-Object -ComObject WScript.Shell).CreateShortcut(
+    "$([Environment]::GetFolderPath('Startup'))\invoicebot WSL.lnk")
+$lnk.TargetPath = $bat
+$lnk.WindowStyle = 7
+$lnk.Save()
+```
+
+The 30 s wait lets the WSL service come up first. At log-on a blank
+"invoicebot WSL" window opens (Windows Terminal ignores "minimized"): leave it
+open, since closing it stops the bot. On a busy log-on Windows may run Startup
+programs several minutes late; in the 9f trial the bot answered about 7
+minutes after boot (`specs/spikes/windows.md`).
+
+### Memory
+
+The stack's limits (app `900m`, Postgres `300m`) fit inside WSL2's default of
+half the host's RAM. Only on a machine with less than 4 GB, raise the VM's
+share in `%UserProfile%\.wslconfig`:
+
+```ini
+[wsl2]
+memory=2GB
+```
+
 ## What the deploy does
 
 1. Starts `postgres` and waits until it is healthy.
