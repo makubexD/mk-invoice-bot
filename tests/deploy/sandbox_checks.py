@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from invoicebot.config.loader import load_config
-from invoicebot.pipeline.extract import PIXELS_PER_MEGAPIXEL, helper_argv
+from invoicebot.pipeline.extract import extract_helper_env, helper_argv
 from invoicebot.sandbox import helper_prefixes, hidden_dirs
 
 #: The dir the container mounts the throwaway config into; the prefix hides this parent.
@@ -68,12 +68,7 @@ def _browser_env(tmpdir: str) -> dict[str, str]:
 
 def _image_env() -> dict[str, str]:
     """Return the env :func:`invoicebot.pipeline.extract._run_helper` gives the helper."""
-    config = load_config(CONFIG / "example.yaml")
-    return {
-        **_base_env(),
-        "OPENCV_IO_MAX_IMAGE_PIXELS": str(config.limits.media.max_megapixels * PIXELS_PER_MEGAPIXEL),
-        "OMP_THREAD_LIMIT": "1",
-    }
+    return extract_helper_env(load_config(CONFIG / "example.yaml").limits.media)
 
 
 def _run(

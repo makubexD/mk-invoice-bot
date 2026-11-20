@@ -45,6 +45,7 @@ from invoicebot.pipeline.extract import (
     ROUTE_STEP,
     _HelperResult,
     _parse_result,
+    extract_helper_env,
     make_extract_handler,
 )
 from invoicebot.pipeline.gaps import RULE_GAP_ADMIN, GapContext
@@ -53,6 +54,15 @@ from invoicebot.queue.jobs import Job
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+#: Prints the helper's address space once its modules are loaded, before it reads any input.
+HELPER_IMPORT_VMSIZE_SCRIPT = (
+    "import cv2, invoicebot.extract.__main__\n"
+    "cv2.setNumThreads(0)\n"
+    "print(next(l.split()[1] for l in open('/proc/self/status') if l.startswith('VmSize:')))\n"
+)
+#: The helper caps itself at 3 GiB (RLIMIT_AS); with one OpenBLAS thread it loads in about 0.3 GiB.
+HELPER_IMPORT_MAX_KIB = 1024 * 1024
 
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
@@ -1119,3 +1129,21 @@ async def test_malformed_helper_output_drops_the_pydantic_cause() -> None:
 
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
+
+
+async def test_extract_helper_env_keeps_import_address_space_independent_of_cores() -> None:
+    """R-9.1: under its env the helper loads in under 1 GiB, so many cores cannot pass its 3 GiB cap."""
+    media = load_config(EXAMPLE_CONFIG).limits.media
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-P",
+        "-c",
+        HELPER_IMPORT_VMSIZE_SCRIPT,
+        env=extract_helper_env(media),
+        stdout=asyncio.subprocess.PIPE,
+    )
+    async with asyncio.timeout(60):
+        stdout, _ = await process.communicate()
+
+    assert process.returncode == 0
+    assert int(stdout) < HELPER_IMPORT_MAX_KIB
