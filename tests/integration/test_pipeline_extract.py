@@ -61,8 +61,9 @@ HELPER_IMPORT_VMSIZE_SCRIPT = (
     "cv2.setNumThreads(0)\n"
     "print(next(l.split()[1] for l in open('/proc/self/status') if l.startswith('VmSize:')))\n"
 )
-#: The helper caps itself at 3 GiB (RLIMIT_AS); with one OpenBLAS thread it loads in about 0.3 GiB.
-HELPER_IMPORT_MAX_KIB = 1024 * 1024
+#: The helper caps itself at 3 GiB (RLIMIT_AS). With one OpenBLAS thread it loads in about 312 MiB and each
+#: extra thread adds about 170 MiB, so this bound fails without the pin on any host with two or more cores.
+HELPER_IMPORT_MAX_KIB = 448 * 1024
 
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
