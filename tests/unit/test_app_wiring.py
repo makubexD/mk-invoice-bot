@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import time
 from pathlib import Path
 from typing import Any, cast
@@ -24,19 +24,23 @@ from invoicebot.app import (
     _daily_tasks,
     _deliver_registry,
     _fetch_schedules,
+    _github_secrets,
     _google_deliver_handler,
     _google_secrets,
     _google_tokens,
+    _laptop_secrets,
     _log_reload_failure,
     _secret_problem,
     _sol_fetcher,
+    _sol_secrets,
     _validation_handlers,
     _validation_secrets,
+    _whatsapp_secrets,
 )
 from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
-from invoicebot.fetchers.sunat_sol import SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
@@ -303,6 +307,23 @@ def test_google_secret_view_declares_only_the_client_secret() -> None:
     assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
     assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
     assert not view.enabled
+
+
+@pytest.mark.parametrize(
+    ("view", "keys"),
+    [
+        (_whatsapp_secrets, WHATSAPP_SECRETS),
+        (_github_secrets, {GITHUB_APP_PRIVATE_KEY}),
+        (_laptop_secrets, {LAPTOP_AGENT_KEY}),
+        (_sol_secrets, SECRETS),
+    ],
+)
+def test_feature_secret_view_is_enabled_only_with_every_key(
+    view: Callable[[SecretStore], Secrets], keys: Iterable[str]
+) -> None:
+    """R-9.10: each feature's view is enabled with all its keys and disabled without them."""
+    assert view(SecretStore(dict.fromkeys(keys, "synthetic-value"))).enabled
+    assert not view(SecretStore({})).enabled
 
 
 def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
