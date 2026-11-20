@@ -138,3 +138,30 @@ warning in the logs, with its reason.
    `sunat.padron.max_mb`. `status` means SUNAT did not answer 200.
 3. For a ZIP you downloaded yourself, copy it in with `podman cp`, then run
    `podman exec "$APP" python scripts/import_padron.py /data/<file>.zip`.
+
+## 9. Rehearse without WhatsApp (D165)
+
+While Meta verification is pending, the dev-only `console` channel runs the same intake as the webhook. Its replies
+stay in the outbox and are never sent anywhere. Config load refuses it with `env: production`.
+
+1. Enable it: add `- { kind: console, profile: <owner profile> }` under `channels` in the live config, then
+   **reload**.
+2. Send a file. Its bytes come from stdin, and the extension picks the kind (`.jpg`, `.jpeg`, `.png`, `.pdf`,
+   `.xml`):
+
+   ```sh
+   podman exec -i "$APP" invoicebot rehearse send --name f.jpg < f.jpg
+   ```
+
+   It prints `intake: <result>` and the invoice id. A text or command: `rehearse send --text "/ayuda"`.
+
+3. Read the bot's replies. The last line is `next: --after <id>`; pass it back to see only newer rows:
+
+   ```sh
+   podman exec "$APP" invoicebot rehearse replies --after <id>
+   ```
+
+   A reply with buttons lists them as `[<id>] <title>`.
+
+4. Press a button: `podman exec "$APP" invoicebot rehearse send --button <id>`.
+5. When 9d2 `live-chat` starts, remove the `console` line from the live config and **reload**.
