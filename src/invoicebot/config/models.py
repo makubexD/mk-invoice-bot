@@ -661,7 +661,8 @@ class GapsGithub(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool
-    repo: str
+    #: R-11.5: the GitHub repository as owner/name.
+    repo: str = Field(pattern=r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}$")
     app_id: int
     installation_id: int
     labels: list[str]

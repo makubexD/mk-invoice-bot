@@ -17,6 +17,7 @@ from invoicebot.config.models import (
     ChannelTemplates,
     Config,
     FlowInbox,
+    GapsGithub,
     GoogleDriveSink,
     GoogleSheetsSink,
     Padron,
@@ -364,6 +365,50 @@ def test_unknown_digest_kind_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="BOGUS"):
         load_config(path)
+
+
+@pytest.mark.parametrize("repo", ["makubexD/mk-invoice-bot", "a/b", "org-1/repo.name_2"])
+def test_gaps_github_repo_in_owner_name_form_loads(repo: str) -> None:
+    """R-11.5: ``gaps.github.repo`` accepts a GitHub repository written as owner/name."""
+    github = GapsGithub.model_validate(
+        {
+            "enabled": True,
+            "repo": repo,
+            "app_id": 0,
+            "installation_id": 0,
+            "labels": ["gap"],
+            "daily_write_budget": 20,
+        }
+    )
+
+    assert github.repo == repo
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "mk-invoice-bot",
+        "a/b/c",
+        "a/",
+        "/b",
+        "a b/c",
+        "https://github.com/a/b",
+        "-a/b",
+    ],
+)
+def test_gaps_github_repo_that_is_not_owner_name_fails(repo: str) -> None:
+    """R-11.5: anything but ``owner/name`` is refused before an issue URL is built from it."""
+    with pytest.raises(ValidationError):
+        GapsGithub.model_validate(
+            {
+                "enabled": True,
+                "repo": repo,
+                "app_id": 0,
+                "installation_id": 0,
+                "labels": ["gap"],
+                "daily_write_budget": 20,
+            }
+        )
 
 
 def test_flow_without_reimbursement_loads_with_none() -> None:
