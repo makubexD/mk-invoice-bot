@@ -145,7 +145,7 @@ Side states and exits (each row names the rule that causes it):
 | ROUTING | BR-R03, BR-R04, BR-E03, any `source=llm` field, or `confirm_mode: always` (BR-S10, D126) | CONFIRMING |
 | ROUTING | The flow is decided and nothing needs asking (D124) | VALIDATING (a `validate` job sends the routed summary) |
 | ROUTING | `unmatched: reject` (BR-R07), or the flow isn't allowed for the profile (BR-R05) | CANCELLED |
-| CONFIRMING | The user confirms / edits | VALIDATING / ROUTING |
+| CONFIRMING | The user answers: confirms, picks, edits (D92) | ROUTING (the answer is stored and the route step runs again; it then moves to VALIDATING) |
 | VALIDATING | `estadoCp` 2 or 4 (BR-V02, BR-V06) | CONFIRM_INVALID |
 | VALIDATING | Any other answer, an outage (BR-V04) or validation off (D124, D125) | FETCHING_DOCS |
 | CONFIRM_INVALID | The user continues / cancels | FETCHING_DOCS / CANCELLED |
@@ -160,7 +160,8 @@ Side states and exits (each row names the rule that causes it):
 | ROUTING (flow B) | Total above `reimbursement_cap` (BR-D06) | CONFIRMING |
 | DELIVERING (flow B) | Every sink done; added to its batch (a batch of one with `per_invoice`, R-7.5) | BATCHED |
 | BATCHED | The batch is `sent` (R-7.8): Graph accepted the email, the laptop wrote its receipt, or the sender tapped [Ya lo envié] | DONE (files purged, `invoice.delivered`) |
-| BATCHED | The email can't be prepared or sent after retries (BR-D03) | stays BATCHED; the batch goes `failed`; `/reprocesar <id>` retries it |
+| BATCHED | The email can't be prepared or sent after retries (BR-D03) | stays BATCHED; the batch goes `failed` |
+| BATCHED (batch `failed`) | `/reprocesar <id>` (S4.9, D96) | DELIVERING (the delivery runs again and re-adds the invoice to a batch) |
 | any non-terminal | `/cancelar`, BR-E05 | CANCELLED |
 | any | A transient error 5 times, or the worker dies twice on the same job (BR-S03) | FAILED |
 | FAILED | `/reprocesar <id>` | FETCHING_DOCS |

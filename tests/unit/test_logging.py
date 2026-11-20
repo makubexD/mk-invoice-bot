@@ -193,6 +193,99 @@ def test_non_personal_extra_key_is_written(log_stream: io.StringIO) -> None:
     assert _records(log_stream)[-1]["reason"] == "status"
 
 
+def test_personal_key_inside_a_longer_name_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: an extra= key with a personal part, such as buyer_ruc, is written as [redacted]."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"buyer_ruc": "20000000001"})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["buyer_ruc"] == "[redacted]"
+    assert "20000000001" not in output
+
+
+def test_personal_key_as_a_later_part_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a personal key used as the second part of the name, such as phone_number, matches."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"phone_number": "51999999999"})
+
+    assert _records(log_stream)[-1]["phone_number"] == "[redacted]"
+
+
+@pytest.mark.parametrize(
+    "key", ["phoneNumber", "wa-id", "senderId", "emisor_razon_social", "razonSocial", "buyer_dni"]
+)
+def test_personal_key_in_another_spelling_is_redacted(log_stream: io.StringIO, key: str) -> None:
+    """R-9.12: camelCase, hyphenated and multi-word personal keys match as a run of words."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={key: "51999999999"})
+
+    assert _records(log_stream)[-1][key] == "[redacted]"
+
+
+def test_non_string_dict_key_is_written_as_text(log_stream: io.StringIO) -> None:
+    """R-9.12: a tuple or number key is turned into text, so the line is still written."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": {(1, 2): "a", 3: "b"}})
+
+    assert _records(log_stream)[-1]["payload"] == {"(1, 2)": "a", "3": "b"}
+
+
+def test_personal_key_inside_a_dict_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a dict value is scrubbed key by key instead of being stringified."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": {"ruc": "20000000001", "count": 3}})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "count": 3}
+    assert "20000000001" not in output
+
+
+def test_personal_key_inside_a_list_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a list value is scrubbed item by item instead of being stringified."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"items": [{"email": "a@example.com"}]})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["items"] == [{"email": "[redacted]"}]
+    assert "a@example.com" not in output
+
+
+def test_personal_part_redacts_a_count_under_that_key(log_stream: io.StringIO) -> None:
+    """R-9.12: a key part matches whole: ``ruc_count`` is redacted, ``instructions`` is not."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"reason": "status", "ruc_count": 4, "instructions": "x"}
+    )
+
+    record = _records(log_stream)[-1]
+    assert record["reason"] == "status"
+    assert record["ruc_count"] == "[redacted]"
+    assert record["instructions"] == "x"
+
+
+def test_value_nested_past_the_cap_becomes_nested(log_stream: io.StringIO) -> None:
+    """R-9.12: a value nested deeper than five levels is written as [nested]."""
+    configure_logging(stream=log_stream)
+    nested: Any = "deep"
+    for _ in range(6):
+        nested = {"level": nested}
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": nested})
+
+    value = _records(log_stream)[-1]["payload"]
+    for _ in range(5):
+        value = value["level"]
+    assert value == "[nested]"
+    assert "deep" not in log_stream.getvalue()
+
+
 def test_extra_number_stays_a_number(log_stream: io.StringIO) -> None:
     """R-9.5: an extra= int value is emitted as a JSON number, not a string."""
     configure_logging(stream=log_stream)

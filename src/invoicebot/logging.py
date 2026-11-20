@@ -68,10 +68,20 @@ _OUTPUT_FIELDS = frozenset({"ts", "level", "event", "logger", "exc", *EXTRA_FIEL
 
 #: ``extra=`` keys whose values are personal data (R-9.5, R-9.12): a sender id is logged only as a
 #: hash, and names, phone numbers, RUCs and e-mail addresses are not logged at all.
-_PERSONAL_KEYS = frozenset({"sender", "sender_id", "phone", "wa_id", "ruc", "razon_social", "email", "name"})
+_PERSONAL_KEYS = frozenset(
+    {"sender", "sender_id", "phone", "wa_id", "ruc", "dni", "razon_social", "email", "nombre"}
+)
+#: One word of a key: a run of lower-case letters or digits, an upper-case run, or a capitalized word.
+_KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
 
 #: Replacement for a value under a personal-data key (R-9.5, R-9.12).
 _PERSONAL_REDACTED = "[redacted]"
+
+#: Deepest nesting a value is scrubbed to; anything deeper becomes ``_NESTED`` (R-9.12).
+_SCRUB_MAX_DEPTH = 5
+
+#: Replacement for a value nested deeper than ``_SCRUB_MAX_DEPTH`` (R-9.12).
+_NESTED = "[nested]"
 
 _logger = logging.getLogger(__name__)
 
@@ -98,6 +108,37 @@ def _redact(text: str, secret_re: re.Pattern[str] | None) -> str:
 def _format_exception(exc_info: Any) -> str:
     """Render ``exc_info`` the way the standard formatter would."""
     return logging.Formatter().formatException(exc_info)
+
+
+def _is_personal(key: str) -> bool:
+    """True when ``key`` holds a personal key as a run of its words (R-9.12).
+
+    Words are split at ``_``, ``-`` and camelCase humps, and match whole, so
+    ``buyer_ruc``, ``phoneNumber``, ``wa-id`` and ``emisor_razon_social`` match
+    while ``instructions`` does not.
+    """
+    words = "_".join(_KEY_WORD.findall(key)).lower()
+    return any(f"_{personal}_" in f"_{words}_" for personal in _PERSONAL_KEYS)
+
+
+def _scrub(value: Any, secret_re: re.Pattern[str] | None, depth: int = 0) -> Any:
+    """Redact personal keys and secrets in ``value`` down to ``_SCRUB_MAX_DEPTH`` (R-9.12)."""
+    if depth >= _SCRUB_MAX_DEPTH:
+        return _NESTED
+    if isinstance(value, dict):
+        return {
+            _redact(str(key), secret_re): (
+                _PERSONAL_REDACTED if _is_personal(str(key)) else _scrub(item, secret_re, depth + 1)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_scrub(item, secret_re, depth + 1) for item in value]
+    if isinstance(value, str):
+        return _redact(value, secret_re)
+    if value is None or isinstance(value, (int, float, bool)):
+        return value
+    return _redact(str(value), secret_re)
 
 
 class RedactionFilter(logging.Filter):
@@ -147,7 +188,7 @@ class JsonFormatter(logging.Formatter):
         }
         for field in EXTRA_FIELDS:
             if field in record.__dict__:
-                payload[field] = _redact_value(record.__dict__[field], self._secret_re)
+                payload[field] = _scrub(record.__dict__[field], self._secret_re)
 
         exc_text = record.exc_text
         if exc_text is None and record.exc_info is not None:
@@ -158,19 +199,12 @@ class JsonFormatter(logging.Formatter):
         for key, value in record.__dict__.items():
             if key in _STANDARD_ATTRS or key in _OUTPUT_FIELDS:
                 continue
-            if key.lower() in _PERSONAL_KEYS:
+            if _is_personal(key):
                 payload[key] = _PERSONAL_REDACTED
                 continue
-            if not isinstance(value, (str, int, float, bool)) and value is not None:
-                value = str(value)
-            payload[key] = _redact_value(value, self._secret_re)
+            payload[key] = _scrub(value, self._secret_re)
 
         return json.dumps(payload, ensure_ascii=False)
-
-
-def _redact_value(value: Any, secret_re: re.Pattern[str] | None) -> Any:
-    """Redact a string value; pass any other type through untouched."""
-    return _redact(value, secret_re) if isinstance(value, str) else value
 
 
 def configure_logging(

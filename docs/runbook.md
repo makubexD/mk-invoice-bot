@@ -29,9 +29,18 @@ The bot asks for this with BR-D01: a revoked or expired token parks the invoice 
 **Google** (loopback sign-in, which the container cannot receive; recipe from `specs/spikes/host.md`):
 
 1. Make a staging dir: `mkdir -m 700 /tmp/gauth`.
-2. On the host, with the private config:
-   `DATA_DIR=/tmp/gauth uv run invoicebot auth-google --account owner` (then `--account invoices_a`). Approve
-   every scope checkbox: an unticked scope is refused.
+2. On the host, point the CLI at the live config (its defaults are the container's paths) and the dev database (the
+   live one has no published port; it is used only for the resume query):
+
+   ```sh
+   export CONFIG_PATH="$LIVE_ROOT/config/config.yaml" SECRETS_PATH="$LIVE_ROOT/config/secrets.age" \
+       AGE_IDENTITY_PATH="$LIVE_ROOT/config/age-identity.txt" DATA_DIR=/tmp/gauth \
+       DATABASE_URL=postgresql://invoicebot:invoicebot@127.0.0.1:5432/invoicebot
+   uv run invoicebot auth-google --account owner   # then --account invoices_a
+   ```
+
+   Approve every scope checkbox: an unticked scope is refused.
+
 3. Copy the tokens into the live app, then restart it:
 
    ```sh

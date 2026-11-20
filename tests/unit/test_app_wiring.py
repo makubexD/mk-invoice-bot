@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import time
 from pathlib import Path
 from typing import Any, cast
 
+import httpx
 import pyrage
 import pytest
 import yaml
@@ -22,21 +23,26 @@ from invoicebot.app import (
     DailyRuns,
     _check_reload_candidate,
     _daily_tasks,
+    _deliver_handlers,
     _deliver_registry,
     _fetch_schedules,
+    _github_secrets,
     _google_deliver_handler,
     _google_secrets,
     _google_tokens,
+    _laptop_secrets,
     _log_reload_failure,
     _secret_problem,
     _sol_fetcher,
+    _sol_secrets,
     _validation_handlers,
     _validation_secrets,
+    _whatsapp_secrets,
 )
 from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
-from invoicebot.fetchers.sunat_sol import SunatSolFetcher
+from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
@@ -135,6 +141,7 @@ def _with_laptop_mode(tmp_path: Path) -> Config:
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
+    document["microsoft"]["accounts"][flow["email_inbox"]["account"]] = "invoices@example.com"
     for candidate in document["flows"].values():
         for sink in candidate["sinks"]:
             if sink["kind"] == "mailer":
@@ -168,6 +175,7 @@ def _without_google(tmp_path: Path) -> Config:
     flow = document["flows"]["personal_google"]
     flow["sinks"] = []
     flow["email_inbox"]["provider"] = "graph"
+    document["microsoft"]["accounts"][flow["email_inbox"]["account"]] = "invoices@example.com"
     path = tmp_path / "no-google.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return load_config(path)
@@ -303,6 +311,23 @@ def test_google_secret_view_declares_only_the_client_secret() -> None:
     assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
     assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
     assert not view.enabled
+
+
+@pytest.mark.parametrize(
+    ("view", "keys"),
+    [
+        (_whatsapp_secrets, WHATSAPP_SECRETS),
+        (_github_secrets, {GITHUB_APP_PRIVATE_KEY}),
+        (_laptop_secrets, {LAPTOP_AGENT_KEY}),
+        (_sol_secrets, SECRETS),
+    ],
+)
+def test_feature_secret_view_is_enabled_only_with_every_key(
+    view: Callable[[SecretStore], Secrets], keys: Iterable[str]
+) -> None:
+    """R-9.10: each feature's view is enabled with all its keys and disabled without them."""
+    assert view(SecretStore(dict.fromkeys(keys, "synthetic-value"))).enabled
+    assert not view(SecretStore({})).enabled
 
 
 def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
@@ -554,3 +579,27 @@ async def test_a_reload_task_that_raises_is_logged(caplog: pytest.LogCaptureFixt
         _log_reload_failure(task)
 
     assert [record.getMessage() for record in caplog.records] == ["config reload failed"]
+
+
+async def test_single_microsoft_account_builds_flow_b_without_the_bot_mailbox(tmp_path: Path) -> None:
+    """R-7.1, D164: a config that pins only ``personal`` wires flow B and never asks for ``bot``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["email_inbox"]["account"] = "personal"
+    for sink in flow["sinks"]:
+        if sink["kind"] == "mailer":
+            sink["modes"] = ["graph"]
+    document["microsoft"]["accounts"] = {"personal": "personal@example.com"}
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = load_config(config_path)
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(pyrage.x25519.Identity.generate()) + "\n", encoding="utf-8")
+    settings = Settings(age_identity_path=identity_path, data_dir=tmp_path)
+
+    async with httpx.AsyncClient() as http:
+        handlers = _deliver_handlers(
+            settings, cfg, cast(Any, None), http, cast(Any, None), _RecordingStore({})
+        )
+
+    assert handlers is not None

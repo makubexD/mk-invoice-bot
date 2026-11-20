@@ -28,6 +28,11 @@ HEADER = "RUC|RAZON SOCIAL|ESTADO|CONDICION"
 #: Synthetic RUCs, in the 11-digit space no other test file uses.
 FIRST_RUC = "20000000901"
 SECOND_RUC = "20000000902"
+#: A deadline short enough to expire during the import.
+TINY_IMPORT_TIMEOUT_S = 0.001
+#: Unique, valid RUCs for a padrón whose COPY cannot finish inside one millisecond.
+BULK_RUC_BASE = 30_000_000_000
+BULK_ROWS = 20_000
 #: One byte past a one-MiB cap.
 OVER_MIB_BYTES = 1024 * 1024 + 1
 
@@ -53,6 +58,11 @@ def _padron_zip(lines: Sequence[str]) -> bytes:
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr(MEMBER, text.encode("iso-8859-1"))
     return buffer.getvalue()
+
+
+def _bulk_rows(count: int) -> list[str]:
+    """Return ``count`` unique, valid padrón lines, so the import outlasts a tiny deadline."""
+    return [f"{BULK_RUC_BASE + index}|EMPRESA {index}|ACTIVO|HABIDO" for index in range(count)]
 
 
 def _ok(body: bytes) -> httpx.MockTransport:
@@ -145,6 +155,37 @@ async def test_refresh_aborts_a_download_past_its_deadline_and_keeps_the_old_row
             await refresh_padron(db_pool, http, _cfg(download_timeout_s=0.05), tmp_path)
 
     assert raised.value.reason == "timeout"
+    assert not list((tmp_path / "padron").iterdir())
+    async with db_pool.connection() as conn:
+        kept = await lookup(conn, FIRST_RUC)
+    assert kept == PadronRow(
+        ruc=FIRST_RUC,
+        razon_social="EMPRESA UNO",
+        estado="ACTIVO",
+        condicion="HABIDO",
+    )
+
+
+async def test_refresh_aborts_an_import_past_its_deadline_and_keeps_the_old_rows(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """S12.4: an import past ``import_timeout_s`` raises the import timeout reason; the old rows survive.
+
+    The download completes before the import deadline starts, and the padrón's
+    rows cannot be copied inside one millisecond, so the deadline expires while
+    ``_import`` runs. No ZIP may be left behind.
+    """
+    old_body = _padron_zip([f"{FIRST_RUC}|EMPRESA UNO|ACTIVO|HABIDO"])
+    async with httpx.AsyncClient(transport=_ok(old_body)) as http:
+        await refresh_padron(db_pool, http, _cfg(), tmp_path)
+
+    slow_body = _padron_zip(_bulk_rows(BULK_ROWS))
+    async with httpx.AsyncClient(transport=_ok(slow_body)) as http:
+        with pytest.raises(PadronRefreshError, match="timeout") as raised:
+            await refresh_padron(db_pool, http, _cfg(import_timeout_s=TINY_IMPORT_TIMEOUT_S), tmp_path)
+
+    assert raised.value.reason == "import_timeout"
     assert not list((tmp_path / "padron").iterdir())
     async with db_pool.connection() as conn:
         kept = await lookup(conn, FIRST_RUC)

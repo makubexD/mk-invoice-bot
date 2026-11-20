@@ -11,14 +11,17 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from invoicebot.auth.providers import microsoft_accounts
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     CalendarField,
     ChannelTemplates,
     Config,
     FlowInbox,
+    GapsGithub,
     GoogleDriveSink,
     GoogleSheetsSink,
+    Microsoft,
     Padron,
     PickField,
     Portal,
@@ -136,6 +139,92 @@ def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
 
     assert cfg.google is not None
     assert cfg.google.accounts["owner"] == "owner@example.com"
+
+
+def test_example_config_maps_each_microsoft_account_to_its_mailbox() -> None:
+    """R-7.9, D164: the example pins every Microsoft account a flow uses to its mailbox."""
+    cfg = load_config(EXAMPLE)
+
+    assert microsoft_accounts(cfg) <= set(cfg.microsoft.accounts)
+
+
+@pytest.mark.parametrize(
+    ("account", "change"),
+    [
+        ("bot", "inbox"),
+        ("personal", "drive"),
+        ("personal", "backup"),
+    ],
+)
+def test_microsoft_account_a_flow_or_the_backup_uses_must_be_pinned(
+    tmp_path: Path, account: str, change: str
+) -> None:
+    """R-7.9, D119, D164: a used Microsoft account without a mailbox in microsoft.accounts fails at load.
+
+    ``bot`` is used by the example's Graph inbox; ``personal`` by its OneDrive target and,
+    with no Microsoft flow at all, still by the nightly backup.
+    """
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["microsoft"]["accounts"][account]
+    if change == "backup":
+        document["flows"] = {
+            name: flow for name, flow in document["flows"].items() if name != "work_microsoft"
+        }
+        document["routing"]["rules"] = [
+            rule for rule in document["routing"]["rules"] if rule.get("flow") != "work_microsoft"
+        ]
+        document["microsoft"]["accounts"].pop("bot", None)
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=f"microsoft.accounts has no mailbox for {account}"):
+        load_config(path)
+
+
+def test_microsoft_single_account_without_inbox_rule_loads(tmp_path: Path) -> None:
+    """R-7.9, D164: one pinned ``personal`` account serves the drive, the graph send and the inbox."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["email_inbox"]["account"] = "personal"
+    for sink in flow["sinks"]:
+        if sink["kind"] == "mailer":
+            sink["modes"] = ["graph"]
+    document["microsoft"]["accounts"] = {"personal": "personal@example.com"}
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert set(cfg.microsoft.accounts) == {"personal"}
+
+
+def test_microsoft_account_name_not_lowercase_fails() -> None:
+    """R-7.9, D164: an account name is a key, so one with an upper-case letter fails."""
+    with pytest.raises(ValidationError, match="Bot"):
+        Microsoft(
+            client_id="00000000-0000-0000-0000-000000000000",
+            timeout_s=30,
+            accounts={"Bot": "bot@example.com"},
+        )
+
+
+def test_microsoft_account_address_without_an_at_sign_fails() -> None:
+    """R-7.9, D164: an account's mailbox is one address, so a value without '@' fails."""
+    with pytest.raises(ValidationError, match="bot"):
+        Microsoft(
+            client_id="00000000-0000-0000-0000-000000000000",
+            timeout_s=30,
+            accounts={"bot": "not-an-address"},
+        )
+
+
+def test_microsoft_account_address_is_stored_lower_cased() -> None:
+    """R-7.9, D164: an account's mailbox is lower-cased, so the pinned address compares case-free."""
+    microsoft = Microsoft(
+        client_id="00000000-0000-0000-0000-000000000000",
+        timeout_s=30,
+        accounts={"bot": "Bot@Example.com"},
+    )
+
+    assert microsoft.accounts["bot"] == "bot@example.com"
 
 
 def test_google_max_message_bytes_must_be_positive(tmp_path: Path) -> None:
@@ -364,6 +453,52 @@ def test_unknown_digest_kind_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="BOGUS"):
         load_config(path)
+
+
+@pytest.mark.parametrize("repo", ["makubexD/mk-invoice-bot", "a/b", "org-1/repo.name_2"])
+def test_gaps_github_repo_in_owner_name_form_loads(repo: str) -> None:
+    """R-11.5: ``gaps.github.repo`` accepts a GitHub repository written as owner/name."""
+    github = GapsGithub.model_validate(
+        {
+            "enabled": True,
+            "repo": repo,
+            "app_id": 0,
+            "installation_id": 0,
+            "labels": ["gap"],
+            "daily_write_budget": 20,
+        }
+    )
+
+    assert github.repo == repo
+
+
+@pytest.mark.parametrize(
+    "repo",
+    [
+        "mk-invoice-bot",
+        "a/b/c",
+        "a/",
+        "/b",
+        "a b/c",
+        "https://github.com/a/b",
+        "-a/b",
+        "a/.",
+        "a/..",
+    ],
+)
+def test_gaps_github_repo_that_is_not_owner_name_fails(repo: str) -> None:
+    """R-11.5: anything but ``owner/name`` is refused before an issue URL is built from it."""
+    with pytest.raises(ValidationError):
+        GapsGithub.model_validate(
+            {
+                "enabled": True,
+                "repo": repo,
+                "app_id": 0,
+                "installation_id": 0,
+                "labels": ["gap"],
+                "daily_write_budget": 20,
+            }
+        )
 
 
 def test_flow_without_reimbursement_loads_with_none() -> None:
@@ -1119,6 +1254,13 @@ def test_padron_takes_the_default_url_and_size_cap() -> None:
 
     assert str(padron.url) == "https://www2.sunat.gob.pe/padron_reducido_ruc.zip"
     assert padron.max_mb == 600
+
+
+def test_padron_takes_the_default_import_deadline() -> None:
+    """S12.4: a padrón config without import_timeout_s takes the 1800 s import deadline."""
+    padron = Padron(refresh_cron="0 4 * * 0")
+
+    assert padron.import_timeout_s == 1800
 
 
 def test_padron_url_over_plain_http_is_rejected() -> None:

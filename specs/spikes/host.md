@@ -58,3 +58,15 @@ gmail.readonly`, both pinned to the same mailbox (D138).
 - `google-setup` created the Drive root folder and both sheets (`personal_google`, `personal_dni`); their ids are in
   the private config, and `scripts/check_config.py` passes. The live app restarted healthy.
 - Still open: rotate the Google client secret (it was shared in a chat session).
+
+## Microsoft account pins (9j `harden-later`, step 10, 2026-11-20)
+
+- The Google side of flow A was already done in 9d step 8; nothing changed there.
+- Owner's decision: flow B uses one personal Microsoft account (`personal`) for OneDrive, the Graph send and the
+  `email_inbox` fetcher. The work tenant is out of scope (IT did not approve it); the work address only receives the
+  mail (`mailer.to`, `mail.owner_work_address`). The `bot` account and the `inbox_rule_account` were removed from the
+  private config; account names, modes and targets stay config-driven, so a second mailbox can come back by config.
+- `microsoft.accounts` pins `personal` to the mailbox both cached live sign-ins already name (D164);
+  `scripts/check_config.py` exits 0 on the private config.
+- Not yet live: the running image (built 2026-11-18) predates D164 and refuses the `accounts` key, so the pinned
+  config goes live with the deploy of this phase's image. Then remove the unused `bot.msal.age` from `/data/tokens`.

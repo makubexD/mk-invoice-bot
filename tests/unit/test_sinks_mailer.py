@@ -176,6 +176,14 @@ def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
     assert (modes["graph"].completion, modes["graph"].done_rule) == ("accepted", "BR-D10")
 
 
+def test_mail_modes_without_a_bot_mailer_offer_no_inbox_rule(tmp_path: Path) -> None:
+    """R-7.7, D108, D164: a config that never signs the bot mailbox in gets no inbox_rule mode."""
+    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), None, None)
+
+    assert "inbox_rule" not in modes
+    assert set(modes) == {"dry_run", "graph"}
+
+
 async def test_inbox_rule_sends_only_to_the_owner_address() -> None:
     """R-7.7, D108: the Graph request replaces the sink's HR recipients with the owner's address."""
     requests: list[httpx.Request] = []

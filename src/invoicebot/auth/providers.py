@@ -14,13 +14,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from invoicebot.auth.msal_cache import TokenProvider
+from invoicebot.auth.msal_cache import PinnedAccount, TokenProvider
 from invoicebot.config.models import (
     Config,
     GoogleDriveSink,
     GoogleSheetsSink,
-    MailerSink,
-    OneDriveFolderSink,
+    files_accounts,
+    mail_read_accounts,
+    mail_send_accounts,
 )
 from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
@@ -33,12 +34,6 @@ FILES_SCOPE = "Files.ReadWrite"
 MAIL_READ_SCOPE = "Mail.Read"
 #: The scope the invoice email needs; only a Graph mailer from the account adds it (R-7.9).
 MAIL_SEND_SCOPE = "Mail.Send"
-#: The mailer mode and inbox provider that talk to Graph (R-7.6, R-6.5).
-GRAPH_MODE = "graph"
-#: The mailer mode that sends through the bot's mailbox for the owner's rule (R-7.7, D108).
-INBOX_RULE_MODE = "inbox_rule"
-#: OneDrive storage targets name their account with this prefix (R-7.1, D98).
-ONEDRIVE_TARGET_PREFIX = "onedrive_"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
 #: The scope that returns an id_token naming the signed-in mailbox (R-6.5, D138).
@@ -68,13 +63,17 @@ def build_token_provider(
     """Build the real provider: client id from config, cache under ``data_dir/tokens`` (D85).
 
     Raises:
-        ValueError: ``AGE_IDENTITY_PATH`` is unset, so no cache can be decrypted.
+        ValueError: ``AGE_IDENTITY_PATH`` is unset, so no cache can be decrypted, or
+            ``account`` has no mailbox in ``microsoft.accounts`` (D164).
     """
     if settings.age_identity_path is None:
         raise ValueError("AGE_IDENTITY_PATH must be set to sign in (R-7.9)")
+    mailbox = cfg.microsoft.accounts.get(account)
+    if mailbox is None:
+        raise ValueError(f"microsoft.accounts has no mailbox for account '{account}' (D164)")
     return TokenProvider(
         client_id=cfg.microsoft.client_id,
-        account=account,
+        account=PinnedAccount(account, mailbox),
         scopes=scopes,
         cache_path=settings.data_dir / TOKENS_DIRECTORY / f"{account}.msal.age",
         identity=load_identity(settings.age_identity_path),
@@ -86,59 +85,21 @@ def google_token_path(data_dir: Path, account: str) -> Path:
     return data_dir / TOKENS_DIRECTORY / f"{account}.google.age"
 
 
-def _files_accounts(cfg: Config) -> set[str]:
-    """Return the accounts an OneDrive target names across every flow (R-7.1, D98)."""
-    return {
-        target.removeprefix(ONEDRIVE_TARGET_PREFIX)
-        for flow in cfg.flows.values()
-        for sink in flow.sinks
-        if isinstance(sink, OneDriveFolderSink)
-        for target in sink.targets
-    }
-
-
-def _mailer_accounts(cfg: Config) -> set[str]:
-    """Return the accounts a Graph mailer sends from across every flow (R-7.6, R-7.7).
-
-    The ``inbox_rule`` mode sends through the bot's own mailbox, so that account
-    needs ``Mail.Send`` too (D108).
-    """
-    accounts: set[str] = set()
-    for flow in cfg.flows.values():
-        for sink in flow.sinks:
-            if not isinstance(sink, MailerSink):
-                continue
-            if GRAPH_MODE in sink.modes:
-                accounts.add(sink.account)
-            if INBOX_RULE_MODE in sink.modes:
-                accounts.add(sink.inbox_rule_account)
-    return accounts
-
-
-def _inbox_accounts(cfg: Config) -> set[str]:
-    """Return the accounts a Graph ``email_inbox`` fetcher searches (R-6.5, D98)."""
-    return {
-        flow.email_inbox.account
-        for flow in cfg.flows.values()
-        if flow.email_inbox is not None and flow.email_inbox.provider == GRAPH_MODE
-    }
-
-
 def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
     """Return the scopes ``account`` needs for the configured flows (R-6.5, R-7.9, D98)."""
     scopes = list(BASE_SCOPES)
-    if account in _files_accounts(cfg):
+    if account in files_accounts(cfg):
         scopes.append(FILES_SCOPE)
-    if account in _mailer_accounts(cfg):
+    if account in mail_send_accounts(cfg):
         scopes.append(MAIL_SEND_SCOPE)
-    if account in _inbox_accounts(cfg):
+    if account in mail_read_accounts(cfg):
         scopes.append(MAIL_READ_SCOPE)
     return tuple(scopes)
 
 
 def microsoft_accounts(cfg: Config) -> frozenset[str]:
     """Return every account a flow uses, each with a scope beyond ``offline_access`` (R-6.5, R-7.9, D98)."""
-    candidates = _files_accounts(cfg) | _mailer_accounts(cfg) | _inbox_accounts(cfg)
+    candidates = files_accounts(cfg) | mail_send_accounts(cfg) | mail_read_accounts(cfg)
     return frozenset(account for account in candidates if len(scopes_for(cfg, account)) > len(BASE_SCOPES))
 
 

@@ -27,10 +27,10 @@ from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_ADAPTER, GoogleTokens
 from invoicebot.auth.providers import (
     GMAIL_PROVIDER,
-    GRAPH_MODE,
     build_token_provider,
     google_accounts,
     google_token_path,
+    microsoft_accounts,
     scopes_for,
 )
 from invoicebot.channels.profiles import ProfileIndex
@@ -40,6 +40,8 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
+    GRAPH_MODE,
+    PERSONAL_MICROSOFT_ACCOUNT,
     Config,
     Flow,
     FlowInbox,
@@ -49,6 +51,7 @@ from invoicebot.config.models import (
     MailerSink,
     OneDriveFolderSink,
     StoreDirectory,
+    SunatSolSite,
     WhatsAppChannel,
 )
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
@@ -136,8 +139,8 @@ WHATSAPP_ADAPTER = "whatsapp"
 WHATSAPP_SECRETS = frozenset(
     {"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token", "sender_hash_key"}
 )
-#: The Microsoft account flow B files through (R-7.1); config pins it to ``personal``.
-MICROSOFT_ACCOUNT = "personal"
+#: The Microsoft account flow B files through and the backup uploads with (R-7.1, D119).
+MICROSOFT_ACCOUNT = PERSONAL_MICROSOFT_ACCOUNT
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
 BOT_ACCOUNT = "bot"
 #: The adapter and mail mode that hands the mail to the laptop agent (R-7.14, D108).
@@ -260,7 +263,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
     rules = runtime.rules
     store = _load_secrets(settings)
     configure_logging(store.values())
-    secrets = store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
+    secrets = _whatsapp_secrets(store)
     channel = _whatsapp_channel(cfg)
     if channel is None or not secrets.enabled:
         # Fail closed: without its secrets or config the webhook is not mounted.
@@ -561,8 +564,12 @@ def _deliver_handlers(
     provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
     drive = GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
     mailer = GraphMailer(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
-    bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
-    bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
+    # Only a flow that lists ``inbox_rule`` signs the bot mailbox in; a single-account
+    # config never pins it (D164).
+    bot_mailer: GraphMailer | None = None
+    if BOT_ACCOUNT in microsoft_accounts(cfg):
+        bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
+        bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
     laptop_flows = _laptop_flow_ids(cfg)
     found = _laptop_root_and_key(cfg, store)
     laptop: LaptopOutlook | None = None
@@ -609,6 +616,34 @@ def _deliver_registry(
     return handlers
 
 
+def _whatsapp_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the WhatsApp channel reads its secrets through (R-9.10)."""
+    return store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
+
+
+def _github_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the GitHub App signs its JWTs with (R-9.10)."""
+    return store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY})
+
+
+def _laptop_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the laptop job keys its HMAC with (R-9.10)."""
+    return store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY})
+
+
+def _sol_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the SOL helper signs in with (R-9.10)."""
+    return store.scoped(SUNAT_SOL, set(SECRETS))
+
+
+def _sol_site(cfg: Config, directory: StoreDirectory) -> SunatSolSite | None:
+    """Return the SOL site once it is enabled and active, or None until then (S10.1, R-5.2)."""
+    site = directory.sunat_sol
+    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+        return None
+    return site
+
+
 def _google_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
     return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
@@ -623,14 +658,11 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     """
     validation = _validation_secrets(cfg, store)
     failed = {
-        "secrets:whatsapp": _whatsapp_channel(cfg) is None
-        or not store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS)).enabled,
+        "secrets:whatsapp": _whatsapp_channel(cfg) is None or not _whatsapp_secrets(store).enabled,
         "secrets:sunat_validez": validation is not None and not validation.enabled,
         "secrets:google": cfg.google is not None and not _google_secrets(store).enabled,
-        "secrets:github": cfg.gaps.github.enabled
-        and not store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).enabled,
-        "secrets:laptop": _laptop_flow(cfg) is not None
-        and not store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).enabled,
+        "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,
+        "secrets:laptop": _laptop_flow(cfg) is not None and not _laptop_secrets(store).enabled,
         "secrets:sunat_sol": _sol_secrets_unusable(cfg, directory, store),
     }
     return next((code for code, problem in failed.items() if problem), None)
@@ -638,10 +670,9 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
 
 def _sol_secrets_unusable(cfg: Config, directory: StoreDirectory, store: SecretStore) -> bool:
     """Return whether an active SOL site lacks its keys or names another taxpayer (R-9.10)."""
-    site = directory.sunat_sol
-    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+    if _sol_site(cfg, directory) is None:
         return False
-    secrets = store.scoped(SUNAT_SOL, set(SECRETS))
+    secrets = _sol_secrets(store)
     return not secrets.enabled or not hmac.compare_digest(
         secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()
     )
@@ -747,7 +778,7 @@ def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] |
     if flow is None:
         return None
     root = _laptop_root(flow)
-    key = store.scoped(LAPTOP_ADAPTER, {LAPTOP_AGENT_KEY}).get(LAPTOP_AGENT_KEY).encode()
+    key = _laptop_secrets(store).get(LAPTOP_AGENT_KEY).encode()
     return root, key
 
 
@@ -760,7 +791,7 @@ def _github_app(cfg: Config, store: SecretStore, http: httpx.AsyncClient) -> Git
     github = cfg.gaps.github
     if not github.enabled:
         return None
-    private_key_pem = store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY}).get(GITHUB_APP_PRIVATE_KEY)
+    private_key_pem = _github_secrets(store).get(GITHUB_APP_PRIVATE_KEY)
     return GitHubApp(
         http,
         app_id=github.app_id,
@@ -1010,10 +1041,10 @@ def _sol_fetcher(
     A missing secret or a ``sol_ruc`` that is not the owner's RUC stops startup, naming
     only the keys, so the helper never signs in as the wrong taxpayer (R-9.10).
     """
-    site = directory.sunat_sol
-    if not cfg.sunat.sol.enabled or site is None or site.status != "active":
+    site = _sol_site(cfg, directory)
+    if site is None:
         return None
-    secrets = store.scoped(SUNAT_SOL, set(SECRETS))
+    secrets = _sol_secrets(store)
     if secrets.enabled and not hmac.compare_digest(secrets.get("sol_ruc").encode(), cfg.owner.ruc.encode()):
         raise ValueError("sunat_sol: secret sol_ruc does not match owner.ruc (R-9.10)")
     return SunatSolFetcher(
