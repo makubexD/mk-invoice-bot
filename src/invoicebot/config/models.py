@@ -96,7 +96,21 @@ class TelegramChannel(BaseModel):
     enabled: bool
 
 
-type Channel = Annotated[WhatsAppChannel | TelegramChannel, Field(discriminator="kind")]
+class ConsoleChannel(BaseModel):
+    """The dev-only rehearsal channel (D165); ``profile`` is the profile it speaks as."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["console"]
+    profile: str
+
+
+type Channel = Annotated[WhatsAppChannel | TelegramChannel | ConsoleChannel, Field(discriminator="kind")]
+
+
+def _console_channels(channels: list[Channel]) -> list[ConsoleChannel]:
+    """Return the console channels in ``channels`` (D165)."""
+    return [channel for channel in channels if isinstance(channel, ConsoleChannel)]
 
 
 class ValidezApi(BaseModel):
@@ -894,6 +908,28 @@ class Config(BaseModel):
         """R-7.7: sending real mail is only allowed in production."""
         if self.mail.send_enabled and self.env != "production":
             raise ValueError(f"mail.send_enabled requires env: production, got {self.env!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _one_console_channel_at_most(self) -> Self:
+        """D165: one console channel is enough to rehearse as one profile."""
+        if len(_console_channels(self.channels)) > 1:
+            raise ValueError("at most one console channel is allowed (D165)")
+        return self
+
+    @model_validator(mode="after")
+    def _console_channel_is_dev_only(self) -> Self:
+        """D165: the console channel is a dev-only rehearsal channel."""
+        if self.env == "production" and _console_channels(self.channels):
+            raise ValueError("the console channel is dev-only (D165)")
+        return self
+
+    @model_validator(mode="after")
+    def _console_profile_is_known(self) -> Self:
+        """D165: the console channel speaks as a profile configured in ``profiles``."""
+        for channel in _console_channels(self.channels):
+            if channel.profile not in self.profiles:
+                raise ValueError(f"console channel profile '{channel.profile}' is not in profiles")
         return self
 
     @model_validator(mode="after")

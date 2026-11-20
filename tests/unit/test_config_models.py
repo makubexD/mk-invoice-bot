@@ -17,6 +17,7 @@ from invoicebot.config.models import (
     CalendarField,
     ChannelTemplates,
     Config,
+    ConsoleChannel,
     FlowInbox,
     GapsGithub,
     GoogleDriveSink,
@@ -1142,6 +1143,50 @@ def test_whatsapp_template_language_rejects_a_dashed_locale() -> None:
 def test_whatsapp_template_language_defaults_to_es_pe() -> None:
     """R-9.6: a channel with no template_language sends templates in Spanish (Peru)."""
     assert _whatsapp_channel().template_language == "es_PE"
+
+
+def _config_with_channel(tmp_path: Path, *channels: dict[str, Any], env: str | None = None) -> Path:
+    """Write the example config with ``channels`` appended."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["channels"].extend(channels)
+    if env is not None:
+        document["env"] = env
+    return _write_yaml(tmp_path / "example.yaml", document)
+
+
+def test_console_channel_with_a_known_profile_loads(tmp_path: Path) -> None:
+    """D165: a console channel speaking as an existing profile loads in development."""
+    cfg = load_config(_config_with_channel(tmp_path, {"kind": "console", "profile": "yo"}))
+
+    assert any(isinstance(channel, ConsoleChannel) for channel in cfg.channels)
+
+
+def test_console_channel_with_an_unknown_profile_fails(tmp_path: Path) -> None:
+    """D165: a console channel speaking as a profile not in profiles is refused, naming it."""
+    path = _config_with_channel(tmp_path, {"kind": "console", "profile": "nadie"})
+
+    with pytest.raises(ValidationError, match="nadie"):
+        load_config(path)
+
+
+def test_console_channel_in_production_fails(tmp_path: Path) -> None:
+    """D165: the console channel is dev-only, so env production with one is refused."""
+    path = _config_with_channel(tmp_path, {"kind": "console", "profile": "yo"}, env="production")
+
+    with pytest.raises(ValidationError, match="D165"):
+        load_config(path)
+
+
+def test_two_console_channels_fail(tmp_path: Path) -> None:
+    """D165: only one console channel may be configured."""
+    path = _config_with_channel(
+        tmp_path,
+        {"kind": "console", "profile": "yo"},
+        {"kind": "console", "profile": "asistente"},
+    )
+
+    with pytest.raises(ValidationError, match="at most one console channel"):
+        load_config(path)
 
 
 def _config_with_profile(tmp_path: Path, profile_id: str) -> Path:
