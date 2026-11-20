@@ -16,6 +16,13 @@ from typing import Literal
 from invoicebot.channels.base import AttachmentKind
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 
+#: Bytes read before a photo's header is checked (R-1.4).
+MEDIA_HEADER_BYTES = 512 * 1024
+#: Name of a stored media file inside its own directory.
+FILE_NAME = "file"
+#: Mode of a stored media directory: the app user only.
+DIRECTORY_MODE = 0o700
+
 type RejectionReason = Literal[
     "too_large",
     "too_many_pixels",

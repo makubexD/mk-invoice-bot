@@ -11,9 +11,9 @@ from pathlib import Path
 import httpx
 import pytest
 
-from invoicebot.channels.media_limits import MediaRejected
+from invoicebot.channels.media_limits import MEDIA_HEADER_BYTES, MediaRejected
 from invoicebot.channels.whatsapp.client import WhatsAppClient
-from invoicebot.channels.whatsapp.media import MEDIA_HEADER_BYTES, MediaChecksumMismatch, download_media
+from invoicebot.channels.whatsapp.media import MediaChecksumMismatch, download_media
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 
 PHONE_NUMBER_ID = "123456789"

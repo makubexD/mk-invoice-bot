@@ -15,16 +15,21 @@ import shutil
 from pathlib import Path
 
 from invoicebot.channels.base import AttachmentKind, DownloadedMedia
-from invoicebot.channels.media_limits import ByteCap, MediaRejected, check_image_header, max_bytes_for
+from invoicebot.channels.media_limits import (
+    DIRECTORY_MODE,
+    FILE_NAME,
+    MEDIA_HEADER_BYTES,
+    ByteCap,
+    MediaRejected,
+    check_image_header,
+    max_bytes_for,
+)
 from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient
 from invoicebot.config.models import MediaLimits
 
 MEDIA_ID_PATTERN = r"[A-Za-z0-9_-]{1,128}"
-MEDIA_HEADER_BYTES = 512 * 1024
 #: Whole-download deadline; must stay below the worker lease (300 s in queue/worker.py).
 DOWNLOAD_TIMEOUT_S = 120.0
-FILE_NAME = "file"
-DIRECTORY_MODE = 0o700
 
 
 class MediaChecksumMismatch(Exception):
