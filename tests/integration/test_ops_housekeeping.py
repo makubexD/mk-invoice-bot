@@ -1,5 +1,6 @@
 """Integration tests for the daily housekeeping task (R-9.7, S12.4)."""
 
+import asyncio
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,7 +10,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.ops.housekeeping import housekeep
-from invoicebot.states import CANCELLED, DONE, FETCHING_DOCS
+from invoicebot.states import CANCELLED, DONE, FAILED, FETCHING_DOCS
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -57,6 +58,37 @@ async def _delete_invoices(pool: AsyncConnectionPool[AsyncConnection[Any]], invo
     async with pool.connection() as conn, conn.transaction():
         await conn.execute("DELETE FROM jobs WHERE invoice_id = ANY(%s)", (invoice_ids,))
         await conn.execute("DELETE FROM invoices WHERE id = ANY(%s)", (invoice_ids,))
+
+
+async def test_housekeep_holds_an_invoice_that_leaves_failed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7 housekeeping waits for an uncommitted state change, then removes the folder.
+
+    A FAILED invoice retried into FETCHING keeps its tmp folder while that change
+    is uncommitted; once the change rolls back, the folder goes.
+    """
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await _insert_invoice(conn, FAILED)
+    tmp = tmp_path / "tmp"
+    folder = tmp / str(invoice_id)
+    folder.mkdir(parents=True)
+    blocker = await db_pool.getconn()
+    try:
+        async with blocker.transaction(force_rollback=True):
+            await blocker.execute("UPDATE invoices SET state = %s WHERE id = %s", (FETCHING_DOCS, invoice_id))
+            with pytest.raises(TimeoutError):
+                async with asyncio.timeout(1):
+                    await housekeep(db_pool, tmp_path)
+    finally:
+        await blocker.rollback()
+        await db_pool.putconn(blocker)
+    try:
+        await housekeep(db_pool, tmp_path)
+
+        assert not folder.exists()
+    finally:
+        await _delete_invoices(db_pool, [invoice_id])
 
 
 async def test_housekeep_removes_tmp_folders_of_terminal_and_unknown_invoices(
