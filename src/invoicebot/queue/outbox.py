@@ -28,7 +28,8 @@ from invoicebot.store.db import Pool
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 8
-VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event"})
+#: Must match the outbox_channel_check constraint (migration 0013).
+VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event", "console"})
 
 
 @dataclass(frozen=True)
