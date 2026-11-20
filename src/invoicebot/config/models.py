@@ -311,6 +311,19 @@ _EMAIL_ADDRESS = re.compile(r"^[^@\s]+@[^@\s]+$")
 _ACCOUNT_NAME = re.compile(r"^[a-z0-9_]+$")
 
 
+def _account_addresses(value: dict[str, str]) -> dict[str, str]:
+    """R-6.5, R-7.9, D138, D164: an account name is a key and its mailbox one lower-cased address."""
+    addresses: dict[str, str] = {}
+    for name, address in value.items():
+        if _ACCOUNT_NAME.fullmatch(name) is None:
+            raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
+        address = address.lower()
+        if _EMAIL_ADDRESS.fullmatch(address) is None:
+            raise ValueError(f"account '{name}' is not an email address")
+        addresses[name] = address
+    return addresses
+
+
 class Mail(BaseModel):
     """Flow mail switches; real sending only in production (R-7.7, D89)."""
 
@@ -343,6 +356,14 @@ class Microsoft(BaseModel):
         pattern=r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
     )
     timeout_s: float = Field(gt=0)
+    #: D164: the mailbox each account name is pinned to, checked at sign-in and on every token.
+    accounts: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("accounts")
+    @classmethod
+    def _accounts_map_names_to_addresses(cls, value: dict[str, str]) -> dict[str, str]:
+        """R-7.9, D164: each account name is pinned to one lower-cased mailbox address."""
+        return _account_addresses(value)
 
 
 class Google(BaseModel):
@@ -364,15 +385,7 @@ class Google(BaseModel):
     @classmethod
     def _accounts_map_names_to_addresses(cls, value: dict[str, str]) -> dict[str, str]:
         """R-6.5, D138: an account name is a key and its mailbox one lower-cased address."""
-        addresses: dict[str, str] = {}
-        for name, address in value.items():
-            if _ACCOUNT_NAME.fullmatch(name) is None:
-                raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
-            address = address.lower()
-            if _EMAIL_ADDRESS.fullmatch(address) is None:
-                raise ValueError(f"account '{name}' is not an email address")
-            addresses[name] = address
-        return addresses
+        return _account_addresses(value)
 
 
 #: An id Google may return; anything else is refused before it is used.

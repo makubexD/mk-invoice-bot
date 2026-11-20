@@ -11,6 +11,7 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
+from invoicebot.auth.providers import microsoft_accounts
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     CalendarField,
@@ -20,6 +21,7 @@ from invoicebot.config.models import (
     GapsGithub,
     GoogleDriveSink,
     GoogleSheetsSink,
+    Microsoft,
     Padron,
     PickField,
     Portal,
@@ -137,6 +139,44 @@ def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
 
     assert cfg.google is not None
     assert cfg.google.accounts["owner"] == "owner@example.com"
+
+
+def test_example_config_maps_each_microsoft_account_to_its_mailbox() -> None:
+    """R-7.9, D164: the example pins every Microsoft account a flow uses to its mailbox."""
+    cfg = load_config(EXAMPLE)
+
+    assert microsoft_accounts(cfg) <= set(cfg.microsoft.accounts)
+
+
+def test_microsoft_account_name_not_lowercase_fails() -> None:
+    """R-7.9, D164: an account name is a key, so one with an upper-case letter fails."""
+    with pytest.raises(ValidationError, match="Bot"):
+        Microsoft(
+            client_id="00000000-0000-0000-0000-000000000000",
+            timeout_s=30,
+            accounts={"Bot": "bot@example.com"},
+        )
+
+
+def test_microsoft_account_address_without_an_at_sign_fails() -> None:
+    """R-7.9, D164: an account's mailbox is one address, so a value without '@' fails."""
+    with pytest.raises(ValidationError, match="bot"):
+        Microsoft(
+            client_id="00000000-0000-0000-0000-000000000000",
+            timeout_s=30,
+            accounts={"bot": "not-an-address"},
+        )
+
+
+def test_microsoft_account_address_is_stored_lower_cased() -> None:
+    """R-7.9, D164: an account's mailbox is lower-cased, so the pinned address compares case-free."""
+    microsoft = Microsoft(
+        client_id="00000000-0000-0000-0000-000000000000",
+        timeout_s=30,
+        accounts={"bot": "Bot@Example.com"},
+    )
+
+    assert microsoft.accounts["bot"] == "bot@example.com"
 
 
 def test_google_max_message_bytes_must_be_positive(tmp_path: Path) -> None:
