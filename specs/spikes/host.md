@@ -70,3 +70,15 @@ gmail.readonly`, both pinned to the same mailbox (D138).
   `scripts/check_config.py` exits 0 on the private config.
 - Not yet live: the running image (built 2026-11-18) predates D164 and refuses the `accounts` key, so the pinned
   config goes live with the deploy of this phase's image. Then remove the unused `bot.msal.age` from `/data/tokens`.
+
+## D164 deploy (9d2 `live-chat`, step 1, 2026-11-20)
+
+- Deployed image `bddef551883b` with the pinned single-account config: `microsoft.accounts` pins `personal`; the
+  `email_inbox` fetcher uses `personal`; no `bot` account and no `inbox_rule_account`. `sunat_sol` stays out of the
+  live fetchers (S0.4, D153).
+- Order matters across a config-schema change: `deploy-live.sh --config` validates with the *running* image, which
+  refused the new `accounts` key, and the new image refused the old unpinned config. So the candidate was checked
+  with the new image (`podman run ... python scripts/check_config.py`), installed by hand (old config kept aside for
+  a rollback), then `deploy-live.sh <tag>`. A later reload through `--config` then validates on the new image.
+- Reload accepted, `/health` ok, `auth-microsoft --account personal` passed the pin, `bot.msal.age` removed from
+  `/data/tokens`.
