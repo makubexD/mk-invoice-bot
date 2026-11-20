@@ -17,11 +17,13 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.app import intake_settings
+from invoicebot.channels.base import Button, OutboundMessage
 from invoicebot.channels.console import inbox_dir
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel
-from invoicebot.rehearse import RehearseError, RehearseSend, rehearse_send
+from invoicebot.queue.outbox import add, rows_after
+from invoicebot.rehearse import RehearseError, RehearseSend, rehearse_replies, rehearse_send
 from invoicebot.settings import Settings
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -86,6 +88,15 @@ async def _rows(
         )
         outbox = [(row[0], row[1]) for row in await cur.fetchall()]
     return invoices, jobs, outbox
+
+
+async def _last_console_id(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> int:
+    """Return the newest console outbox id, or 0 when there is none."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT coalesce(max(id), 0) FROM outbox WHERE channel = 'console'")
+        row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -207,6 +218,94 @@ def test_no_console_channel_exits_two(
         ["rehearse", "send", "--text", "/ayuda"],
         settings=_settings(tmp_path, test_database_url),
     )
+
+    assert code == 2
+    assert "console channel not configured (D165)" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_replies_returns_the_acknowledgement(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """D165: after a rehearse send photo, rehearse_replies returns the BR-S09 reply."""
+    profile_id = _profile_id()
+    cfg = _config(profile_id)
+    before = await _last_console_id(db_pool)
+
+    await rehearse_send(
+        tmp_path,
+        test_database_url,
+        cfg,
+        intake_settings(cfg),
+        RehearseSend(name="photo.png"),
+        io.BytesIO(b"\x89PNG\r\n\x1a\n" + b"photo"),
+    )
+
+    replies = await rehearse_replies(test_database_url, before)
+    assert [reply.rule_id for reply in replies] == ["BR-S09"]
+    assert replies[0].status == "pending"
+    assert replies[0].text
+    assert replies[0].buttons == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_rows_after_the_last_id_returns_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D165: rows_after with the newest console id returns no rows."""
+    last_id = await _last_console_id(db_pool)
+
+    async with db_pool.connection() as conn:
+        assert await rows_after(conn, "console", last_id) == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_console_row_buttons_are_returned(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+) -> None:
+    """D165: a console row with buttons comes back with its buttons."""
+    profile_id = _profile_id()
+    message = OutboundMessage(
+        channel="console",
+        recipient=profile_id,
+        profile_id=profile_id,
+        rule_id="BR-S01",
+        text="¿Confirmas?",
+        buttons=[Button(id="yes", title="Sí"), Button(id="no", title="No")],
+    )
+    async with db_pool.connection() as conn:
+        outbox_id = await add(conn, "console", profile_id, message.model_dump(mode="json"))
+
+    replies = await rehearse_replies(test_database_url, outbox_id - 1)
+    [reply] = [other for other in replies if other.id == outbox_id]
+    assert reply.rule_id == "BR-S01"
+    assert reply.text == "¿Confirmas?"
+    assert reply.buttons == [Button(id="yes", title="Sí"), Button(id="no", title="No")]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_other_channels_are_never_returned(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+) -> None:
+    """D165: rehearse replies never returns a row of another channel."""
+    before = await _last_console_id(db_pool)
+    async with db_pool.connection() as conn:
+        whatsapp_id = await add(conn, "whatsapp", _profile_id(), {"text": "hola"})
+
+    replies = await rehearse_replies(test_database_url, before)
+    assert all(reply.id != whatsapp_id for reply in replies)
+    assert replies == []
+
+
+def test_replies_without_a_console_channel_exits_two(
+    test_database_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D165: without a console channel rehearse replies exits 2 with the D165 message."""
+    code = main(["rehearse", "replies"], settings=_settings(tmp_path, test_database_url))
 
     assert code == 2
     assert "console channel not configured (D165)" in capsys.readouterr().err

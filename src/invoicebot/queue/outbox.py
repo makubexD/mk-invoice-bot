@@ -15,7 +15,7 @@ clock.
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, cast
 
@@ -42,6 +42,7 @@ class OutboxRow:
     payload: dict[str, Any]
     template: str | None
     attempts: int
+    state: str = "pending"
 
 
 #: A coroutine that delivers one outbox row and returns the channel's message id,
@@ -136,6 +137,24 @@ async def set_pending_issue_hint(
         (hint_url, fingerprint),
     )
     return cur.rowcount
+
+
+async def rows_after(conn: AsyncConnection[Any], channel: str, after_id: int) -> list[OutboxRow]:
+    """Return ``channel``'s outbox rows above ``after_id``, oldest first (D165).
+
+    ``rehearse replies`` prints the console rows the transport kept, so a call with
+    the last id it showed returns only what arrived since. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT id, channel, "to", payload_json, template, attempts, state
+        FROM outbox
+        WHERE channel = %(channel)s AND id > %(after_id)s
+        ORDER BY id
+        """,
+        {"channel": channel, "after_id": after_id},
+    )
+    return [replace(_outbox_row(raw), state=str(raw[6])) for raw in await cur.fetchall()]
 
 
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:

@@ -10,12 +10,13 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
+from invoicebot.channels.base import Attachment, AttachmentKind, Button, InboundMessage, OutboundMessage
 from invoicebot.channels.console import (
     CONSOLE,
     MEDIA_REF_MAX_CHARS,
@@ -25,8 +26,9 @@ from invoicebot.channels.console import (
 )
 from invoicebot.channels.media_limits import max_bytes_for
 from invoicebot.channels.profiles import sender_role
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, ConsoleChannel
 from invoicebot.pipeline.intake import IntakeResult, IntakeSettings, handle_inbound
+from invoicebot.queue.outbox import OutboxRow, rows_after
 from invoicebot.store.db import create_pool
 
 #: The attachment kind a ``rehearse send`` file name's extension produces (D165).
@@ -43,6 +45,18 @@ class RehearseError(Exception):
     """A ``rehearse`` command refused to run; the CLI turns it into exit 2 (D165)."""
 
 
+#: The refusal both ``rehearse`` commands give when the config lists no console channel.
+_NO_CONSOLE_CHANNEL = "console channel not configured (D165)"
+
+
+def require_console(cfg: Config) -> ConsoleChannel:
+    """Return the config's console channel, refusing when it lists none (D165)."""
+    channel = console_channel(cfg)
+    if channel is None:
+        raise RehearseError(_NO_CONSOLE_CHANNEL)
+    return channel
+
+
 @dataclass(frozen=True)
 class RehearseSend:
     """One ``rehearse send`` invocation: a file name, a text or a button id (D165)."""
@@ -50,6 +64,17 @@ class RehearseSend:
     name: str | None = None
     text: str | None = None
     button: str | None = None
+
+
+@dataclass(frozen=True)
+class ConsoleReply:
+    """One console outbox row as ``rehearse replies`` shows it (D165)."""
+
+    id: int
+    rule_id: str | None
+    status: str
+    text: str
+    buttons: list[Button]
 
 
 async def rehearse_send(
@@ -70,9 +95,7 @@ async def rehearse_send(
         RehearseError: the config has no console channel, a file name's extension is
             unknown, or the file's bytes are over their cap.
     """
-    channel = console_channel(cfg)
-    if channel is None:
-        raise RehearseError("console channel not configured (D165)")
+    channel = require_console(cfg)
     attachment: Attachment | None = None
     if request.name is not None:
         attachment = await _read_attachment(request.name, cfg, data_dir, stdin)
@@ -101,6 +124,54 @@ async def rehearse_send(
     finally:
         await pool.close()
     return result
+
+
+async def rehearse_replies(database_url: str, after_id: int) -> list[ConsoleReply]:
+    """Read the console outbox rows above ``after_id`` and return them for printing (D165).
+
+    Each payload is validated as an :class:`OutboundMessage` before it is shown, so the
+    command never prints a row the pipeline could not have sent.
+
+    Raises:
+        pydantic.ValidationError: a stored payload is not an outbound message.
+    """
+    pool = create_pool(database_url)
+    await pool.open(wait=True)
+    try:
+        async with pool.connection() as conn:
+            rows = await rows_after(conn, CONSOLE, after_id)
+    finally:
+        await pool.close()
+    return [_console_reply(row) for row in rows]
+
+
+def _console_reply(row: OutboxRow) -> ConsoleReply:
+    """Validate one console row's payload and turn it into a printable reply (D165)."""
+    message = OutboundMessage.model_validate(row.payload)
+    return ConsoleReply(
+        id=row.id,
+        rule_id=message.rule_id,
+        status=row.state,
+        text=message.text,
+        buttons=message.buttons,
+    )
+
+
+def format_replies(replies: Sequence[ConsoleReply], after_id: int) -> list[str]:
+    """Render replies for the terminal and the cursor for the next call (D165).
+
+    Each reply shows as ``#<id> <rule id or -> <status>``, then its text lines, then
+    one ``[<id>] <title>`` line per button. The last line asks for the next call after
+    the newest reply, or after ``after_id`` when there are none.
+    """
+    lines: list[str] = []
+    for reply in replies:
+        lines.append(f"#{reply.id} {reply.rule_id or '-'} {reply.status}")
+        lines.extend(reply.text.splitlines())
+        lines.extend(f"[{button.id}] {button.title}" for button in reply.buttons)
+    last_id = replies[-1].id if replies else after_id
+    lines.append(f"next: --after {last_id}")
+    return lines
 
 
 async def _read_attachment(name: str, cfg: Config, data_dir: Path, stdin: BinaryIO) -> Attachment:
