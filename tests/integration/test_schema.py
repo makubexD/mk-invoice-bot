@@ -11,6 +11,7 @@ from alembic import command
 from alembic.config import Config
 from psycopg import AsyncConnection
 from psycopg.errors import CheckViolation, UniqueViolation
+from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -55,6 +56,12 @@ INSERT_INVOICE = """
 """
 
 INSERT_BATCH = "INSERT INTO batches (flow_id, state) VALUES (%s, %s)"
+
+INSERT_OUTBOX = """
+    INSERT INTO outbox (channel, "to", payload_json, state)
+    VALUES (%s, %s, %s, %s)
+    RETURNING id
+"""
 
 
 def _run_alembic(url: str, revision: str, *, downgrade: bool = False) -> None:
@@ -168,6 +175,39 @@ async def test_invoice_flow_data_json_defaults_to_empty_object(
         row = await cur.fetchone()
     assert row is not None
     assert row[1] == {}
+
+
+async def test_invoice_accepts_console_origin_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D165: an invoice with origin_channel console inserts."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(INSERT_INVOICE, ("owner", "console", "parsed"))
+        row = await cur.fetchone()
+        assert row is not None
+        # Remove it again so a later downgrade past 0013 can restore the old CHECK.
+        await conn.execute("DELETE FROM invoices WHERE id = %s", (row[0],))
+
+
+async def test_outbox_accepts_console_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D165: an outbox row with channel console inserts."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(INSERT_OUTBOX, ("console", "owner", Jsonb({}), "pending"))
+        row = await cur.fetchone()
+        assert row is not None
+        # Remove it again so a later downgrade past 0013 can restore the old CHECK.
+        await conn.execute("DELETE FROM outbox WHERE id = %s", (row[0],))
+
+
+async def test_invoice_still_refuses_unknown_origin_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D165: an invoice with origin_channel sms is still refused."""
+    with pytest.raises(CheckViolation):
+        async with db_pool.connection() as conn:
+            await conn.execute(INSERT_INVOICE, ("owner", "sms", "parsed"))
 
 
 async def test_batch_accepts_prepared_and_rejects_unknown_states(

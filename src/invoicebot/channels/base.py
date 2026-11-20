@@ -16,7 +16,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from invoicebot.config.models import MediaLimits
 
-type ChannelName = Literal["whatsapp", "telegram"]
+type ChannelName = Literal["whatsapp", "telegram", "console"]
 type SenderRole = Literal["owner", "admin", "sender"]
 type AttachmentKind = Literal["photo", "pdf", "xml", "xlsx", "captcha"]
 
