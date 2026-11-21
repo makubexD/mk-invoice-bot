@@ -76,9 +76,28 @@ gmail.readonly`, both pinned to the same mailbox (D138).
 - Deployed image `bddef551883b` with the pinned single-account config: `microsoft.accounts` pins `personal`; the
   `email_inbox` fetcher uses `personal`; no `bot` account and no `inbox_rule_account`. `sunat_sol` stays out of the
   live fetchers (S0.4, D153).
-- Order matters across a config-schema change: `deploy-live.sh --config` validates with the *running* image, which
+- Order matters across a config-schema change: `deploy-live.sh --config` validates with the _running_ image, which
   refused the new `accounts` key, and the new image refused the old unpinned config. So the candidate was checked
   with the new image (`podman run ... python scripts/check_config.py`), installed by hand (old config kept aside for
   a rollback), then `deploy-live.sh <tag>`. A later reload through `--config` then validates on the new image.
 - Reload accepted, `/health` ok, `auth-microsoft --account personal` passed the pin, `bot.msal.age` removed from
   `/data/tokens`.
+
+## Console rehearsal (9k `rehearse`, step 10, 2026-11-20)
+
+Image `135409caf664`, console channel `{kind: console, profile: yo}` in the live config (D165).
+
+- **Found and fixed: the sandboxed extract helper read an empty stdin.** dash gives a background command
+  `/dev/null` as stdin even with `<&0`, so every sandboxed extract (photo, PDF, XML) answered "unreadable" (BR-E01)
+  since D158 moved the input to stdin. The live host had never read a document. Both wrappers now hand stdin over
+  on fd 3, and `tests/deploy/sandbox_checks.py` gained `image-stdin` and `browser-stdin`; `extract-helper` now
+  requires a reading (the JSON-only check passed on an empty input). Before the fix: 6/6 sample photos BR-E01.
+  After: 4/6 read (2 unreadable), each routed with BR-R02.
+- **Works:** `rehearse send` (photo, PDF, text), `rehearse replies --after`, BR-S09 on intake, BR-R02 summaries with
+  `[id] title` buttons, a lone XML refused with BR-E07 (D121; the XML of a chat invoice comes from the fetchers).
+- **Routing:** all 4 readable sample photos and the paid flow B sample PDF (Shimaya, F005-2212) routed to flow B
+  (`work_microsoft`) and wait in `FETCHING_DOCS` for the merchant's mail ("esperando correo del comercio").
+- **Expected noise:** `channel token rejected` (WhatsApp) on every admin alert while the WABA is restricted.
+- **Still open** (need the owner or a mail fetch): flow B's OneDrive folder, Excel, `dry_run` mail and `/pagado` once
+  the XML arrives (then delete the duplicate Shimaya folder); flow A (no sample routes to flow A: needs a personal
+  photo), `/reprocesar`, the PDF-only store, the DNI boleta, the Gmail forward and the BR-D01 revoke.
