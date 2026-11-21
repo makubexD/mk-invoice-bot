@@ -174,12 +174,17 @@ def _copy_to_file(
     return written, digest.hexdigest()
 
 
+def console_message_id(outbox_id: int) -> str:
+    """Return the channel message id a console outbox row gets (D165)."""
+    return f"console-{outbox_id}"
+
+
 def console_transport() -> Transport:
     """Return an outbox transport that keeps console rows for ``rehearse replies`` (D165)."""
 
     async def deliver(row: OutboxRow) -> str:
         logger.debug("console transport kept outbox row %d", row.id)
-        return f"console-{row.id}"
+        return console_message_id(row.id)
 
     return deliver
 

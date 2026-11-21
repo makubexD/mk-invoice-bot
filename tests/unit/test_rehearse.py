@@ -3,6 +3,7 @@
 import pytest
 
 from invoicebot.channels.base import Button
+from invoicebot.channels.console import console_message_id
 from invoicebot.rehearse import ConsoleReply, RehearseError, RehearseSend, format_replies
 
 
@@ -69,3 +70,18 @@ def test_rehearse_send_refuses_a_file_with_a_button() -> None:
     """D165: a send naming both a file and a button is refused before anything runs."""
     with pytest.raises(RehearseError, match="D165"):
         RehearseSend(name="photo.png", button="yes")
+
+
+def test_console_message_id_prefixes_the_outbox_id() -> None:
+    """D165: a console outbox row's channel message id is ``console-<id>``."""
+    assert console_message_id(42) == "console-42"
+
+
+def test_rehearse_send_keeps_the_reply_to_id() -> None:
+    """D165: a send carries the console reply id it quotes."""
+    assert RehearseSend(name="a.pdf", reply_to=7).reply_to == 7
+
+
+def test_rehearse_send_without_a_reply_to_has_none() -> None:
+    """D165: a send that quotes nothing keeps ``reply_to`` as ``None``."""
+    assert RehearseSend(name="a.pdf").reply_to is None
