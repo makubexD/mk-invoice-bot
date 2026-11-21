@@ -17,7 +17,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Button, OutboundMessage
-from invoicebot.channels.console import console_transport, inbox_dir
+from invoicebot.channels.console import console_message_id, console_transport, inbox_dir
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel
@@ -106,14 +106,14 @@ async def _two_open_invoices(
 ) -> tuple[int, int, int]:
     """Create two ``MANUAL_REQUIRED`` console invoices with a delivered BR-F07 message each.
 
-    Returns the first invoice's id, the second's id and the first invoice's outbox id,
+    Returns the first invoice's id, the second's id and the second invoice's outbox id,
     whose channel message id is the ``--reply-to`` value a quoted upload passes
-    (D102, D165).
+    (D102, D165). Quoting the newer invoice rules out "the oldest open invoice wins".
     """
     async with pool.connection() as conn:
         first = await create_invoice(conn, profile_id, "console")
         await set_state(conn, first, "MANUAL_REQUIRED", rule_id="BR-F07")
-        quoted = await queue_message(
+        await queue_message(
             conn,
             Addressee("console", profile_id),
             "Synthetic bot message.",
@@ -122,7 +122,7 @@ async def _two_open_invoices(
         )
         second = await create_invoice(conn, profile_id, "console")
         await set_state(conn, second, "MANUAL_REQUIRED", rule_id="BR-F07")
-        await queue_message(
+        quoted = await queue_message(
             conn,
             Addressee("console", profile_id),
             "Synthetic bot message.",
@@ -130,6 +130,9 @@ async def _two_open_invoices(
             rule_id="BR-F07",
         )
     await OutboxSender(pool, {"console": console_transport()}).send_pending()
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT state, channel_message_id FROM outbox WHERE id = %s", (quoted,))
+        assert await cur.fetchone() == ("sent", console_message_id(quoted))
     return first, second, quoted
 
 
@@ -419,6 +422,20 @@ def test_replies_without_a_console_channel_exits_two(
     assert "console channel not configured (D165)" in capsys.readouterr().err
 
 
+def test_send_with_a_reply_to_below_one_exits_two(
+    test_database_url: str, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D165: rehearse send --reply-to 0 exits 2 with the positive-id message."""
+    with pytest.raises(SystemExit) as exc:
+        main(
+            ["rehearse", "send", "--reply-to", "0", "--name", "a.pdf"],
+            settings=_settings(tmp_path, test_database_url),
+        )
+
+    assert exc.value.code == 2
+    assert "--reply-to must be a positive reply id" in capsys.readouterr().err
+
+
 @pytest.mark.asyncio(loop_scope="session")
 async def test_quoted_upload_links_to_the_quoted_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
@@ -428,7 +445,7 @@ async def test_quoted_upload_links_to_the_quoted_invoice(
     """D102, D165: a quoted upload links to the quoted invoice instead of asking BR-D14."""
     profile_id = _profile_id()
     cfg = _config(profile_id)
-    first, _second, quoted = await _two_open_invoices(db_pool, profile_id)
+    _first, second, quoted = await _two_open_invoices(db_pool, profile_id)
 
     result = await rehearse_send(
         tmp_path,
@@ -439,9 +456,9 @@ async def test_quoted_upload_links_to_the_quoted_invoice(
         io.BytesIO(b"%PDF-1.4 synthetic"),
     )
 
-    assert result.invoice_id == first
-    assert await _messages_invoice_ids(db_pool, profile_id) == [first]
-    assert await _invoice_jobs(db_pool, first) == ["attach_upload"]
+    assert result.invoice_id == second
+    assert await _messages_invoice_ids(db_pool, profile_id) == [second]
+    assert await _invoice_jobs(db_pool, second) == ["attach_upload"]
     _invoices, _jobs, outbox = await _rows(db_pool, profile_id)
     assert [rule_id for _channel, rule_id in outbox] == ["BR-F07", "BR-F07"]
     assert len(list(inbox_dir(tmp_path).glob("*.pdf"))) == 1
