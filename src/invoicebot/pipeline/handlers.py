@@ -21,7 +21,7 @@ from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
 from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
-from invoicebot.store.invoices import FileRecord, add_file, has_file, load_invoice_head, set_state
+from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
 #: Job step that reads the downloaded photo or PDF (S3.11).
 EXTRACT_STEP = "extract"
@@ -57,7 +57,7 @@ def make_download_handler(
     """Build the handler that downloads an invoice's first attachment (R-1.4).
 
     ``sources`` maps a channel name to the source that downloads its media, and
-    the invoice's ``origin_channel`` picks one; a channel with no source raises
+    the channel of the invoice's message picks one; a channel with no source raises
     ``LookupError``. A successful download stores a ``files`` row, enqueues the
     ``extract`` step in the same transaction and leaves the invoice in
     ``RECEIVED``; an invoice that already has a file is left untouched, so a
@@ -71,13 +71,10 @@ def make_download_handler(
         async with pool.connection() as conn:
             if await has_file(conn, job.invoice_id):
                 return
-            head = await load_invoice_head(conn, job.invoice_id)
-        if head is None:
-            raise RuntimeError(f"invoice {job.invoice_id} does not exist")
-        source = sources.get(head.origin_channel)
-        if source is None:
-            raise LookupError(f"no media source for channel {head.origin_channel}")
         msg = await _load_message(pool, job.invoice_id)
+        source = sources.get(msg.channel)
+        if source is None:
+            raise LookupError(f"no media source for channel {msg.channel}")
         attachment = _first_attachment(msg)
         try:
             media = await source.download(

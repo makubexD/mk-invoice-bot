@@ -8,6 +8,7 @@ webhook uses. Outbound replies stay in the outbox for ``rehearse replies``.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import uuid
 from collections.abc import Sequence
@@ -15,6 +16,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
+
+from pydantic import ValidationError
 
 from invoicebot.channels.base import Attachment, AttachmentKind, Button, InboundMessage, OutboundMessage
 from invoicebot.channels.console import (
@@ -24,7 +27,7 @@ from invoicebot.channels.console import (
     console_channel,
     inbox_dir,
 )
-from invoicebot.channels.media_limits import max_bytes_for
+from invoicebot.channels.media_limits import DIRECTORY_MODE, max_bytes_for
 from invoicebot.channels.profiles import sender_role
 from invoicebot.config.models import Config, ConsoleChannel
 from invoicebot.pipeline.intake import IntakeResult, IntakeSettings, handle_inbound
@@ -39,6 +42,12 @@ class RehearseError(Exception):
 
 #: The refusal both ``rehearse`` commands give when the config lists no console channel.
 _NO_CONSOLE_CHANNEL = "console channel not configured (D165)"
+#: What ``rehearse replies`` shows for a console row whose payload is not an outbound message.
+INVALID_PAYLOAD_TEXT = "<invalid payload>"
+#: Characters in the uuid hex that prefixes every inbox file name.
+_UUID_HEX_CHARS = 32
+
+logger = logging.getLogger(__name__)
 
 
 def require_console(cfg: Config) -> ConsoleChannel:
@@ -112,6 +121,7 @@ async def rehearse_send(
         text=replace_unsafe_chars(request.text or ""),
         attachments=[attachment] if attachment is not None else [],
         button_id=request.button,
+        # The sender-side send time, as a channel's own timestamp is (only touch_window reads it).
         received_at=datetime.now(UTC),
     )
     pool = create_pool(database_url)
@@ -149,10 +159,8 @@ async def rehearse_replies(database_url: str, after_id: int) -> list[ConsoleRepl
     """Read the console outbox rows above ``after_id`` and return them for printing (D165).
 
     Each payload is validated as an :class:`OutboundMessage` before it is shown, so the
-    command never prints a row the pipeline could not have sent.
-
-    Raises:
-        pydantic.ValidationError: a stored payload is not an outbound message.
+    command never prints a row the pipeline could not have sent; a row that fails shows
+    as :data:`INVALID_PAYLOAD_TEXT`, so one bad row never blocks the cursor (D165).
     """
     pool = create_pool(database_url)
     await pool.open(wait=True)
@@ -166,7 +174,11 @@ async def rehearse_replies(database_url: str, after_id: int) -> list[ConsoleRepl
 
 def _console_reply(row: OutboxRow) -> ConsoleReply:
     """Validate one console row's payload and turn it into a printable reply (D165)."""
-    message = OutboundMessage.model_validate(row.payload)
+    try:
+        message = OutboundMessage.model_validate(row.payload)
+    except ValidationError:
+        logger.warning("console outbox row %d has an invalid payload", row.id)
+        return ConsoleReply(id=row.id, rule_id=None, status=row.state, text=INVALID_PAYLOAD_TEXT, buttons=[])
     return ConsoleReply(
         id=row.id,
         rule_id=message.rule_id,
@@ -236,14 +248,19 @@ def _media_ref(name: str) -> str:
     suffix = Path(name).suffix.lower()
     stem = Path(name).stem
     allowed = "".join(char for char in stem if char.isascii() and (char.isalnum() or char in "._-"))
-    max_stem = MEDIA_REF_MAX_CHARS - 32 - 1 - len(suffix)
+    max_stem = MEDIA_REF_MAX_CHARS - _UUID_HEX_CHARS - 1 - len(suffix)
     stem = allowed[: max(1, max_stem)].rstrip("._-")
     return f"{uuid.uuid4().hex}-{stem or 'file'}{suffix}"
 
 
 def _write_inbox(path: Path, data: bytes) -> None:
-    """Write ``data`` to ``path`` (0600) under a 0700 inbox directory (D165)."""
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    """Write ``data`` to ``path`` (0600) under a 0700 inbox directory (D165).
+
+    The mode is set on every call, so an inbox made earlier with a looser umask is
+    tightened too.
+    """
+    path.parent.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
+    path.parent.chmod(DIRECTORY_MODE)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     try:
         with os.fdopen(fd, "wb") as stream:

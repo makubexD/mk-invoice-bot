@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import os
 import re
 import shutil
+import stat
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -49,6 +51,8 @@ MEDIA_BY_SUFFIX: dict[str, tuple[AttachmentKind, str]] = {
     ".xml": ("xml", "application/xml"),
 }
 _CHUNK_BYTES = 64 * 1024
+#: The copy's name until its checks pass; a retry trusts only :data:`FILE_NAME` (D165).
+_PARTIAL_SUFFIX = ".partial"
 
 
 def inbox_dir(data_dir: Path) -> Path:
@@ -68,10 +72,14 @@ class ConsoleMediaSource:
         """Copy one inbox file into ``out_dir`` and remove the inbox copy (D165).
 
         A retried download is idempotent: when the inbox copy is already gone but the
-        stored file exists, that file is re-hashed and returned (D165).
+        stored file exists, that file is re-hashed and returned (D165). The copy is
+        written under a temporary name and renamed only after every check passes, so
+        the stored name never holds a partial or unchecked file. A symlinked inbox
+        file is refused.
 
         Raises:
-            ValueError: when ``media_ref`` is not a plain file name or its extension is unknown.
+            ValueError: when ``media_ref`` is not a plain file name, its extension is
+                unknown or does not match ``kind``.
             FileNotFoundError: when neither an inbox file nor a stored file matches ``media_ref``.
             MediaRejected: when the kind is unsupported, the file is over its cap, or a
                 photo is not PNG/JPEG or declares too many pixels.
@@ -92,18 +100,22 @@ def _download(
     media = MEDIA_BY_SUFFIX.get(Path(media_ref).suffix.lower())
     if media is None:
         raise ValueError(f"unsupported media extension: {media_ref!r}")
-    mime = media[1]
+    suffix_kind, mime = media
+    if suffix_kind != kind:
+        raise ValueError(f"media_ref {media_ref!r} is not a {kind}")
     source = inbox_dir(data_dir) / media_ref
     limit = max_bytes_for(kind, limits)
     directory = out_dir / media_ref
     path = directory / FILE_NAME
-    if not source.is_file():
+    if not source.exists(follow_symlinks=False):
         if path.is_file():
             return _existing_download(path, mime, limit)
         raise FileNotFoundError(source)
+    partial = directory / f"{FILE_NAME}{_PARTIAL_SUFFIX}"
     try:
         directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
-        size, sha256 = _copy_to_file(source, path, ByteCap(limit), kind, limits.max_megapixels)
+        size, sha256 = _copy_to_file(source, partial, ByteCap(limit), kind, limits.max_megapixels)
+        partial.replace(path)
     except BaseException:
         shutil.rmtree(directory, ignore_errors=True)
         raise
@@ -134,12 +146,19 @@ def _copy_to_file(
 
     A photo's chunks are written as they arrive and ``check_image_header`` runs on
     the first :data:`MEDIA_HEADER_BYTES` (or on the whole file when it is shorter);
-    on rejection the caller removes the directory (BR-E07).
+    on rejection the caller removes the directory (BR-E07). ``source`` is opened
+    without following a symlink and must be a regular file.
+
+    Raises:
+        OSError: when ``source`` is a symlink or not a regular file.
     """
     digest = hashlib.sha256()
     written = 0
     pending: bytearray | None = bytearray() if kind == "photo" else None
-    with source.open("rb") as src, path.open("wb") as dst:
+    fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as src, path.open("wb") as dst:
+        if not stat.S_ISREG(os.fstat(src.fileno()).st_mode):
+            raise OSError(f"not a regular file: {source.name}")
         while chunk := src.read(_CHUNK_BYTES):
             cap.add(len(chunk))
             digest.update(chunk)

@@ -38,13 +38,18 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Restore the channel CHECK constraints without the console channel."""
+    """Restore the channel CHECK constraints without the console channel.
+
+    ``NOT VALID`` keeps console rows written while 0013 was live (the previous image
+    never writes ``console``, so only existing rows are exempt); a downgrade deletes
+    no data.
+    """
     op.execute(
         """
         ALTER TABLE invoices
             DROP CONSTRAINT invoices_origin_channel_check,
             ADD CONSTRAINT invoices_origin_channel_check
-            CHECK (origin_channel IN ('whatsapp', 'telegram'))
+            CHECK (origin_channel IN ('whatsapp', 'telegram')) NOT VALID
         """
     )
     op.execute(
@@ -52,6 +57,6 @@ def downgrade() -> None:
         ALTER TABLE outbox
             DROP CONSTRAINT outbox_channel_check,
             ADD CONSTRAINT outbox_channel_check
-            CHECK (channel IN ('whatsapp', 'telegram', 'github', 'event'))
+            CHECK (channel IN ('whatsapp', 'telegram', 'github', 'event')) NOT VALID
         """
     )

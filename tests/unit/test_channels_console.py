@@ -116,6 +116,41 @@ async def test_console_media_source_missing_file_raises(tmp_path: Path) -> None:
         await ConsoleMediaSource(tmp_path).download("missing.jpg", "photo", tmp_path / "out", _limits())
 
 
+async def test_console_media_source_refuses_a_symlinked_inbox_file(tmp_path: Path) -> None:
+    """D165: an inbox file that is a symlink is refused and its target is not copied."""
+    target = tmp_path / "outside.png"
+    target.write_bytes(_png(100, 100))
+    directory = inbox_dir(tmp_path)
+    directory.mkdir(parents=True)
+    (directory / _PHOTO_NAME).symlink_to(target)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with pytest.raises(OSError, match="Too many levels of symbolic links"):
+        await ConsoleMediaSource(tmp_path).download(_PHOTO_NAME, "photo", out_dir, _limits())
+
+    assert list(out_dir.iterdir()) == []
+
+
+async def test_console_media_source_retry_ignores_a_partial_copy(tmp_path: Path) -> None:
+    """D165: a copy left under its temporary name by a killed run is not returned on retry."""
+    out_dir = tmp_path / "out"
+    partial = out_dir / _PHOTO_NAME / "file.partial"
+    partial.parent.mkdir(parents=True)
+    partial.write_bytes(b"truncated")
+
+    with pytest.raises(FileNotFoundError):
+        await ConsoleMediaSource(tmp_path).download(_PHOTO_NAME, "photo", out_dir, _limits())
+
+
+async def test_console_media_source_rejects_a_kind_that_does_not_match_the_suffix(tmp_path: Path) -> None:
+    """D165: a .png asked for as a pdf raises ValueError, so the photo checks cannot be skipped."""
+    _inbox_file(tmp_path, _PHOTO_NAME, _png(100, 100))
+
+    with pytest.raises(ValueError, match="is not a pdf"):
+        await ConsoleMediaSource(tmp_path).download(_PHOTO_NAME, "pdf", tmp_path / "out", _limits())
+
+
 async def test_console_transport_keeps_the_row() -> None:
     """D165: the console transport accepts a row and returns its console message id."""
     row = OutboxRow(

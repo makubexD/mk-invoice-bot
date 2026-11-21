@@ -49,6 +49,7 @@ from invoicebot.store.invoices import (
     FileKind,
     FileRecord,
     InvoiceHead,
+    StoredUpload,
     add_file,
     get_file_path,
     list_unattached_uploads,
@@ -83,7 +84,7 @@ class _Inputs:
     head: InvoiceHead
     flow: Flow
     reading: Reading
-    uploads: Sequence[Attachment]
+    uploads: Sequence[StoredUpload]
     serie: str
     numero: str
 
@@ -115,7 +116,8 @@ def make_attach_handler(
 ) -> Handler:
     """Build the handler that attaches a stuck invoice's uploaded files (S7.5).
 
-    ``media`` maps a channel name to the source that downloads its uploads. An invoice
+    ``media`` maps a channel name to the source that downloads its uploads; each upload's
+    own message channel picks one, not the invoice's origin (D102, D165). An invoice
     outside ``MANUAL_REQUIRED`` is left untouched, and so is one whose linked uploads are
     all stored already, so a redelivered job writes nothing (D101). A missing reading, flow
     or media source raises, so the queue retries the job.
@@ -176,7 +178,8 @@ async def _collect(
     kept: list[FileRecord] = []
     stored_kinds: list[str] = []
     replies: list[_Rejection] = []
-    for upload in inputs.uploads:
+    for stored in inputs.uploads:
+        upload = stored.attachment
         if upload.kind not in inputs.flow.manual_uploads:
             logger.debug(
                 "upload kind not allowed",
@@ -185,7 +188,7 @@ async def _collect(
             continue
         downloaded = await _download(
             media,
-            inputs.head.origin_channel,
+            stored.channel,
             upload,
             out_dir,
             limits,

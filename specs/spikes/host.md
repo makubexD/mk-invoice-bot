@@ -95,7 +95,7 @@ Image `135409caf664`, console channel `{kind: console, profile: yo}` in the live
   After: 4/6 read (2 unreadable), each routed with BR-R02.
 - **Works:** `rehearse send` (photo, PDF, text), `rehearse replies --after`, BR-S09 on intake, BR-R02 summaries with
   `[id] title` buttons, a lone XML refused with BR-E07 (D121; the XML of a chat invoice comes from the fetchers).
-- **Routing:** all 4 readable sample photos and the paid flow B sample PDF (Shimaya, F005-2212) routed to flow B
+- **Routing:** all 4 readable sample photos and the paid flow B sample PDF routed to flow B
   (`work_microsoft`) and wait in `FETCHING_DOCS` for the merchant's mail ("esperando correo del comercio").
 - **Expected noise:** `channel token rejected` (WhatsApp) on every admin alert while the WABA is restricted.
 - **Still open** (need the owner or a mail fetch): flow B's OneDrive folder, Excel, `dry_run` mail and `/pagado` once

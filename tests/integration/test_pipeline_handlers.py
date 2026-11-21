@@ -425,13 +425,12 @@ async def test_media_info_failure_raises_and_changes_nothing(
 async def test_channel_without_a_media_source_raises_and_stores_no_file(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-1.5: an invoice whose channel has no media source raises LookupError and stores no file."""
+    """R-1.5: a message whose channel has no media source raises LookupError and stores no file."""
     profile_id = _profile()
-    async with db_pool.connection() as conn:
-        invoice_id = await create_invoice(conn, profile_id, "telegram")
+    invoice_id = await _queue_photo(db_pool, profile_id, "media-no-source")
     download = make_download_handler(db_pool, {}, tmp_path, _limits())
 
-    with pytest.raises(LookupError, match="no media source for channel telegram"):
+    with pytest.raises(LookupError, match="no media source for channel whatsapp"):
         await download(_job(invoice_id))
 
     async with db_pool.connection() as conn:
