@@ -33,7 +33,6 @@ import yaml
 from pydantic import TypeAdapter, ValidationError
 
 from invoicebot import rehearse
-from invoicebot.app import intake_settings
 from invoicebot.auth.google_consent import (
     STATE_PARAM,
     ConsentError,
@@ -73,6 +72,7 @@ from invoicebot.config.models import (
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
 from invoicebot.pipeline.deliver import DELIVER_STEP
+from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.pipeline.pending_auth import GOOGLE, MICROSOFT
 from invoicebot.queue.jobs import enqueue
 from invoicebot.secrets import SecretStore, load_identity

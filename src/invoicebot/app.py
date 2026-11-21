@@ -50,7 +50,6 @@ from invoicebot.config.models import (
     GoogleDriveSink,
     GoogleSheetsSink,
     Mail,
-    MailerSink,
     OneDriveFolderSink,
     StoreDirectory,
     SunatSolSite,
@@ -73,7 +72,6 @@ from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
-from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
     DeliverContext,
@@ -87,7 +85,14 @@ from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
-from invoicebot.pipeline.intake import DOWNLOAD_STEP, IntakeRoles, IntakeSettings
+from invoicebot.pipeline.intake import DOWNLOAD_STEP
+from invoicebot.pipeline.intake_config import (
+    LAPTOP_ADAPTER,
+    admin_profiles,
+    intake_settings,
+    laptop_flow_ids,
+    lists_laptop,
+)
 from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
@@ -96,7 +101,6 @@ from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
-from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.outbox import OutboxSender, Transport
@@ -145,8 +149,6 @@ WHATSAPP_SECRETS = frozenset(
 MICROSOFT_ACCOUNT = PERSONAL_MICROSOFT_ACCOUNT
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
 BOT_ACCOUNT = "bot"
-#: The adapter and mail mode that hands the mail to the laptop agent (R-7.14, D108).
-LAPTOP_ADAPTER = "laptop_outlook"
 #: The age-store secret the laptop job's HMAC is keyed with (R-7.14).
 LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
@@ -319,9 +321,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         # same token file would race on a refresh (D135).
         google_tokens = _google_tokens(settings, cfg, http, store)
         handlers = {
-            DOWNLOAD_STEP: make_download_handler(
-                pool, _media_sources(cfg, client, settings.data_dir), settings.data_dir, cfg.limits.media
-            ),
+            **_media_handlers(cfg, client, settings, pool),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -345,13 +345,6 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 ),
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
-            ),
-            ATTACH_STEP: make_attach_handler(
-                pool,
-                cfg,
-                _media_sources(cfg, client, settings.data_dir),
-                settings.data_dir,
-                cfg.limits.media,
             ),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
@@ -476,51 +469,11 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         pool=pool,
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
-        admin_profiles=_admin_profiles(cfg),
+        admin_profiles=admin_profiles(cfg),
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
         intake=intake_settings(cfg),
-    )
-
-
-def _teach_setup(cfg: Config) -> TeachSetup | None:
-    """Return the teaching setup, or None when chat teaching is off (R-11.4, BR-F02)."""
-    if not cfg.gaps.teach_via_chat:
-        return None
-    return TeachSetup(
-        profiles=cfg.profiles,
-        resolver=SystemResolver(),
-        github_repo=cfg.gaps.github.repo if cfg.gaps.github.enabled else None,
-    )
-
-
-def _payment_flow(cfg: Config) -> PaymentFlow | None:
-    """Return the first flow that tracks payments, or None when no flow opts in (R-7.12)."""
-    for name, flow in cfg.flows.items():
-        reimbursement = flow.reimbursement
-        if reimbursement is not None and reimbursement.track_payments:
-            return PaymentFlow(flow_id=name, cap=reimbursement.cap)
-    return None
-
-
-def _admin_profiles(cfg: Config) -> frozenset[str]:
-    """Return the profile ids whose ``admin`` flag is set (R-1.2)."""
-    return frozenset(name for name, profile in cfg.profiles.items() if profile.admin)
-
-
-def intake_settings(cfg: Config) -> IntakeSettings:
-    """Return the intake arguments shared by the webhook and the console CLI (D165)."""
-    return IntakeSettings(
-        max_queued_per_sender=cfg.limits.max_queued_per_sender,
-        media_max_bytes=cfg.limits.media.max_bytes,
-        timezone=cfg.owner.timezone,
-        roles=IntakeRoles(
-            admins=_admin_profiles(cfg),
-            payment_flow=_payment_flow(cfg),
-            laptop_flows=_laptop_flow_ids(cfg),
-            teach=_teach_setup(cfg),
-        ),
     )
 
 
@@ -537,6 +490,17 @@ def _media_sources(cfg: Config, client: WhatsAppClient, data_dir: Path) -> dict[
     if console_channel(cfg) is not None:
         sources[CONSOLE] = ConsoleMediaSource(data_dir)
     return sources
+
+
+def _media_handlers(
+    cfg: Config, client: WhatsAppClient, settings: Settings, pool: Pool
+) -> dict[str, Handler]:
+    """Return the media handlers, built once over one shared source map (R-1.4, D165)."""
+    sources = _media_sources(cfg, client, settings.data_dir)
+    return {
+        DOWNLOAD_STEP: make_download_handler(pool, sources, settings.data_dir, cfg.limits.media),
+        ATTACH_STEP: make_attach_handler(pool, cfg, sources, settings.data_dir, cfg.limits.media),
+    }
 
 
 def _console_transports(cfg: Config) -> dict[str, Transport]:
@@ -605,7 +569,7 @@ def _deliver_handlers(
     if BOT_ACCOUNT in microsoft_accounts(cfg):
         bot_provider = build_token_provider(settings, cfg, BOT_ACCOUNT, scopes_for(cfg, BOT_ACCOUNT))
         bot_mailer = GraphMailer(http, bot_provider, cfg.microsoft.timeout_s, account=BOT_ACCOUNT)
-    laptop_flows = _laptop_flow_ids(cfg)
+    laptop_flows = laptop_flow_ids(cfg)
     found = _laptop_root_and_key(cfg, store)
     laptop: LaptopOutlook | None = None
     laptop_task: TaskFactory | None = None
@@ -799,7 +763,7 @@ def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str
 
 def _laptop_flow(cfg: Config) -> Flow | None:
     """Return the first flow that lists ``laptop_outlook``, or None when none does (R-7.14)."""
-    return next((flow for flow in cfg.flows.values() if _lists_laptop(flow)), None)
+    return next((flow for flow in cfg.flows.values() if lists_laptop(flow)), None)
 
 
 def _laptop_root_and_key(cfg: Config, store: SecretStore) -> tuple[str, bytes] | None:
@@ -1029,16 +993,6 @@ async def _run_retention(pool: Pool, cfg: Config) -> None:
     async with pool.connection() as conn, conn.transaction():
         counts = await prune(conn, cfg.ops.retention_days)
     logger.info("retention pruned", extra={"counts": counts})
-
-
-def _laptop_flow_ids(cfg: Config) -> frozenset[str]:
-    """Return the names of the flows whose mailer sink lists ``laptop_outlook`` (D109)."""
-    return frozenset(name for name, flow in cfg.flows.items() if _lists_laptop(flow))
-
-
-def _lists_laptop(flow: Flow) -> bool:
-    """Return whether the flow's mailer sink lists the laptop mode (R-7.14)."""
-    return any(isinstance(sink, MailerSink) and LAPTOP_ADAPTER in sink.modes for sink in flow.sinks)
 
 
 def _laptop_root(flow: Flow) -> str:

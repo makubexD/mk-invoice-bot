@@ -16,12 +16,12 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.app import intake_settings
 from invoicebot.channels.base import Button, OutboundMessage
 from invoicebot.channels.console import inbox_dir
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel
+from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.queue.outbox import add, rows_after
 from invoicebot.rehearse import RehearseError, RehearseSend, rehearse_replies, rehearse_send
 from invoicebot.settings import Settings
