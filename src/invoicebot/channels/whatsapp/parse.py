@@ -12,8 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage, SenderRole
-from invoicebot.channels.profiles import ProfileIndex
+from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
+from invoicebot.channels.profiles import ProfileIndex, sender_role
 from invoicebot.channels.whatsapp.signature import sender_hash
 from invoicebot.text import replace_unsafe_chars
 
@@ -104,21 +104,13 @@ def _parse_message(
         channel="whatsapp",
         external_id=external_id,
         profile_id=profile_id,
-        sender_role=_sender_role(profile_id, owner_profile, admin_profiles),
+        sender_role=sender_role(profile_id, owner_profile, admin_profiles),
         text=replace_unsafe_chars(content.text),
         attachments=content.attachments,
         reply_to_external_id=_reply_to(raw),
         button_id=content.button_id,
         received_at=received_at,
     )
-
-
-def _sender_role(profile_id: str, owner_profile: str, admin_profiles: frozenset[str]) -> SenderRole:
-    if profile_id == owner_profile:
-        return "owner"
-    if profile_id in admin_profiles:
-        return "admin"
-    return "sender"
 
 
 def _content(message_type: str, message: dict[str, Any]) -> _Content | None:

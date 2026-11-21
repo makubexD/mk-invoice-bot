@@ -868,6 +868,36 @@ async def test_upload_is_downloaded_through_its_channel_source(
     assert telegram.refs == []
 
 
+async def test_upload_on_another_channel_uses_its_own_channel_source(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5, D102, D165: an upload linked to another channel's invoice downloads through its own channel."""
+    profile_id = f"uploads-{uuid4().hex}"
+    invoice_id = await _invoice(db_pool, profile_id)
+    media_ref = f"ref-{uuid4().hex}"
+    await _link_upload(
+        db_pool,
+        invoice_id,
+        profile_id,
+        _Upload("pdf", media_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
+        channel="telegram",
+    )
+    whatsapp = _FakeMediaSource({media_ref: (MIME["pdf"], b"synthetic whatsapp bytes")})
+    telegram = _FakeMediaSource({media_ref: (MIME["pdf"], PDF_BYTES)})
+
+    handler = make_attach_handler(
+        db_pool,
+        _config(),
+        {"whatsapp": whatsapp, "telegram": telegram},
+        tmp_path,
+        _limits(),
+    )
+    await handler(_job(invoice_id))
+
+    assert telegram.refs == [media_ref]
+    assert whatsapp.refs == []
+
+
 async def test_upload_from_a_channel_with_no_source_fails_the_job(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

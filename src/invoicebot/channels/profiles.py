@@ -7,8 +7,17 @@ channel never match.
 
 from __future__ import annotations
 
-from invoicebot.channels.base import ChannelName
+from invoicebot.channels.base import ChannelName, SenderRole
 from invoicebot.config.models import Config, Profile
+
+
+def sender_role(profile_id: str, owner_profile: str, admin_profiles: frozenset[str]) -> SenderRole:
+    """Return the role a profile has in the pipeline: owner, admin or sender (R-1.2)."""
+    if profile_id == owner_profile:
+        return "owner"
+    if profile_id in admin_profiles:
+        return "admin"
+    return "sender"
 
 
 class ProfileIndex:

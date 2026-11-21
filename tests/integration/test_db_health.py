@@ -20,6 +20,7 @@ from invoicebot.app import create_app
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.pipeline.handlers import MEGABYTE
+from invoicebot.pipeline.intake import IntakeSettings
 from invoicebot.store.db import Pool, create_pool, ping
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -55,14 +56,14 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
         pool=pool,
         index=ProfileIndex({profile_id: profile}),
         owner_profile=profile_id,
-        admin_profiles=frozenset(),
-        laptop_flows=frozenset(),
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
-        max_queued_per_sender=MAX_QUEUED,
-        media_max_bytes=MEDIA_MAX_BYTES,
-        timezone=TIMEZONE,
+        intake=IntakeSettings(
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        ),
     )
     app = FastAPI()
     app.include_router(make_router(deps))

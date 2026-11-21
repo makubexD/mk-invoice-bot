@@ -748,9 +748,21 @@ async def record_upload_rejection(
     return cur.rowcount == 1
 
 
+@dataclass(frozen=True)
+class StoredUpload:
+    """A linked upload and the channel of the message that carried it (R-1.5, D102).
+
+    The channel picks the media source: an upload may reach an invoice that came in on
+    another channel of the same profile (D102, D165).
+    """
+
+    channel: ChannelName
+    attachment: Attachment
+
+
 async def list_unattached_uploads(
     conn: AsyncConnection[Any], invoice_id: int, kinds: Sequence[str]
-) -> list[Attachment]:
+) -> list[StoredUpload]:
     """Return the invoice's linked uploads of ``kinds`` with no file or rejection row, oldest first.
 
     The attachments travel in the stored message payload; a kept upload records its media
@@ -759,7 +771,8 @@ async def list_unattached_uploads(
     """
     cur = await conn.execute(
         """
-        SELECT attachment->>'kind',
+        SELECT m.channel,
+               attachment->>'kind',
                attachment->>'media_ref',
                attachment->>'mime',
                attachment->>'size'
@@ -785,13 +798,16 @@ async def list_unattached_uploads(
         (invoice_id, list(kinds)),
     )
     return [
-        Attachment(
-            kind=cast(AttachmentKind, kind),
-            media_ref=str(media_ref),
-            mime=str(mime),
-            size=int(size),
+        StoredUpload(
+            channel=cast(ChannelName, channel),
+            attachment=Attachment(
+                kind=cast(AttachmentKind, kind),
+                media_ref=str(media_ref),
+                mime=str(mime),
+                size=int(size),
+            ),
         )
-        for kind, media_ref, mime, size in await cur.fetchall()
+        for channel, kind, media_ref, mime, size in await cur.fetchall()
     ]
 
 

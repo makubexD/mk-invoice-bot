@@ -21,8 +21,9 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage
+from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage, MediaSource
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, handle_inbound
@@ -35,6 +36,7 @@ from invoicebot.store.invoices import create_invoice, set_state
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 PHONE_NUMBER_ID = "123456789"
+WHATSAPP_ADAPTER = "whatsapp"
 GRAPH_VERSION = "v23.0"
 BEARER = "synthetic-bearer-value"
 MEDIA_URL = "https://mmg.whatsapp.net/v/t62/media"
@@ -61,6 +63,11 @@ async def _make_client(handler: Handler) -> AsyncIterator[WhatsAppClient]:
             graph_api_version=GRAPH_VERSION,
             token=BEARER,
         )
+
+
+def _sources(client: WhatsAppClient) -> dict[str, MediaSource]:
+    """Map the WhatsApp adapter to the media source that downloads its files."""
+    return {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
 
 
 def _png_header(width: int, height: int) -> bytes:
@@ -208,7 +215,7 @@ async def _run_download(
         return httpx.Response(200, content=body)
 
     async with _make_client(handler) as client:
-        await make_download_handler(pool, client, tmp_path, _limits())(_job(invoice_id))
+        await make_download_handler(pool, _sources(client), tmp_path, _limits())(_job(invoice_id))
 
 
 async def _outbox_rows(conn: AsyncConnection[Any], to: str, rule_id: str) -> list[tuple[str, str]]:
@@ -242,7 +249,7 @@ async def test_valid_photo_stores_the_file_and_keeps_the_invoice_received(
     profile_id = _profile()
     invoice_id = await _queue_photo(db_pool, profile_id, media_ref)
     async with _make_client(handler) as client:
-        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
         await download(_job(invoice_id))
 
     async with db_pool.connection() as conn:
@@ -280,7 +287,7 @@ async def test_second_download_run_stores_one_file_and_sends_no_request(
     profile_id = _profile()
     invoice_id = await _queue_photo(db_pool, profile_id, media_ref)
     async with _make_client(handler) as client:
-        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
         await download(_job(invoice_id))
         requests_after_first_run = len(requests)
         await download(_job(invoice_id))
@@ -338,7 +345,7 @@ async def test_oversized_image_cancels_the_invoice_and_replies_br_e07(
     profile_id = _profile()
     invoice_id = await _queue_photo(db_pool, profile_id, f"ref-{uuid4().hex}")
     async with _make_client(handler) as client:
-        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
         await download(_job(invoice_id))
 
     async with db_pool.connection() as conn:
@@ -375,7 +382,7 @@ async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
         )
     assert result.invoice_id is not None
     async with _make_client(handler) as client:
-        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
         await download(_job(result.invoice_id))
 
     async with db_pool.connection() as conn:
@@ -403,7 +410,7 @@ async def test_media_info_failure_raises_and_changes_nothing(
     profile_id = _profile()
     invoice_id = await _queue_photo(db_pool, profile_id, f"ref-{uuid4().hex}")
     async with _make_client(handler) as client:
-        download = make_download_handler(db_pool, client, tmp_path, _limits())
+        download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
         with pytest.raises(WhatsAppError):
             await download(_job(invoice_id))
 
@@ -412,6 +419,23 @@ async def test_media_info_failure_raises_and_changes_nothing(
         files = await _files(conn, invoice_id)
 
     assert (state, rule_id) == ("RECEIVED", None)
+    assert files == []
+
+
+async def test_channel_without_a_media_source_raises_and_stores_no_file(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-1.5: a message whose channel has no media source raises LookupError and stores no file."""
+    profile_id = _profile()
+    invoice_id = await _queue_photo(db_pool, profile_id, "media-no-source")
+    download = make_download_handler(db_pool, {}, tmp_path, _limits())
+
+    with pytest.raises(LookupError, match="no media source for channel whatsapp"):
+        await download(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        files = await _files(conn, invoice_id)
+
     assert files == []
 
 

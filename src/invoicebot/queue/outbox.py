@@ -28,12 +28,13 @@ from invoicebot.store.db import Pool
 logger = logging.getLogger(__name__)
 
 MAX_ATTEMPTS = 8
-VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event"})
+#: Must match the outbox_channel_check constraint (migration 0013).
+VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event", "console"})
 
 
 @dataclass(frozen=True)
 class OutboxRow:
-    """A due outbox row handed to a transport."""
+    """An outbox row as stored: handed to a transport, or listed by ``rows_after``."""
 
     id: int
     channel: str
@@ -41,6 +42,7 @@ class OutboxRow:
     payload: dict[str, Any]
     template: str | None
     attempts: int
+    state: str
 
 
 #: A coroutine that delivers one outbox row and returns the channel's message id,
@@ -135,6 +137,26 @@ async def set_pending_issue_hint(
         (hint_url, fingerprint),
     )
     return cur.rowcount
+
+
+async def rows_after(conn: AsyncConnection[Any], channel: str, after_id: int) -> list[OutboxRow]:
+    """Return ``channel``'s outbox rows above ``after_id``, oldest first (D165).
+
+    ``rehearse replies`` prints the console rows the transport kept, so a call with
+    the last id it showed returns only what arrived since. Does not commit.
+    """
+    # shortcut: an id cursor can skip a row whose transaction commits after a higher id
+    # was read; fine for a dev-only rehearsal, where one operator sends one message at a time.
+    cur = await conn.execute(
+        """
+        SELECT id, channel, "to", payload_json, template, attempts, state
+        FROM outbox
+        WHERE channel = %(channel)s AND id > %(after_id)s
+        ORDER BY id
+        """,
+        {"channel": channel, "after_id": after_id},
+    )
+    return [_outbox_row(raw) for raw in await cur.fetchall()]
 
 
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
@@ -280,7 +302,7 @@ class OutboxSender:
                 async with conn.transaction():
                     cur = await conn.execute(
                         """
-                        SELECT id, channel, "to", payload_json, template, attempts
+                        SELECT id, channel, "to", payload_json, template, attempts, state
                         FROM outbox
                         WHERE state = 'pending' AND run_after <= now()
                         ORDER BY id
@@ -387,4 +409,5 @@ def _outbox_row(raw: tuple[Any, ...]) -> OutboxRow:
         payload=cast(dict[str, Any], raw[3]),
         template=cast(str | None, raw[4]),
         attempts=int(raw[5]),
+        state=str(raw[6]),
     )

@@ -138,3 +138,45 @@ warning in the logs, with its reason.
    `sunat.padron.max_mb`. `status` means SUNAT did not answer 200.
 3. For a ZIP you downloaded yourself, copy it in with `podman cp`, then run
    `podman exec "$APP" python scripts/import_padron.py /data/<file>.zip`.
+
+## 9. Rehearse without WhatsApp (D165)
+
+While Meta verification is pending, the dev-only `console` channel runs the same intake as the webhook. Its replies
+stay in the outbox and are never sent anywhere. Config load refuses it with `env: production`.
+
+1. Enable it: add `- { kind: console, profile: <owner profile> }` under `channels` in the live config, then
+   **reload**.
+2. Send a file. Its bytes come from stdin, and the extension picks the kind (`.jpg`, `.jpeg`, `.png`, `.pdf`,
+   `.xml`):
+
+   ```sh
+   podman exec -i "$APP" invoicebot rehearse send --name f.jpg < f.jpg
+   ```
+
+   It prints `intake: <result>` and the invoice id. A text or command: `rehearse send --text "/ayuda"`.
+
+3. Read the bot's replies. The last line is `next: --after <id>`; pass it back to see only newer rows:
+
+   ```sh
+   podman exec "$APP" invoicebot rehearse replies --after <id>
+   ```
+
+   A reply with buttons lists them as `[<id>] <title>`.
+
+4. Press a button: `podman exec "$APP" invoicebot rehearse send --button <id>`.
+5. When 9d2 `live-chat` starts, close the rehearsal first, then remove the `console` line from the live config and
+   **reload**. With the line gone, a pending console reply has no transport and ends `dead` with an error per row,
+   and a console download or attach job has no media source and parks.
+   - Cancel each console invoice that is still open: `rehearse send --text "/cancelar <id>"`, then check its reply.
+   - Retire the console replies nobody will read, in the live database:
+
+     ```sh
+     PG=$(podman ps -q --filter label=com.docker.compose.project=invoicebot-live \
+         --filter label=com.docker.compose.service=postgres)
+     podman exec "$PG" psql -U invoicebot invoicebot \
+         -c "UPDATE outbox SET state = 'dead' WHERE channel = 'console' AND state = 'pending'"
+     ```
+
+**Known limit:** the console cannot reply to a message, so a PDF or XML sent while the profile has more than one open
+invoice always gets BR-D14 ("reply to the right photo"). Rehearse a manual upload with a single open invoice: cancel
+or finish the others first.

@@ -23,7 +23,7 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.whatsapp.media import DIRECTORY_MODE
+from invoicebot.channels.media_limits import DIRECTORY_MODE
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,

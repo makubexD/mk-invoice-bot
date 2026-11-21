@@ -54,6 +54,7 @@ from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, RULE_ACK
+from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
@@ -230,14 +231,10 @@ def _deps(pool: Pool, setup: _Setup) -> WebhookDeps:
         pool=pool,
         index=ProfileIndex({setup.profile_id: profile}),
         owner_profile=setup.profile_id,
-        admin_profiles=frozenset(),
-        laptop_flows=frozenset(),
-        timezone=setup.cfg.owner.timezone,
         app_secret=APP_SECRET,
         verify_token=VERIFY_TOKEN,
         sender_hash_key=SENDER_HASH_KEY,
-        max_queued_per_sender=setup.cfg.limits.max_queued_per_sender,
-        media_max_bytes=setup.cfg.limits.media.max_bytes,
+        intake=intake_settings(setup.cfg),
     )
 
 

@@ -362,7 +362,7 @@ mk-invoice-bot/
     api/{rest,mcp,auth}.py  # public contract (R-12)
     events/{schema,publisher}.py
     settings.py
-    channels/{base,whatsapp,telegram}.py
+    channels/{base,whatsapp,telegram,console}.py   # console: dev-only rehearsal channel (D165)
     store/{db,repo}.py   # migrations/ holds Alembic plain-SQL revisions
     queue/{jobs,worker,scheduler}.py
     pipeline/{states,machine}.py

@@ -1,20 +1,19 @@
 """Job handlers of the pipeline: download an invoice's media (R-1.4, R-1.11).
 
 :func:`make_download_handler` builds the handler of the ``download_media`` job
-step with its pool, channel client, data directory and media limits injected.
-The download itself runs with no transaction open; only its outcome is
-recorded, in one transaction, so the state change and the outbox message (or
-the file row and its ``extract`` job) commit together.
+step with its pool, one media source per channel, data directory and media
+limits injected. The download itself runs with no transaction open; only its
+outcome is recorded, in one transaction, so the state change and the outbox
+message (or the file row and its ``extract`` job) commit together.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
+from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage, MediaSource
 from invoicebot.channels.media_limits import MediaRejected, RejectionReason
-from invoicebot.channels.whatsapp.client import WhatsAppClient
-from invoicebot.channels.whatsapp.media import download_media
 from invoicebot.config.models import MediaLimits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.queue.jobs import Job, enqueue
@@ -51,19 +50,21 @@ class MediaRejection:
 
 def make_download_handler(
     pool: Pool,
-    client: WhatsAppClient,
+    sources: Mapping[str, MediaSource],
     data_dir: Path,
     limits: MediaLimits,
 ) -> Handler:
     """Build the handler that downloads an invoice's first attachment (R-1.4).
 
-    A successful download stores a ``files`` row, enqueues the ``extract`` step
-    in the same transaction and leaves the invoice in ``RECEIVED``; an invoice
-    that already has a file is left untouched, so a retried job neither
-    downloads nor enqueues it twice. ``MediaRejected`` cancels the invoice
-    with BR-E07 and replies to the sender; the handler returns normally, so the
-    job completes rather than retrying. Any other exception propagates for the
-    queue to retry.
+    ``sources`` maps a channel name to the source that downloads its media, and
+    the channel of the invoice's message picks one; a channel with no source raises
+    ``LookupError``. A successful download stores a ``files`` row, enqueues the
+    ``extract`` step in the same transaction and leaves the invoice in
+    ``RECEIVED``; an invoice that already has a file is left untouched, so a
+    retried job neither downloads nor enqueues it twice. ``MediaRejected``
+    cancels the invoice with BR-E07 and replies to the sender; the handler
+    returns normally, so the job completes rather than retrying. Any other
+    exception propagates for the queue to retry.
     """
 
     async def handle(job: Job) -> None:
@@ -71,10 +72,12 @@ def make_download_handler(
             if await has_file(conn, job.invoice_id):
                 return
         msg = await _load_message(pool, job.invoice_id)
+        source = sources.get(msg.channel)
+        if source is None:
+            raise LookupError(f"no media source for channel {msg.channel}")
         attachment = _first_attachment(msg)
         try:
-            media = await download_media(
-                client,
+            media = await source.download(
                 attachment.media_ref,
                 attachment.kind,
                 data_dir / TMP_DIRECTORY,

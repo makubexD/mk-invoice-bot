@@ -841,8 +841,8 @@ async def test_record_upload_rejection_hides_only_its_upload(
         await record_upload_rejection(conn, invoice_id, "media-pdf", "BR-D15")
         after = await list_unattached_uploads(conn, invoice_id, ("pdf", "xml"))
 
-    assert [upload.media_ref for upload in before] == ["media-pdf", "media-xml"]
-    assert [upload.media_ref for upload in after] == ["media-xml"]
+    assert [upload.attachment.media_ref for upload in before] == ["media-pdf", "media-xml"]
+    assert [upload.attachment.media_ref for upload in after] == ["media-xml"]
 
 
 async def test_record_upload_rejection_twice_keeps_one_row(
