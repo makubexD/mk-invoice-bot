@@ -30,6 +30,7 @@ from invoicebot.config.models import Config, ConsoleChannel
 from invoicebot.pipeline.intake import IntakeResult, IntakeSettings, handle_inbound
 from invoicebot.queue.outbox import OutboxRow, rows_after
 from invoicebot.store.db import create_pool
+from invoicebot.text import replace_unsafe_chars
 
 
 class RehearseError(Exception):
@@ -50,11 +51,22 @@ def require_console(cfg: Config) -> ConsoleChannel:
 
 @dataclass(frozen=True)
 class RehearseSend:
-    """One ``rehearse send`` invocation: a file name, a text or a button id (D165)."""
+    """One ``rehearse send`` invocation: a file name, a text or a button id (D165).
+
+    A request never names both a file and a button: a file carries a caption text,
+    but a button press cannot also arrive with the file it would answer (D165).
+
+    Raises:
+        RehearseError: a request names both ``name`` and ``button``.
+    """
 
     name: str | None = None
     text: str | None = None
     button: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.name is not None and self.button is not None:
+            raise RehearseError("rehearse send cannot combine --name and --button (D165)")
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,8 @@ async def rehearse_send(
     A file named by ``request.name`` is read from ``stdin`` up to its kind's cap and
     written to the inbox before intake; a text or button runs without a file. The
     message is handled in one pooled connection, so intake keeps its own transaction.
+    When intake creates no job for the file, or raises, the inbox file is removed
+    again so a refused send leaves nothing behind (D165).
 
     Raises:
         RehearseError: the config has no console channel, a file name's extension is
@@ -95,7 +109,7 @@ async def rehearse_send(
         external_id=f"console-{uuid.uuid4().hex}",
         profile_id=channel.profile,
         sender_role=sender_role(channel.profile, cfg.owner.profile, intake.roles.admins),
-        text=request.text or "",
+        text=replace_unsafe_chars(request.text or ""),
         attachments=[attachment] if attachment is not None else [],
         button_id=request.button,
         received_at=datetime.now(UTC),
@@ -112,9 +126,23 @@ async def rehearse_send(
                 timezone=intake.timezone,
                 roles=intake.roles,
             )
+    except BaseException:
+        await _discard_inbox(data_dir, attachment)
+        raise
     finally:
         await pool.close()
+    if attachment is not None and result.invoice_id is None:
+        # shortcut: a stored result with an invoice id is assumed to consume the file.
+        await _discard_inbox(data_dir, attachment)
     return result
+
+
+async def _discard_inbox(data_dir: Path, attachment: Attachment | None) -> None:
+    """Remove the inbox file when no download or attach job will consume it (D165)."""
+    if attachment is None:
+        return
+    path = inbox_dir(data_dir) / attachment.media_ref
+    await asyncio.to_thread(path.unlink, missing_ok=True)
 
 
 async def rehearse_replies(database_url: str, after_id: int) -> list[ConsoleReply]:
@@ -153,13 +181,18 @@ def format_replies(replies: Sequence[ConsoleReply], after_id: int) -> list[str]:
 
     Each reply shows as ``#<id> <rule id or -> <status>``, then its text lines, then
     one ``[<id>] <title>`` line per button. The last line asks for the next call after
-    the newest reply, or after ``after_id`` when there are none.
+    the newest reply, or after ``after_id`` when there are none. Text lines are
+    cleaned per line, so a newline between them stays and no control character from
+    invoice data reaches the terminal (R-12.8).
     """
     lines: list[str] = []
     for reply in replies:
         lines.append(f"#{reply.id} {reply.rule_id or '-'} {reply.status}")
-        lines.extend(reply.text.splitlines())
-        lines.extend(f"[{button.id}] {button.title}" for button in reply.buttons)
+        lines.extend(replace_unsafe_chars(line) for line in reply.text.splitlines())
+        lines.extend(
+            f"[{replace_unsafe_chars(button.id)}] {replace_unsafe_chars(button.title)}"
+            for button in reply.buttons
+        )
     last_id = replies[-1].id if replies else after_id
     lines.append(f"next: --after {last_id}")
     return lines

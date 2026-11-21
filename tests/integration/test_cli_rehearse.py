@@ -131,6 +131,60 @@ async def test_photo_creates_invoice_job_and_acknowledgement(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_queued_photo_keeps_its_inbox_file(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """D165: a photo that queues keeps its inbox file for the download job."""
+    profile_id = _profile_id()
+    cfg = _config(profile_id)
+    data = b"\x89PNG\r\n\x1a\n" + b"photo"
+
+    result = await rehearse_send(
+        tmp_path,
+        test_database_url,
+        cfg,
+        intake_settings(cfg),
+        RehearseSend(name="photo.png"),
+        io.BytesIO(data),
+    )
+
+    assert result.status == "queued"
+    assert result.invoice_id is not None
+    [inbox_file] = inbox_dir(tmp_path).glob("*.png")
+    assert inbox_file.read_bytes() == data
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_lone_xml_leaves_no_inbox_file(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """D165: a lone XML is refused (BR-E07) and its inbox file is removed."""
+    profile_id = _profile_id()
+    cfg = _config(profile_id)
+
+    result = await rehearse_send(
+        tmp_path,
+        test_database_url,
+        cfg,
+        intake_settings(cfg),
+        RehearseSend(name="factura.xml"),
+        io.BytesIO(b"<factura/>"),
+    )
+
+    invoices, jobs, outbox = await _rows(db_pool, profile_id)
+    assert invoices == []
+    assert jobs == []
+    assert outbox == [("console", "BR-E07")]
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert list(inbox_dir(tmp_path).iterdir()) == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_text_help_stores_a_reply_and_no_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     test_database_url: str,

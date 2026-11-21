@@ -359,8 +359,8 @@ def _rehearse_send(
     database_url = settings.database_url
     if database_url is None:
         parser.error("DATABASE_URL must be set to rehearse a console message")
-    request = rehearse.RehearseSend(name=args.name, text=args.text, button=args.button)
     try:
+        request = rehearse.RehearseSend(name=args.name, text=args.text, button=args.button)
         result = asyncio.run(
             rehearse.rehearse_send(
                 settings.data_dir,
