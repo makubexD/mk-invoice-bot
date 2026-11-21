@@ -164,7 +164,9 @@ stay in the outbox and are never sent anywhere. Config load refuses it with `env
    A reply with buttons lists them as `[<id>] <title>`.
 
 4. Press a button: `podman exec "$APP" invoicebot rehearse send --button <id>`.
-5. When 9d2 `live-chat` starts, close the rehearsal first, then remove the `console` line from the live config and
+5. Quote a reply: `podman exec -i "$APP" invoicebot rehearse send --reply-to <id> --name f.pdf < f.pdf`, with the
+   `#<id>` of the bot's message about that invoice; wait until `rehearse replies` shows it `sent`.
+6. When 9d2 `live-chat` starts, close the rehearsal first, then remove the `console` line from the live config and
    **reload**. With the line gone, a pending console reply has no transport and ends `dead` with an error per row,
    and a console download or attach job has no media source and parks.
    - Cancel each console invoice that is still open: `rehearse send --text "/cancelar <id>"`, then check its reply.
@@ -177,6 +179,5 @@ stay in the outbox and are never sent anywhere. Config load refuses it with `env
          -c "UPDATE outbox SET state = 'dead' WHERE channel = 'console' AND state = 'pending'"
      ```
 
-**Known limit:** the console cannot reply to a message, so a PDF or XML sent while the profile has more than one open
-invoice always gets BR-D14 ("reply to the right photo"). Rehearse a manual upload with a single open invoice: cancel
-or finish the others first.
+**Known limit:** a reply still `pending` has no channel message id yet, so a quote of it does not resolve and the
+upload is handled as if unquoted.
