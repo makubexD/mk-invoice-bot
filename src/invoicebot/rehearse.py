@@ -25,6 +25,7 @@ from invoicebot.channels.console import (
     MEDIA_BY_SUFFIX,
     MEDIA_REF_MAX_CHARS,
     console_channel,
+    console_message_id,
     inbox_dir,
 )
 from invoicebot.channels.media_limits import DIRECTORY_MODE, max_bytes_for
@@ -64,6 +65,8 @@ class RehearseSend:
 
     A request never names both a file and a button: a file carries a caption text,
     but a button press cannot also arrive with the file it would answer (D165).
+    ``reply_to`` is the console reply id to quote, so intake resolves it through the
+    outbox and picks that invoice as a WhatsApp reply does (D102, D165).
 
     Raises:
         RehearseError: a request names both ``name`` and ``button``.
@@ -72,6 +75,7 @@ class RehearseSend:
     name: str | None = None
     text: str | None = None
     button: str | None = None
+    reply_to: int | None = None
 
     def __post_init__(self) -> None:
         if self.name is not None and self.button is not None:
@@ -120,6 +124,7 @@ async def rehearse_send(
         sender_role=sender_role(channel.profile, cfg.owner.profile, intake.roles.admins),
         text=replace_unsafe_chars(request.text or ""),
         attachments=[attachment] if attachment is not None else [],
+        reply_to_external_id=None if request.reply_to is None else console_message_id(request.reply_to),
         button_id=request.button,
         # The sender-side send time, as a channel's own timestamp is (only touch_window reads it).
         received_at=datetime.now(UTC),

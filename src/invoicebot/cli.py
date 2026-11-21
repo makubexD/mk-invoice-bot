@@ -203,6 +203,11 @@ def _parser() -> argparse.ArgumentParser:
     send.add_argument("--name", help="file name; its bytes are read from stdin (extension picks kind)")
     send.add_argument("--text", help="text message, e.g. a command")
     send.add_argument("--button", help="button id to press")
+    send.add_argument(
+        "--reply-to",
+        type=int,
+        help="console reply id to quote (the #<id> rehearse replies printed)",
+    )
     replies = rehearse_sub.add_parser("replies", help="print the console replies the outbox kept")
     replies.add_argument(
         "--after",
@@ -356,11 +361,18 @@ def _rehearse_send(
     """Feed one console message through the live intake and return its exit status (D165)."""
     if args.name is None and args.text is None and args.button is None:
         parser.error("rehearse send needs one of --name, --text or --button")
+    if args.reply_to is not None and args.reply_to < 1:
+        parser.error("--reply-to must be a positive reply id")
     database_url = settings.database_url
     if database_url is None:
         parser.error("DATABASE_URL must be set to rehearse a console message")
     try:
-        request = rehearse.RehearseSend(name=args.name, text=args.text, button=args.button)
+        request = rehearse.RehearseSend(
+            name=args.name,
+            text=args.text,
+            button=args.button,
+            reply_to=args.reply_to,
+        )
         result = asyncio.run(
             rehearse.rehearse_send(
                 settings.data_dir,
