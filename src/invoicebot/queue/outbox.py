@@ -15,7 +15,7 @@ clock.
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
 
@@ -34,7 +34,7 @@ VALID_CHANNELS = frozenset({"whatsapp", "telegram", "github", "event", "console"
 
 @dataclass(frozen=True)
 class OutboxRow:
-    """A due outbox row handed to a transport."""
+    """An outbox row as stored: handed to a transport, or listed by ``rows_after``."""
 
     id: int
     channel: str
@@ -42,7 +42,7 @@ class OutboxRow:
     payload: dict[str, Any]
     template: str | None
     attempts: int
-    state: str = "pending"
+    state: str
 
 
 #: A coroutine that delivers one outbox row and returns the channel's message id,
@@ -145,6 +145,8 @@ async def rows_after(conn: AsyncConnection[Any], channel: str, after_id: int) ->
     ``rehearse replies`` prints the console rows the transport kept, so a call with
     the last id it showed returns only what arrived since. Does not commit.
     """
+    # shortcut: an id cursor can skip a row whose transaction commits after a higher id
+    # was read; fine for a dev-only rehearsal, where one operator sends one message at a time.
     cur = await conn.execute(
         """
         SELECT id, channel, "to", payload_json, template, attempts, state
@@ -154,7 +156,7 @@ async def rows_after(conn: AsyncConnection[Any], channel: str, after_id: int) ->
         """,
         {"channel": channel, "after_id": after_id},
     )
-    return [replace(_outbox_row(raw), state=str(raw[6])) for raw in await cur.fetchall()]
+    return [_outbox_row(raw) for raw in await cur.fetchall()]
 
 
 async def last_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str | None:
@@ -300,7 +302,7 @@ class OutboxSender:
                 async with conn.transaction():
                     cur = await conn.execute(
                         """
-                        SELECT id, channel, "to", payload_json, template, attempts
+                        SELECT id, channel, "to", payload_json, template, attempts, state
                         FROM outbox
                         WHERE state = 'pending' AND run_after <= now()
                         ORDER BY id
@@ -407,4 +409,5 @@ def _outbox_row(raw: tuple[Any, ...]) -> OutboxRow:
         payload=cast(dict[str, Any], raw[3]),
         template=cast(str | None, raw[4]),
         attempts=int(raw[5]),
+        state=str(raw[6]),
     )

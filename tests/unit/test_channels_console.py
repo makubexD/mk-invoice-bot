@@ -160,6 +160,7 @@ async def test_console_transport_keeps_the_row() -> None:
         payload={"text": "hola"},
         template=None,
         attempts=0,
+        state="pending",
     )
 
     assert await console_transport()(row) == "console-7"

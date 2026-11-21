@@ -86,6 +86,7 @@ def _row(payload: dict[str, Any]) -> OutboxRow:
         payload=payload,
         template=None,
         attempts=0,
+        state="pending",
     )
 
 

@@ -74,6 +74,7 @@ def _row(msg: OutboundMessage, *, to: str = PROFILE) -> OutboxRow:
         payload=msg.model_dump(mode="json"),
         template=None,
         attempts=0,
+        state="pending",
     )
 
 

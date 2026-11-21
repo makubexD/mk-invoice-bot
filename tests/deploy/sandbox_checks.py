@@ -398,6 +398,8 @@ def check_extract_helper() -> None:
         result = json.loads(done.stdout)
     except json.JSONDecodeError:
         raise CheckFailed(f"stdout is not JSON: {done.stdout!r}") from None
+    if not isinstance(result, dict):
+        raise CheckFailed(f"stdout is not a JSON object: {done.stdout!r}")
     # An empty stdin also prints valid JSON ("unreadable"), so require a reading (9k finding).
     if result.get("error") is not None or result.get("reading") is None:
         raise CheckFailed(f"helper read nothing: error={result.get('error')!r}")
@@ -422,6 +424,28 @@ def check_browser_stdin() -> None:
         _check_stdin_reaches_helper(PREFIXES.browser, _browser_env(tmpdir))
 
 
+#: Prints whether fd 3 is open; ``/proc`` is empty under the image prefix, so it probes with a redirect.
+FD3_PROBE = "( true <&3 ) 2>/dev/null && echo open || echo closed"
+
+
+def _check_fd3_closed(prefix: Sequence[str], env: Mapping[str, str]) -> None:
+    """The wrapper's saved stdin (fd 3) is closed before the helper runs (D158)."""
+    done = _run([*prefix, "sh", "-c", FD3_PROBE], env, SHORT_TIMEOUT_S)
+    if done.returncode != 0 or done.stdout.strip() != "closed":
+        raise CheckFailed(f"fd 3 is {done.stdout.strip()!r} in the helper (exit {done.returncode})")
+
+
+def check_image_fd3_closed() -> None:
+    """The image prefix closes fd 3 for the helper."""
+    _check_fd3_closed(PREFIXES.image, _base_env())
+
+
+def check_browser_fd3_closed() -> None:
+    """The browser prefix closes fd 3 for the helper."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _check_fd3_closed(PREFIXES.browser, _browser_env(tmpdir))
+
+
 CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "image-no-network": check_image_no_network,
     "image-no-proc": check_image_no_proc,
@@ -441,6 +465,8 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "extract-helper": check_extract_helper,
     "image-stdin": check_image_stdin,
     "browser-stdin": check_browser_stdin,
+    "image-fd3-closed": check_image_fd3_closed,
+    "browser-fd3-closed": check_browser_fd3_closed,
 }
 
 
