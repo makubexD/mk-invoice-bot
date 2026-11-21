@@ -19,8 +19,8 @@ from typing import BinaryIO
 from invoicebot.channels.base import Attachment, AttachmentKind, Button, InboundMessage, OutboundMessage
 from invoicebot.channels.console import (
     CONSOLE,
+    MEDIA_BY_SUFFIX,
     MEDIA_REF_MAX_CHARS,
-    MIME_BY_SUFFIX,
     console_channel,
     inbox_dir,
 )
@@ -30,15 +30,6 @@ from invoicebot.config.models import Config, ConsoleChannel
 from invoicebot.pipeline.intake import IntakeResult, IntakeSettings, handle_inbound
 from invoicebot.queue.outbox import OutboxRow, rows_after
 from invoicebot.store.db import create_pool
-
-#: The attachment kind a ``rehearse send`` file name's extension produces (D165).
-_KIND_BY_SUFFIX: dict[str, AttachmentKind] = {
-    ".jpg": "photo",
-    ".jpeg": "photo",
-    ".png": "photo",
-    ".pdf": "pdf",
-    ".xml": "xml",
-}
 
 
 class RehearseError(Exception):
@@ -197,11 +188,10 @@ def _kind_and_mime(name: str) -> tuple[AttachmentKind, str]:
         RehearseError: the extension is not a supported media type.
     """
     suffix = Path(name).suffix.lower()
-    kind = _KIND_BY_SUFFIX.get(suffix)
-    mime = MIME_BY_SUFFIX.get(suffix)
-    if kind is None or mime is None:
+    media = MEDIA_BY_SUFFIX.get(suffix)
+    if media is None:
         raise RehearseError(f"unsupported file type: {name!r} (D165)")
-    return kind, mime
+    return media
 
 
 def _media_ref(name: str) -> str:

@@ -61,6 +61,22 @@ async def test_console_media_source_copies_hashes_and_clears_the_inbox(tmp_path:
     assert not source.exists()
 
 
+async def test_console_media_source_retried_download_returns_the_stored_file(tmp_path: Path) -> None:
+    """D165: a download retried after the inbox copy was removed returns the same hash and size."""
+    data = _png(100, 100)
+    _inbox_file(tmp_path, _PHOTO_NAME, data)
+    out_dir = tmp_path / "out"
+    source = ConsoleMediaSource(tmp_path)
+
+    first = await source.download(_PHOTO_NAME, "photo", out_dir, _limits())
+    second = await source.download(_PHOTO_NAME, "photo", out_dir, _limits())
+
+    assert second.sha256 == first.sha256 == hashlib.sha256(data).hexdigest()
+    assert second.size == first.size == len(data)
+    assert second.path == first.path
+    assert second.mime == "image/png"
+
+
 @pytest.mark.parametrize("media_ref", ["../x.jpg", "a/b.jpg", ".hidden", "a" * 65])
 async def test_console_media_source_rejects_an_unsafe_name(tmp_path: Path, media_ref: str) -> None:
     """D165: a media_ref that escapes the inbox or is too long raises ValueError."""
@@ -76,6 +92,19 @@ async def test_console_media_source_rejects_a_file_over_the_photo_cap(tmp_path: 
 
     with pytest.raises(MediaRejected, match="too_large"):
         await ConsoleMediaSource(tmp_path).download(_PHOTO_NAME, "photo", out_dir, _limits(image=10))
+
+    assert list(out_dir.iterdir()) == []
+    assert source.exists()
+
+
+async def test_console_media_source_rejects_a_photo_that_is_not_png_or_jpeg(tmp_path: Path) -> None:
+    """R-1.11: a .jpg whose bytes are not a PNG/JPEG header raises MediaRejected and leaves no out file."""
+    source = _inbox_file(tmp_path, "photo.jpg", b"not an image")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with pytest.raises(MediaRejected, match="unsupported_type"):
+        await ConsoleMediaSource(tmp_path).download("photo.jpg", "photo", out_dir, _limits())
 
     assert list(out_dir.iterdir()) == []
     assert source.exists()

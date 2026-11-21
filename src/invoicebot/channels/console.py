@@ -27,6 +27,7 @@ from invoicebot.channels.media_limits import (
     FILE_NAME,
     MEDIA_HEADER_BYTES,
     ByteCap,
+    MediaRejected,
     check_image_header,
     max_bytes_for,
 )
@@ -39,13 +40,13 @@ CONSOLE: ChannelName = "console"
 #: Longest ``media_ref`` the console source accepts (D165).
 MEDIA_REF_MAX_CHARS = 64
 _MEDIA_REF_PATTERN = re.compile(rf"[A-Za-z0-9._-]{{1,{MEDIA_REF_MAX_CHARS}}}")
-#: The mime a console file name's extension gives (D165).
-MIME_BY_SUFFIX: dict[str, str] = {
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".png": "image/png",
-    ".pdf": "application/pdf",
-    ".xml": "application/xml",
+#: The attachment kind and mime a console file name's extension gives (D165).
+MEDIA_BY_SUFFIX: dict[str, tuple[AttachmentKind, str]] = {
+    ".jpg": ("photo", "image/jpeg"),
+    ".jpeg": ("photo", "image/jpeg"),
+    ".png": ("photo", "image/png"),
+    ".pdf": ("pdf", "application/pdf"),
+    ".xml": ("xml", "application/xml"),
 }
 _CHUNK_BYTES = 64 * 1024
 
@@ -66,9 +67,12 @@ class ConsoleMediaSource:
     ) -> DownloadedMedia:
         """Copy one inbox file into ``out_dir`` and remove the inbox copy (D165).
 
+        A retried download is idempotent: when the inbox copy is already gone but the
+        stored file exists, that file is re-hashed and returned (D165).
+
         Raises:
             ValueError: when ``media_ref`` is not a plain file name or its extension is unknown.
-            FileNotFoundError: when no inbox file matches ``media_ref``.
+            FileNotFoundError: when neither an inbox file nor a stored file matches ``media_ref``.
             MediaRejected: when the kind is unsupported, the file is over its cap, or a
                 photo is not PNG/JPEG or declares too many pixels.
         """
@@ -85,15 +89,18 @@ def _download(
     """Validate, copy, hash and clean up one inbox file; runs in a worker thread."""
     if _MEDIA_REF_PATTERN.fullmatch(media_ref) is None or media_ref.startswith("."):
         raise ValueError("media_ref must be a plain file name")
-    mime = MIME_BY_SUFFIX.get(Path(media_ref).suffix.lower())
-    if mime is None:
+    media = MEDIA_BY_SUFFIX.get(Path(media_ref).suffix.lower())
+    if media is None:
         raise ValueError(f"unsupported media extension: {media_ref!r}")
+    mime = media[1]
     source = inbox_dir(data_dir) / media_ref
-    if not source.is_file():
-        raise FileNotFoundError(source)
     limit = max_bytes_for(kind, limits)
     directory = out_dir / media_ref
     path = directory / FILE_NAME
+    if not source.is_file():
+        if path.is_file():
+            return _existing_download(path, mime, limit)
+        raise FileNotFoundError(source)
     try:
         directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
         size, sha256 = _copy_to_file(source, path, ByteCap(limit), kind, limits.max_megapixels)
@@ -102,6 +109,18 @@ def _download(
         raise
     source.unlink()
     return DownloadedMedia(path=path, sha256=sha256, size=size, mime=mime)
+
+
+def _existing_download(path: Path, mime: str, limit: int) -> DownloadedMedia:
+    """Return an already stored file's media, re-hashed under the same cap (D165)."""
+    size = path.stat().st_size
+    if size > limit:
+        raise MediaRejected("too_large")
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(_CHUNK_BYTES):
+            digest.update(chunk)
+    return DownloadedMedia(path=path, sha256=digest.hexdigest(), size=size, mime=mime)
 
 
 def _copy_to_file(
@@ -113,8 +132,9 @@ def _copy_to_file(
 ) -> tuple[int, str]:
     """Copy ``source`` to ``path`` under ``cap`` and return its byte count and hex SHA-256.
 
-    A photo's first :data:`MEDIA_HEADER_BYTES` are held back until
-    ``check_image_header`` passes, mirroring the WhatsApp source (BR-E07).
+    A photo's chunks are written as they arrive and ``check_image_header`` runs on
+    the first :data:`MEDIA_HEADER_BYTES` (or on the whole file when it is shorter);
+    on rejection the caller removes the directory (BR-E07).
     """
     digest = hashlib.sha256()
     written = 0
