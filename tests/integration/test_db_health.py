@@ -56,7 +56,6 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
         pool=pool,
         index=ProfileIndex({profile_id: profile}),
         owner_profile=profile_id,
-        admin_profiles=frozenset(),
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,

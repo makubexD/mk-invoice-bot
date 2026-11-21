@@ -42,7 +42,6 @@ class WebhookDeps:
     pool: Pool
     index: ProfileIndex
     owner_profile: str
-    admin_profiles: frozenset[str]
     app_secret: str
     verify_token: str
     sender_hash_key: str
@@ -81,7 +80,7 @@ def make_router(deps: WebhookDeps) -> APIRouter:
             payload,
             deps.index,
             owner_profile=deps.owner_profile,
-            admin_profiles=deps.admin_profiles,
+            admin_profiles=deps.intake.roles.admins,
             sender_hash_key=deps.sender_hash_key,
         )
         for digest in dict.fromkeys(parsed.unknown_senders):

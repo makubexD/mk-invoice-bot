@@ -88,7 +88,6 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
 from invoicebot.pipeline.intake import DOWNLOAD_STEP
 from invoicebot.pipeline.intake_config import (
     LAPTOP_ADAPTER,
-    admin_profiles,
     intake_settings,
     laptop_flow_ids,
     lists_laptop,
@@ -469,7 +468,6 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         pool=pool,
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
-        admin_profiles=admin_profiles(cfg),
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=secrets.get("sender_hash_key"),
