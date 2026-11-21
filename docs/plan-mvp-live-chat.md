@@ -23,6 +23,7 @@ Waits for Meta business verification. Until then, stop here and push-notify the 
 
 The steps follow the `live-trial-meta-setup` memory. Do not create a second app or portfolio.
 
+0. **Blocking:** close the console rehearsal (runbook section 9, step 5: cancel open console invoices, retire pending console replies, remove the `console` line, reload) and confirm the live config no longer lists `kind: console`. The dev-only guard only checks the config's own `env`, so nothing else stops it (D165 audit).
 1. A permanent System User token with `whatsapp_business_messaging` and `whatsapp_business_management`, stored in the age store as `whatsapp_token` (replaces the 24 h one). Reset the app secret (it was pasted in chat on 2026-11-16) and store the new one.
 2. Register the bot number with the Cloud API (it leaves the WhatsApp Business app), and put its `phone_number_id` in the private config.
 3. Submit the utility templates (S0.7) and wait for approval.
