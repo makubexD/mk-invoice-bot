@@ -17,14 +17,16 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Button, OutboundMessage
-from invoicebot.channels.console import inbox_dir
+from invoicebot.channels.console import console_transport, inbox_dir
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel
 from invoicebot.pipeline.intake_config import intake_settings
-from invoicebot.queue.outbox import add, rows_after
+from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.queue.outbox import OutboxSender, add, rows_after
 from invoicebot.rehearse import RehearseError, RehearseSend, rehearse_replies, rehearse_send
 from invoicebot.settings import Settings
+from invoicebot.store.invoices import create_invoice, set_state
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = REPO_ROOT / "config" / "example.yaml"
@@ -97,6 +99,58 @@ async def _last_console_id(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> i
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+async def _two_open_invoices(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str
+) -> tuple[int, int, int]:
+    """Create two ``MANUAL_REQUIRED`` console invoices with a delivered BR-F07 message each.
+
+    Returns the first invoice's id, the second's id and the first invoice's outbox id,
+    whose channel message id is the ``--reply-to`` value a quoted upload passes
+    (D102, D165).
+    """
+    async with pool.connection() as conn:
+        first = await create_invoice(conn, profile_id, "console")
+        await set_state(conn, first, "MANUAL_REQUIRED", rule_id="BR-F07")
+        quoted = await queue_message(
+            conn,
+            Addressee("console", profile_id),
+            "Synthetic bot message.",
+            invoice_id=first,
+            rule_id="BR-F07",
+        )
+        second = await create_invoice(conn, profile_id, "console")
+        await set_state(conn, second, "MANUAL_REQUIRED", rule_id="BR-F07")
+        await queue_message(
+            conn,
+            Addressee("console", profile_id),
+            "Synthetic bot message.",
+            invoice_id=second,
+            rule_id="BR-F07",
+        )
+    await OutboxSender(pool, {"console": console_transport()}).send_pending()
+    return first, second, quoted
+
+
+async def _invoice_jobs(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> list[str]:
+    """Return invoice_id's job steps, oldest first."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+        return [str(row[0]) for row in await cur.fetchall()]
+
+
+async def _messages_invoice_ids(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str
+) -> list[int | None]:
+    """Return the invoice ids the profile's console messages are linked to, oldest first."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT invoice_id FROM messages WHERE profile_id = %s AND channel = 'console'"
+            " ORDER BY received_at",
+            (profile_id,),
+        )
+        return [None if row[0] is None else int(row[0]) for row in await cur.fetchall()]
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -363,3 +417,59 @@ def test_replies_without_a_console_channel_exits_two(
 
     assert code == 2
     assert "console channel not configured (D165)" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_quoted_upload_links_to_the_quoted_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """D102, D165: a quoted upload links to the quoted invoice instead of asking BR-D14."""
+    profile_id = _profile_id()
+    cfg = _config(profile_id)
+    first, _second, quoted = await _two_open_invoices(db_pool, profile_id)
+
+    result = await rehearse_send(
+        tmp_path,
+        test_database_url,
+        cfg,
+        intake_settings(cfg),
+        RehearseSend(name="doc.pdf", reply_to=quoted),
+        io.BytesIO(b"%PDF-1.4 synthetic"),
+    )
+
+    assert result.invoice_id == first
+    assert await _messages_invoice_ids(db_pool, profile_id) == [first]
+    assert await _invoice_jobs(db_pool, first) == ["attach_upload"]
+    _invoices, _jobs, outbox = await _rows(db_pool, profile_id)
+    assert [rule_id for _channel, rule_id in outbox] == ["BR-F07", "BR-F07"]
+    assert len(list(inbox_dir(tmp_path).glob("*.pdf"))) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_unquoted_upload_asks_which_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    test_database_url: str,
+    tmp_path: Path,
+) -> None:
+    """D102, D165: an unquoted upload with two open invoices asks which one (BR-D14)."""
+    profile_id = _profile_id()
+    cfg = _config(profile_id)
+    first, second, _quoted = await _two_open_invoices(db_pool, profile_id)
+
+    result = await rehearse_send(
+        tmp_path,
+        test_database_url,
+        cfg,
+        intake_settings(cfg),
+        RehearseSend(name="doc.pdf"),
+        io.BytesIO(b"%PDF-1.4 synthetic"),
+    )
+
+    assert result.invoice_id is None
+    _invoices, _jobs, outbox = await _rows(db_pool, profile_id)
+    assert [rule_id for _channel, rule_id in outbox] == ["BR-F07", "BR-F07", "BR-D14"]
+    assert await _invoice_jobs(db_pool, first) == []
+    assert await _invoice_jobs(db_pool, second) == []
+    assert list(inbox_dir(tmp_path).iterdir()) == []
