@@ -22,8 +22,8 @@ CHECK_OUTPUT_BYTES = 4 * 1024
 #: without an out dir (D158). The helper runs with no capabilities, so it cannot unmount a
 #: mask. This shell stays PID 1 of the namespace instead of exec'ing: a helper that leaves
 #: the process group still dies with it, because the kernel kills the whole namespace when
-#: PID 1 exits. `<&0` keeps stdin, which a background command would otherwise read from
-#: /dev/null.
+#: PID 1 exits. A background command's stdin is `/dev/null` in dash even with `<&0`, so stdin is
+#: first saved on fd 3 and handed over from there (the helper reads its input from stdin, D158).
 IMAGE_SCRIPT = """\
 set -e
 echo 1000 > /proc/self/oom_score_adj
@@ -34,7 +34,8 @@ mount -t tmpfs -o size=4k,mode=0555 none "$data"
 mount -o remount,bind,ro "$data"
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
-setpriv --bounding-set=-all --inh-caps=-all --no-new-privs -- "$@" <&0 &
+exec 3<&0
+setpriv --bounding-set=-all --inh-caps=-all --no-new-privs -- "$@" <&3 3<&- &
 wait $!
 """
 
@@ -64,7 +65,8 @@ fi
 mount -o remount,bind,ro "$data"
 while [ "$1" != "--" ]; do mount -t tmpfs -o size=4k,mode=0555 none "$1"; shift; done
 shift
-unshare --user --map-user=1000 --map-group=1000 "$@" <&0 &
+exec 3<&0
+unshare --user --map-user=1000 --map-group=1000 "$@" <&3 3<&- &
 wait $!
 """
 

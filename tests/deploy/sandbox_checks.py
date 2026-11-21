@@ -40,6 +40,7 @@ GOLDEN = CHECKS / "golden"
 SHORT_TIMEOUT_S = 20
 BROWSER_TIMEOUT_S = 60
 HELPER_TIMEOUT_S = 60
+STDIN_PROBE_BYTES = 200_000
 
 
 class CheckFailed(Exception):
@@ -394,9 +395,31 @@ def check_extract_helper() -> None:
     if done.returncode != 0:
         raise CheckFailed(f"helper exited {done.returncode}: {done.stderr!r}")
     try:
-        json.loads(done.stdout)
+        result = json.loads(done.stdout)
     except json.JSONDecodeError:
         raise CheckFailed(f"stdout is not JSON: {done.stdout!r}") from None
+    # An empty stdin also prints valid JSON ("unreadable"), so require a reading (9k finding).
+    if result.get("error") is not None or result.get("reading") is None:
+        raise CheckFailed(f"helper read nothing: error={result.get('error')!r}")
+
+
+def _check_stdin_reaches_helper(prefix: Sequence[str], env: Mapping[str, str]) -> None:
+    """Every byte fed to the wrapper reaches the helper's stdin (D158)."""
+    payload = b"x" * STDIN_PROBE_BYTES
+    done = _run([*prefix, "wc", "-c"], env, SHORT_TIMEOUT_S, stdin=payload)
+    if done.returncode != 0 or done.stdout.strip() != str(len(payload)).encode():
+        raise CheckFailed(f"helper saw {done.stdout.strip()!r} of {len(payload)} bytes")
+
+
+def check_image_stdin() -> None:
+    """The image prefix hands its stdin to the helper; dash gives a background job /dev/null."""
+    _check_stdin_reaches_helper(PREFIXES.image, _base_env())
+
+
+def check_browser_stdin() -> None:
+    """The browser prefix hands its stdin to the helper (the SOL helper reads credentials there)."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+        _check_stdin_reaches_helper(PREFIXES.browser, _browser_env(tmpdir))
 
 
 CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
@@ -416,6 +439,8 @@ CHECKS_BY_NAME: dict[str, Callable[[], None]] = {
     "chromium-sandbox": check_chromium_sandbox,
     "no-orphan-chromium": check_no_orphan_chromium,
     "extract-helper": check_extract_helper,
+    "image-stdin": check_image_stdin,
+    "browser-stdin": check_browser_stdin,
 }
 
 
