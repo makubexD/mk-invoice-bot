@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import date
 from decimal import Decimal
@@ -265,6 +266,20 @@ async def test_fetch_redirect_to_an_allowed_host_is_followed(tmp_path: Path) -> 
     assert requested == [START_URL, DOCUMENT_URL]
 
 
+async def test_fetch_ok_logs_no_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """R-5.2, R-5.6, R-5.7: a successful fetch logs no warning."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=PDF)
+
+    async with _make_fetcher(handler) as fetcher:
+        with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.qr_url"):
+            result = await fetcher.fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.OK
+    assert [record for record in caplog.records if record.name == "invoicebot.fetchers.qr_url"] == []
+
+
 async def test_fetch_redirect_to_a_disallowed_host_is_guard_blocked(tmp_path: Path) -> None:
     """R-5.2, R-5.6: a redirect outside the allowlist is refused and its target not requested."""
     requested: list[str] = []
@@ -307,6 +322,22 @@ async def test_fetch_server_error_is_technical(tmp_path: Path) -> None:
     assert result.reason is FetchReason.TECHNICAL
 
 
+async def test_fetch_connect_error_logs_one_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """R-5.2, R-5.6, R-5.7: an HTTP failure logs one warning with the exception class."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("synthetic connect failure")
+
+    async with _make_fetcher(handler) as fetcher:
+        with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.qr_url"):
+            result = await fetcher.fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "qr url fetch failed"]
+    assert len(records) == 1
+    assert records[0].error == "ConnectError"
+
+
 async def test_fetch_timeout_is_timeout(tmp_path: Path) -> None:
     """R-5.2, R-5.6: a timed-out request is reported as a timeout."""
 
@@ -317,6 +348,22 @@ async def test_fetch_timeout_is_timeout(tmp_path: Path) -> None:
         result = await fetcher.fetch(_invoice(), tmp_path)
 
     assert result.reason is FetchReason.TIMEOUT
+
+
+async def test_fetch_timeout_logs_one_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """R-5.2, R-5.6, R-5.7: a timed-out request logs one warning with the exception class."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadTimeout("synthetic timeout")
+
+    async with _make_fetcher(handler) as fetcher:
+        with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.qr_url"):
+            result = await fetcher.fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.TIMEOUT
+    records = [record for record in caplog.records if record.getMessage() == "qr url fetch timed out"]
+    assert len(records) == 1
+    assert records[0].error == "ReadTimeout"
 
 
 async def test_fetch_past_the_deadline_is_timeout(tmp_path: Path) -> None:

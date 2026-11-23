@@ -9,6 +9,7 @@ a sign-in need is a reason code.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -30,6 +31,8 @@ from invoicebot.fetchers.base import (
 )
 from invoicebot.fetchers.graph_mail import MailAttachment, MailMessage
 from invoicebot.fetchers.portal import invoice_reading, sha256_hex
+
+logger = logging.getLogger(__name__)
 
 #: The newest messages Graph is asked for; the invoice's own mail is near the top (S11.9).
 SEARCH_TOP = 25
@@ -82,7 +85,8 @@ class EmailInboxFetcher:
             return await self._fetch(invoice, out_dir)
         except AuthRequired:
             return _result(FetchReason.AUTH_REQUIRED)
-        except (MailboxError, httpx.HTTPError):
+        except (MailboxError, httpx.HTTPError) as err:
+            logger.warning("email inbox fetch failed", extra={"error": type(err).__name__})
             return _result(FetchReason.TECHNICAL)
 
     async def _fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
