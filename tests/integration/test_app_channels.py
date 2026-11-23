@@ -178,3 +178,32 @@ async def test_failed_startup_check_mounts_no_webhook(
         response = await client.get("/webhook/whatsapp", params=params)
 
     assert response.status_code == 404
+
+
+def _telegram_without_secrets_document() -> dict[str, Any]:
+    """Return the example config with WhatsApp and Telegram both enabled (D174)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    for channel in document["channels"]:
+        if channel["kind"] == "telegram":
+            channel["enabled"] = True
+    return document
+
+
+async def test_configured_channel_without_secrets_starts_nothing(
+    runtime_env: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D174: WhatsApp complete, Telegram enabled without secrets: no channel starts, as reload refuses it."""
+    _write_config(runtime_env, _telegram_without_secrets_document())
+    _write_secrets(runtime_env, SECRET_VALUES)
+    monkeypatch.setattr(invoicebot.app, "configure_logging", lambda *_args, **_kwargs: None)
+    caplog.set_level(logging.ERROR, logger="invoicebot.app")
+
+    async with _app_client() as client:
+        health = await client.get("/health")
+        webhook = await client.get("/webhook/whatsapp")
+
+    assert "a configured chat channel is missing its secrets" in caplog.text
+    assert webhook.status_code == 404
+    assert health.status_code == 200

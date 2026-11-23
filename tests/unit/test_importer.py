@@ -43,6 +43,11 @@ def _example_document() -> dict[str, Any]:
     return yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
 
 
+def _example_config() -> Config:
+    """Return the shipped example config as a validated ``Config``."""
+    return Config.model_validate(_example_document())
+
+
 def _folder(root: Path, name: str) -> Path:
     """Create and return the folder ``name`` under ``root``."""
     folder = root / name
@@ -225,7 +230,7 @@ def test_import_origin_channel_reads_the_owner_preferred_channel() -> None:
 
     cfg = Config.model_validate(document)
 
-    assert import_origin_channel(cfg) == "telegram"
+    assert import_origin_channel(cfg, "yo") == "telegram"
 
 
 def test_import_origin_channel_refuses_an_owner_without_a_preferred_channel() -> None:
@@ -236,4 +241,38 @@ def test_import_origin_channel_refuses_an_owner_without_a_preferred_channel() ->
     cfg = Config.model_validate(document)
 
     with pytest.raises(ValueError, match="yo"):
-        import_origin_channel(cfg)
+        import_origin_channel(cfg, "yo")
+
+
+def test_import_origin_channel_reads_the_claim_profile_preferred_channel() -> None:
+    """R-1.9: a claim profile preferring telegram imports with telegram under a whatsapp owner."""
+    cfg = _example_config()
+    assistant = cfg.profiles["asistente"].model_copy(update={"preferred_channel": "telegram"})
+    cfg = cfg.model_copy(update={"profiles": {**cfg.profiles, "asistente": assistant}})
+
+    assert import_origin_channel(cfg, "asistente") == "telegram"
+
+
+def test_import_origin_channel_falls_back_to_the_owner_preferred_channel() -> None:
+    """R-1.9: a claim profile with no preference imports on the owner's preferred channel."""
+    cfg = _example_config()
+
+    assert import_origin_channel(cfg, "asistente") == "whatsapp"
+
+
+def test_import_origin_channel_refuses_two_profiles_without_a_preferred_channel() -> None:
+    """R-1.9: a claim profile and owner with no preferred channel are refused, naming the owner."""
+    cfg = _example_config()
+    owner = cfg.profiles["yo"].model_copy(update={"preferred_channel": None})
+    cfg = cfg.model_copy(update={"profiles": {**cfg.profiles, "yo": owner}})
+
+    with pytest.raises(ValueError, match="yo"):
+        import_origin_channel(cfg, "asistente")
+
+
+def test_import_origin_channel_refuses_an_unknown_profile() -> None:
+    """R-1.9: an unknown profile id is refused, naming the profile."""
+    cfg = _example_config()
+
+    with pytest.raises(ValueError, match="desconocido"):
+        import_origin_channel(cfg, "desconocido")

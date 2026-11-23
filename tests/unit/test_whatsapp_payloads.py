@@ -6,11 +6,14 @@ import pytest
 
 from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import (
+    BUTTONS_LABEL_MAX_CHARS,
+    LIST_ROW_TITLE_MAX_CHARS,
     buttons_payload,
     list_payload,
     template_payload,
     text_payload,
 )
+from invoicebot.config.checks import BUTTON_TITLE_MAX
 
 TO = "51999999999"
 
@@ -135,3 +138,9 @@ def test_template_payload_without_params_omits_components() -> None:
         "template": {"name": "invoice_done", "language": {"code": "es_PE"}},
     }
     assert "components" not in payload["template"]
+
+
+def test_configured_button_title_fits_whatsapp_limits() -> None:
+    """R-1.7: a configured button title must fit the WhatsApp button and list-row caps."""
+    assert BUTTON_TITLE_MAX <= BUTTONS_LABEL_MAX_CHARS
+    assert BUTTON_TITLE_MAX <= LIST_ROW_TITLE_MAX_CHARS

@@ -45,7 +45,7 @@ channels:
     # secrets: WHATSAPP_TOKEN, WHATSAPP_APP_SECRET, WHATSAPP_VERIFY_TOKEN
   - kind: telegram                    # v1.1 (R-1.7)
     enabled: false
-    # secrets: TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET (redacted in logs, R-9.16)
+    # secrets: telegram_bot_token, telegram_webhook_secret in the age store (redacted in logs, R-9.16)
   # - { kind: console, profile: yo }   # D165: dev-only rehearsal channel
 
 sunat:

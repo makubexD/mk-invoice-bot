@@ -114,6 +114,26 @@ async def test_builder_with_full_config_returns_whatsapp_wiring(http: httpx.Asyn
     assert isinstance(wiring.router, APIRouter)
 
 
+def test_configured_is_true_for_the_example_config() -> None:
+    """D183: the example config enables WhatsApp, so its builder reports it configured."""
+    assert whatsapp_wiring.configured(_config()) is True
+
+
+def test_configured_is_false_without_a_whatsapp_channel() -> None:
+    """D183: removing the WhatsApp channel makes the builder report it not configured."""
+    cfg = _config().model_copy(update={"channels": []})
+
+    assert whatsapp_wiring.configured(cfg) is False
+
+
+def test_secret_problem_without_whatsapp_token_is_secrets_whatsapp() -> None:
+    """D183: a store without ``whatsapp_token`` reports the WhatsApp secret view."""
+    values = _secrets()
+    del values["whatsapp_token"]
+
+    assert whatsapp_wiring.secret_problem(_config(), SecretStore(values)) == "secrets:whatsapp"
+
+
 def test_secret_problem_without_whatsapp_config_is_none() -> None:
     """R-1.7: an optional WhatsApp channel that is not configured needs no secrets (D174)."""
     cfg = _config().model_copy(update={"channels": []})

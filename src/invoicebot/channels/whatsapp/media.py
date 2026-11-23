@@ -9,7 +9,6 @@ download leaves nothing behind.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import re
 import shutil
 from pathlib import Path
@@ -18,13 +17,12 @@ from invoicebot.channels.base import AttachmentKind, DownloadedMedia, MediaTrans
 from invoicebot.channels.media_limits import (
     DIRECTORY_MODE,
     FILE_NAME,
-    MEDIA_HEADER_BYTES,
     ByteCap,
     MediaRejected,
-    check_image_header,
     max_bytes_for,
+    write_capped_stream,
 )
-from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient, WhatsAppError
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.config.models import MediaLimits
 
 MEDIA_ID_PATTERN = r"[A-Za-z0-9_-]{1,128}"
@@ -86,7 +84,8 @@ async def download_media(
             directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
             path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
             async with asyncio.timeout(DOWNLOAD_TIMEOUT_S):
-                size, sha256 = await _stream_to_file(client, info, path, ByteCap(limit), kind, limits)
+                async with client.stream_media(info.url) as body:
+                    size, sha256 = await write_capped_stream(body, path, ByteCap(limit), kind, limits)
             if info.sha256 is not None and info.sha256.lower() != sha256.lower():
                 raise MediaChecksumMismatch(media_id)
         except BaseException:
@@ -109,48 +108,3 @@ def _neutral_error(exc: WhatsAppError) -> MediaTransient | MediaUnusable:
     if _retryable(exc):
         return MediaTransient(str(exc))
     return MediaUnusable(str(exc))
-
-
-async def _stream_to_file(
-    client: WhatsAppClient,
-    info: MediaInfo,
-    path: Path,
-    cap: ByteCap,
-    kind: AttachmentKind,
-    limits: MediaLimits,
-) -> tuple[int, str]:
-    """Stream the body into ``path`` and return the bytes written and their hex SHA-256.
-
-    A photo's first 512 KiB are held in memory until ``check_image_header``
-    passes, so a rejected image never reaches the disk (BR-E07). The larger
-    window keeps the SOF marker findable behind a long EXIF/APP1 segment.
-    """
-    digest = hashlib.sha256()
-    written = 0
-    pending: bytearray | None = bytearray() if kind == "photo" else None
-    async with client.stream_media(info.url) as body:
-        async for chunk in body:
-            cap.add(len(chunk))
-            digest.update(chunk)
-            if pending is not None:
-                pending.extend(chunk)
-                if len(pending) < MEDIA_HEADER_BYTES:
-                    continue
-                check_image_header(bytes(pending), limits.max_megapixels)
-                written += len(pending)
-                await asyncio.to_thread(_append_bytes, path, bytes(pending))
-                pending = None
-            else:
-                written += len(chunk)
-                await asyncio.to_thread(_append_bytes, path, chunk)
-    if pending is not None:
-        check_image_header(bytes(pending), limits.max_megapixels)
-        written += len(pending)
-        await asyncio.to_thread(_append_bytes, path, bytes(pending))
-    return written, digest.hexdigest()
-
-
-def _append_bytes(path: Path, data: bytes) -> None:
-    """Append ``data`` to ``path``; runs in a worker thread so the loop is not blocked."""
-    with path.open("ab") as file:
-        file.write(data)

@@ -193,15 +193,42 @@ ignore_imports =
 # The browser helper lands in a later step of plan-mvp-fetch; until then the ignores match nothing.
 unmatched_ignore_imports_alerting = none
 
+# Only invoicebot.app may import invoicebot.wiring.
 [importlinter:contract:only-app-builds-channels]
 name = Only the composition root builds channels
 type = forbidden
 source_modules =
+    invoicebot.api
+    invoicebot.auth
     invoicebot.channels
+    invoicebot.cli
+    invoicebot.config
+    invoicebot.events
+    invoicebot.extract
+    invoicebot.fetchers
+    invoicebot.gaps
+    invoicebot.github
+    invoicebot.helper
+    invoicebot.importer
+    invoicebot.logging
+    invoicebot.net
+    invoicebot.ops
+    invoicebot.padron
     invoicebot.pipeline
     invoicebot.queue
-    invoicebot.store
+    invoicebot.rehearse
+    invoicebot.reload
+    invoicebot.routing
     invoicebot.rules
-    invoicebot.api
+    invoicebot.runtime_config
+    invoicebot.sandbox
+    invoicebot.secrets
+    invoicebot.settings
+    invoicebot.sinks
+    invoicebot.states
+    invoicebot.store
+    invoicebot.sunat
+    invoicebot.sunat_origins
+    invoicebot.text
 forbidden_modules =
     invoicebot.wiring

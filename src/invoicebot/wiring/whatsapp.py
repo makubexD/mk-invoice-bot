@@ -8,7 +8,6 @@ secret views are complete (R-1.7, R-9.10, D174).
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from functools import partial
 
 import httpx
@@ -21,12 +20,16 @@ from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import Config, WhatsAppChannel
-from invoicebot.pipeline.outgoing import queue_rate_limited_alert
 from invoicebot.queue.outbox import Transport
-from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.db import Pool
-from invoicebot.wiring.channels import SENDER_HASH_KEY, ChannelBuilder, ChannelWiring, channel_secrets
+from invoicebot.wiring.channels import (
+    SENDER_HASH_KEY,
+    ChannelBuilder,
+    ChannelWiring,
+    alert_channel_token,
+    channel_secrets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,15 +41,19 @@ WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp
 class WhatsAppBuilder:
     """Builds the WhatsApp channel, or ``None`` while its config or secrets are missing."""
 
+    def configured(self, cfg: Config) -> bool:
+        """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
+        return _whatsapp_channel(cfg) is not None
+
     def __call__(
         self, cfg: Config, store: SecretStore, http: httpx.AsyncClient, intake_deps: IntakeDeps
     ) -> ChannelWiring | None:
         """Return the WhatsApp wiring, or ``None`` when it must stay disabled (D174)."""
-        secrets, shared = _whatsapp_secrets(store), channel_secrets(store)
         channel = _whatsapp_channel(cfg)
         if channel is None:
             # Not configured: WhatsApp is optional since D174, so this is not an error.
             return None
+        secrets, shared = _whatsapp_secrets(store), channel_secrets(store)
         if not secrets.enabled or not shared.enabled:
             # Fail closed: a configured channel without its secrets is not mounted.
             logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing | shared.missing))
@@ -66,7 +73,7 @@ class WhatsAppBuilder:
 
     def secret_problem(self, cfg: Config, store: SecretStore) -> str | None:
         """Return the code of the first secret a configured WhatsApp channel lacks (R-9.6)."""
-        if _whatsapp_channel(cfg) is None:
+        if not self.configured(cfg):
             return None
         if not _whatsapp_secrets(store).enabled:
             return "secrets:whatsapp"
@@ -88,7 +95,7 @@ def _transport(cfg: Config, channel: WhatsAppChannel, client: WhatsAppClient, po
         numbers=numbers,
         templates=channel.templates,
         language=channel.template_language,
-        on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
+        on_token_rejected=partial(alert_channel_token, pool, cfg, "WhatsApp"),
     )
 
 
@@ -112,20 +119,3 @@ def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
 def _whatsapp_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the WhatsApp channel reads its secrets through (R-9.10)."""
     return store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
-
-
-async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
-    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
-    logger.error("channel token rejected", extra={"channel": channel})
-    # shortcut: the alert goes out through the same WhatsApp channel whose token
-    # failed, so it waits in the outbox until the token works; the ERROR log is the
-    # only immediate signal until a second channel exists.
-    async with pool.connection() as conn, conn.transaction():
-        await queue_rate_limited_alert(
-            conn,
-            cfg.profiles,
-            f"BR-O03:{channel.lower()}",
-            timedelta(hours=cfg.ops.self_alerts.realert_hours),
-            "BR-O03",
-            MESSAGES["BR-O03"].format(channel=channel),
-        )

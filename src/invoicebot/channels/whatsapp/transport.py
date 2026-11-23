@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from datetime import timedelta
 from typing import Any
 
 from invoicebot.channels.base import OutboundMessage
@@ -27,6 +26,7 @@ from invoicebot.channels.whatsapp.payloads import (
 )
 from invoicebot.config.models import ChannelTemplates
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
+from invoicebot.queue.retry import RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
 from invoicebot.rules.messages_es import LIST_BUTTON
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import window_open
@@ -68,10 +68,6 @@ TEMPLATE_PARAM_MAX_CHARS = 1024
 #: A rejected channel token: Meta's status and error code for an expired or invalid token (BR-O03).
 TOKEN_REJECTED_STATUS = 401
 TOKEN_REJECTED_CODE = 190
-#: How long a row waits for the token to be renewed before it is tried again (BR-O03).
-TOKEN_RETRY_DELAY = timedelta(minutes=15)
-#: The rule whose alert tells the owner to renew the channel token (BR-O03).
-RULE_TOKEN_REJECTED = "BR-O03"  # noqa: S105  # nosec B105  # a rule id, not a secret
 
 
 class TemplateMissing(Exception):

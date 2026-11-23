@@ -279,12 +279,18 @@ def import_flow(cfg: Config, profile_id: str) -> str:
     return folder_flows[0]
 
 
-def import_origin_channel(cfg: Config) -> ChannelName:
-    """Return the owner profile's preferred channel for an imported claim (R-1.9, D110).
+def import_origin_channel(cfg: Config, profile_id: str) -> ChannelName:
+    """Return the channel an imported claim's profile prefers, else the owner's (R-1.9, D110).
 
     Raises:
-        ValueError: the owner profile has no preferred channel.
+        ValueError: the profile is unknown, or neither it nor the owner profile has a
+            preferred channel.
     """
+    profile = cfg.profiles.get(profile_id)
+    if profile is None:
+        raise ValueError(f"unknown profile {profile_id!r}")
+    if profile.preferred_channel is not None:
+        return profile.preferred_channel
     return ProfileIndex.from_config(cfg).admin_channel(cfg.owner.profile)
 
 
@@ -314,11 +320,11 @@ async def register_claims(
 ) -> ImportReport:
     """Register each claim as a DONE flow B invoice with a sent batch (R-7.16, D110).
 
-    The invoice's origin channel is the owner profile's preferred channel (R-1.9). A
-    claim whose natural key an invoice already holds is skipped, so a second run changes
-    nothing. Each claim is registered in its own transaction; with ``dry_run`` nothing is
-    written and the report says which claims would be registered. Never commits outside
-    a claim's transaction.
+    The invoice's origin channel is the claim profile's preferred channel, else the
+    owner profile's (R-1.9). A claim whose natural key an invoice already holds is
+    skipped, so a second run changes nothing. Each claim is registered in its own
+    transaction; with ``dry_run`` nothing is written and the report says which claims
+    would be registered. Never commits outside a claim's transaction.
     """
     entries: list[ImportEntry] = []
     for claim in claims:

@@ -25,7 +25,8 @@ MCP server and signed event webhooks (v1.1).
 In development, phase 9 of the MVP roadmap ([docs/plan-mvp.md](docs/plan-mvp.md)).
 Flows A, B and `personal_dni` are built and the bot runs on the owner's machine
 (milestone M7). The live chat runs (phase 9d2 `live-chat`) wait for Meta's
-business verification.
+business verification. The Telegram adapter is built and tested offline (T1);
+live setup is T2 ([docs/plan-telegram.md](docs/plan-telegram.md)).
 
 ## Quickstart (development)
 
