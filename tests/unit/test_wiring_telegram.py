@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, cast
@@ -22,6 +23,8 @@ from invoicebot.wiring.telegram import TELEGRAM_SECRETS, telegram_wiring
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
+#: A webhook secret of the strength D184 requires, 43 characters like token_urlsafe(32).
+WEBHOOK_SECRET = "synthetic_webhook_secret_0123456789abcdefgh"  # noqa: S105  # a synthetic test value
 
 
 def _config() -> Config:
@@ -41,7 +44,17 @@ def _enabled_config() -> Config:
 
 def _secrets() -> dict[str, str]:
     """Return synthetic values for every secret the Telegram channel declares (R-9.10)."""
-    return dict.fromkeys(TELEGRAM_SECRETS | CHANNEL_SECRETS, "synthetic-value")
+    return {
+        **dict.fromkeys(TELEGRAM_SECRETS | CHANNEL_SECRETS, "synthetic-value"),
+        "telegram_webhook_secret": WEBHOOK_SECRET,
+    }
+
+
+def _store_with_webhook_secret(secret: str) -> SecretStore:
+    """Return an enabled Telegram and channel store whose webhook secret is ``secret`` (D184)."""
+    values = _secrets()
+    values["telegram_webhook_secret"] = secret
+    return SecretStore(values)
 
 
 def _intake_deps(cfg: Config) -> IntakeDeps:
@@ -143,3 +156,42 @@ def test_secret_problem_without_telegram_config_is_none() -> None:
 def test_secret_problem_with_every_secret_is_none() -> None:
     """R-9.10: an enabled Telegram channel with both secret views complete raises no problem."""
     assert telegram_wiring.secret_problem(_enabled_config(), SecretStore(_secrets())) is None
+
+
+def test_secret_problem_accepts_a_token_urlsafe_webhook_secret() -> None:
+    """D184, R-9.6: a 43-character token_urlsafe secret is strong enough."""
+    store = _store_with_webhook_secret(secrets.token_urlsafe(32))
+
+    assert telegram_wiring.secret_problem(_enabled_config(), store) is None
+
+
+def test_secret_problem_accepts_a_32_character_webhook_secret() -> None:
+    """D184, R-9.6: the shortest allowed secret, 32 charset characters, is accepted."""
+    assert telegram_wiring.secret_problem(_enabled_config(), _store_with_webhook_secret("a" * 32)) is None
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["a" * 31, "a" * 39 + " ", "a" * 257],
+    ids=["too-short", "off-charset", "too-long"],
+)
+def test_secret_problem_rejects_a_weak_webhook_secret(secret: str) -> None:
+    """D184, R-9.6: a secret outside the charset or length range is refused as weak."""
+    assert (
+        telegram_wiring.secret_problem(_enabled_config(), _store_with_webhook_secret(secret))
+        == "secrets:telegram_webhook_weak"
+    )
+
+
+def test_weak_webhook_secret_problem_never_contains_the_value() -> None:
+    """D184: the weak-secret problem code never echoes the secret."""
+    secret = "short secret"  # noqa: S105  # a synthetic weak test value
+    problem = telegram_wiring.secret_problem(_enabled_config(), _store_with_webhook_secret(secret))
+
+    assert problem == "secrets:telegram_webhook_weak"
+    assert secret not in problem
+
+
+def test_secret_problem_ignores_webhook_strength_when_telegram_is_disabled() -> None:
+    """D184, D174: a disabled Telegram channel needs no strong webhook secret."""
+    assert telegram_wiring.secret_problem(_config(), _store_with_webhook_secret("short")) is None

@@ -8,6 +8,7 @@ views are complete (R-1.7, R-9.10, D174).
 from __future__ import annotations
 
 import logging
+import re
 from functools import partial
 
 import httpx
@@ -36,6 +37,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_ADAPTER: ChannelName = "telegram"
 #: Secrets the Telegram channel declares (R-9.10).
 TELEGRAM_SECRETS = frozenset({"telegram_bot_token", "telegram_webhook_secret"})
+#: Telegram's webhook secret charset and length, at least 32 characters (D184).
+WEBHOOK_SECRET_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
 
 
 class TelegramBuilder:
@@ -70,8 +73,11 @@ class TelegramBuilder:
         """Return the code of the first secret a configured Telegram channel lacks (R-9.6)."""
         if not self.configured(cfg):
             return None
-        if not _telegram_secrets(store).enabled:
+        secrets = _telegram_secrets(store)
+        if not secrets.enabled:
             return "secrets:telegram"
+        if WEBHOOK_SECRET_PATTERN.fullmatch(secrets.get("telegram_webhook_secret")) is None:
+            return "secrets:telegram_webhook_weak"
         if not channel_secrets(store).enabled:
             return "secrets:channels"
         return None
