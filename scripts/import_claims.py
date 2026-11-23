@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(settings.config_path)
         flow_id = import_flow(cfg, args.profile)
-        origin_channel = import_origin_channel(cfg)
+        origin_channel = import_origin_channel(cfg, args.profile)
         drive_root = folder_sink_root(cfg, flow_id)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
