@@ -79,9 +79,9 @@ def main() -> int:
                 chromium_sandbox=chromium_sandbox,
             )
         )
-    except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
+    except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16, D169)
         logger.error("SOL browser helper failed: %s", type(error).__name__)
-        emit(HelperOutput(reason=FetchReason.TECHNICAL))
+        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=type(error).__name__))
     else:
         emit(output(result))
     return 0
