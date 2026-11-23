@@ -223,3 +223,40 @@ async def test_technical_streak_counts_timeouts_as_technical(
         streak = await technical_streak(conn, portal_key, 3)
 
     assert streak is True
+
+
+async def test_fetch_attempts_has_the_streak_index(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D172: the index the BR-F03 streak orders by exists on portal, invoice, at and id."""
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT indexdef FROM pg_indexes WHERE indexname = %s",
+            ("ix_fetch_attempts_portal_invoice_at",),
+        )
+        rows = await cur.fetchall()
+
+    assert len(rows) == 1
+    assert "portal_key, invoice_id, at DESC, id DESC" in str(rows[0][0])
+
+
+async def test_technical_streak_breaks_a_tie_by_attempt_id(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D170: attempts with the same at are ordered by id, so the later one decides the streak."""
+    technical_then_ok_portal = _fresh_portal_key()
+    ok_then_technical_portal = _fresh_portal_key()
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", technical_then_ok_portal, "technical", 10)
+        await record_attempt(conn, invoice_id, "portal_registry", technical_then_ok_portal, "ok", 10)
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", ok_then_technical_portal, "ok", 10)
+        await record_attempt(conn, invoice_id, "portal_registry", ok_then_technical_portal, "technical", 10)
+    async with db_pool.connection() as conn:
+        technical_then_ok = await technical_streak(conn, technical_then_ok_portal, 1)
+        ok_then_technical = await technical_streak(conn, ok_then_technical_portal, 1)
+
+    assert technical_then_ok is False
+    assert ok_then_technical is True
