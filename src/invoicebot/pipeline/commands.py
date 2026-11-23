@@ -110,14 +110,15 @@ class CommandContext:
     """What a command needs beyond its message: admins, the timezone, the payment flow and teaching.
 
     ``reprocess_min_interval_s`` is the least time between two fetch rounds that
-    ``/reprocesar`` may start; 0 means no wait (D171).
+    ``/reprocesar`` may start; 0 means no wait (D171). No default, so a new entry
+    point cannot drop D171's brake.
     """
 
     admins: frozenset[str]
     timezone: str
+    reprocess_min_interval_s: int
     payment_flow: PaymentFlow | None = None
     teach: TeachSetup | None = None
-    reprocess_min_interval_s: int = 0
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.

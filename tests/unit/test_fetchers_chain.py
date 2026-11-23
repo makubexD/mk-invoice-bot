@@ -58,13 +58,15 @@ def attempts(reason: FetchReason, count: int) -> list[Attempt]:
 )
 def test_decide_one_registered_fetcher(history: list[Attempt], expected: object) -> None:
     """R-5.1: a fetcher runs, waits on its schedule, is done, or is used up (D65, D167)."""
-    assert decide(ORDER, REGISTERED, history, schedule_for) == expected
+    assert decide(ORDER, REGISTERED, history, schedule_for, no_retry=frozenset()) == expected
 
 
 def test_technical_failure_passes_to_the_next_fetcher() -> None:
     """D167: a fetcher's second technical failure is final and the chain moves to the next fetcher."""
     history = attempts(FetchReason.TECHNICAL, 2)
-    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Run("email_inbox")
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for, no_retry=frozenset()) == Run(
+        "email_inbox"
+    )
 
 
 def test_technical_failure_without_a_schedule_moves_on() -> None:
@@ -75,13 +77,15 @@ def test_technical_failure_without_a_schedule_moves_on() -> None:
         return []
 
     history = attempts(FetchReason.TECHNICAL, 1)
-    assert decide(ORDER, {FETCHER, "email_inbox"}, history, no_schedule) == Run("email_inbox")
-    assert decide(ORDER, REGISTERED, history, no_schedule) == Exhausted()
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, no_schedule, no_retry=frozenset()) == Run(
+        "email_inbox"
+    )
+    assert decide(ORDER, REGISTERED, history, no_schedule, no_retry=frozenset()) == Exhausted()
 
 
 def test_empty_order_is_exhausted() -> None:
     """D65: an empty order leaves no fetcher to run."""
-    assert decide([], REGISTERED, [], schedule_for) == Exhausted()
+    assert decide([], REGISTERED, [], schedule_for, no_retry=frozenset()) == Exhausted()
 
 
 def test_retry_delay_first_not_found_is_the_first_wait() -> None:
@@ -106,7 +110,13 @@ def test_decide_waits_exactly_when_retry_delay_has_a_delay(not_found_attempts: i
     """D65: ``decide`` waits after the next not-found-yet exactly when ``retry_delay`` queued a retry."""
     history = attempts(FetchReason.NOT_FOUND_YET, not_found_attempts)
     has_delay = retry_delay(FETCHER, history, schedule_for(FETCHER)) is not None
-    waits = decide(ORDER, REGISTERED, [*history, Attempt(FETCHER, FetchReason.NOT_FOUND_YET)], schedule_for)
+    waits = decide(
+        ORDER,
+        REGISTERED,
+        [*history, Attempt(FETCHER, FetchReason.NOT_FOUND_YET)],
+        schedule_for,
+        no_retry=frozenset(),
+    )
     assert (waits == Wait(FETCHER)) is has_delay
 
 
@@ -119,14 +129,14 @@ def test_fetch_result_ok_only_for_ok_reason() -> None:
 def test_auth_required_waits_on_the_first_schedule_entry() -> None:
     """D65, D100: an auth-required attempt waits for the first scheduled retry."""
     history = attempts(FetchReason.AUTH_REQUIRED, 1)
-    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert decide(ORDER, REGISTERED, history, schedule_for, no_retry=frozenset()) == Wait(FETCHER)
     assert retry_delay(FETCHER, [], schedule_for(FETCHER)) == timedelta(hours=1)
 
 
 def test_auth_required_then_not_found_yet_waits_on_the_second_schedule_entry() -> None:
     """D65, D100: auth-required and not-found-yet attempts share the schedule in order."""
     history = [Attempt(FETCHER, FetchReason.AUTH_REQUIRED), Attempt(FETCHER, FetchReason.NOT_FOUND_YET)]
-    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert decide(ORDER, REGISTERED, history, schedule_for, no_retry=frozenset()) == Wait(FETCHER)
     assert retry_delay(FETCHER, history[:-1], schedule_for(FETCHER)) == timedelta(hours=6)
 
 
@@ -137,7 +147,9 @@ def test_wait_reasons_exhaust_the_schedule_and_move_on() -> None:
         Attempt(FETCHER, FetchReason.NOT_FOUND_YET),
         Attempt(FETCHER, FetchReason.AUTH_REQUIRED),
     ]
-    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Run("email_inbox")
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for, no_retry=frozenset()) == Run(
+        "email_inbox"
+    )
 
 
 @pytest.mark.parametrize(
@@ -165,7 +177,7 @@ def test_technical_retry_delay(
     expected: timedelta | None,
 ) -> None:
     """D167: a technical failure's one retry waits the fetcher's first scheduled delay."""
-    assert technical_retry_delay(FETCHER, history, schedule) == expected
+    assert technical_retry_delay(FETCHER, history, schedule, no_retry=frozenset()) == expected
 
 
 def test_technical_retry_delay_respects_no_retry() -> None:
@@ -181,11 +193,19 @@ def test_decide_no_retry_moves_to_the_next_fetcher() -> None:
     assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for, no_retry={FETCHER}) == Run(
         "email_inbox"
     )
-    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Wait(FETCHER)
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for, no_retry=frozenset()) == Wait(
+        FETCHER
+    )
 
 
 def test_technical_then_not_found_yet_waits_on_the_second_slot() -> None:
     """D170: a technical attempt before a wait reason does not use a wait slot."""
     history = [Attempt(FETCHER, FetchReason.TECHNICAL), Attempt(FETCHER, FetchReason.NOT_FOUND_YET)]
-    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert decide(ORDER, REGISTERED, history, schedule_for, no_retry=frozenset()) == Wait(FETCHER)
     assert retry_delay(FETCHER, history, schedule_for(FETCHER)) == timedelta(hours=6)
+
+
+def test_decide_requires_no_retry() -> None:
+    """D170: ``decide`` without ``no_retry`` raises ``TypeError``, so a caller cannot lose the brake."""
+    with pytest.raises(TypeError):
+        decide(ORDER, REGISTERED, [], schedule_for)  # type: ignore[call-arg]  # proves the TypeError

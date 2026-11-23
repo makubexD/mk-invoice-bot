@@ -312,6 +312,14 @@ async def _updated_at(conn: AsyncConnection[Any], invoice_id: int) -> datetime:
     return cast(datetime, row[0])
 
 
+async def _fetch_round_at(conn: AsyncConnection[Any], invoice_id: int) -> datetime | None:
+    """Return the stored fetch_round_at of invoice_id, for the D171 brake tests."""
+    cur = await conn.execute("SELECT fetch_round_at FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return cast(datetime | None, row[0])
+
+
 async def _invoice_payloads(conn: AsyncConnection[Any], invoice_id: int) -> list[dict[str, Any]]:
     """Return the outbox payloads linked to invoice_id, oldest first."""
     cur = await conn.execute(
@@ -708,6 +716,59 @@ async def test_reprocesar_too_soon_refuses_the_round_and_keeps_the_state(
     assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
 
 
+async def test_reprocesar_on_a_failed_invoice_too_soon_keeps_the_state_and_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: /reprocesar from the sender refuses a FAILED invoice whose fetch round is recent."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=600)
+
+    async with db_pool.connection() as conn:
+        before = await _fetch_round_at(conn, invoice_id)
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        after = await _fetch_round_at(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "FAILED"
+    assert after == before
+    assert jobs == []
+    assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_another_senders_invoice_too_soon_refuses_an_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: an admin's /reprocesar gets the same brake on another sender's recent fetch round."""
+    owner_profile = _profile()
+    invoice_id = await _invoice_in(db_pool, owner_profile, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    admin_profile = _profile()
+    msg = _message(admin_profile, f"/reprocesar {invoice_id}")
+    context = CommandContext(
+        admins=frozenset({admin_profile}), timezone=TIMEZONE, reprocess_min_interval_s=600
+    )
+
+    async with db_pool.connection() as conn:
+        before = await _fetch_round_at(conn, invoice_id)
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        after = await _fetch_round_at(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, admin_profile)
+
+    assert head is not None
+    assert head.state == "MANUAL_REQUIRED"
+    assert after == before
+    assert jobs == []
+    assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
+
+
 async def test_reprocesar_after_the_interval_starts_a_new_round(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -738,7 +799,7 @@ async def test_reprocesar_with_the_default_interval_does_not_block(
     invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
     await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
-    context = CommandContext(admins=frozenset(), timezone=TIMEZONE)
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=0)
 
     async with db_pool.connection() as conn:
         await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
@@ -803,7 +864,9 @@ async def test_reprocesar_after_used_up_fetchers_runs_the_chain_again(
     assert jobs == ["fetch"]
     assert attempts == []
     assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
-    assert decide(flow.fetchers, flow.fetchers, [], lambda _fetcher: ()) == Run(flow.fetchers[0])
+    assert decide(flow.fetchers, flow.fetchers, [], lambda _fetcher: (), no_retry=frozenset()) == Run(
+        flow.fetchers[0]
+    )
 
 
 async def test_reprocesar_on_a_failed_batch_redelivers(
@@ -1180,7 +1243,7 @@ async def clean_teach_tables(
 def _portal_context(*, teach: bool = True) -> CommandContext:
     """Return a context with the example profiles, teaching wired when asked."""
     setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver()) if teach else None
-    return CommandContext(admins=frozenset(), timezone=TIMEZONE, teach=setup)
+    return CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=0, teach=setup)
 
 
 def _portal_message(text: str) -> InboundMessage:
@@ -1253,7 +1316,7 @@ async def test_portal_message_through_intake_stores_a_proposed_link(
 ) -> None:
     """R-11.4: /portal through handle_inbound stores a proposed taught_links row."""
     setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver())
-    roles = IntakeRoles(teach=setup)
+    roles = IntakeRoles(reprocess_min_interval_s=0, teach=setup)
     msg = _portal_message(f"/portal {ISSUER_RUC_TEXT} {GOOD_URL}")
 
     async with db_pool.connection() as conn:
@@ -1341,7 +1404,7 @@ async def _run_as(
 ) -> list[tuple[str, str | None]]:
     """Run ``text`` for profile_id, admin or not, and return its replies (S8.9)."""
     admins = frozenset({profile_id}) if is_admin else frozenset()
-    context = CommandContext(admins=admins, timezone=TIMEZONE)
+    context = CommandContext(admins=admins, timezone=TIMEZONE, reprocess_min_interval_s=0)
     parsed = parse_command(text)
     assert parsed is not None
     name, arg = parsed

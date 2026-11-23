@@ -23,6 +23,7 @@ import httpx
 import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.sinks.google_api import GoogleError, GoogleTransient
 
 #: The token endpoint every Google OAuth client refreshes against (D128).
@@ -38,6 +39,11 @@ EXPIRY_SKEW_S = 60
 MAX_TOKEN_LIFETIME_S = 3600
 #: The error code Google answers a refused refresh token with (BR-D01).
 INVALID_GRANT = "invalid_grant"
+
+
+def google_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
+    return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
 
 
 class GoogleTokens:

@@ -20,6 +20,7 @@ from invoicebot.config.models import (
     GoogleDriveSink,
     GoogleSheetsSink,
     files_accounts,
+    google_accounts_in,
     mail_read_accounts,
     mail_send_accounts,
 )
@@ -141,8 +142,8 @@ def _gmail_inbox_accounts(cfg: Config) -> set[str]:
 
 
 def google_accounts(cfg: Config) -> set[str]:
-    """Return every account a Google sink or a ``gmail`` inbox names (R-6.5, D129)."""
-    return _google_sink_accounts(cfg) | _gmail_inbox_accounts(cfg)
+    """Return every account a Google sink or a ``gmail`` inbox names (R-6.5, D129, D138)."""
+    return {account for flow in cfg.flows.values() for account in google_accounts_in(flow)}
 
 
 def google_scopes_for(cfg: Config, account: str) -> list[str]:

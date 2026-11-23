@@ -42,9 +42,9 @@ from invoicebot.auth.google_consent import (
 )
 from invoicebot.auth.google_oauth import (
     GOOGLE_CLIENT_SECRET,
-    GOOGLE_OAUTH_ADAPTER,
     TOKEN_URL,
     GoogleTokens,
+    google_secrets,
     save_refresh_token,
 )
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
@@ -273,10 +273,8 @@ def _auth_google(
         parser.error("DATABASE_URL must be set to resume waiting invoices")
     if settings.secrets_path is None or settings.age_identity_path is None:
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to sign in")
-    client_secret = (
-        SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
-        .get(GOOGLE_CLIENT_SECRET)
+    client_secret = google_secrets(SecretStore.load(settings.secrets_path, settings.age_identity_path)).get(
+        GOOGLE_CLIENT_SECRET
     )
     try:
         asyncio.run(_google_sign_in(settings, cfg, account, client_secret, show, transport))
@@ -334,10 +332,8 @@ def _google_setup(
         parser.error("google settings must be configured to run google-setup (D128)")
     if settings.secrets_path is None or settings.age_identity_path is None:
         parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to create the sheet")
-    client_secret = (
-        SecretStore.load(settings.secrets_path, settings.age_identity_path)
-        .scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
-        .get(GOOGLE_CLIENT_SECRET)
+    client_secret = google_secrets(SecretStore.load(settings.secrets_path, settings.age_identity_path)).get(
+        GOOGLE_CLIENT_SECRET
     )
     try:
         lines = asyncio.run(_create_google_setup(settings, cfg, args, target, client_secret, transport))

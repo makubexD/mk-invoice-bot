@@ -110,7 +110,9 @@ async def _run(
     payment_flow: PaymentFlow | None,
 ) -> None:
     """Run ``/pagado arg`` for profile_id in the caller's transaction."""
-    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, payment_flow=payment_flow)
+    context = CommandContext(
+        admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=0, payment_flow=payment_flow
+    )
     await handle_command(conn, _message(profile_id, arg), "pagado", arg, context=context)
 
 

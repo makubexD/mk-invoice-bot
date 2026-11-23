@@ -402,6 +402,12 @@ class Google(BaseModel):
         return _account_addresses(value)
 
 
+#: The sink kinds a Google sink carries (D132).
+#: The ``Literal[...]`` annotations on ``GoogleDriveSink.kind`` and ``GoogleSheetsSink.kind``
+#: repeat this text: pydantic needs a literal, not a constant.
+GOOGLE_DRIVE_KIND = "google_drive"
+GOOGLE_SHEETS_KIND = "google_sheets"
+
 #: An id Google may return; anything else is refused before it is used.
 GOOGLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 
@@ -631,8 +637,8 @@ class Flow(BaseModel):
         A sheets sink alone is allowed: the flow writes its row without uploading files.
         """
         kinds = {sink.kind for sink in self.sinks}
-        if "google_drive" in kinds and "google_sheets" not in kinds:
-            raise ValueError("a flow with a 'google_drive' sink needs a 'google_sheets' sink")
+        if GOOGLE_DRIVE_KIND in kinds and GOOGLE_SHEETS_KIND not in kinds:
+            raise ValueError(f"a flow with a {GOOGLE_DRIVE_KIND!r} sink needs a {GOOGLE_SHEETS_KIND!r} sink")
         return self
 
 
@@ -863,7 +869,7 @@ def mail_read_accounts(cfg: Config) -> set[str]:
     }
 
 
-def _google_accounts_in(flow: Flow) -> list[str]:
+def google_accounts_in(flow: Flow) -> list[str]:
     """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
     accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
     inbox = flow.email_inbox
@@ -957,7 +963,7 @@ class Config(BaseModel):
     def _google_usage_needs_google_settings(self) -> Self:
         """R-6.5, D129, D138: a Google sink or gmail inbox needs its account in google.accounts."""
         for name, flow in self.flows.items():
-            accounts = _google_accounts_in(flow)
+            accounts = google_accounts_in(flow)
             if not accounts:
                 continue
             if self.google is None:

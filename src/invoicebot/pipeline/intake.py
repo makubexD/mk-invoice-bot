@@ -83,18 +83,19 @@ class IntakeRoles:
     ``teach`` is the profiles and resolver a /portal or BR-F02 answer teaches with,
     None when ``gaps.teach_via_chat`` is off (R-11.4), and ``reprocess_min_interval_s``
     is the least time between two fetch rounds ``/reprocesar`` may start, 0 for no
-    wait (D171).
+    wait (D171). It has no default, as in ``CommandContext``, so roles built by hand
+    cannot drop D171's brake; ``NO_ROLES`` (tests, callers without config) has none.
     """
 
+    reprocess_min_interval_s: int
     admins: frozenset[str] = frozenset()
     payment_flow: PaymentFlow | None = None
     laptop_flows: frozenset[str] = frozenset()
     teach: TeachSetup | None = None
-    reprocess_min_interval_s: int = 0
 
 
-#: No admins, no payment flow and no laptop flows: what a caller without config passes.
-NO_ROLES = IntakeRoles()
+#: No admins, no payment flow, no laptop flows and no /reprocesar wait: what a caller without config passes.
+NO_ROLES = IntakeRoles(reprocess_min_interval_s=0)
 
 
 @dataclass(frozen=True)

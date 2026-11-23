@@ -28,7 +28,6 @@ from invoicebot.app import (
     _fetch_schedules,
     _github_secrets,
     _google_deliver_handler,
-    _google_secrets,
     _google_tokens,
     _laptop_secrets,
     _log_reload_failure,
@@ -39,7 +38,7 @@ from invoicebot.app import (
     _validation_secrets,
     _whatsapp_secrets,
 )
-from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER
+from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
@@ -306,7 +305,7 @@ def test_google_secret_view_declares_only_the_client_secret() -> None:
     """R-9.10: the Google OAuth view declares google_client_secret and nothing else."""
     store = _RecordingStore({"other_key": "synthetic-other-value"})
 
-    view = _google_secrets(store)
+    view = google_secrets(store)
 
     assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
     assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
