@@ -176,10 +176,38 @@ List in the summary each existing test whose expectation changed and why (D167);
 Test: `uv run pytest -q tests/integration/test_pipeline_fetch.py tests/integration/test_flow_a.py
 tests/integration/test_flow_dni.py tests/integration/test_gap_resume_flow.py`.
 
-## Step 8: Live: re-fetch invoice 12 `[inline: the owner's live host and real invoices]`
+## Step 8: D168, Chromium's sandbox keeps its zygote `[inline: design decision and spec wording]`
+
+Found in the first live run of step 10 (2026-11-23): every sandboxed browser fetch fails at launch. Chromium exits
+with "Zygote cannot be disabled if sandbox is enabled": spec 03 §8's `--no-zygote` contradicts D147's
+`chromium_sandbox=True`, so the helper reports `technical` in about 1 s. The portal has never fetched live. A probe in
+the live container loaded the portal with the sandbox on and `--no-zygote` dropped; the RSS sum rose about 56 MiB
+(806 vs 750, shared pages counted twice), inside the 450 MB helper budget (spike S0.9: 315 MB peak).
+
+1. `specs/05-open-questions.md`, after D167: **D168** "Chromium's sandbox keeps its zygote": with the sandbox on
+   (D147), the helper drops `--no-zygote`, since Chromium refuses to start with both; the zygote costs about 50 MB,
+   inside the helper budget. With the sandbox off, the flag stays.
+2. `specs/03-design.md` §8, the launch flags line: after `--no-zygote` add "(only with Chromium's sandbox off, D168)".
+
+Test: `grep -n "D168" specs/05-open-questions.md specs/03-design.md` shows both lines.
+
+## Step 9: Drop `--no-zygote` when Chromium's sandbox is on `[worker]`
+
+Files: `src/invoicebot/fetchers/browser/session.py`, `tests/unit/test_browser_session.py`.
+
+1. `session.py`: move `"--no-zygote"` out of `LAUNCH_ARGS` into its own constant `NO_ZYGOTE` (comment: only without
+   Chromium's sandbox, D168). `_launch_args(portal, chromium_sandbox)` appends `NO_ZYGOTE` only when `chromium_sandbox`
+   is false; `launch_options` passes its flag through. Docstrings cite D168.
+2. Tests in `test_browser_session.py` (docstrings start `D168`): with `chromium_sandbox=True`, `options["args"]` has no
+   `--no-zygote`; with `False`, it has it once. Every other flag of `LAUNCH_ARGS` is present in both cases.
+
+Test: `uv run pytest -q tests/unit/test_browser_session.py`.
+
+## Step 10: Live: re-fetch invoice 12 `[inline: the owner's live host and real invoices]`
 
 1. Deploy the image (`./deploy/deploy-live.sh <tag>`), check `/health` and that the migration reached `0014`.
-2. `invoicebot rehearse send --text "/reprocesar 12"`, then `rehearse replies`: expect BR-F12 or the reprocess
+2. If invoice 12 is still `FETCHING_DOCS` with its D167 retry queued from the first live run, let that job run (or
+   move its `run_after` to `now()`) instead of `/reprocesar`. Otherwise `invoicebot rehearse send --text "/reprocesar 12"`, then `rehearse replies`: expect BR-F12 or the reprocess
    acknowledgement, then no BR-F07; invoice 12 moves to `DELIVERING` and on through flow B (dry-run mail, BR-D07).
 3. Check the OneDrive folder with `rclone lsl "onedrive:Reembolsos/<folder>"` for invoice 12's PDF, XML and Excel.
 4. `podman logs` for the fetch step shows `portal_key` `facturactiva-la-lena` with reason `ok`; no new warning.
