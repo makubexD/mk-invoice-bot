@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
 from invoicebot.config.models import OneDriveFolderSink, SinkFiles
-from invoicebot.importer import Claim, ImportReport, read_claims, register_claims
+from invoicebot.importer import Claim, ImportReport, ImportTarget, read_claims, register_claims
 from invoicebot.pipeline.folder_status import _Inputs, _plan
 from invoicebot.states import DONE
 from invoicebot.store.flow_b import claim_seq
@@ -68,7 +68,12 @@ async def _register(
     """Run the import inside a transaction the test owns."""
     async with db_pool.connection() as conn, conn.transaction():
         return await register_claims(
-            conn, profile_id, flow_id, claims, drive_root=drive_root, dry_run=dry_run
+            conn,
+            profile_id,
+            ImportTarget(flow_id, drive_root),
+            claims,
+            origin_channel="whatsapp",
+            dry_run=dry_run,
         )
 
 

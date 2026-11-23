@@ -5,12 +5,15 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 
 import pytest
+import yaml
 
 # The existing synthetic invoice generator; its RUCs are the ones in tests/synthetic_rucs.txt.
 from test_extract_ubl import _invoice_xml
 
+from invoicebot.config.models import Config
 from invoicebot.extract.ubl import MAX_XML_BYTES
 from invoicebot.importer import (
     SKIP_FIELDS_MISSING,
@@ -25,11 +28,19 @@ from invoicebot.importer import (
     Claim,
     ClaimFolder,
     Skipped,
+    import_origin_channel,
     parse_claim_folder,
     read_claim,
 )
 
 _SENT_NAME = "2026-07-Support_3_LaLena_Sent"
+ROOT = Path(__file__).resolve().parents[2]
+EXAMPLE = ROOT / "config" / "example.yaml"
+
+
+def _example_document() -> dict[str, Any]:
+    """Return the shipped example config as the mapping the tests edit."""
+    return yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
 
 
 def _folder(root: Path, name: str) -> Path:
@@ -202,3 +213,27 @@ def test_read_claim_skips_an_xml_missing_a_claim_field(tmp_path: Path) -> None:
     _write_xml(folder, _invoice_xml(ruc_emisor=""))
 
     assert read_claim(folder) == Skipped(SKIP_FIELDS_MISSING)
+
+
+def test_import_origin_channel_reads_the_owner_preferred_channel() -> None:
+    """R-1.9: an owner profile preferring telegram imports with telegram as the origin channel."""
+    document = _example_document()
+    document["profiles"]["yo"]["preferred_channel"] = "telegram"
+    for channel in document["channels"]:
+        if channel["kind"] == "telegram":
+            channel["enabled"] = True
+
+    cfg = Config.model_validate(document)
+
+    assert import_origin_channel(cfg) == "telegram"
+
+
+def test_import_origin_channel_refuses_an_owner_without_a_preferred_channel() -> None:
+    """R-1.9: an owner profile with no preferred channel is refused, naming the profile."""
+    document = _example_document()
+    document["profiles"]["yo"]["preferred_channel"] = None
+
+    cfg = Config.model_validate(document)
+
+    with pytest.raises(ValueError, match="yo"):
+        import_origin_channel(cfg)

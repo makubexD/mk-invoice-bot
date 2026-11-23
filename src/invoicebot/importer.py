@@ -65,9 +65,6 @@ SENT_FOLDER_SUFFIX = "_Sent"
 SENT_BATCH_STATE = "sent"
 #: The state ``open_batch`` stores before the batch is closed as sent (R-7.5).
 PREPARED_BATCH_STATE: BatchState = "prepared"
-#: D110 leaves the origin channel open, and the schema accepts only the two channels; an
-#: imported claim is filed under the owner's WhatsApp profile.
-IMPORT_ORIGIN_CHANNEL: ChannelName = "whatsapp"
 
 #: What the import did with one claim (R-7.16).
 type ImportStatus = Literal["registered", "would_register", "skipped"]
@@ -132,6 +129,14 @@ class ImportReport:
     """The outcome of one import run, one entry per claim (R-7.16)."""
 
     entries: tuple[ImportEntry, ...]
+
+
+@dataclass(frozen=True)
+class ImportTarget:
+    """Where an imported claim is filed: its flow and that flow's sink root (R-7.16)."""
+
+    flow_id: str
+    drive_root: str
 
 
 def parse_claim_folder(name: str) -> ClaimFolder | None:
@@ -273,6 +278,19 @@ def import_flow(cfg: Config, profile_id: str) -> str:
     return folder_flows[0]
 
 
+def import_origin_channel(cfg: Config) -> ChannelName:
+    """Return the owner profile's preferred channel for an imported claim (R-1.9, D110).
+
+    Raises:
+        ValueError: the owner profile has no preferred channel.
+    """
+    profile_id = cfg.owner.profile
+    channel = cfg.profiles[profile_id].preferred_channel
+    if channel is None:
+        raise ValueError(f"owner profile {profile_id!r} has no preferred channel")
+    return channel
+
+
 def folder_sink_root(cfg: Config, flow_id: str) -> str:
     """Return the root of the flow's OneDrive folder sink (R-7.16).
 
@@ -291,18 +309,19 @@ def folder_sink_root(cfg: Config, flow_id: str) -> str:
 async def register_claims(
     conn: AsyncConnection[Any],
     profile_id: str,
-    flow_id: str,
+    target: ImportTarget,
     claims: Iterable[Claim],
     *,
-    drive_root: str,
+    origin_channel: ChannelName,
     dry_run: bool = False,
 ) -> ImportReport:
     """Register each claim as a DONE flow B invoice with a sent batch (R-7.16, D110).
 
-    A claim whose natural key an invoice already holds is skipped, so a second run
-    changes nothing. Each claim is registered in its own transaction; with ``dry_run``
-    nothing is written and the report says which claims would be registered. Never
-    commits outside a claim's transaction.
+    The invoice's origin channel is the owner profile's preferred channel (R-1.9). A
+    claim whose natural key an invoice already holds is skipped, so a second run changes
+    nothing. Each claim is registered in its own transaction; with ``dry_run`` nothing is
+    written and the report says which claims would be registered. Never commits outside
+    a claim's transaction.
     """
     entries: list[ImportEntry] = []
     for claim in claims:
@@ -316,7 +335,8 @@ async def register_claims(
             if dry_run:
                 entries.append(ImportEntry(claim, "would_register"))
                 continue
-            invoice_id = await _insert_claim(conn, profile_id, flow_id, claim, reading, drive_root)
+            invoice_id = await _start_invoice(conn, profile_id, key, origin_channel)
+            await _insert_claim(conn, invoice_id, target, claim, reading)
         entries.append(ImportEntry(claim, "registered", invoice_id))
     return ImportReport(tuple(entries))
 
@@ -336,31 +356,38 @@ async def _natural_key_holder(conn: AsyncConnection[Any], key: str) -> int | Non
     return None if row is None else int(row[0])
 
 
-async def _insert_claim(
+async def _start_invoice(
     conn: AsyncConnection[Any],
     profile_id: str,
-    flow_id: str,
-    claim: Claim,
-    reading: Reading,
-    drive_root: str,
+    key: str,
+    origin_channel: ChannelName,
 ) -> int:
-    """Insert one claim as a DONE invoice with a sent batch and return its id (R-7.16)."""
-    key = _natural_key(profile_id, reading)
-    invoice_id = await create_invoice(conn, profile_id, IMPORT_ORIGIN_CHANNEL)
+    """Create the claim's invoice on ``origin_channel`` and give it its natural key (R-7.16)."""
+    invoice_id = await create_invoice(conn, profile_id, origin_channel)
     duplicate = await claim_natural_key(conn, invoice_id, key)
     if duplicate is not None:
         raise RuntimeError(f"invoice {duplicate.invoice_id} claimed the key first")
+    return invoice_id
+
+
+async def _insert_claim(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    target: ImportTarget,
+    claim: Claim,
+    reading: Reading,
+) -> None:
+    """Store one claim's fields, batch, flow and folder data on its invoice (R-7.16)."""
     await save_reading(conn, invoice_id, reading)
     await conn.execute(
         "UPDATE invoices SET razon_social = %s WHERE id = %s",
         (claim.razon_social, invoice_id),
     )
-    batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
+    batch_id = await open_batch(conn, invoice_id, target.flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
-    await set_flow(conn, invoice_id, flow_id)
-    await merge_flow_data(conn, invoice_id, _flow_data(claim, drive_root))
+    await set_flow(conn, invoice_id, target.flow_id)
+    await merge_flow_data(conn, invoice_id, _flow_data(claim, target.drive_root))
     await set_state(conn, invoice_id, DONE)
-    return invoice_id
 
 
 def _claim_reading(claim: Claim) -> Reading:
