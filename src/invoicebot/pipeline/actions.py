@@ -29,7 +29,7 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale

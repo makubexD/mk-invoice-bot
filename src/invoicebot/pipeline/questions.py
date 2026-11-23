@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 
 from invoicebot.channels.base import Button
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Flow, Store
 from invoicebot.extract.fields import Reading
 from invoicebot.routing.router import RULE_ASK

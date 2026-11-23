@@ -133,14 +133,6 @@ forbidden_modules =
     invoicebot.channels.whatsapp
 ignore_imports =
     # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.actions -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.deliver -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.questions -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.replies -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
     invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.client
     # Telegram (ops): media port and button codec move then
     invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.media
