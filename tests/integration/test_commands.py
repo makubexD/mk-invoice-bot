@@ -738,7 +738,7 @@ async def test_reprocesar_with_the_default_interval_does_not_block(
     invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
     await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
-    context = CommandContext(admins=frozenset(), timezone=TIMEZONE)
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=0)
 
     async with db_pool.connection() as conn:
         await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
@@ -1182,7 +1182,7 @@ async def clean_teach_tables(
 def _portal_context(*, teach: bool = True) -> CommandContext:
     """Return a context with the example profiles, teaching wired when asked."""
     setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver()) if teach else None
-    return CommandContext(admins=frozenset(), timezone=TIMEZONE, teach=setup)
+    return CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=0, teach=setup)
 
 
 def _portal_message(text: str) -> InboundMessage:
@@ -1343,7 +1343,7 @@ async def _run_as(
 ) -> list[tuple[str, str | None]]:
     """Run ``text`` for profile_id, admin or not, and return its replies (S8.9)."""
     admins = frozenset({profile_id}) if is_admin else frozenset()
-    context = CommandContext(admins=admins, timezone=TIMEZONE)
+    context = CommandContext(admins=admins, timezone=TIMEZONE, reprocess_min_interval_s=0)
     parsed = parse_command(text)
     assert parsed is not None
     name, arg = parsed
