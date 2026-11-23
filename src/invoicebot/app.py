@@ -127,6 +127,7 @@ from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
 from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring
 from invoicebot.wiring.console import ConsoleBuilder
+from invoicebot.wiring.telegram import telegram_wiring
 from invoicebot.wiring.whatsapp import whatsapp_wiring
 
 logger = logging.getLogger(__name__)
@@ -140,7 +141,7 @@ _FetcherBuilder = Callable[[str, Flow], Fetcher | None]
 _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 
 #: Builds the chat channels that need no process state, or ``None`` when not enabled (D174).
-CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring,)
+CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring, telegram_wiring)
 
 
 def _channel_builders(data_dir: Path) -> tuple[ChannelBuilder, ...]:
