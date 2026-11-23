@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from typing import Any, TextIO
 
 from pydantic import BaseModel
+from pydantic.fields import FieldInfo
 
 #: Event fields copied from ``extra=`` onto the JSON object, in output order.
 EXTRA_FIELDS = (
@@ -86,6 +87,9 @@ _SCRUB_MAX_DEPTH = 5
 #: Replacement for a value nested deeper than ``_SCRUB_MAX_DEPTH`` (R-9.12).
 _NESTED = "[nested]"
 
+#: Replacement for an attribute that raises ``AttributeError`` when read (R-9.12).
+_UNREADABLE = "[unreadable]"
+
 _logger = logging.getLogger(__name__)
 
 
@@ -124,19 +128,44 @@ def _is_personal(key: str) -> bool:
     return any(f"_{personal}_" in f"_{words}_" for personal in _PERSONAL_KEYS)
 
 
+def _read_field(value: Any, name: str) -> Any:
+    """Return ``value.name``, or ``_UNREADABLE`` when the attribute is not set (R-9.12)."""
+    try:
+        return getattr(value, name)
+    except AttributeError:
+        return _UNREADABLE
+
+
+def _field_key(name: str, field: FieldInfo) -> str:
+    """Return the key a model field is logged under: a personal alias, else its name (R-9.12)."""
+    for alias in (field.serialization_alias, field.alias):
+        if alias is not None and _is_personal(alias):
+            return alias
+    return name
+
+
 def _fields_of(value: Any) -> dict[str, Any] | None:
     """Return a dataclass instance's or pydantic model's shown fields, or ``None`` (R-9.12).
 
     A dataclass class has no field values, so only an instance converts. Fields
     are read, not copied with ``asdict``, so the caller's depth cap still
     applies to the values. A field declared ``repr=False`` is left out, as the
-    class's own text form hides it (``SolCredentials``, R-9.16).
+    class's own text form hides it (``SolCredentials``, R-9.16). A field that
+    raises ``AttributeError`` on read becomes ``_UNREADABLE``; a model field
+    whose alias is personal is keyed by that alias, so the dict branch redacts
+    it.
     """
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {field.name: getattr(value, field.name) for field in dataclasses.fields(value) if field.repr}
+        return {
+            field.name: _read_field(value, field.name) for field in dataclasses.fields(value) if field.repr
+        }
     if isinstance(value, BaseModel):
         shown = type(value).model_fields
-        return {name: item for name, item in value if name not in shown or shown[name].repr}
+        return {
+            (_field_key(name, shown[name]) if name in shown else name): _read_field(value, name)
+            for name, _ in value
+            if name not in shown or shown[name].repr
+        }
     return None
 
 

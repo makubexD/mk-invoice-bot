@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from invoicebot.logging import PROPAGATING_LOGGERS, JsonFormatter, configure_logging, step_timer
 
@@ -422,3 +422,60 @@ def test_pydantic_field_hidden_from_repr_is_left_out(log_stream: io.StringIO) ->
 
     assert _records(log_stream)[-1]["payload"] == {"label": "ops"}
     assert "t9z" not in log_stream.getvalue()
+
+
+class _AliasedRuc(BaseModel):
+    """A pydantic model whose field name hides a personal alias."""
+
+    tax_id: str = Field(alias="ruc")
+    label: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _UnsetField:
+    """A dataclass with an ``init=False`` field that is never assigned."""
+
+    label: str = "ops"
+    memo: str = dataclasses.field(init=False)
+
+
+def test_pydantic_personal_alias_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a model field aliased as ruc logs under ruc as [redacted], never its value."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"payload": _AliasedRuc(ruc="20000000001", label="ops")}
+    )
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "label": "ops"}
+    assert "20000000001" not in output
+
+
+def test_field_that_raises_on_read_becomes_unreadable(log_stream: io.StringIO) -> None:
+    """R-9.12: an attribute raising AttributeError on read is [unreadable], and the rest still log."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _UnsetField()})
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops", "memo": "[unreadable]"}
+
+
+class _ExtraAllowed(BaseModel):
+    """A pydantic model that keeps extra keys."""
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+def test_pydantic_extra_field_is_logged_and_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a model's extra keys log under their own names, a personal one redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"payload": _ExtraAllowed(label="ops", ruc="20000000001")}
+    )
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops", "ruc": "[redacted]"}
+    assert "20000000001" not in log_stream.getvalue()
