@@ -74,25 +74,37 @@ Files: `src/invoicebot/logging.py`, `tests/unit/test_logging.py`.
 
 Test: `uv run pytest -q tests/unit/test_logging.py`
 
-## Step 5: One home for the gmail provider and the OneDrive sink kind `[worker]`
+## Step 5: One home for the gmail provider `[worker]`
+
+Files: `src/invoicebot/config/models.py`, `src/invoicebot/auth/providers.py`, `src/invoicebot/pipeline/deliver.py`,
+`src/invoicebot/app.py`.
+
+1. `models.py`: add `GMAIL_PROVIDER = "gmail"` next to the email inbox model, with the same comment as
+   `GOOGLE_DRIVE_KIND` that the `Literal[...]` annotation repeats the text. The `"gmail"` comparisons in `models.py`
+   (about lines 603 and 876) use the constant.
+2. `providers.py`: delete its own `GMAIL_PROVIDER` and import it from `config.models`.
+3. `deliver.py` and `app.py`: import `GMAIL_PROVIDER` from `config.models`, not `auth.providers` (mypy is strict, so
+   no implicit re-export).
+
+Test: `uv run pytest -q tests/unit/test_config_models.py tests/unit/test_app_wiring.py tests/integration/test_pipeline_deliver_dispatch.py && uv run mypy src && uv run lint-imports`
+
+## Step 6: One home for the OneDrive sink kind and the Google account derivation `[worker]`
 
 Files: `src/invoicebot/config/models.py`, `src/invoicebot/auth/providers.py`, `src/invoicebot/app.py`,
 `tests/unit/test_config_models.py`.
 
-1. `models.py`: add `GMAIL_PROVIDER = "gmail"` next to the email inbox model and `ONEDRIVE_FOLDER_KIND =
-   "onedrive_folder"` next to `GOOGLE_DRIVE_KIND`, with the same comment that the `Literal[...]` annotations repeat the
-   text. The `"gmail"` comparisons in `models.py` (about lines 603 and 876) use the constant. Add
-   `google_sink_accounts_in(flow)` and `gmail_inbox_accounts_in(flow)`; `google_accounts_in` returns their
-   concatenation.
-2. `providers.py`: import `GMAIL_PROVIDER` from `config.models` (delete its own); `_google_sink_accounts` and
-   `_gmail_inbox_accounts` become set comprehensions over the two new helpers.
+1. `models.py`: add `ONEDRIVE_FOLDER_KIND = "onedrive_folder"` next to `GOOGLE_DRIVE_KIND`, with the same comment.
+   Add `google_sink_accounts_in(flow)` and `gmail_inbox_accounts_in(flow)`; `google_accounts_in` returns their
+   concatenation, in the same order as today.
+2. `providers.py`: `_google_sink_accounts` and `_gmail_inbox_accounts` become set comprehensions over the two new
+   helpers.
 3. `app.py`: delete `ONEDRIVE_FOLDER_KIND`, import it from `config.models`; reword the comment above it.
-4. Test, docstring starting `R-6.5`: each constant equals the single argument of its model's `Literal` annotation
-   (`typing.get_args` on the model field), so the two cannot drift.
+4. Test, docstring starting `R-6.5`: `GMAIL_PROVIDER` and `ONEDRIVE_FOLDER_KIND` each equal the single argument of
+   their model's `Literal` annotation (`typing.get_args` on the model field), so the two cannot drift.
 
 Test: `uv run pytest -q tests/unit/test_config_models.py tests/unit/test_app_wiring.py && uv run mypy src && uv run lint-imports`
 
-## Step 6: The Google secret view test covers an enabled view `[worker]`
+## Step 7: The Google secret view test covers an enabled view `[worker]`
 
 Files: `tests/unit/test_app_wiring.py`.
 
@@ -103,7 +115,7 @@ whose `missing` is empty, and whose `get("other_key")` raises (use whatever the 
 
 Test: `uv run pytest -q tests/unit/test_app_wiring.py`
 
-## Step 7: Compare-and-delete the SUNAT token on a 401 `[worker]`
+## Step 8: Compare-and-delete the SUNAT token on a 401 `[worker]`
 
 Files: `src/invoicebot/store/kv.py`, `src/invoicebot/sunat/token.py`, `src/invoicebot/pipeline/validate.py`,
 `tests/integration/test_sunat_token.py`.
@@ -118,7 +130,7 @@ Files: `src/invoicebot/store/kv.py`, `src/invoicebot/sunat/token.py`, `src/invoi
 
 Test: `uv run pytest -q tests/integration/test_sunat_token.py tests/integration/test_pipeline_validate.py && uv run mypy src`
 
-## Step 8: Revoke the grant of a refused wrong-mailbox Google sign-in `[worker]`
+## Step 9: Revoke the grant of a refused wrong-mailbox Google sign-in `[worker]`
 
 Files: `src/invoicebot/auth/google_oauth.py`, `src/invoicebot/cli.py`, `tests/integration/test_cli_auth_google.py`.
 
@@ -133,7 +145,7 @@ Files: `src/invoicebot/auth/google_oauth.py`, `src/invoicebot/cli.py`, `tests/in
 
 Test: `uv run pytest -q tests/integration/test_cli_auth_google.py`
 
-## Step 9: `/gaps` shows `…` only when it cut the list `[worker]`
+## Step 10: `/gaps` shows `…` only when it cut the list `[worker]`
 
 Files: `src/invoicebot/pipeline/commands.py`, `src/invoicebot/rules/messages_es.py`,
 `tests/integration/test_commands.py`.
@@ -145,7 +157,7 @@ Files: `src/invoicebot/pipeline/commands.py`, `src/invoicebot/rules/messages_es.
 
 Test: `uv run pytest -q tests/integration/test_commands.py -k gaps`
 
-## Step 10: A wiring test for the `github_health` choice `[worker]`
+## Step 11: A wiring test for the `github_health` choice `[worker]`
 
 Files: `src/invoicebot/app.py`, `tests/unit/test_app_wiring.py`.
 
@@ -157,7 +169,7 @@ Files: `src/invoicebot/app.py`, `tests/unit/test_app_wiring.py`.
 
 Test: `uv run pytest -q tests/unit/test_app_wiring.py && uv run mypy src`
 
-## Step 11: One email normalization helper `[worker]`
+## Step 12: One email normalization helper `[worker]`
 
 Files: `src/invoicebot/text.py`, `tests/unit/test_text.py`, `src/invoicebot/config/models.py`, `src/invoicebot/cli.py`.
 
@@ -169,7 +181,7 @@ Files: `src/invoicebot/text.py`, `tests/unit/test_text.py`, `src/invoicebot/conf
 
 Test: `uv run pytest -q tests/unit/test_text.py tests/unit/test_config_models.py tests/integration/test_cli_auth_google.py`
 
-## Step 12: The Microsoft mailbox pin uses the same helper `[worker]`
+## Step 13: The Microsoft mailbox pin uses the same helper `[worker]`
 
 Files: `src/invoicebot/auth/msal_cache.py`, `tests/unit/test_msal_cache.py` (or the file that tests it today).
 
