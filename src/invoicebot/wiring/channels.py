@@ -12,7 +12,7 @@ from fastapi import APIRouter
 
 from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.channels.base import ChannelName, MediaSource
-from invoicebot.config.models import Config
+from invoicebot.config.models import Config, Profile, enabled_chat_channels
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert
 from invoicebot.queue.outbox import Transport
 from invoicebot.rules.messages_es import MESSAGES
@@ -62,16 +62,37 @@ class ChannelBuilder(Protocol):
         """Return the first missing-secret code the channel needs, or ``None`` (R-9.6)."""
 
 
+def alert_profiles(cfg: Config, channel: str) -> dict[str, Profile]:
+    """Return the profiles BR-O03 alerts, with each admin moved off the rejected channel when it has
+    another route (D185).
+    """
+    rejected = channel.lower()
+    fallbacks = enabled_chat_channels(cfg.channels) - {rejected}
+    profiles: dict[str, Profile] = {}
+    for profile_id, profile in cfg.profiles.items():
+        fallback = _fallback_channel(profile, rejected, fallbacks)
+        profiles[profile_id] = (
+            profile if fallback is None else profile.model_copy(update={"preferred_channel": fallback})
+        )
+    return profiles
+
+
+def _fallback_channel(profile: Profile, rejected: str, fallbacks: set[str]) -> str | None:
+    """Return the sorted first enabled channel other than ``rejected`` the profile has an id for (D185)."""
+    if not profile.admin or profile.preferred_channel != rejected:
+        return None
+    sender_ids = {"whatsapp": profile.whatsapp, "telegram": profile.telegram_user_id}
+    return next((name for name in sorted(fallbacks) if sender_ids.get(name) is not None), None)
+
+
 async def alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
     """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
-    # shortcut: the alert goes to each admin's preferred channel, which may be the very channel
-    # whose token was rejected; then only this error log reaches anyone. A fallback channel
-    # needs a routing decision of its own (review follow-up, T2).
+    # D185: an admin whose preferred channel is the rejected one gets the alert on another enabled channel.
     logger.error("channel token rejected", extra={"channel": channel})
     async with pool.connection() as conn, conn.transaction():
         await queue_rate_limited_alert(
             conn,
-            cfg.profiles,
+            alert_profiles(cfg, channel),
             f"BR-O03:{channel.lower()}",
             timedelta(hours=cfg.ops.self_alerts.realert_hours),
             "BR-O03",
