@@ -1255,7 +1255,7 @@ async def test_portal_message_through_intake_stores_a_proposed_link(
 ) -> None:
     """R-11.4: /portal through handle_inbound stores a proposed taught_links row."""
     setup = TeachSetup(profiles=load_config(EXAMPLE).profiles, resolver=FakeResolver())
-    roles = IntakeRoles(teach=setup)
+    roles = IntakeRoles(reprocess_min_interval_s=0, teach=setup)
     msg = _portal_message(f"/portal {ISSUER_RUC_TEXT} {GOOD_URL}")
 
     async with db_pool.connection() as conn:

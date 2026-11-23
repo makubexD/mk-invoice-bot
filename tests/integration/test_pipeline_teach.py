@@ -752,7 +752,7 @@ async def test_press_through_intake_approves_without_an_invoice(
             max_queued_per_sender=5,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone="America/Lima",
-            roles=IntakeRoles(teach=_setup()),
+            roles=IntakeRoles(reprocess_min_interval_s=0, teach=_setup()),
         )
         link = await taught_links.get(conn, ISSUER_RUC)
         gap = await get_gap(conn, GAP_FINGERPRINT)

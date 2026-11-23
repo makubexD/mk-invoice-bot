@@ -289,7 +289,9 @@ def _teach_roles(profile_id: str) -> IntakeRoles:
         "yo": cfg.profiles["yo"],
         profile_id: cfg.profiles["asistente"],
     }
-    return IntakeRoles(teach=TeachSetup(profiles=profiles, resolver=FakeResolver()))
+    return IntakeRoles(
+        reprocess_min_interval_s=0, teach=TeachSetup(profiles=profiles, resolver=FakeResolver())
+    )
 
 
 async def _queue_br_f02(

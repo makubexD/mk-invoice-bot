@@ -934,7 +934,7 @@ async def test_not_arrived_with_a_laptop_flow_sends_br_d11_with_three_buttons(
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
-            roles=IntakeRoles(laptop_flows=frozenset({LAPTOP_FLOW})),
+            roles=IntakeRoles(reprocess_min_interval_s=0, laptop_flows=frozenset({LAPTOP_FLOW})),
         )
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -972,7 +972,7 @@ async def test_not_arrived_without_a_laptop_flow_sends_two_buttons(
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
-            roles=IntakeRoles(laptop_flows=frozenset({"another_flow"})),
+            roles=IntakeRoles(reprocess_min_interval_s=0, laptop_flows=frozenset({"another_flow"})),
         )
         invoice = await _invoice_row(conn, invoice_id)
         messages = await _messages(conn, profile_id)
@@ -1080,7 +1080,7 @@ async def test_via_laptop_enqueues_one_resend_job_and_changes_no_state(
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
-            roles=IntakeRoles(laptop_flows=laptop_flows),
+            roles=IntakeRoles(reprocess_min_interval_s=0, laptop_flows=laptop_flows),
         )
         invoice = await _invoice_row(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
@@ -1115,7 +1115,7 @@ async def test_via_laptop_on_a_flow_without_laptop_outlook_answers_br_s02(
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
-            roles=IntakeRoles(laptop_flows=laptop_flows),
+            roles=IntakeRoles(reprocess_min_interval_s=0, laptop_flows=laptop_flows),
         )
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
@@ -1157,7 +1157,7 @@ async def test_via_laptop_after_br_d10_answers_br_s02(
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
-            roles=IntakeRoles(laptop_flows=laptop_flows),
+            roles=IntakeRoles(reprocess_min_interval_s=0, laptop_flows=laptop_flows),
         )
         invoice = await _invoice_row(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
