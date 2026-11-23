@@ -33,8 +33,23 @@ from invoicebot.config.models import (
     StoreDirectory,
 )
 from invoicebot.extract.fields import Reading
-from invoicebot.fetchers.base import Fetcher, FetchInvoice, FetchReason, FetchResult
-from invoicebot.fetchers.chain import WAIT_REASONS, Attempt, Exhausted, Run, Wait, decide, retry_delay
+from invoicebot.fetchers.base import (
+    TECHNICAL_REASONS,
+    Fetcher,
+    FetchInvoice,
+    FetchReason,
+    FetchResult,
+)
+from invoicebot.fetchers.chain import (
+    WAIT_REASONS,
+    Attempt,
+    Exhausted,
+    Run,
+    Wait,
+    decide,
+    retry_delay,
+    technical_retry_delay,
+)
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUGS, RULE_AUTH_ADMIN
@@ -43,7 +58,6 @@ from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
     RULE_EXHAUSTED,
-    TECHNICAL_REASONS,
     manual_message,
     portal_for,
 )
@@ -243,7 +257,12 @@ async def _run(
     if not result.ok:
         # R-9.2: a failed fetch, a helper killed on timeout included, leaves nothing.
         shutil.rmtree(out_dir, ignore_errors=True)
-    delay = retry_delay(fetcher, inputs.attempts, schedule_for(fetcher))
+    schedule = schedule_for(fetcher)
+    delay = (
+        technical_retry_delay(fetcher, inputs.attempts, schedule)
+        if result.reason in TECHNICAL_REASONS
+        else retry_delay(fetcher, inputs.attempts, schedule)
+    )
     outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
     committed = False
     try:
@@ -321,7 +340,11 @@ async def _record_result(
     result: FetchResult,
     delay: timedelta | None,
 ) -> None:
-    """Store an ``ok`` result's files and enqueue deliver, or schedule the next try, in one transaction."""
+    """Store an ``ok`` result's files and enqueue deliver, or schedule the next try, in one transaction.
+
+    A technical failure gets one retry on its first schedule entry (D167); every other
+    failure, and a technical one with no retry left, moves the chain on at once.
+    """
     if result.ok:
         # shortcut: a fetched file's local_path stays under tmp/ until deliver moves it.
         for fetched in result.files:
@@ -353,6 +376,9 @@ async def _record_result(
             inputs.attempts, fetcher, {FetchReason.AUTH_REQUIRED}
         ):
             await _alert_sign_in(conn, inputs)
+    elif result.reason in TECHNICAL_REASONS and delay is not None:
+        # D167: a technical retry sends no notice and no admin alert.
+        await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await _run_after(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
 

@@ -1277,6 +1277,86 @@ async def _clean_fetch_attempts(
     await clear()
 
 
+@pytest.mark.parametrize("reason", [FetchReason.TECHNICAL, FetchReason.TIMEOUT], ids=["technical", "timeout"])
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_first_technical_failure_schedules_one_retry_without_a_message(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, reason: FetchReason
+) -> None:
+    """D167: a first technical or timeout failure records one attempt and retries in about 1 h, silently."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(reason), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        attempts = await _attempts(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+        delay = await _latest_delay(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("FETCHING_DOCS", None, FLOW)
+    assert attempts == [("portal_registry", PORTAL_KEY, False, reason.value)]
+    assert len(jobs) == 1
+    assert MINUTES_55 <= delay.total_seconds() / 60 <= MINUTES_65
+    assert outbox == []
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_second_technical_moves_the_chain_on_at_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D167: a second technical failure spends the retry, and the next fetcher runs at once."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    first = FakeFetcher(FetchReason.TECHNICAL)
+    second = FakeFetcher(FetchReason.OK)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("portal_registry", "manual")),
+        _directory(),
+        {FLOW: {"portal_registry": first, "manual": second}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, retry_job_id))
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10
+
+    await handler(_job(invoice_id, next_job_id))
+
+    assert (first.calls, second.calls) == (2, 1)
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_second_technical_with_one_fetcher_ends_manual_required(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D167: a second technical failure with no next fetcher ends in MANUAL_REQUIRED with BR-F07."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.TECHNICAL)
+
+    await _run(db_pool, fetcher, invoice_id, tmp_path)
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await _run(db_pool, fetcher, invoice_id, tmp_path, retry_job_id)
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await _run(db_pool, fetcher, invoice_id, tmp_path, next_job_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+    assert fetcher.calls == 2
+
+
 async def _technical_failures(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
@@ -1339,11 +1419,16 @@ async def test_broken_third_invoices_br_f07_names_the_broken_portal(
 ) -> None:
     """BR-F03: the third invoice's BR-F07 bullet is BR-F03's line, not the technical one."""
     profile_id = f"fetch-{uuid4().hex}"
-    invoice_ids = await _technical_failures(db_pool, tmp_path, profile_id, 3)
+    invoice_id = (await _technical_failures(db_pool, tmp_path, profile_id, 3))[-1]
     async with db_pool.connection() as conn:
-        next_job_id = await _latest_fetch_job_id(conn, invoice_ids[-1])
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
 
-    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_ids[-1], tmp_path, next_job_id)
+    # D167: the invoice's first technical failure waits, so its retry spends the one retry
+    # and only the job after it ends the chain in BR-F07.
+    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_id, tmp_path, retry_job_id)
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_id, tmp_path, next_job_id)
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
