@@ -144,9 +144,11 @@ _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 
 #: Secrets the WhatsApp channel declares (R-9.10).
 WHATSAPP_ADAPTER = "whatsapp"
-WHATSAPP_SECRETS = frozenset(
-    {"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token", "sender_hash_key"}
-)
+WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token"})
+#: The one secret every chat channel declares: senders are logged only as its keyed hash (R-9.10, R-9.16).
+CHANNEL_ADAPTER = "channels"
+SENDER_HASH_KEY = "sender_hash_key"
+CHANNEL_SECRETS = frozenset({SENDER_HASH_KEY})
 #: The Microsoft account flow B files through and the backup uploads with (R-7.1, D119).
 MICROSOFT_ACCOUNT = PERSONAL_MICROSOFT_ACCOUNT
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
@@ -265,11 +267,14 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
     rules = runtime.rules
     store = _load_secrets(settings)
     configure_logging(store.values())
-    secrets = _whatsapp_secrets(store)
+    secrets, channel_secrets = _whatsapp_secrets(store), _channel_secrets(store)
     channel = _whatsapp_channel(cfg)
-    if channel is None or not secrets.enabled:
+    if channel is None or not secrets.enabled or not channel_secrets.enabled:
         # Fail closed: without its secrets or config the webhook is not mounted.
-        logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing) or ["channel config"])
+        logger.error(
+            "whatsapp channel disabled: missing %s",
+            sorted(secrets.missing | channel_secrets.missing) or ["channel config"],
+        )
         yield
         return
     sunat_secrets = _validation_secrets(cfg, store)
@@ -314,7 +319,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             graph_api_version=channel.graph_api_version,
             token=secrets.get("whatsapp_token"),
         )
-        app.include_router(make_router(_webhook_deps(cfg, pool, secrets)))
+        app.include_router(make_router(_webhook_deps(cfg, pool, secrets, channel_secrets)))
         # One token source per Google account for the whole process: two instances on the
         # same token file would race on a refresh (D135).
         google_tokens = _google_tokens(settings, cfg, http, store)
@@ -461,7 +466,7 @@ def _log_reload_failure(task: asyncio.Task[bool]) -> None:
         logger.error("config reload failed", exc_info=err)
 
 
-def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
+def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets, channel_secrets: Secrets) -> WebhookDeps:
     """Collect what the webhook routes need from the config and the channel's secrets."""
     return WebhookDeps(
         pool=pool,
@@ -469,7 +474,7 @@ def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets) -> WebhookDeps:
         owner_profile=cfg.owner.profile,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
-        sender_hash_key=secrets.get("sender_hash_key"),
+        sender_hash_key=channel_secrets.get(SENDER_HASH_KEY),
         intake=intake_settings(cfg),
     )
 
@@ -617,6 +622,11 @@ def _whatsapp_secrets(store: SecretStore) -> Secrets:
     return store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
 
 
+def _channel_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view every chat channel reads the shared secrets through (R-9.10)."""
+    return store.scoped(CHANNEL_ADAPTER, set(CHANNEL_SECRETS))
+
+
 def _github_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the GitHub App signs its JWTs with (R-9.10)."""
     return store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY})
@@ -648,8 +658,10 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     a key or a value.
     """
     validation = _validation_secrets(cfg, store)
+    chat_enabled = _whatsapp_channel(cfg) is not None or console_channel(cfg) is not None
     failed = {
         "secrets:whatsapp": _whatsapp_channel(cfg) is None or not _whatsapp_secrets(store).enabled,
+        "secrets:channels": chat_enabled and not _channel_secrets(store).enabled,
         "secrets:sunat_validez": validation is not None and not validation.enabled,
         "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
         "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,

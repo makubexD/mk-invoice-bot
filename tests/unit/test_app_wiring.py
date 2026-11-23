@@ -15,12 +15,17 @@ import pytest
 import yaml
 
 from invoicebot.app import (
+    CHANNEL_ADAPTER,
+    CHANNEL_SECRETS,
     GITHUB_APP_PRIVATE_KEY,
     GOOGLE_CLIENT_SECRET,
     LAPTOP_ADAPTER,
     LAPTOP_AGENT_KEY,
+    SENDER_HASH_KEY,
+    WHATSAPP_ADAPTER,
     WHATSAPP_SECRETS,
     DailyRuns,
+    _channel_secrets,
     _check_reload_candidate,
     _daily_tasks,
     _deliver_handlers,
@@ -130,7 +135,11 @@ def _sol_store(sol_ruc: str) -> SecretStore:
 
 def _base_secrets() -> dict[str, str]:
     """Return synthetic values for the secrets the example config always needs (R-9.6)."""
-    return {**dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"), GITHUB_APP_PRIVATE_KEY: "synthetic-pem"}
+    return {
+        **dict.fromkeys(WHATSAPP_SECRETS, "synthetic-value"),
+        **dict.fromkeys(CHANNEL_SECRETS, "synthetic-value"),
+        GITHUB_APP_PRIVATE_KEY: "synthetic-pem",
+    }
 
 
 def _with_laptop_mode(tmp_path: Path) -> Config:
@@ -362,6 +371,26 @@ def test_feature_secret_view_is_enabled_only_with_every_key(
     assert not view(SecretStore({})).enabled
 
 
+def test_whatsapp_secret_view_no_longer_declares_the_sender_hash_key() -> None:
+    """R-9.10: the WhatsApp view declares its three keys and not the shared sender hash key."""
+    store = _RecordingStore({})
+
+    _whatsapp_secrets(store)
+
+    assert store.scoped_calls == [(WHATSAPP_ADAPTER, WHATSAPP_SECRETS)]
+
+
+def test_channel_secret_view_declares_only_the_sender_hash_key() -> None:
+    """R-9.10: the shared channel view declares sender_hash_key and nothing else."""
+    store = _RecordingStore({"whatsapp_token": "synthetic-token-value"})
+
+    view = _channel_secrets(store)
+
+    assert store.scoped_calls == [(CHANNEL_ADAPTER, frozenset({SENDER_HASH_KEY}))]
+    assert view.missing == frozenset({SENDER_HASH_KEY})
+    assert not view.enabled
+
+
 def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
     """R-6.4: without google config there are no Google tokens and no flow A deliverer."""
     cfg = _without_google(tmp_path)
@@ -447,6 +476,15 @@ def test_secret_problem_without_the_whatsapp_token_is_whatsapp(tmp_path: Path) -
     store = SecretStore(values)
 
     assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:whatsapp"
+
+
+def test_secret_problem_without_the_sender_hash_key_is_channels(tmp_path: Path) -> None:
+    """R-9.10: a chat-enabled candidate without the shared hash key is refused as secrets:channels."""
+    cfg = _without_google(tmp_path)
+    values = _base_secrets()
+    del values[SENDER_HASH_KEY]
+
+    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(values)) == "secrets:channels"
 
 
 def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path: Path) -> None:
