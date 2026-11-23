@@ -131,11 +131,6 @@ source_modules =
     invoicebot.pipeline
 forbidden_modules =
     invoicebot.channels.whatsapp
-ignore_imports =
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.client
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.media
 
 [importlinter:contract:pure-readers]
 name = Extract and routing are pure: no pipeline, queue, store or channel imports
