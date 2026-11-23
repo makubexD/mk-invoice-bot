@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import httpx
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -524,3 +525,22 @@ def test_frozenset_holding_a_secret_is_masked(log_stream: io.StringIO) -> None:
     output = log_stream.getvalue()
     assert _records(log_stream)[-1]["payload"] == ["public-value", "***"]
     assert secret not in output
+
+
+def test_header_mapping_credentials_are_redacted(log_stream: io.StringIO) -> None:
+    """R-9.16: a walked httpx.Headers hides its authorization and cookie values, as its own repr did."""
+    configure_logging(stream=log_stream)
+    headers = httpx.Headers(
+        {"Authorization": "Bearer runtime-token-value", "Cookie": "sid=runtime-cookie", "Accept": "*/*"}
+    )
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": headers})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {
+        "authorization": "[redacted]",
+        "cookie": "[redacted]",
+        "accept": "*/*",
+    }
+    assert "runtime-token-value" not in output
+    assert "runtime-cookie" not in output

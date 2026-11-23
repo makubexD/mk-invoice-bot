@@ -613,9 +613,21 @@ async def _require_pinned_mailbox(
     ):
         return
     token = _token_to_revoke(response)
-    if token is not None:
+    if token is not None and not _pinned_elsewhere(address, cfg):
         await revoke(client, token)
     raise _SignInError(f"signed in as {signed_in}, but account {account!r} is pinned to {expected}")
+
+
+def _pinned_elsewhere(address: object, cfg: Config) -> bool:
+    """True when ``address`` is another configured account's mailbox (D138).
+
+    Google's revoke drops the whole grant for that user and client, so revoking a sign-in
+    into another account's mailbox would sign that account out too; it is left alone.
+    """
+    if not isinstance(address, str):
+        return False
+    pinned = {normalize_email(mailbox) for mailbox in _google_settings(cfg).accounts.values()}
+    return normalize_email(address) in pinned
 
 
 def _token_to_revoke(response: httpx.Response) -> str | None:

@@ -159,13 +159,19 @@ def _token_transport(
     requests: list[httpx.Request] | None = None,
     *,
     revoke_status: int = httpx.codes.OK,
+    revoke_unreachable: bool = False,
 ) -> httpx.MockTransport:
-    """Answer the code exchange with ``payload`` and a revoke with ``revoke_status`` (D138)."""
+    """Answer the code exchange with ``payload`` and a revoke with ``revoke_status`` (D138).
+
+    With ``revoke_unreachable`` the revoke fails to connect instead.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         if requests is not None:
             requests.append(request)
         if str(request.url) == REVOKE_URL:
+            if revoke_unreachable:
+                raise httpx.ConnectError("unreachable", request=request)
             return httpx.Response(revoke_status)
         form = parse_qs(request.content.decode("utf-8"))
         assert form["grant_type"] == ["authorization_code"]
@@ -485,6 +491,57 @@ async def test_auth_google_other_mailbox_revokes_the_grant(
         "signed in as someone-else@example.com, but account 'owner' is pinned to owner@example.com"
         in capsys.readouterr().err
     )
+
+
+async def test_auth_google_other_mailbox_without_refresh_token_revokes_the_access_token(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """D138: a refused sign-in with no refresh token revokes its access token."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    requests: list[httpx.Request] = []
+    response = {**NO_REFRESH_RESPONSE, "id_token": _id_token("someone-else@example.com")}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response, requests))
+
+    revokes = [request for request in requests if str(request.url) == REVOKE_URL]
+    assert code == 1
+    assert [parse_qs(request.content.decode("utf-8"))["token"] for request in revokes] == [["a"]]
+
+
+async def test_auth_google_mailbox_pinned_to_another_account_is_not_revoked(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D138: another account's pinned mailbox is refused without revoking that account's grant."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    requests: list[httpx.Request] = []
+    response = {**TOKEN_RESPONSE, "id_token": _id_token(INBOX_EMAIL.upper())}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response, requests))
+
+    assert code == 1
+    assert [request for request in requests if str(request.url) == REVOKE_URL] == []
+    assert "pinned to owner@example.com" in capsys.readouterr().err
+
+
+async def test_auth_google_revoke_transport_error_keeps_the_refusal(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D138: a revoke that cannot reach Google still exits 1 with the refusal message."""
+    _, identity_path, secrets_path = _age_material(tmp_path)
+    settings = _settings(db_pool, tmp_path, identity_path, secrets_path)
+    response = {**TOKEN_RESPONSE, "id_token": _id_token("someone-else@example.com")}
+
+    code = await _run_cli(settings, _show_redirect(), _token_transport(response, revoke_unreachable=True))
+
+    assert code == 1
+    assert "but account 'owner' is pinned to owner@example.com" in capsys.readouterr().err
 
 
 async def test_auth_google_unverified_mailbox_is_refused(

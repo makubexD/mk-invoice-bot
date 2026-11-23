@@ -71,9 +71,23 @@ _STANDARD_ATTRS = frozenset(logging.LogRecord("", 0, "", 0, "", (), None).__dict
 _OUTPUT_FIELDS = frozenset({"ts", "level", "event", "logger", "exc", *EXTRA_FIELDS})
 
 #: ``extra=`` keys whose values are personal data (R-9.5, R-9.12): a sender id is logged only as a
-#: hash, and names, phone numbers, RUCs and e-mail addresses are not logged at all.
+#: hash, and names, phone numbers, RUCs and e-mail addresses are not logged at all. ``authorization``
+#: and ``cookie`` keep a header mapping's credentials hidden (R-9.16): runtime tokens are not in the
+#: loaded secret values, and walking ``httpx.Headers`` bypasses its own ``[secure]`` repr.
 _PERSONAL_KEYS = frozenset(
-    {"sender", "sender_id", "phone", "wa_id", "ruc", "dni", "razon_social", "email", "nombre"}
+    {
+        "sender",
+        "sender_id",
+        "phone",
+        "wa_id",
+        "ruc",
+        "dni",
+        "razon_social",
+        "email",
+        "nombre",
+        "authorization",
+        "cookie",
+    }
 )
 #: One word of a key: a run of lower-case letters or digits, an upper-case run, or a capitalized word.
 _KEY_WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")

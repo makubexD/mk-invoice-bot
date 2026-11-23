@@ -134,10 +134,11 @@ def test_google_account_address_without_an_at_sign_fails(tmp_path: Path) -> None
         load_config(path)
 
 
-def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
-    """R-6.5: an account's mailbox is lower-cased, so the pinned address compares case-free."""
+@pytest.mark.parametrize("address", ["Owner@Example.COM", " owner@example.com "], ids=["case", "spaces"])
+def test_google_account_address_is_stored_normalized(tmp_path: Path, address: str) -> None:
+    """R-6.5, D164: an account's mailbox is stored as normalize_email gives it: trimmed and case-folded."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    document["google"]["accounts"]["owner"] = "Owner@Example.COM"
+    document["google"]["accounts"]["owner"] = address
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     cfg = load_config(path)

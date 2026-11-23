@@ -823,7 +823,7 @@ def _github_transports(
 
 def _github_health_run(
     github_app: GitHubApp | None, pool: Pool, cfg: Config
-) -> Callable[..., Awaitable[None]] | None:
+) -> Callable[[], Awaitable[None]] | None:
     """Return the daily GitHub App health check, or None without a GitHub App (BR-D05)."""
     if github_app is None:
         return None
