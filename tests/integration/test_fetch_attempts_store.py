@@ -7,8 +7,8 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
-from invoicebot.store.fetch_attempts import list_attempts, record_attempt
-from invoicebot.store.invoices import create_invoice
+from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
+from invoicebot.store.invoices import create_invoice, start_fetch_round
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -73,3 +73,74 @@ async def test_record_attempt_sets_ok_only_for_the_ok_reason(
         rows = await cur.fetchall()
 
     assert rows == [(True, "ok"), (False, "not_found_yet")]
+
+
+async def test_list_attempts_returns_every_attempt_without_a_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D166: an invoice with no fetch round lists every attempt it ever had, in order."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "not_found_yet", 120)
+        await record_attempt(conn, invoice_id, "qr_link", None, "ok", 80)
+    async with db_pool.connection() as conn:
+        attempts = await list_attempts(conn, invoice_id)
+
+    assert attempts == [("portal_registry", "not_found_yet"), ("qr_link", "ok")]
+
+
+async def test_list_attempts_returns_only_the_current_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D166: a round started after two attempts hides them from list_attempts but keeps them stored."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "not_found_yet", 120)
+        await record_attempt(conn, invoice_id, "qr_link", None, "ok", 80)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "ok", 90)
+    async with db_pool.connection() as conn:
+        attempts = await list_attempts(conn, invoice_id)
+        cur = await conn.execute(
+            "SELECT count(*) FROM fetch_attempts WHERE invoice_id = %s",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+
+    assert attempts == [("portal_registry", "ok")]
+    assert row is not None
+    assert row[0] == 3
+
+
+async def test_list_attempts_is_empty_after_a_round_with_no_attempts(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D166: a round started after the only attempt lists no attempt for the invoice."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "not_found_yet", 120)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        attempts = await list_attempts(conn, invoice_id)
+
+    assert attempts == []
+
+
+async def test_technical_streak_counts_attempts_from_before_the_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D166: technical_streak is per portal and ignores rounds, so three earlier technicals still count."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "technical", 10)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "timeout", 10)
+        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "technical", 10)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        streak = await technical_streak(conn, PORTAL_KEY, 3)
+
+    assert streak is True

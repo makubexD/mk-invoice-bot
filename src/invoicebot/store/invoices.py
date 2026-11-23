@@ -166,6 +166,19 @@ async def set_flow(conn: AsyncConnection[Any], invoice_id: int, flow: str) -> No
     await conn.execute("UPDATE invoices SET flow_id = %s WHERE id = %s", (flow, invoice_id))
 
 
+async def start_fetch_round(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Start a new fetch round for invoice_id with the database clock (D166).
+
+    The chain decision, the retry counts and BR-F07's list read only the attempts at
+    or after ``fetch_round_at``; the full log stays for the per-portal stats. Does not
+    commit.
+    """
+    await conn.execute(
+        "UPDATE invoices SET fetch_round_at = now() WHERE id = %s",
+        (invoice_id,),
+    )
+
+
 async def load_flow(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
     """Return the flow the invoice was routed to, or None before routing or when it does not exist."""
     cur = await conn.execute("SELECT flow_id FROM invoices WHERE id = %s", (invoice_id,))
