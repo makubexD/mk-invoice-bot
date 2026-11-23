@@ -1224,6 +1224,46 @@ def test_two_console_channels_fail(tmp_path: Path) -> None:
         load_config(path)
 
 
+def _config_with_preferred_channel(
+    tmp_path: Path, preferred_channel: str, *, telegram_enabled: bool, keep_telegram_id: bool
+) -> Path:
+    """Write the example config with ``yo`` preferring ``preferred_channel``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["profiles"]["yo"]["preferred_channel"] = preferred_channel
+    if not keep_telegram_id:
+        del document["profiles"]["yo"]["telegram_user_id"]
+    for channel in document["channels"]:
+        if channel["kind"] == "telegram":
+            channel["enabled"] = telegram_enabled
+    return _write_yaml(tmp_path / "example.yaml", document)
+
+
+def test_profile_preferring_a_disabled_channel_fails(tmp_path: Path) -> None:
+    """D174: a preferred_channel naming a disabled chat channel is refused."""
+    path = _config_with_preferred_channel(tmp_path, "telegram", telegram_enabled=False, keep_telegram_id=True)
+
+    with pytest.raises(ValidationError, match=r"profile 'yo' prefers disabled channel 'telegram'"):
+        load_config(path)
+
+
+def test_profile_preferring_telegram_without_an_id_fails(tmp_path: Path) -> None:
+    """D174: a preferred Telegram channel needs an id, and the error names no phone number."""
+    path = _config_with_preferred_channel(tmp_path, "telegram", telegram_enabled=True, keep_telegram_id=False)
+
+    with pytest.raises(
+        ValidationError, match=r"profile 'yo' prefers channel 'telegram' without an id"
+    ) as excinfo:
+        load_config(path)
+    assert "51999999999" not in str(excinfo.value)
+
+
+def test_example_config_preferred_channels_are_reachable() -> None:
+    """D174: the shipped example's preferred channel is enabled and the profile has an id."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.profiles["yo"].preferred_channel == "whatsapp"
+
+
 def _config_with_profile(tmp_path: Path, profile_id: str) -> Path:
     """Write the example config with its profiles replaced by one keyed by ``profile_id``."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))

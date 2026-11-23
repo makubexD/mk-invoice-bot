@@ -114,6 +114,34 @@ def _console_channels(channels: list[Channel]) -> list[ConsoleChannel]:
     return [channel for channel in channels if isinstance(channel, ConsoleChannel)]
 
 
+def _enabled_chat_channels(channels: list[Channel]) -> set[str]:
+    """Return the chat channels D174 counts as enabled.
+
+    WhatsApp is enabled by its presence; Telegram by its own ``enabled`` flag.
+    """
+    enabled: set[str] = set()
+    if any(isinstance(channel, WhatsAppChannel) for channel in channels):
+        enabled.add("whatsapp")
+    if any(isinstance(channel, TelegramChannel) and channel.enabled for channel in channels):
+        enabled.add("telegram")
+    return enabled
+
+
+def _preferred_channel_is_reachable(profile_id: str, profile: Profile, enabled: set[str]) -> None:
+    """D174: a profile's preferred channel is enabled and the profile has an id on it.
+
+    The error names the profile and the channel only, never the phone number or user id.
+    """
+    channel = profile.preferred_channel
+    if channel is None:
+        return
+    if channel not in enabled:
+        raise ValueError(f"profile '{profile_id}' prefers disabled channel '{channel}' (D174)")
+    sender_id = profile.whatsapp if channel == "whatsapp" else profile.telegram_user_id
+    if sender_id is None:
+        raise ValueError(f"profile '{profile_id}' prefers channel '{channel}' without an id for it (D174)")
+
+
 class ValidezApi(BaseModel):
     """The SUNAT validez API: the endpoints to call and how long to wait (R-4.1)."""
 
@@ -960,6 +988,14 @@ class Config(BaseModel):
         for channel in _console_channels(self.channels):
             if channel.profile not in self.profiles:
                 raise ValueError(f"console channel profile '{channel.profile}' is not in profiles")
+        return self
+
+    @model_validator(mode="after")
+    def _preferred_channels_are_reachable(self) -> Self:
+        """D174: an admin alert always has an enabled channel and an id to reach the profile on."""
+        enabled = _enabled_chat_channels(self.channels)
+        for profile_id, profile in self.profiles.items():
+            _preferred_channel_is_reachable(profile_id, profile, enabled)
         return self
 
     @model_validator(mode="after")
