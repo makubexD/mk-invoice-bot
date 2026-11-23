@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import Flow, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Reading
+from invoicebot.fetchers.base import TECHNICAL_REASONS as TECHNICAL_REASONS
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.chain import Attempt
 from invoicebot.rules.messages_es import (
@@ -97,9 +98,6 @@ _FIXED_LINES: dict[FetchReason, str] = {
     FetchReason.NO_PORTAL: FETCH_NO_PORTAL_LINE,
     FetchReason.AUTH_REQUIRED: FETCH_AUTH_LINE,
 }
-
-#: The reasons BR-F03 counts as a portal failure (spec 06 §3).
-TECHNICAL_REASONS = frozenset({FetchReason.TECHNICAL, FetchReason.TIMEOUT})
 
 
 def _reason_line(

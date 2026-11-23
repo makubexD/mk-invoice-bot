@@ -11,9 +11,10 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 
-from invoicebot.fetchers.base import FetchReason
+from invoicebot.fetchers.base import TECHNICAL_REASONS, FetchReason
 
 #: Reasons after which a fetcher waits for its next scheduled retry instead of ending (D65, D100).
+#: A technical reason is not here: it gets one retry of its own (D167).
 WAIT_REASONS = frozenset({FetchReason.NOT_FOUND_YET, FetchReason.AUTH_REQUIRED})
 
 
@@ -64,8 +65,9 @@ def decide(
 
     Walks ``order`` keeping only registered fetchers. A fetcher with no attempt
     runs; one whose latest attempt is ``ok`` is done; one whose latest attempt
-    is in ``WAIT_REASONS`` waits on its schedule until it is used up; any other
-    reason is final and the next fetcher gets its turn.
+    is in ``WAIT_REASONS`` waits on its schedule until it is used up; one whose
+    latest attempt is technical waits once on its first schedule entry (D167);
+    any other reason is final and the next fetcher gets its turn.
     """
     for fetcher in order:
         if fetcher not in registered:
@@ -90,6 +92,10 @@ def _decide_one(
         return Done(fetcher)
     if latest in WAIT_REASONS:
         return _wait_or_none(fetcher, history, schedule_for)
+    if latest in TECHNICAL_REASONS:
+        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher)) is None:
+            return None
+        return Wait(fetcher)
     return None
 
 
@@ -120,3 +126,22 @@ def retry_delay(
     """
     retries = sum(1 for attempt in attempts if attempt.fetcher == fetcher and attempt.reason in WAIT_REASONS)
     return schedule[retries] if retries < len(schedule) else None
+
+
+def technical_retry_delay(
+    fetcher: str,
+    attempts: Sequence[Attempt],
+    schedule: Sequence[timedelta],
+) -> timedelta | None:
+    """Return the wait after this technical failure, or ``None`` when its one retry is spent (D167).
+
+    ``attempts`` excludes the run being judged: an earlier technical or timeout
+    attempt for the same fetcher uses up the retry. Any other earlier reason,
+    a wait reason included, leaves it, so the wait is ``schedule[0]``; an empty
+    schedule has no retry.
+    """
+    if not schedule:
+        return None
+    if any(attempt.fetcher == fetcher and attempt.reason in TECHNICAL_REASONS for attempt in attempts):
+        return None
+    return schedule[0]
