@@ -49,8 +49,9 @@ Not yet open/closed (adding Telegram today would edit these):
   `callback_query.id`.
 - **D179 bot owner:** the bot is created with BotFather from the owner's personal Telegram account; no dedicated
   number. A Telegram bot is its own identity (`@username` plus token), not a phone account: senders see the bot, never
-  the owner's number, and the bot sees only numeric user ids. The personal account only manages the bot, so it must
-  have two-step verification on; losing that account means a new bot, a new token and a new `setWebhook`.
+  the owner's number, and the bot sees only numeric user ids. Two-step verification on that account is recommended, not
+  required; the owner decides at T2 (2026-11-23). Losing that account means a new bot, a new token and a new
+  `setWebhook` (runbook step 11).
 
 ## Phases
 
@@ -74,8 +75,9 @@ a user must message the bot first (a 403 before that is permanent); no 24-hour w
 
 The T2 plan turns these into its owner steps. Nothing here needs a second SIM or phone.
 
-1. **Protect the owning account.** In Telegram, Settings → Privacy and Security → Two-Step Verification: set a
-   password and a recovery email. The bot is managed from this account.
+1. **Protect the owning account (owner's choice, recommended).** In Telegram, Settings → Privacy and Security →
+   Two-Step Verification: set a password and a recovery email. The bot is managed from this account, and without it
+   anyone who receives an SMS code for the number can take the bot.
 2. **Create the bot.** Open `@BotFather` (the verified one) and send `/newbot`. Give a display name (e.g. "Facturas")
    and a username ending in `bot` (e.g. `mk_facturas_bot`); it is public and cannot be changed later.
 3. **Store the token at once.** BotFather replies with the token. Put it straight into the age store as
