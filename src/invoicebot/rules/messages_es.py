@@ -538,6 +538,10 @@ REPROCESS_NOT_ALLOWED = (
     "El comprobante #{id} está {state_desc}. /reprocesar solo sirve para comprobantes "
     "que fallaron o que esperan sus archivos."
 )
+#: /reprocesar's answer when the last fetch round is too recent (S4.9, D171).
+REPROCESS_TOO_SOON = (
+    "Ya reintenté el comprobante #{id} hace poco. Vuelve a usar /reprocesar {id} en unos minutos."
+)
 
 
 def modes_desc(modes: Sequence[str]) -> str:

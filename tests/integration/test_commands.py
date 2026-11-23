@@ -61,6 +61,7 @@ from invoicebot.rules.messages_es import (
     PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
+    REPROCESS_TOO_SOON,
     STATUS,
     STATUS_RULE,
     STATUS_RULE_ONLY,
@@ -205,6 +206,20 @@ async def _backdate_questions(
             WHERE invoice_id = %s
             """,
             (minutes, invoice_id),
+        )
+
+
+async def _set_fetch_round(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    *,
+    minutes_ago: int,
+) -> None:
+    """Stamp the invoice's last fetch round minutes_ago, with the database clock (D171)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE invoices SET fetch_round_at = now() - make_interval(mins => %s) WHERE id = %s",
+            (minutes_ago, invoice_id),
         )
 
 
@@ -668,6 +683,94 @@ async def test_reprocesar_on_manual_required_refetches(
     assert head is not None
     assert head.state == "FETCHING_DOCS"
     assert jobs == ["fetch"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_too_soon_refuses_the_round_and_keeps_the_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: /reprocesar refuses a fetch round that started within reprocess_min_interval_s."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=600)
+
+    async with db_pool.connection() as conn:
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "MANUAL_REQUIRED"
+    assert jobs == []
+    assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_after_the_interval_starts_a_new_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: a round older than reprocess_min_interval_s lets /reprocesar start a new one."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=20)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=600)
+
+    async with db_pool.connection() as conn:
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_with_the_default_interval_does_not_block(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: the default 0 means no wait, so a recent round does not block /reprocesar."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE)
+
+    async with db_pool.connection() as conn:
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_a_failed_batch_ignores_the_interval(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: a BATCHED invoice starts no fetch round, so the brake does not apply to it."""
+    profile_id = _profile()
+    invoice_id = await _failed_batch_invoice(db_pool, profile_id)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=600)
+
+    async with db_pool.connection() as conn:
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "DELIVERING"
+    assert jobs == ["deliver"]
     assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
 
 
