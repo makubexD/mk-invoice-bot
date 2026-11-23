@@ -114,7 +114,7 @@ def _console_channels(channels: list[Channel]) -> list[ConsoleChannel]:
     return [channel for channel in channels if isinstance(channel, ConsoleChannel)]
 
 
-def _enabled_chat_channels(channels: list[Channel]) -> set[str]:
+def enabled_chat_channels(channels: list[Channel]) -> set[str]:
     """Return the chat channels D174 counts as enabled.
 
     WhatsApp is enabled by its presence; Telegram by its own ``enabled`` flag.
@@ -993,7 +993,7 @@ class Config(BaseModel):
     @model_validator(mode="after")
     def _preferred_channels_are_reachable(self) -> Self:
         """D174: an admin alert always has an enabled channel and an id to reach the profile on."""
-        enabled = _enabled_chat_channels(self.channels)
+        enabled = enabled_chat_channels(self.channels)
         for profile_id, profile in self.profiles.items():
             _preferred_channel_is_reachable(profile_id, profile, enabled)
         return self

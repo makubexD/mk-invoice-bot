@@ -24,7 +24,6 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.intake_route import IntakeDeps
-from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.providers import (
     build_token_provider,
@@ -35,10 +34,6 @@ from invoicebot.auth.providers import (
 )
 from invoicebot.channels.base import MediaSource
 from invoicebot.channels.console import CONSOLE, ConsoleMediaSource, console_channel, console_transport
-from invoicebot.channels.profiles import ProfileIndex
-from invoicebot.channels.whatsapp.client import REQUEST_TIMEOUT_SECONDS, WhatsAppClient
-from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
-from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -57,7 +52,7 @@ from invoicebot.config.models import (
     OneDriveFolderSink,
     StoreDirectory,
     SunatSolSite,
-    WhatsAppChannel,
+    enabled_chat_channels,
 )
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
@@ -132,6 +127,8 @@ from invoicebot.store.gaps import get_gap
 from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
+from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring, channel_secrets
+from invoicebot.wiring.whatsapp import whatsapp_wiring
 
 logger = logging.getLogger(__name__)
 
@@ -143,13 +140,10 @@ _FetcherBuilder = Callable[[str, Flow], Fetcher | None]
 #: Builds one flow's mailbox and, when it cannot, the reason it is disabled (D98).
 _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 
-#: Secrets the WhatsApp channel declares (R-9.10).
-WHATSAPP_ADAPTER = "whatsapp"
-WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp_verify_token"})
-#: The one secret every chat channel declares: senders are logged only as its keyed hash (R-9.10, R-9.16).
-CHANNEL_ADAPTER = "channels"
-SENDER_HASH_KEY = "sender_hash_key"
-CHANNEL_SECRETS = frozenset({SENDER_HASH_KEY})
+#: Builds each chat channel's wiring, or ``None`` when the channel is not enabled (D174).
+CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring,)
+#: Per-request timeout for the shared HTTP clients and the GitHub App (R-1.4, R-11.10).
+HTTP_TIMEOUT_S = 30.0
 #: The Microsoft account flow B files through and the backup uploads with (R-7.1, D119).
 MICROSOFT_ACCOUNT = PERSONAL_MICROSOFT_ACCOUNT
 #: The bot's own mailbox, which sends the ``inbox_rule`` mail (R-7.7, D108).
@@ -252,7 +246,7 @@ def _load_runtime(settings: Settings) -> RuntimeConfig:
 
 @asynccontextmanager
 async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> AsyncIterator[None]:
-    """Wire the WhatsApp channel when config, secrets and a database are present."""
+    """Wire the enabled chat channels when config, secrets and a database are present."""
     if not settings.runtime_files_present():
         logger.warning("no config or secrets file: serving /health only")
         yield
@@ -268,40 +262,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
     rules = runtime.rules
     store = _load_secrets(settings)
     configure_logging(store.values())
-    secrets, channel_secrets = _whatsapp_secrets(store), _channel_secrets(store)
-    channel = _whatsapp_channel(cfg)
-    if channel is None or not secrets.enabled or not channel_secrets.enabled:
-        # Fail closed: without its secrets or config the webhook is not mounted.
-        logger.error(
-            "whatsapp channel disabled: missing %s",
-            sorted(secrets.missing | channel_secrets.missing) or ["channel config"],
-        )
-        yield
-        return
-    sunat_secrets = _validation_secrets(cfg, store)
-    if sunat_secrets is not None and not sunat_secrets.enabled:
-        # Fail closed (D124): an enabled API without its secrets must not start, rather
-        # than answer every invoice BR-V04 for a configuration mistake.
-        logger.error("sunat validation disabled: missing %s", sorted(sunat_secrets.missing))
-        yield
-        return
-    prefixes = helper_prefixes(
-        settings.helper_sandbox,
-        hidden_dirs(
-            [
-                settings.config_path,
-                settings.secrets_path,
-                settings.age_identity_path,
-                passfile_path(settings.database_url),
-            ]
-        ),
-        settings.helper_tmp_mb,
-        settings.data_dir,
-    )
-    # Fail fast: a host without the namespaces rolls back instead of running bare helpers (D147).
-    await check_sandbox(prefixes, SANDBOX_CHECK_TIMEOUT_S)
+    intake_deps = IntakeDeps(pool=pool, intake=intake_settings(cfg))
     async with (
-        httpx.AsyncClient(timeout=REQUEST_TIMEOUT_SECONDS) as http,
+        httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as http,
         httpx.AsyncClient(
             transport=GuardedTransport(
                 # A pinned request reaches httpcore by IP, so a pooled connection would carry an
@@ -311,21 +274,48 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 SystemResolver(),
             ),
             follow_redirects=False,
-            timeout=REQUEST_TIMEOUT_SECONDS,
+            timeout=HTTP_TIMEOUT_S,
         ) as guarded_http,
     ):
-        client = WhatsAppClient(
-            http,
-            phone_number_id=channel.phone_number_id,
-            graph_api_version=channel.graph_api_version,
-            token=secrets.get("whatsapp_token"),
+        wirings = [w for b in CHANNEL_BUILDERS if (w := b(cfg, store, http, intake_deps)) is not None]
+        if not wirings:
+            # Fail closed (D174): without an enabled chat channel no router is mounted and
+            # nothing is started.
+            logger.error("no chat channel enabled")
+            yield
+            return
+        sunat_secrets = _validation_secrets(cfg, store)
+        if sunat_secrets is not None and not sunat_secrets.enabled:
+            # Fail closed (D124): an enabled API without its secrets must not start, rather
+            # than answer every invoice BR-V04 for a configuration mistake.
+            logger.error("sunat validation disabled: missing %s", sorted(sunat_secrets.missing))
+            yield
+            return
+        prefixes = helper_prefixes(
+            settings.helper_sandbox,
+            hidden_dirs(
+                [
+                    settings.config_path,
+                    settings.secrets_path,
+                    settings.age_identity_path,
+                    passfile_path(settings.database_url),
+                ]
+            ),
+            settings.helper_tmp_mb,
+            settings.data_dir,
         )
-        app.include_router(make_router(_webhook_deps(cfg, pool, secrets, channel_secrets)))
+        # Fail fast: a host without the namespaces rolls back instead of running bare helpers (D147).
+        await check_sandbox(prefixes, SANDBOX_CHECK_TIMEOUT_S)
+        # Mounted only once every fail-closed check passed: a stored message needs workers.
+        for wiring in wirings:
+            if wiring.router is not None:
+                app.include_router(wiring.router)
         # One token source per Google account for the whole process: two instances on the
         # same token file would race on a refresh (D135).
         google_tokens = _google_tokens(settings, cfg, http, store)
+        sources = _media_sources(wirings, cfg, settings.data_dir)
         handlers = {
-            **_media_handlers(cfg, client, settings, pool),
+            **_media_handlers(cfg, sources, settings, pool),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -355,17 +345,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
         handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
         worker = Worker(pool, handlers)
-        numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
         github_app = _github_app(cfg, store, http)
-        transports = {
-            WHATSAPP_ADAPTER: make_transport(
-                client,
-                pool,
-                numbers=numbers,
-                templates=channel.templates,
-                language=channel.template_language,
-                on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
-            ),
+        transports: dict[str, Transport] = {
+            **{wiring.name: wiring.transport for wiring in wirings},
             **_github_transports(cfg, github_app, http, pool),
             **_console_transports(cfg),
         }
@@ -467,18 +449,6 @@ def _log_reload_failure(task: asyncio.Task[bool]) -> None:
         logger.error("config reload failed", exc_info=err)
 
 
-def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets, channel_secrets: Secrets) -> WebhookDeps:
-    """Collect what the webhook routes need from the config and the channel's secrets."""
-    return WebhookDeps(
-        intake_deps=IntakeDeps(pool=pool, intake=intake_settings(cfg)),
-        index=ProfileIndex.from_config(cfg),
-        owner_profile=cfg.owner.profile,
-        app_secret=secrets.get("whatsapp_app_secret"),
-        verify_token=secrets.get("whatsapp_verify_token"),
-        sender_hash_key=channel_secrets.get(SENDER_HASH_KEY),
-    )
-
-
 def _load_secrets(settings: Settings) -> SecretStore:
     """Decrypt the secrets file, failing fast when the identity is not configured."""
     if settings.secrets_path is None or settings.age_identity_path is None:
@@ -486,19 +456,20 @@ def _load_secrets(settings: Settings) -> SecretStore:
     return SecretStore.load(settings.secrets_path, settings.age_identity_path)
 
 
-def _media_sources(cfg: Config, client: WhatsAppClient, data_dir: Path) -> dict[str, MediaSource]:
-    """Return the media source of each configured channel, keyed by channel name (R-1.4, D165)."""
-    sources: dict[str, MediaSource] = {WHATSAPP_ADAPTER: WhatsAppMediaSource(client)}
+def _media_sources(wirings: list[ChannelWiring], cfg: Config, data_dir: Path) -> dict[str, MediaSource]:
+    """Return each wiring's media source plus the console source when configured (R-1.4, D165)."""
+    sources: dict[str, MediaSource] = {
+        wiring.name: wiring.media_source for wiring in wirings if wiring.media_source is not None
+    }
     if console_channel(cfg) is not None:
         sources[CONSOLE] = ConsoleMediaSource(data_dir)
     return sources
 
 
 def _media_handlers(
-    cfg: Config, client: WhatsAppClient, settings: Settings, pool: Pool
+    cfg: Config, sources: Mapping[str, MediaSource], settings: Settings, pool: Pool
 ) -> dict[str, Handler]:
     """Return the media handlers, built once over one shared source map (R-1.4, D165)."""
-    sources = _media_sources(cfg, client, settings.data_dir)
     return {
         DOWNLOAD_STEP: make_download_handler(pool, sources, settings.data_dir, cfg.limits.media),
         ATTACH_STEP: make_attach_handler(pool, cfg, sources, settings.data_dir, cfg.limits.media),
@@ -510,11 +481,6 @@ def _console_transports(cfg: Config) -> dict[str, Transport]:
     if console_channel(cfg) is None:
         return {}
     return {CONSOLE: console_transport()}
-
-
-def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
-    """Return the configured WhatsApp channel, if any."""
-    return next((channel for channel in cfg.channels if isinstance(channel, WhatsAppChannel)), None)
 
 
 def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:
@@ -617,16 +583,6 @@ def _deliver_registry(
     return handlers
 
 
-def _whatsapp_secrets(store: SecretStore) -> Secrets:
-    """Return the age-store view the WhatsApp channel reads its secrets through (R-9.10)."""
-    return store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
-
-
-def _channel_secrets(store: SecretStore) -> Secrets:
-    """Return the age-store view every chat channel reads the shared secrets through (R-9.10)."""
-    return store.scoped(CHANNEL_ADAPTER, set(CHANNEL_SECRETS))
-
-
 def _github_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the GitHub App signs its JWTs with (R-9.10)."""
     return store.scoped(GITHUB_ADAPTER, {GITHUB_APP_PRIVATE_KEY})
@@ -651,23 +607,30 @@ def _sol_site(cfg: Config, directory: StoreDirectory) -> SunatSolSite | None:
 
 
 def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) -> str | None:
-    """Return the first secret the candidate config needs but the store lacks (R-9.6, R-9.9, R-9.10, D155).
+    """Return the first secret the candidate needs but the store lacks (R-9.6, R-9.9, R-9.10, D155, D174).
 
     Startup keeps its own fail-closed checks; this one lets a reload refuse the same
     candidate before it restarts into a crash. Only the problem code is returned, never
     a key or a value.
     """
     validation = _validation_secrets(cfg, store)
-    chat_enabled = _whatsapp_channel(cfg) is not None or console_channel(cfg) is not None
-    failed = {
-        "secrets:whatsapp": _whatsapp_channel(cfg) is None or not _whatsapp_secrets(store).enabled,
-        "secrets:channels": chat_enabled and not _channel_secrets(store).enabled,
-        "secrets:sunat_validez": validation is not None and not validation.enabled,
-        "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
-        "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,
-        "secrets:laptop": _laptop_flow(cfg) is not None and not _laptop_secrets(store).enabled,
-        "secrets:sunat_sol": _sol_secrets_unusable(cfg, directory, store),
-    }
+    enabled = enabled_chat_channels(cfg.channels)
+    chat_enabled = bool(enabled) or console_channel(cfg) is not None
+    failed: dict[str, bool] = {"channels:none": not enabled}
+    for builder in CHANNEL_BUILDERS:
+        problem = builder.secret_problem(cfg, store)
+        if problem is not None:
+            failed[problem] = True
+    failed.update(
+        {
+            "secrets:channels": chat_enabled and not channel_secrets(store).enabled,
+            "secrets:sunat_validez": validation is not None and not validation.enabled,
+            "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
+            "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,
+            "secrets:laptop": _laptop_flow(cfg) is not None and not _laptop_secrets(store).enabled,
+            "secrets:sunat_sol": _sol_secrets_unusable(cfg, directory, store),
+        }
+    )
     return next((code for code, problem in failed.items() if problem), None)
 
 
@@ -800,7 +763,7 @@ def _github_app(cfg: Config, store: SecretStore, http: httpx.AsyncClient) -> Git
         app_id=github.app_id,
         installation_id=github.installation_id,
         private_key_pem=private_key_pem,
-        timeout_s=REQUEST_TIMEOUT_SECONDS,
+        timeout_s=HTTP_TIMEOUT_S,
     )
 
 
@@ -862,23 +825,6 @@ async def _gap_issue_url(pool: Pool, fingerprint: str) -> str | None:
     async with pool.connection() as conn:
         gap = await get_gap(conn, fingerprint)
     return None if gap is None else gap.issue_url
-
-
-async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
-    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
-    logger.error("channel token rejected", extra={"channel": channel})
-    # shortcut: the alert goes out through the same WhatsApp channel whose token
-    # failed, so it waits in the outbox until the token works; the ERROR log is the
-    # only immediate signal until a second channel exists.
-    async with pool.connection() as conn, conn.transaction():
-        await queue_rate_limited_alert(
-            conn,
-            cfg.profiles,
-            f"BR-O03:{channel.lower()}",
-            timedelta(hours=cfg.ops.self_alerts.realert_hours),
-            "BR-O03",
-            MESSAGES["BR-O03"].format(channel=channel),
-        )
 
 
 @dataclass(frozen=True)

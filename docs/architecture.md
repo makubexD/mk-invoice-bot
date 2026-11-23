@@ -48,6 +48,7 @@ flowchart LR
         config["config: typed YAML config"]
         ops["ops: daily jobs, backups, padrón"]
         gaps["gaps: capability gaps"]
+        wiring["wiring: builds each chat channel for app.py"]
     end
 
     helpers[["helper subprocesses: extract, browser (sandbox.py)"]]
@@ -77,6 +78,8 @@ flowchart LR
     fetchers --> auth
     sinks --> auth
     ops --> pipeline
+    wiring --> channels
+    wiring --> api
     ops --> sinks
     ops --> store
     routing --> config

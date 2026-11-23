@@ -15,17 +15,11 @@ import pytest
 import yaml
 
 from invoicebot.app import (
-    CHANNEL_ADAPTER,
-    CHANNEL_SECRETS,
     GITHUB_APP_PRIVATE_KEY,
     GOOGLE_CLIENT_SECRET,
     LAPTOP_ADAPTER,
     LAPTOP_AGENT_KEY,
-    SENDER_HASH_KEY,
-    WHATSAPP_ADAPTER,
-    WHATSAPP_SECRETS,
     DailyRuns,
-    _channel_secrets,
     _check_reload_candidate,
     _daily_tasks,
     _deliver_handlers,
@@ -42,7 +36,6 @@ from invoicebot.app import (
     _sol_secrets,
     _validation_handlers,
     _validation_secrets,
-    _whatsapp_secrets,
 )
 from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
@@ -57,6 +50,8 @@ from invoicebot.secrets import SecretNotDeclared, Secrets, SecretStore
 from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
+from invoicebot.wiring.channels import CHANNEL_ADAPTER, CHANNEL_SECRETS, SENDER_HASH_KEY, channel_secrets
+from invoicebot.wiring.whatsapp import WHATSAPP_ADAPTER, WHATSAPP_SECRETS, _whatsapp_secrets
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -384,7 +379,7 @@ def test_channel_secret_view_declares_only_the_sender_hash_key() -> None:
     """R-9.10: the shared channel view declares sender_hash_key and nothing else."""
     store = _RecordingStore({"whatsapp_token": "synthetic-token-value"})
 
-    view = _channel_secrets(store)
+    view = channel_secrets(store)
 
     assert store.scoped_calls == [(CHANNEL_ADAPTER, frozenset({SENDER_HASH_KEY}))]
     assert view.missing == frozenset({SENDER_HASH_KEY})
