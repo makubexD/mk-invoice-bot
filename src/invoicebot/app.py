@@ -26,7 +26,6 @@ from fastapi.responses import JSONResponse
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.providers import (
-    GMAIL_PROVIDER,
     build_token_provider,
     google_accounts,
     google_token_path,
@@ -42,9 +41,11 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
+    GMAIL_PROVIDER,
     GOOGLE_DRIVE_KIND,
     GOOGLE_SHEETS_KIND,
     GRAPH_MODE,
+    ONEDRIVE_FOLDER_KIND,
     PERSONAL_MICROSOFT_ACCOUNT,
     Config,
     Flow,
@@ -155,9 +156,6 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
-#: The OneDrive sink kind the deliver dispatcher picks a flow's deliverer by (D132); the Google kinds
-#: live in ``config.models``.
-ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
 #: How long each helper wrapper gets to start once at startup (D147).
@@ -380,7 +378,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 housekeeping=partial(housekeep, pool, settings.data_dir),
                 padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
                 digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
-                github_health=None if github_app is None else partial(_github_health, github_app, pool, cfg),
+                github_health=_github_health_run(github_app, pool, cfg),
             ),
         )
         background: dict[str, TaskFactory] = {
@@ -821,6 +819,15 @@ def _github_transports(
             hooks=hooks,
         )
     }
+
+
+def _github_health_run(
+    github_app: GitHubApp | None, pool: Pool, cfg: Config
+) -> Callable[[], Awaitable[None]] | None:
+    """Return the daily GitHub App health check, or None without a GitHub App (BR-D05)."""
+    if github_app is None:
+        return None
+    return partial(_github_health, github_app, pool, cfg)
 
 
 async def _github_health(app: TokenSource, pool: Pool, cfg: Config) -> None:

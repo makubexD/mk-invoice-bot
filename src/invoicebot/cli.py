@@ -45,6 +45,7 @@ from invoicebot.auth.google_oauth import (
     TOKEN_URL,
     GoogleTokens,
     google_secrets,
+    revoke,
     save_refresh_token,
 )
 from invoicebot.auth.msal_cache import AuthRequired, TokenProvider
@@ -82,6 +83,7 @@ from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
+from invoicebot.text import normalize_email
 
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: How long the Google sign-in waits for the browser's redirect (D128).
@@ -518,8 +520,9 @@ async def _google_sign_in(
         async with asyncio.timeout(SIGN_IN_TIMEOUT_S):
             path = await redirect_path
     code = parse_redirect(path, state)
-    response = await _exchange_code(cfg, client_secret, code, verifier, redirect_uri, transport)
-    _require_pinned_mailbox(response, cfg, account)
+    async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as client:
+        response = await _exchange_code(client, google.client_id, client_secret, code, verifier, redirect_uri)
+        await _require_pinned_mailbox(client, response, cfg, account)
     data_scopes = [scope for scope in scopes if scope not in IDENTITY_SCOPES]
     refresh_token = _granted_refresh_token(response, data_scopes)
     save_refresh_token(
@@ -530,12 +533,12 @@ async def _google_sign_in(
 
 
 async def _exchange_code(
-    cfg: Config,
+    client: httpx.AsyncClient,
+    client_id: str,
     client_secret: str,
     code: str,
     verifier: str,
     redirect_uri: str,
-    transport: httpx.AsyncBaseTransport | None,
 ) -> httpx.Response:
     """Swap the authorization code at Google's token endpoint and return its answer (R-6.4).
 
@@ -543,19 +546,17 @@ async def _exchange_code(
         _SignInError: the endpoint answers non-200.
         httpx.HTTPError: the request never reached Google.
     """
-    google = _google_settings(cfg)
-    async with httpx.AsyncClient(transport=transport, timeout=google.timeout_s) as client:
-        response = await client.post(
-            TOKEN_URL,
-            data={
-                "client_id": google.client_id,
-                "client_secret": client_secret,
-                "code": code,
-                "code_verifier": verifier,
-                "grant_type": "authorization_code",
-                "redirect_uri": redirect_uri,
-            },
-        )
+    response = await client.post(
+        TOKEN_URL,
+        data={
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "code": code,
+            "code_verifier": verifier,
+            "grant_type": "authorization_code",
+            "redirect_uri": redirect_uri,
+        },
+    )
     if response.status_code != httpx.codes.OK:
         raise _SignInError(f"the token endpoint answered {response.status_code} (R-6.4)")
     return response
@@ -587,8 +588,13 @@ def _id_token_claims(response: httpx.Response) -> dict[str, object] | None:
     return claims if isinstance(claims, dict) else None
 
 
-def _require_pinned_mailbox(response: httpx.Response, cfg: Config, account: str) -> None:
+async def _require_pinned_mailbox(
+    client: httpx.AsyncClient, response: httpx.Response, cfg: Config, account: str
+) -> None:
     """Refuse a sign-in that is not the mailbox ``account`` is pinned to (R-6.5, D138).
+
+    Before refusing, revoke the grant the wrong sign-in obtained, so it cannot be used
+    afterwards. The refusal stands even when the revocation fails.
 
     Raises:
         _SignInError: the id_token is missing or malformed, its ``email_verified`` is not
@@ -603,10 +609,40 @@ def _require_pinned_mailbox(response: httpx.Response, cfg: Config, account: str)
         isinstance(address, str)
         and claims is not None
         and claims.get("email_verified") is True
-        and address.casefold() == expected
+        and normalize_email(address) == normalize_email(expected)
     ):
         return
+    token = _token_to_revoke(response)
+    if token is not None and not _pinned_elsewhere(address, cfg):
+        await revoke(client, token)
     raise _SignInError(f"signed in as {signed_in}, but account {account!r} is pinned to {expected}")
+
+
+def _pinned_elsewhere(address: object, cfg: Config) -> bool:
+    """True when ``address`` is another configured account's mailbox (D138).
+
+    Google's revoke drops the whole grant for that user and client, so revoking a sign-in
+    into another account's mailbox would sign that account out too; it is left alone.
+    """
+    if not isinstance(address, str):
+        return False
+    pinned = {normalize_email(mailbox) for mailbox in _google_settings(cfg).accounts.values()}
+    return normalize_email(address) in pinned
+
+
+def _token_to_revoke(response: httpx.Response) -> str | None:
+    """Return a token from a refused sign-in's answer: its refresh token, else its access token (D138)."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("refresh_token", "access_token"):
+        token = payload.get(key)
+        if isinstance(token, str) and token:
+            return token
+    return None
 
 
 def _granted_refresh_token(response: httpx.Response, scopes: Sequence[str]) -> str:

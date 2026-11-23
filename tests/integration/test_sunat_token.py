@@ -26,6 +26,7 @@ from invoicebot.sunat.token import (
     MAX_TOKEN_TTL_S,
     SECRETS,
     SunatUnavailable,
+    forget,
     token,
 )
 
@@ -373,3 +374,37 @@ async def test_two_validez_401s_are_unavailable_and_leave_no_token_cached(
     async with db_pool.connection() as conn:
         cached = await kv.get(conn, CACHE_KEY)
     assert cached is None
+
+
+async def test_forget_deletes_the_rejected_token(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: forget drops the stored token when it is still the one the 401 rejected."""
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO kv (key, value, expires_at) VALUES (%s, %s, now() + interval '1 hour')",
+            (CACHE_KEY, ACCESS_VALUE),
+        )
+
+    await forget(db_pool, ACCESS_VALUE)
+
+    async with db_pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
+    assert cached is None
+
+
+async def test_forget_keeps_a_token_fetched_after_the_401(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-4.3: forget leaves a token another worker stored after the rejected one."""
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO kv (key, value, expires_at) VALUES (%s, %s, now() + interval '1 hour')",
+            (CACHE_KEY, REFRESHED_VALUE),
+        )
+
+    await forget(db_pool, ACCESS_VALUE)
+
+    async with db_pool.connection() as conn:
+        cached = await kv.get(conn, CACHE_KEY)
+    assert cached == REFRESHED_VALUE

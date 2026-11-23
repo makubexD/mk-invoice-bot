@@ -476,6 +476,8 @@ HELP_GAP = "/gap ignorar <id>: deja de avisar de esa brecha"
 GAPS_EMPTY = "No hay brechas abiertas."
 #: The first line of the ``/gaps`` answer (S8.9, D139).
 GAPS_HEADER = "Brechas abiertas:"
+#: The last line of ``/gaps`` when more gaps are open than it lists (S8.9, D139).
+GAPS_TRUNCATED = "…"
 #: One ``/gaps`` line per gap; ``{issue}`` is ``GAPS_ISSUE`` or empty (S8.9, D139).
 GAPS_LINE = "{fingerprint} · {kind} · {subject} · {count}×{issue}"
 #: The issue part of a ``GAPS_LINE`` (S8.9, D139).

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from datetime import time, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, get_args
 
 import pytest
 import yaml
@@ -14,6 +14,8 @@ from pydantic import ValidationError
 from invoicebot.auth.providers import microsoft_accounts
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
+    GMAIL_PROVIDER,
+    ONEDRIVE_FOLDER_KIND,
     CalendarField,
     ChannelTemplates,
     Config,
@@ -23,6 +25,7 @@ from invoicebot.config.models import (
     GoogleDriveSink,
     GoogleSheetsSink,
     Microsoft,
+    OneDriveFolderSink,
     Padron,
     PickField,
     Portal,
@@ -131,10 +134,11 @@ def test_google_account_address_without_an_at_sign_fails(tmp_path: Path) -> None
         load_config(path)
 
 
-def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
-    """R-6.5: an account's mailbox is lower-cased, so the pinned address compares case-free."""
+@pytest.mark.parametrize("address", ["Owner@Example.COM", " owner@example.com "], ids=["case", "spaces"])
+def test_google_account_address_is_stored_normalized(tmp_path: Path, address: str) -> None:
+    """R-6.5, D164: an account's mailbox is stored as normalize_email gives it: trimmed and case-folded."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    document["google"]["accounts"]["owner"] = "Owner@Example.COM"
+    document["google"]["accounts"]["owner"] = address
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     cfg = load_config(path)
@@ -162,6 +166,15 @@ def test_google_accounts_in_skips_a_graph_inbox() -> None:
     flow = load_config(EXAMPLE).flows["work_microsoft"]
 
     assert google_accounts_in(flow) == []
+
+
+def test_sink_kind_and_provider_constants_match_their_literal_annotations() -> None:
+    """R-6.5: each constant equals an argument of its model's ``Literal``, so the two cannot drift."""
+    provider_args = get_args(FlowInbox.model_fields["provider"].annotation)
+    kind_args = get_args(OneDriveFolderSink.model_fields["kind"].annotation)
+
+    assert GMAIL_PROVIDER in provider_args
+    assert kind_args == (ONEDRIVE_FOLDER_KIND,)
 
 
 def test_example_config_maps_each_microsoft_account_to_its_mailbox() -> None:

@@ -31,3 +31,8 @@ def escape_formula(value: str) -> str:
     if value.startswith(FORMULA_PREFIXES) or value.lstrip().startswith(FORMULA_PREFIXES):
         return "'" + value
     return value
+
+
+def normalize_email(address: str) -> str:
+    """Return the form mailbox pins are compared in (D138, D164)."""
+    return address.strip().casefold()

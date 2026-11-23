@@ -26,6 +26,7 @@ from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.commands import (
     COMMANDS,
+    MAX_GAP_LINES,
     CommandContext,
     handle_command,
     help_text,
@@ -47,6 +48,7 @@ from invoicebot.rules.messages_es import (
     GAPS_HEADER,
     GAPS_ISSUE,
     GAPS_LINE,
+    GAPS_TRUNCATED,
     HELP_AYUDA,
     HELP_GAP,
     HELP_GAPS,
@@ -1456,6 +1458,48 @@ async def test_gaps_with_none_open_answers_gaps_empty(
         replies = await _run_as(conn, profile_id, "/gaps", is_admin=True)
 
     assert replies == [(GAPS_EMPTY, None)]
+
+
+async def _seed_gaps(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    count: int,
+) -> None:
+    """Seed ``count`` open gaps of one kind, each with its own fingerprint (S8.9)."""
+    async with db_pool.connection() as conn, conn.transaction():
+        for _ in range(count):
+            await upsert_gap(conn, PORTAL_MISSING, f"portal_missing:{uuid4().hex}", GAP_SUBJECT, None)
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_gaps_at_the_limit_list_every_gap_without_the_truncation_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9, D139: /gaps with exactly MAX_GAP_LINES open gaps shows no truncation line."""
+    profile_id = _profile()
+    await _seed_gaps(db_pool, MAX_GAP_LINES)
+    async with db_pool.connection() as conn, conn.transaction():
+        replies = await _run_as(conn, profile_id, "/gaps", is_admin=True)
+
+    lines = replies[0][0].splitlines()
+    assert lines[0] == GAPS_HEADER
+    assert len(lines) == MAX_GAP_LINES + 1
+    assert GAPS_TRUNCATED not in lines
+
+
+@pytest.mark.usefixtures("clean_gaps")
+async def test_gaps_past_the_limit_list_the_limit_and_the_truncation_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """S8.9, D139: /gaps with MAX_GAP_LINES + 1 open gaps lists MAX_GAP_LINES and truncates."""
+    profile_id = _profile()
+    await _seed_gaps(db_pool, MAX_GAP_LINES + 1)
+    async with db_pool.connection() as conn, conn.transaction():
+        replies = await _run_as(conn, profile_id, "/gaps", is_admin=True)
+
+    lines = replies[0][0].splitlines()
+    assert lines[0] == GAPS_HEADER
+    assert len(lines) == MAX_GAP_LINES + 2
+    assert lines[-1] == GAPS_TRUNCATED
 
 
 @pytest.mark.usefixtures("clean_gaps")

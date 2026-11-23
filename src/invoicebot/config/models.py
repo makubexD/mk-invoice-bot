@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from invoicebot.sunat_origins import is_sunat_origin
+from invoicebot.text import normalize_email
 
 #: D143: the owner's DNI, eight digits, used by BR-R10 to route boletas made out to it.
 DNI_PATTERN = re.compile(r"^[0-9]{8}$")
@@ -331,7 +332,7 @@ def _account_addresses(value: dict[str, str]) -> dict[str, str]:
     for name, address in value.items():
         if _ACCOUNT_NAME.fullmatch(name) is None:
             raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
-        address = address.casefold()
+        address = normalize_email(address)
         if _EMAIL_ADDRESS.fullmatch(address) is None:
             raise ValueError(f"account '{name}' is not an email address")
         addresses[name] = address
@@ -407,6 +408,11 @@ class Google(BaseModel):
 #: repeat this text: pydantic needs a literal, not a constant.
 GOOGLE_DRIVE_KIND = "google_drive"
 GOOGLE_SHEETS_KIND = "google_sheets"
+
+#: The OneDrive sink kind the deliver dispatcher picks a flow's deliverer by (D132).
+#: The ``Literal[...]`` annotation on ``OneDriveFolderSink.kind`` repeats this text: pydantic
+#: needs a literal, not a constant.
+ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 
 #: An id Google may return; anything else is refused before it is used.
 GOOGLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
@@ -593,6 +599,12 @@ class Reimbursement(BaseModel):
     cap: Decimal = Field(gt=0)
     #: R-7.12: turns on /pagado payment tracking for the flow.
     track_payments: bool = False
+
+
+#: The inbox provider that talks to Gmail instead of Graph (R-6.5, D135).
+#: The ``Literal[...]`` annotation on ``FlowInbox.provider`` repeats this text: pydantic
+#: needs a literal, not a constant.
+GMAIL_PROVIDER = "gmail"
 
 
 class FlowInbox(BaseModel):
@@ -869,13 +881,22 @@ def mail_read_accounts(cfg: Config) -> set[str]:
     }
 
 
+def google_sink_accounts_in(flow: Flow) -> list[str]:
+    """Return the accounts ``flow``'s Google sinks name (R-6.5, D138)."""
+    return [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
+
+
+def gmail_inbox_accounts_in(flow: Flow) -> list[str]:
+    """Return the account ``flow``'s ``gmail`` inbox fetcher searches, if any (R-6.5, D138)."""
+    inbox = flow.email_inbox
+    if inbox is None or inbox.provider != GMAIL_PROVIDER:
+        return []
+    return [inbox.account]
+
+
 def google_accounts_in(flow: Flow) -> list[str]:
     """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
-    accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
-    inbox = flow.email_inbox
-    if inbox is not None and inbox.provider == "gmail":
-        accounts.append(inbox.account)
-    return accounts
+    return google_sink_accounts_in(flow) + gmail_inbox_accounts_in(flow)
 
 
 class Config(BaseModel):

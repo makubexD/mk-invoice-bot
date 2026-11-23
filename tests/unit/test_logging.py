@@ -8,10 +8,12 @@ import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from types import MappingProxyType
+from typing import Any, NamedTuple
 
+import httpx
 import pytest
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from invoicebot.logging import PROPAGATING_LOGGERS, JsonFormatter, configure_logging, step_timer
 
@@ -422,3 +424,123 @@ def test_pydantic_field_hidden_from_repr_is_left_out(log_stream: io.StringIO) ->
 
     assert _records(log_stream)[-1]["payload"] == {"label": "ops"}
     assert "t9z" not in log_stream.getvalue()
+
+
+class _AliasedRuc(BaseModel):
+    """A pydantic model whose field name hides a personal alias."""
+
+    tax_id: str = Field(alias="ruc")
+    label: str
+
+
+@dataclasses.dataclass(frozen=True)
+class _UnsetField:
+    """A dataclass with an ``init=False`` field that is never assigned."""
+
+    label: str = "ops"
+    memo: str = dataclasses.field(init=False)
+
+
+def test_pydantic_personal_alias_is_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a model field aliased as ruc logs under ruc as [redacted], never its value."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"payload": _AliasedRuc(ruc="20000000001", label="ops")}
+    )
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "label": "ops"}
+    assert "20000000001" not in output
+
+
+def test_field_that_raises_on_read_becomes_unreadable(log_stream: io.StringIO) -> None:
+    """R-9.12: an attribute raising AttributeError on read is [unreadable], and the rest still log."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _UnsetField()})
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops", "memo": "[unreadable]"}
+
+
+class _ExtraAllowed(BaseModel):
+    """A pydantic model that keeps extra keys."""
+
+    model_config = ConfigDict(extra="allow")
+
+    label: str
+
+
+def test_pydantic_extra_field_is_logged_and_redacted(log_stream: io.StringIO) -> None:
+    """R-9.12: a model's extra keys log under their own names, a personal one redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"payload": _ExtraAllowed(label="ops", ruc="20000000001")}
+    )
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops", "ruc": "[redacted]"}
+    assert "20000000001" not in log_stream.getvalue()
+
+
+class _RucEntry(NamedTuple):
+    """A named tuple carrying a synthetic RUC and a count."""
+
+    ruc: str
+    count: int
+
+
+def test_namedtuple_keeps_field_names_and_redacts(log_stream: io.StringIO) -> None:
+    """R-9.12: a NamedTuple in extra= logs under its field names, so ruc is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _RucEntry(ruc="20000000001", count=2)})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "count": 2}
+    assert "20000000001" not in output
+
+
+def test_mapping_proxy_is_scrubbed_key_by_key(log_stream: io.StringIO) -> None:
+    """R-9.12: a read-only mapping in extra= is scrubbed key by key, so phone_number is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x",
+        extra={"payload": MappingProxyType({"phone_number": "51999999999", "count": 3})},
+    )
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"phone_number": "[redacted]", "count": 3}
+    assert "51999999999" not in output
+
+
+def test_frozenset_holding_a_secret_is_masked(log_stream: io.StringIO) -> None:
+    """R-9.12: a frozenset in extra= is scrubbed item by item, so a loaded secret is masked."""
+    secret = "synthetic-" + "secret-value-42"
+    configure_logging(secret_values=[secret], stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": frozenset({secret, "public-value"})})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == ["public-value", "***"]
+    assert secret not in output
+
+
+def test_header_mapping_credentials_are_redacted(log_stream: io.StringIO) -> None:
+    """R-9.16: a walked httpx.Headers hides its authorization and cookie values, as its own repr did."""
+    configure_logging(stream=log_stream)
+    headers = httpx.Headers(
+        {"Authorization": "Bearer runtime-token-value", "Cookie": "sid=runtime-cookie", "Accept": "*/*"}
+    )
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": headers})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {
+        "authorization": "[redacted]",
+        "cookie": "[redacted]",
+        "accept": "*/*",
+    }
+    assert "runtime-token-value" not in output
+    assert "runtime-cookie" not in output

@@ -25,6 +25,8 @@ from secrets import token_hex
 import msal
 import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
 
+from invoicebot.text import normalize_email
+
 #: Personal Microsoft accounts only (D84).
 AUTHORITY = "https://login.microsoftonline.com/consumers"
 
@@ -80,7 +82,7 @@ class TokenProvider:
     ) -> None:
         self._client_id = client_id
         self._account = account.name
-        self._mailbox = account.mailbox.casefold()
+        self._mailbox = normalize_email(account.mailbox)
         self._scopes = [scope for scope in scopes if scope not in _MSAL_RESERVED_SCOPES]
         self._cache_path = Path(cache_path)
         self._identity = identity
@@ -133,7 +135,7 @@ class TokenProvider:
         if not isinstance(claims, Mapping):
             raise WrongMailbox(self._account)
         mailbox = claims.get("preferred_username")
-        if not isinstance(mailbox, str) or mailbox.casefold() != self._mailbox:
+        if not isinstance(mailbox, str) or normalize_email(mailbox) != self._mailbox:
             raise WrongMailbox(self._account)
 
     def _token(self) -> str:
@@ -146,7 +148,7 @@ class TokenProvider:
         if len(accounts) != 1:
             raise AuthRequired(self._account)
         username = accounts[0].get("username")
-        if not isinstance(username, str) or username.casefold() != self._mailbox:
+        if not isinstance(username, str) or normalize_email(username) != self._mailbox:
             raise AuthRequired(self._account)
         result = app.acquire_token_silent(self._scopes, account=accounts[0])
         self._save_if_changed(cache)

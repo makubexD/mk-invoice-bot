@@ -178,9 +178,12 @@ async def ask_sunat(
     for _ in range(VALIDEZ_ATTEMPTS):
         try:
             access_token = await token(pool, http, secrets, cfg.sunat.validez_api)
+        except SunatUnavailable:
+            return None
+        try:
             return await sunat_validate(http, access_token, cfg.sunat.validez_api, cfg.owner.ruc, reading)
         except SunatUnauthorized:
-            await forget(pool)
+            await forget(pool, access_token)
         except SunatUnavailable:
             return None
     return None

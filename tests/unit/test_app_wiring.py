@@ -26,6 +26,7 @@ from invoicebot.app import (
     _deliver_handlers,
     _deliver_registry,
     _fetch_schedules,
+    _github_health_run,
     _github_secrets,
     _google_deliver_handler,
     _google_tokens,
@@ -47,7 +48,7 @@ from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.runtime_config import ConfigRejected
 from invoicebot.sandbox import HelperPrefixes
-from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.secrets import SecretNotDeclared, Secrets, SecretStore
 from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
@@ -257,6 +258,24 @@ def test_daily_tasks_without_github_health_add_no_check() -> None:
     assert "github_health" not in {task.key for task in tasks}
 
 
+def test_github_health_run_without_an_app_is_none() -> None:
+    """BR-D05: with no GitHub App there is no daily health check to run."""
+    cfg = load_config(EXAMPLE)
+
+    assert _github_health_run(None, cast(Any, None), cfg) is None
+
+
+def test_github_health_run_with_an_app_is_bound_to_it() -> None:
+    """BR-D05: with a GitHub App the daily health check is a call bound to that App."""
+    cfg = load_config(EXAMPLE)
+    github_app = cast(Any, object())
+
+    run = _github_health_run(github_app, cast(Any, None), cfg)
+
+    assert run is not None
+    assert cast(Any, run).args[0] is github_app
+
+
 def test_sunat_validation_off_reads_no_secret(tmp_path: Path) -> None:
     """D124: with validation off the app never scopes the SUNAT secrets."""
     cfg = _sunat_config(tmp_path, enabled=False)
@@ -310,6 +329,20 @@ def test_google_secret_view_declares_only_the_client_secret() -> None:
     assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
     assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
     assert not view.enabled
+
+
+def test_google_secret_view_is_enabled_when_the_client_secret_is_present() -> None:
+    """R-9.10: a Google view holding its client secret is enabled and refuses an undeclared key."""
+    store = _RecordingStore(
+        {"google_client_secret": "synthetic-client-secret", "other_key": "synthetic-other-value"}
+    )
+
+    view = google_secrets(store)
+
+    assert view.enabled
+    assert view.missing == frozenset()
+    with pytest.raises(SecretNotDeclared):
+        view.get("other_key")
 
 
 @pytest.mark.parametrize(
