@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Protocol
 
 import httpx
@@ -11,8 +13,13 @@ from fastapi import APIRouter
 from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.channels.base import ChannelName, MediaSource
 from invoicebot.config.models import Config
+from invoicebot.pipeline.outgoing import queue_rate_limited_alert
 from invoicebot.queue.outbox import Transport
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.store.db import Pool
+
+logger = logging.getLogger(__name__)
 
 #: The one secret every chat channel declares: senders are logged only as its keyed hash (R-9.10, R-9.16).
 CHANNEL_ADAPTER = "channels"
@@ -49,3 +56,17 @@ class ChannelBuilder(Protocol):
 
     def secret_problem(self, cfg: Config, store: SecretStore) -> str | None:
         """Return the first missing-secret code the channel needs, or ``None`` (R-9.6)."""
+
+
+async def alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
+    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
+    logger.error("channel token rejected", extra={"channel": channel})
+    async with pool.connection() as conn, conn.transaction():
+        await queue_rate_limited_alert(
+            conn,
+            cfg.profiles,
+            f"BR-O03:{channel.lower()}",
+            timedelta(hours=cfg.ops.self_alerts.realert_hours),
+            "BR-O03",
+            MESSAGES["BR-O03"].format(channel=channel),
+        )

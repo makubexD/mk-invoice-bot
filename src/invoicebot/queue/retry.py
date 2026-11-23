@@ -4,10 +4,17 @@ One home for the backoff schedule and for how a failure is stored, so the two
 queues cannot drift apart.
 """
 
+from datetime import timedelta
+
 MAX_BACKOFF_MINUTES = 60
 
 #: ``last_error`` only needs to identify the failure; the traceback is in the log.
 MAX_ERROR_CHARS = 500
+
+#: How long a row waits for the token to be renewed before it is tried again (BR-O03).
+TOKEN_RETRY_DELAY = timedelta(minutes=15)
+#: The rule whose alert tells the owner to renew the channel token (BR-O03).
+RULE_TOKEN_REJECTED = "BR-O03"  # noqa: S105  # nosec B105  # a rule id, not a secret
 
 
 def backoff_minutes(attempts: int) -> int:

@@ -8,7 +8,6 @@ secret views are complete (R-1.7, R-9.10, D174).
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
 from functools import partial
 
 import httpx
@@ -21,12 +20,16 @@ from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import Config, WhatsAppChannel
-from invoicebot.pipeline.outgoing import queue_rate_limited_alert
 from invoicebot.queue.outbox import Transport
-from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.db import Pool
-from invoicebot.wiring.channels import SENDER_HASH_KEY, ChannelBuilder, ChannelWiring, channel_secrets
+from invoicebot.wiring.channels import (
+    SENDER_HASH_KEY,
+    ChannelBuilder,
+    ChannelWiring,
+    alert_channel_token,
+    channel_secrets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +91,7 @@ def _transport(cfg: Config, channel: WhatsAppChannel, client: WhatsAppClient, po
         numbers=numbers,
         templates=channel.templates,
         language=channel.template_language,
-        on_token_rejected=partial(_alert_channel_token, pool, cfg, "WhatsApp"),
+        on_token_rejected=partial(alert_channel_token, pool, cfg, "WhatsApp"),
     )
 
 
@@ -112,20 +115,3 @@ def _whatsapp_channel(cfg: Config) -> WhatsAppChannel | None:
 def _whatsapp_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the WhatsApp channel reads its secrets through (R-9.10)."""
     return store.scoped(WHATSAPP_ADAPTER, set(WHATSAPP_SECRETS))
-
-
-async def _alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
-    """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
-    logger.error("channel token rejected", extra={"channel": channel})
-    # shortcut: the alert goes out through the same WhatsApp channel whose token
-    # failed, so it waits in the outbox until the token works; the ERROR log is the
-    # only immediate signal until a second channel exists.
-    async with pool.connection() as conn, conn.transaction():
-        await queue_rate_limited_alert(
-            conn,
-            cfg.profiles,
-            f"BR-O03:{channel.lower()}",
-            timedelta(hours=cfg.ops.self_alerts.realert_hours),
-            "BR-O03",
-            MESSAGES["BR-O03"].format(channel=channel),
-        )
