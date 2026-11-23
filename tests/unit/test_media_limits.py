@@ -8,11 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from invoicebot.channels.base import AttachmentKind
 from invoicebot.channels.media_limits import (
     ByteCap,
     MediaRejected,
     check_image_header,
     check_zip,
+    document_kind,
     image_megapixels,
     max_bytes_for,
 )
@@ -99,6 +101,23 @@ def test_max_bytes_for_maps_kinds_to_configured_caps() -> None:
     with pytest.raises(MediaRejected) as exc:
         max_bytes_for("captcha", limits)
     assert exc.value.reason == "unsupported_type"
+
+
+@pytest.mark.parametrize(
+    ("mime", "kind"),
+    [
+        ("image/png", "photo"),
+        ("image/jpeg", "photo"),
+        ("application/pdf", "pdf"),
+        ("text/xml", "xml"),
+        ("application/xml", "xml"),
+        ("application/zip", None),
+        ("text/plain", None),
+    ],
+)
+def test_document_kind_maps_mime_to_attachment_kind(mime: str, kind: AttachmentKind | None) -> None:
+    """R-1.4: a channel's document mime type maps to its kind, or is not kept."""
+    assert document_kind(mime) == kind
 
 
 def test_zip_with_too_many_entries_is_rejected(tmp_path: Path) -> None:

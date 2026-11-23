@@ -68,6 +68,13 @@ _BYTES_FOR_KIND: dict[AttachmentKind, Callable[[MediaMaxBytes], int]] = {
     "xml": lambda caps: caps.xml,
 }
 
+#: Document mime types every channel keeps, mapped to their attachment kind (R-1.4).
+DOCUMENT_KINDS: dict[str, AttachmentKind] = {
+    "application/pdf": "pdf",
+    "text/xml": "xml",
+    "application/xml": "xml",
+}
+
 
 class MediaRejected(Exception):
     """Media failed a size, pixel or archive check before it was read."""
@@ -118,6 +125,15 @@ def max_bytes_for(kind: AttachmentKind, limits: MediaLimits) -> int:
     if cap_for is None:
         raise MediaRejected("unsupported_type")
     return cap_for(limits.max_bytes)
+
+
+def document_kind(mime: str) -> AttachmentKind | None:
+    """Return the attachment kind a channel's document mime type maps to, or ``None``
+    when it is not kept (R-1.4).
+    """
+    if mime.startswith("image/"):
+        return "photo"
+    return DOCUMENT_KINDS.get(mime)
 
 
 def check_zip(path: Path, max_entries: int, max_ratio: int) -> None:

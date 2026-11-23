@@ -12,7 +12,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
+from invoicebot.channels.base import Attachment, InboundMessage
+from invoicebot.channels.media_limits import document_kind
 from invoicebot.channels.profiles import ProfileIndex, sender_role
 from invoicebot.channels.sender_hash import sender_hash
 from invoicebot.text import replace_unsafe_chars
@@ -143,7 +144,7 @@ def _document_content(message: dict[str, Any]) -> _Content | None:
     if fields is None:
         return None
     media_ref, mime = fields
-    kind = _document_kind(mime)
+    kind = document_kind(mime)
     if kind is None:
         return _Content()
     attachment = Attachment(kind=kind, media_ref=media_ref, mime=mime, size=0)
@@ -165,12 +166,6 @@ def _media_fields(media: object) -> tuple[str, str] | None:
     if media_ref is None or mime is None:
         return None
     return media_ref, mime
-
-
-def _document_kind(mime: str) -> AttachmentKind | None:
-    if mime.startswith("image/"):
-        return "photo"
-    return _DOCUMENT_KINDS.get(mime)
 
 
 def _reply_id(interactive: object, key: str) -> str | None:
@@ -208,12 +203,6 @@ def _str_field(data: object, key: str) -> str | None:
     value = data.get(key)
     return value if isinstance(value, str) else None
 
-
-_DOCUMENT_KINDS: dict[str, AttachmentKind] = {
-    "application/pdf": "pdf",
-    "text/xml": "xml",
-    "application/xml": "xml",
-}
 
 _BUILDERS: dict[str, _Builder] = {
     "text": _text_content,
