@@ -11,14 +11,18 @@ from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.queue.jobs import enqueue
 from invoicebot.states import BATCHED, DELIVERING, FAILED, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store.flow_b import get_batch_state
-from invoicebot.store.invoices import load_flow, set_state
+from invoicebot.store.invoices import load_flow, set_state, start_fetch_round
 
 
 async def retry_documents(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
-    """Send a failed or manual invoice back to its fetch step, if it has a flow (S4.9, D96)."""
+    """Send a failed or manual invoice back to its fetch step in a new fetch round, if it has a flow.
+
+    S4.9, D96, D166.
+    """
     if state == FAILED and await load_flow(conn, invoice_id) is None:
         return False
     await set_state(conn, invoice_id, FETCHING_DOCS, expected=state)
+    await start_fetch_round(conn, invoice_id)
     await enqueue(conn, invoice_id, FETCH_STEP)
     return True
 
