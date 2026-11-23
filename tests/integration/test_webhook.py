@@ -24,6 +24,7 @@ import pytest
 from fastapi import FastAPI
 from psycopg import AsyncConnection
 
+from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.sender_hash import sender_hash
@@ -80,18 +81,20 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
         admin=True,
     )
     return WebhookDeps(
-        pool=pool,
+        intake_deps=IntakeDeps(
+            pool=pool,
+            intake=IntakeSettings(
+                max_queued_per_sender=MAX_QUEUED,
+                media_max_bytes=MEDIA_MAX_BYTES,
+                timezone=TIMEZONE,
+                roles=NO_ROLES,
+            ),
+        ),
         index=ProfileIndex({sender.profile_id: profile}),
         owner_profile=sender.profile_id,
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
-        intake=IntakeSettings(
-            max_queued_per_sender=MAX_QUEUED,
-            media_max_bytes=MEDIA_MAX_BYTES,
-            timezone=TIMEZONE,
-            roles=NO_ROLES,
-        ),
     )
 
 
@@ -343,7 +346,7 @@ async def test_state_moved_during_intake_returns_503(db_pool: Pool, monkeypatch:
     async def moved(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
         raise StateMoved(1, "EXTRACT_FAILED", "CANCELLED")
 
-    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", moved)
+    monkeypatch.setattr("invoicebot.api.intake_route.handle_inbound", moved)
     async with _client(_deps(db_pool, sender)) as client:
         response = await _post(client, _body(_photo_payload(sender.number)))
 
@@ -360,7 +363,7 @@ async def test_message_refused_by_database_returns_200(
     async def refused(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
         raise psycopg.errors.DataError("bad")
 
-    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", refused)
+    monkeypatch.setattr("invoicebot.api.intake_route.handle_inbound", refused)
     with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
         async with _client(_deps(db_pool, sender)) as client:
             response = await _post(client, _body(_photo_payload(sender.number)))
@@ -391,7 +394,7 @@ async def test_one_refused_message_does_not_drop_the_rest_of_the_batch(
             raise psycopg.errors.DataError("bad")
         await handle_inbound(conn, msg, **kwargs)
 
-    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", refused)
+    monkeypatch.setattr("invoicebot.api.intake_route.handle_inbound", refused)
     with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
         async with _client(_deps(db_pool, sender)) as client:
             response = await _post(client, body)
@@ -436,7 +439,7 @@ async def test_database_operational_error_returns_503(
     async def down(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
         raise psycopg.errors.OperationalError("down: Failing row contains (secret-value)")
 
-    monkeypatch.setattr("invoicebot.api.webhook.handle_inbound", down)
+    monkeypatch.setattr("invoicebot.api.intake_route.handle_inbound", down)
     with caplog.at_level(logging.ERROR, logger="invoicebot.api.webhook"):
         async with _client(_deps(db_pool, sender)) as client:
             response = await _post(client, _body(_photo_payload(sender.number)))

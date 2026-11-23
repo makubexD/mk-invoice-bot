@@ -23,6 +23,7 @@ import pyrage  # type: ignore[import-untyped]  # pyrage ships no type informatio
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
+from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.providers import (
@@ -469,13 +470,12 @@ def _log_reload_failure(task: asyncio.Task[bool]) -> None:
 def _webhook_deps(cfg: Config, pool: Pool, secrets: Secrets, channel_secrets: Secrets) -> WebhookDeps:
     """Collect what the webhook routes need from the config and the channel's secrets."""
     return WebhookDeps(
-        pool=pool,
+        intake_deps=IntakeDeps(pool=pool, intake=intake_settings(cfg)),
         index=ProfileIndex.from_config(cfg),
         owner_profile=cfg.owner.profile,
         app_secret=secrets.get("whatsapp_app_secret"),
         verify_token=secrets.get("whatsapp_verify_token"),
         sender_hash_key=channel_secrets.get(SENDER_HASH_KEY),
-        intake=intake_settings(cfg),
     )
 
 
