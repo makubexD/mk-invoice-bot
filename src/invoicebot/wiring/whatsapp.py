@@ -41,15 +41,19 @@ WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp
 class WhatsAppBuilder:
     """Builds the WhatsApp channel, or ``None`` while its config or secrets are missing."""
 
+    def configured(self, cfg: Config) -> bool:
+        """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
+        return _whatsapp_channel(cfg) is not None
+
     def __call__(
         self, cfg: Config, store: SecretStore, http: httpx.AsyncClient, intake_deps: IntakeDeps
     ) -> ChannelWiring | None:
         """Return the WhatsApp wiring, or ``None`` when it must stay disabled (D174)."""
-        secrets, shared = _whatsapp_secrets(store), channel_secrets(store)
         channel = _whatsapp_channel(cfg)
         if channel is None:
             # Not configured: WhatsApp is optional since D174, so this is not an error.
             return None
+        secrets, shared = _whatsapp_secrets(store), channel_secrets(store)
         if not secrets.enabled or not shared.enabled:
             # Fail closed: a configured channel without its secrets is not mounted.
             logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing | shared.missing))
@@ -69,7 +73,7 @@ class WhatsAppBuilder:
 
     def secret_problem(self, cfg: Config, store: SecretStore) -> str | None:
         """Return the code of the first secret a configured WhatsApp channel lacks (R-9.6)."""
-        if _whatsapp_channel(cfg) is None:
+        if not self.configured(cfg):
             return None
         if not _whatsapp_secrets(store).enabled:
             return "secrets:whatsapp"

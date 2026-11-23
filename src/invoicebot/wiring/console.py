@@ -24,13 +24,17 @@ class ConsoleBuilder:
     def __init__(self, data_dir: Path) -> None:
         self._data_dir = data_dir
 
+    def configured(self, cfg: Config) -> bool:
+        """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
+        return console_channel(cfg) is not None
+
     def __call__(
         self, cfg: Config, store: SecretStore, http: httpx.AsyncClient, intake_deps: IntakeDeps
     ) -> ChannelWiring | None:
         """Return the console wiring, or ``None`` when the config does not list it (D165)."""
         # The console declares no secret and has no router, so the other builder inputs go unused.
         del store, http, intake_deps
-        if console_channel(cfg) is None:
+        if not self.configured(cfg):
             return None
         return ChannelWiring(
             name=CONSOLE,
@@ -40,6 +44,6 @@ class ConsoleBuilder:
         )
 
     def secret_problem(self, cfg: Config, store: SecretStore) -> str | None:
-        """Return ``None``: the console needs only the shared channel secret (R-9.10)."""
+        """Return ``None``: the console declares no secret, not even the shared one (R-9.10, D165)."""
         del cfg, store
         return None

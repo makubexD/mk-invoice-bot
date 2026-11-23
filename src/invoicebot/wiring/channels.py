@@ -45,9 +45,13 @@ class ChannelWiring:
 class ChannelBuilder(Protocol):
     """Builds one chat channel, or ``None`` when its config or secrets are missing.
 
-    Implementers fail closed: a channel that is not configured, or whose declared
-    secrets are incomplete, returns ``None`` and keeps its router unmounted (D174).
+    Implementers fail closed: ``__call__`` returns ``None`` exactly when
+    :meth:`configured` is false or the channel's declared secrets are incomplete,
+    and a disabled channel keeps its router unmounted (D174).
     """
+
+    def configured(self, cfg: Config) -> bool:
+        """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
 
     def __call__(
         self, cfg: Config, store: SecretStore, http: httpx.AsyncClient, intake_deps: IntakeDeps
