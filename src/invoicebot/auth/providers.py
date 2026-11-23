@@ -16,6 +16,7 @@ from pathlib import Path
 
 from invoicebot.auth.msal_cache import PinnedAccount, TokenProvider
 from invoicebot.config.models import (
+    GMAIL_PROVIDER,
     Config,
     GoogleDriveSink,
     GoogleSheetsSink,
@@ -51,8 +52,6 @@ DRIVE_FILE_SCOPE = "https://www.googleapis.com/auth/drive.file"
 SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets"
 #: The Gmail scope a ``gmail`` inbox's account signs in with (R-6.5, D129).
 GMAIL_READ_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
-#: The inbox provider that talks to Gmail instead of Graph (R-6.5, D135).
-GMAIL_PROVIDER = "gmail"
 
 
 def build_token_provider(

@@ -26,7 +26,6 @@ from fastapi.responses import JSONResponse
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.providers import (
-    GMAIL_PROVIDER,
     build_token_provider,
     google_accounts,
     google_token_path,
@@ -42,6 +41,7 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
+    GMAIL_PROVIDER,
     GOOGLE_DRIVE_KIND,
     GOOGLE_SHEETS_KIND,
     GRAPH_MODE,

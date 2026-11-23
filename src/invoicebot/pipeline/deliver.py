@@ -39,11 +39,11 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.auth.providers import GMAIL_PROVIDER
 from invoicebot.channels.base import Button
 from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
+    GMAIL_PROVIDER,
     GRAPH_MODE,
     Config,
     ExcelTemplateSink,

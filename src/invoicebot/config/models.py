@@ -595,6 +595,12 @@ class Reimbursement(BaseModel):
     track_payments: bool = False
 
 
+#: The inbox provider that talks to Gmail instead of Graph (R-6.5, D135).
+#: The ``Literal[...]`` annotation on ``FlowInbox.provider`` repeats this text: pydantic
+#: needs a literal, not a constant.
+GMAIL_PROVIDER = "gmail"
+
+
 class FlowInbox(BaseModel):
     """One flow's invoice mailbox: which provider, which account, how to retry (D98)."""
 
@@ -873,7 +879,7 @@ def google_accounts_in(flow: Flow) -> list[str]:
     """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
     accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
     inbox = flow.email_inbox
-    if inbox is not None and inbox.provider == "gmail":
+    if inbox is not None and inbox.provider == GMAIL_PROVIDER:
         accounts.append(inbox.account)
     return accounts
 
