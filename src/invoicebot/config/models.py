@@ -408,6 +408,11 @@ class Google(BaseModel):
 GOOGLE_DRIVE_KIND = "google_drive"
 GOOGLE_SHEETS_KIND = "google_sheets"
 
+#: The OneDrive sink kind the deliver dispatcher picks a flow's deliverer by (D132).
+#: The ``Literal[...]`` annotation on ``OneDriveFolderSink.kind`` repeats this text: pydantic
+#: needs a literal, not a constant.
+ONEDRIVE_FOLDER_KIND = "onedrive_folder"
+
 #: An id Google may return; anything else is refused before it is used.
 GOOGLE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,200}$")
 
@@ -875,13 +880,22 @@ def mail_read_accounts(cfg: Config) -> set[str]:
     }
 
 
+def google_sink_accounts_in(flow: Flow) -> list[str]:
+    """Return the accounts ``flow``'s Google sinks name (R-6.5, D138)."""
+    return [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
+
+
+def gmail_inbox_accounts_in(flow: Flow) -> list[str]:
+    """Return the account ``flow``'s ``gmail`` inbox fetcher searches, if any (R-6.5, D138)."""
+    inbox = flow.email_inbox
+    if inbox is None or inbox.provider != GMAIL_PROVIDER:
+        return []
+    return [inbox.account]
+
+
 def google_accounts_in(flow: Flow) -> list[str]:
     """Return the accounts ``flow``'s Google sinks and gmail inbox name (R-6.5, D138)."""
-    accounts = [sink.account for sink in flow.sinks if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))]
-    inbox = flow.email_inbox
-    if inbox is not None and inbox.provider == GMAIL_PROVIDER:
-        accounts.append(inbox.account)
-    return accounts
+    return google_sink_accounts_in(flow) + gmail_inbox_accounts_in(flow)
 
 
 class Config(BaseModel):

@@ -16,12 +16,12 @@ from pathlib import Path
 
 from invoicebot.auth.msal_cache import PinnedAccount, TokenProvider
 from invoicebot.config.models import (
-    GMAIL_PROVIDER,
     Config,
-    GoogleDriveSink,
     GoogleSheetsSink,
     files_accounts,
+    gmail_inbox_accounts_in,
     google_accounts_in,
+    google_sink_accounts_in,
     mail_read_accounts,
     mail_send_accounts,
 )
@@ -113,12 +113,7 @@ def delivery_accounts(cfg: Config) -> frozenset[str]:
 
 def _google_sink_accounts(cfg: Config) -> set[str]:
     """Return the accounts a Google sink names across every flow (R-6.5, D129)."""
-    return {
-        sink.account
-        for flow in cfg.flows.values()
-        for sink in flow.sinks
-        if isinstance(sink, (GoogleDriveSink, GoogleSheetsSink))
-    }
+    return {account for flow in cfg.flows.values() for account in google_sink_accounts_in(flow)}
 
 
 def _existing_sheet_accounts(cfg: Config) -> set[str]:
@@ -133,11 +128,7 @@ def _existing_sheet_accounts(cfg: Config) -> set[str]:
 
 def _gmail_inbox_accounts(cfg: Config) -> set[str]:
     """Return the accounts a ``gmail`` inbox fetcher searches (R-6.5, D129)."""
-    return {
-        flow.email_inbox.account
-        for flow in cfg.flows.values()
-        if flow.email_inbox is not None and flow.email_inbox.provider == GMAIL_PROVIDER
-    }
+    return {account for flow in cfg.flows.values() for account in gmail_inbox_accounts_in(flow)}
 
 
 def google_accounts(cfg: Config) -> set[str]:
