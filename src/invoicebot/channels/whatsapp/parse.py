@@ -14,7 +14,7 @@ from typing import Any
 
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
 from invoicebot.channels.profiles import ProfileIndex, sender_role
-from invoicebot.channels.whatsapp.signature import sender_hash
+from invoicebot.channels.sender_hash import sender_hash
 from invoicebot.text import replace_unsafe_chars
 
 _MAX_EPOCH_SECONDS = 253402300799  # 9999-12-31T23:59:59Z

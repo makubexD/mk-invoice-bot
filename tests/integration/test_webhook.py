@@ -26,7 +26,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.channels.profiles import ProfileIndex
-from invoicebot.channels.whatsapp.signature import sender_hash
+from invoicebot.channels.sender_hash import sender_hash
 from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import NO_ROLES, IntakeSettings, handle_inbound
