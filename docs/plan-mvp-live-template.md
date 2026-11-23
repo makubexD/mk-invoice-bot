@@ -58,12 +58,17 @@ its `I16` reads `11.80`; LibreOffice (`soffice --headless --convert-to csv`) ope
 Test: the reload passes; the gap `template_invalid:work_microsoft:excel_template` is `fixed`; invoice 8 leaves
 `MANUAL_REQUIRED`.
 
-## Step 4: invoice 8 delivered end to end `[inline: the owner's live host and real mail]`
+## Step 4: invoice 8 delivered end to end `[inline: the owner's live host]`
 
-1. Follow invoice 8 with `rehearse replies --after 64` and its row in `invoices` until it settles.
-2. Expect BR-D10 (Graph accepted the mail) and `DONE`. On BR-D01, the owner signs in again (`auth-microsoft
---account personal`) and the invoice resumes; any other rule is a stop.
-3. The owner checks the OneDrive folder (PDF, XML, filled `Formato de reembolsos.xlsx` with invoice 8's values) and the
-   mail in the work inbox, then removes them if they duplicate the October submission.
+Amended 2026-11-22 (owner's decision): the live host runs `env: development` with `mail.send_enabled: false`, so every
+mail mode is `dry_run` (R-7.7, D89) and the mail is an `.eml` draft (BR-D07), not a Graph send. Production config
+refuses the `console` channel (D165), so the real Graph send moves to 9d2.
 
-Test: invoice 8 is `DONE` with BR-D10, and the owner confirms the folder, the workbook values and the mail.
+1. Follow invoice 8 with `rehearse replies --after 64` and its row in `invoices` until it settles at BR-D07
+   (`BATCHED`, draft written).
+2. Check the OneDrive folder with the read-only `rclone` remote: PDF, XML and a `Formato de reembolsos.xlsx` whose
+   cells match invoice 8. The live profile's placeholder `legal_name` is set to the owner's file name (live config
+   only), then **reload**.
+3. Press the draft's "Ya lo envié" button (`rehearse send --button 8:sent`).
+
+Test: invoice 8 is `DONE` with BR-D08, and its OneDrive folder ends in `_Sent`.
