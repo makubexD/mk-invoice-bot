@@ -23,10 +23,15 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Attachment, ChannelName, DownloadedMedia, MediaSource
+from invoicebot.channels.base import (
+    Attachment,
+    ChannelName,
+    DownloadedMedia,
+    MediaSource,
+    MediaTransient,
+    MediaUnusable,
+)
 from invoicebot.channels.media_limits import MediaRejected
-from invoicebot.channels.whatsapp.client import WhatsAppError
-from invoicebot.channels.whatsapp.media import MediaChecksumMismatch
 from invoicebot.config.models import Config, Flow, MediaLimits
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
@@ -62,10 +67,6 @@ from invoicebot.store.invoices import (
 
 logger = logging.getLogger(__name__)
 
-#: Meta answers a retry can fix: a 5xx, or an expired token, a lost permission, a timeout
-#: or a rate limit. Any other 4xx, or an error before the request, means the media is gone.
-HTTP_SERVER_ERROR = 500
-RETRYABLE_STATUSES = frozenset({401, 403, 408, 429})
 #: BR-F09's reply when an uploaded XML is unsafe or invalid.
 RULE_XML_INVALID = "BR-F09"
 #: BR-F06's reply when an uploaded XML is not this invoice's.
@@ -238,19 +239,14 @@ async def _download(
             extra={"invoice_id": invoice_id, "reason": str(rejected)},
         )
         return None
-    except (WhatsAppError, MediaChecksumMismatch) as exc:
-        if isinstance(exc, WhatsAppError) and _retryable(exc):
-            raise  # the queue retries the job; a skip would lose the upload
+    except MediaTransient:
+        raise  # the queue retries the job; a skip would lose the upload
+    except MediaUnusable as unusable:
         logger.warning(
             "upload skipped",
-            extra={"invoice_id": invoice_id, "type": type(exc).__name__},
+            extra={"invoice_id": invoice_id, "type": type(unusable.__cause__ or unusable).__name__},
         )
         return None
-
-
-def _retryable(exc: WhatsAppError) -> bool:
-    """Return whether a retry can fix the error: a server, rate, auth or timeout status (R-1.11)."""
-    return exc.status >= HTTP_SERVER_ERROR or exc.status in RETRYABLE_STATUSES
 
 
 async def _rejection(media: DownloadedMedia, upload: Attachment, inputs: _Inputs) -> _Rejection | None:

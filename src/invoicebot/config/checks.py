@@ -32,6 +32,10 @@ _PYTHON_ADAPTER_PREFIX = "python:"
 _GENERIC_FORM_ADAPTER = "generic_form"
 _URL_TEMPLATE_MARKER = "{"
 
+#: The strictest channel cap on a button title (WhatsApp; Telegram allows more), so a
+#: label fits every channel (BR-R03, BR-R09).
+BUTTON_TITLE_MAX = 20
+
 #: The names a flow B template may read (BR-D02); ``profile`` stands for ``profile.attr``.
 _FLOW_TEMPLATE_NAMES = frozenset(
     {
@@ -114,13 +118,12 @@ def flow_problems(
     return problems
 
 
-def label_problems(cfg: Config, directory: StoreDirectory, *, max_chars: int) -> list[Problem]:
+def label_problems(cfg: Config, directory: StoreDirectory) -> list[Problem]:
     """Return every flow label or store comercio that cannot be a button title (BR-R03, BR-R09).
 
-    Flow labels and store comercios become WhatsApp button titles, so each is 1 to
-    ``max_chars`` characters. The cap is passed in because ``config`` may not import
-    the channels. Each problem points at its flow or store field, such as
-    ``flows.work.label`` or ``stores/<ruc>.yaml:brands[0].comercio``.
+    Flow labels and store comercios become button titles, so each is 1 to
+    ``BUTTON_TITLE_MAX`` characters. Each problem points at its flow or store field,
+    such as ``flows.work.label`` or ``stores/<ruc>.yaml:brands[0].comercio``.
     """
     problems: list[Problem] = []
     for flow_name, flow in cfg.flows.items():
@@ -129,7 +132,6 @@ def label_problems(cfg: Config, directory: StoreDirectory, *, max_chars: int) ->
             path=f"flows.{flow_name}.label",
             code=_FLOW_LABEL_CODE,
             subject=f"flow '{flow_name}' label",
-            max_chars=max_chars,
         )
         if problem is not None:
             problems.append(problem)
@@ -140,26 +142,24 @@ def label_problems(cfg: Config, directory: StoreDirectory, *, max_chars: int) ->
                 path=f"stores/{ruc}.yaml:brands[{index}].comercio",
                 code=_STORE_COMERCIO_CODE,
                 subject=f"stores/{ruc}.yaml comercio '{brand.comercio}'",
-                max_chars=max_chars,
             )
             if problem is not None:
                 problems.append(problem)
     return problems
 
 
-def _label_problem(value: str, *, path: str, code: str, subject: str, max_chars: int) -> Problem | None:
-    """BR-R03, BR-R09: a button title is 1 to ``max_chars`` characters."""
-    if 1 <= len(value) <= max_chars:
+def _label_problem(value: str, *, path: str, code: str, subject: str) -> Problem | None:
+    """BR-R03, BR-R09: a button title is 1 to ``BUTTON_TITLE_MAX`` characters."""
+    if 1 <= len(value) <= BUTTON_TITLE_MAX:
         return None
-    return Problem(
-        code=code,
-        path=path,
-        message=(
-            f"{subject} is {len(value)} characters; it becomes a WhatsApp button title, "
-            f"which must be 1-{max_chars} (BR-R03, BR-R09)"
-        ),
-        blocking=True,
-    )
+    if not value:
+        message = f"{subject} is empty: a button title needs at least 1 character (BR-R03, BR-R09)"
+    else:
+        message = (
+            f"{subject} is {len(value)} characters: "
+            f"button title over {BUTTON_TITLE_MAX} characters (BR-R03, BR-R09)"
+        )
+    return Problem(code=code, path=path, message=message, blocking=True)
 
 
 def _sink_problems(

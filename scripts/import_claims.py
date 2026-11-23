@@ -15,15 +15,18 @@ import asyncio
 import sys
 from pathlib import Path
 
+from invoicebot.channels.base import ChannelName
 from invoicebot.config.loader import load_config
 from invoicebot.importer import (
     SKIP_EXISTS,
     Claim,
     ImportEntry,
     ImportReport,
+    ImportTarget,
     Skipped,
     folder_sink_root,
     import_flow,
+    import_origin_channel,
     read_claims,
     register_claims,
 )
@@ -43,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         cfg = load_config(settings.config_path)
         flow_id = import_flow(cfg, args.profile)
+        origin_channel = import_origin_channel(cfg)
         drive_root = folder_sink_root(cfg, flow_id)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -53,8 +57,9 @@ def main(argv: list[str] | None = None) -> int:
 
     readings = read_claims(args.folders)
     claims = [reading.result for reading in readings if isinstance(reading.result, Claim)]
+    target = ImportTarget(flow_id, drive_root)
     report = asyncio.run(
-        _register(settings.database_url, args.profile, flow_id, drive_root, claims, args.dry_run)
+        _register(settings.database_url, args.profile, target, claims, origin_channel, args.dry_run)
     )
     entries = {entry.claim.folder_path: entry for entry in report.entries}
     for reading in readings:
@@ -77,9 +82,9 @@ def _parser() -> argparse.ArgumentParser:
 async def _register(
     database_url: str,
     profile_id: str,
-    flow_id: str,
-    drive_root: str,
+    target: ImportTarget,
     claims: list[Claim],
+    origin_channel: ChannelName,
     dry_run: bool,
 ) -> ImportReport:
     """Register the claims over a short-lived pool, one transaction per claim (R-7.16)."""
@@ -88,7 +93,7 @@ async def _register(
     try:
         async with pool.connection() as conn:
             return await register_claims(
-                conn, profile_id, flow_id, claims, drive_root=drive_root, dry_run=dry_run
+                conn, profile_id, target, claims, origin_channel=origin_channel, dry_run=dry_run
             )
     finally:
         await pool.close()

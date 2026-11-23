@@ -2,18 +2,18 @@
 
 Pure functions only: each builder returns the JSON body for ``/messages`` and
 rejects a value outside Meta's documented limits before the caller sends it.
-Reply ids encode the invoice and the action as ``"<invoice_id>:<action>"`` and
-add an optional digit choice and its menu number as
-``"<invoice_id>:<action>:<choice>:<menu>"``.
+Reply ids come from the shared codec in ``invoicebot.channels.buttons``.
 """
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from typing import Any
 
-from invoicebot.channels.base import MENU_MAX, Button, ButtonPress
+from invoicebot.channels.base import Button
+from invoicebot.channels.buttons import ACTION_MAX_CHARS as ACTION_MAX_CHARS
+from invoicebot.channels.buttons import button_id as button_id
+from invoicebot.channels.buttons import parse_button_id as parse_button_id
 
 PRODUCT = "whatsapp"
 TEXT_MAX_CHARS = 4096
@@ -23,11 +23,8 @@ BUTTONS_LABEL_MAX_CHARS = 20
 BUTTON_ID_MAX_CHARS = 256
 LIST_ROWS_MAX_COUNT = 10
 LIST_ROW_TITLE_MAX_CHARS = 24
-ACTION_MAX_CHARS = 32
 
 _MIN_LENGTH = 1
-_ACTION_PATTERN = rf"[a-z_]{{1,{ACTION_MAX_CHARS}}}"
-_BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})(?::([0-9]):([0-9]{{1,4}}))?"
 
 
 def _check_chars(value: str, *, maximum: int, field: str) -> None:
@@ -46,38 +43,6 @@ def _check_unique_ids(buttons: Sequence[Button], *, field: str) -> None:
     """Raise ValueError when two buttons or rows share an id, which Meta rejects."""
     if len({button.id for button in buttons}) != len(buttons):
         raise ValueError(f"{field} ids must be unique")
-
-
-def button_id(invoice_id: int, action: str, choice: int | None = None, menu: int | None = None) -> str:
-    """Encode a reply button id, rejecting a bad action, choice or menu number."""
-    if re.fullmatch(_ACTION_PATTERN, action) is None:
-        raise ValueError(f"action must match [a-z_]{{1,{ACTION_MAX_CHARS}}}, got {action!r}")
-    if choice is None:
-        if menu is not None:
-            raise ValueError(f"menu needs a choice, got {menu!r}")
-        return f"{invoice_id}:{action}"
-    if type(choice) is not int or not 0 <= choice <= 9:
-        raise ValueError(f"choice must be an int 0-9, got {choice!r}")
-    if menu is None:
-        raise ValueError(f"choice {choice} needs a menu, got None")
-    if type(menu) is not int or not 0 <= menu <= MENU_MAX:
-        raise ValueError(f"menu must be an int 0-{MENU_MAX}, got {menu!r}")
-    return f"{invoice_id}:{action}:{choice}:{menu}"
-
-
-def parse_button_id(value: str) -> ButtonPress | None:
-    """Parse a reply button id, or None if malformed or a choice lacks its menu."""
-    match = re.fullmatch(_BUTTON_ID_PATTERN, value)
-    if match is None:
-        return None
-    choice = match.group(3)
-    menu = match.group(4)
-    return ButtonPress(
-        int(match.group(1)),
-        match.group(2),
-        int(choice) if choice is not None else None,
-        int(menu) if menu is not None else None,
-    )
 
 
 def text_payload(to: str, body: str) -> dict[str, Any]:

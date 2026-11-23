@@ -28,7 +28,7 @@ Not yet open/closed (adding Telegram today would edit these):
 - The console channel (D165), the second channel, had to touch the pipeline, the webhook module and `app.py` in three
   places: proof that the seam is missing.
 
-## Decisions (owner answers 2026-11-23; recorded as D173–D178 in T0 step 1)
+## Decisions (owner answers 2026-11-23; recorded as D173–D179 in T0 step 1)
 
 - **D173 ingress:** a webhook at `/webhook/telegram` through the existing Tailscale Funnel, verified with the
   `X-Telegram-Bot-Api-Secret-Token` header (`hmac.compare_digest`), acknowledged only after the update is stored
@@ -47,14 +47,19 @@ Not yet open/closed (adding Telegram today would edit these):
 - **D178 Telegram message ids:** `external_id` is `"<chat_id>:<message_id>"` for both inbound messages and the ids the
   transport returns, since Telegram message ids are unique only per chat. A button press dedupes on the
   `callback_query.id`.
+- **D179 bot owner:** the bot is created with BotFather from the owner's personal Telegram account; no dedicated
+  number. A Telegram bot is its own identity (`@username` plus token), not a phone account: senders see the bot, never
+  the owner's number, and the bot sees only numeric user ids. Two-step verification on that account is recommended, not
+  required; the owner decides at T2 (2026-11-23). Losing that account means a new bot, a new token and a new
+  `setWebhook` (runbook step 11).
 
 ## Phases
 
 | Phase | Plan | What | Needs from the owner |
 | --- | --- | --- | --- |
-| T0 `telegram-seams` | `docs/plan-telegram-seams.md` | Refactor with no behavior change: neutral button codec, media errors and sender hash; shared intake route; a channel registry (`wiring/`) so `app.py` iterates builders; any channel optional (D174). After T0, a channel is a new package plus one line in the builder tuple. | Nothing |
+| T0 `telegram-seams` | Done 2026-11-23, `docs/archive/plan-telegram-seams.md` | Refactor with no behavior change: neutral button codec, media errors and sender hash; shared intake route; a channel registry (`wiring/`) so `app.py` iterates builders; any channel optional (D174). After T0, a channel is a new package plus one line in the builder tuple. | Nothing |
 | T1 `telegram-adapter` | drafted when T0 finishes | `channels/telegram/` client, parser, transport, media source; `api/telegram_webhook.py`; `wiring/telegram.py`; `TelegramChannel` config (`mode` fixed to webhook, `api_base`); the conversation tests parametrized over fake, WhatsApp and Telegram fixtures (S14.1); cross-channel `/estado` and upload tests (S14.2, D176); token-in-URL redaction test (R-9.16). All offline with `httpx.MockTransport`. | Nothing |
-| T2 `telegram-live` | drafted when T1 finishes | Bot from BotFather; `telegram_bot_token` and `telegram_webhook_secret` in the age store; Funnel path; `setWebhook`; each profile's `telegram_user_id`; live rehearsal of flows A, B and `personal_dni`, commands, photo vs document upload, an admin alert, a gap notice; runbook entries (token rotation, "send /start first"). | Bot token, user ids, the live run |
+| T2 `telegram-live` | drafted when T1 finishes | Bot from BotFather (owner setup below, D179); `telegram_bot_token` and `telegram_webhook_secret` in the age store; Funnel path; `setWebhook`; each profile's `telegram_user_id`; live rehearsal of flows A, B and `personal_dni`, commands, photo vs document upload, an admin alert, a gap notice; runbook entries (token rotation, "send /start first"). | Bot token, user ids, the live run |
 
 T1 sketch (sized for the step rules, ≤4 files each): config model and D-notes; client (`TelegramError(status,
 retry_after)`); parser (text, largest photo, document, `callback_query`, `reply_to_message`, `/cmd@bot` stripping,
@@ -62,6 +67,51 @@ non-private chats refused); transport (plain text, one inline button per row, 42
 `PermanentSendError`, 401 → BR-O03); media source (`getFile`, 20 MB cap before reading); webhook router; callback
 acknowledgement; wiring builder; parity and cross-channel tests; redaction test.
 
+T0 review follow-ups for T1 (2026-11-23):
+- Startup and the reload check must agree: `_secret_problem` iterates `CHANNEL_BUILDERS` and special-cases the console,
+  while startup keeps whichever builders return a wiring. Give both one rule from the builders (e.g. a `configured(cfg)`
+  predicate on the port), so the console builder is not special-cased and "no channel" comes from the builders.
+- Until `wiring/telegram.py` exists, `telegram.enabled: true` passes config validation with no transport behind it.
+  The T1 builder closes this; if T1 slips, have `check_config` block it.
+- `import_origin_channel` uses the owner's preferred channel even when `import_claims --profile` names another profile.
+- `tests/unit/test_app_wiring.py` imports the private `_whatsapp_secrets`; test through `secret_problem` instead.
+- The `.importlinter` "Only the composition root builds channels" contract lists only some packages; forbid
+  `invoicebot.wiring` everywhere except `invoicebot.app`.
+- `BUTTON_TITLE_MAX` (config) and `BUTTONS_LABEL_MAX_CHARS` (WhatsApp payloads) both hold 20; a test should pin the
+  config cap to at most each channel's cap.
+
 Telegram facts the design relies on: `callback_data` ≤ 64 bytes (today's longest button id is 49); `sendMessage` ≤
 4096 characters, sent without `parse_mode`; `getFile` downloads ≤ 20 MB; about 1 message/s per chat and 30/s overall;
 a user must message the bot first (a 403 before that is permanent); no 24-hour window and no templates.
+
+## T2 owner setup, step by step (D179)
+
+The T2 plan turns these into its owner steps. Nothing here needs a second SIM or phone.
+
+1. **Protect the owning account (owner's choice, recommended).** In Telegram, Settings → Privacy and Security →
+   Two-Step Verification: set a password and a recovery email. The bot is managed from this account, and without it
+   anyone who receives an SMS code for the number can take the bot.
+2. **Create the bot.** Open `@BotFather` (the verified one) and send `/newbot`. Give a display name (e.g. "Facturas")
+   and a username ending in `bot` (e.g. `mk_facturas_bot`); it is public and cannot be changed later.
+3. **Store the token at once.** BotFather replies with the token. Put it straight into the age store as
+   `telegram_bot_token`; never paste it into a chat, the repo, a shell history or an environment variable (R-9.9,
+   R-9.16). Then delete BotFather's message holding it.
+4. **Make the webhook secret.** Generate `telegram_webhook_secret` with
+   `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"` (Telegram allows `A-Z a-z 0-9 _ -`, 1–256
+   characters) and store it the same way (D173).
+5. **Close the bot to groups.** In BotFather: `/setjoingroups` → Disable (D175 accepts private chats only). Optional:
+   `/setdescription`, `/setabouttext`, `/setuserpic`, and `/setcommands` with the Spanish command list, so the
+   commands appear in Telegram's menu.
+6. **Each user presses Start.** The owner and every other sender open `t.me/<username>` and press **Start**; a bot
+   cannot write first (a 403 before that is permanent).
+7. **Collect user ids.** Before `setWebhook` (`getUpdates` stops working once a webhook is set), read each sender's
+   numeric `from.id` from one message they sent the bot, and put it in their profile as `telegram_user_id` (D175).
+   T2 decides the tool (a CLI subcommand that reads the token from the store, so it is never typed).
+8. **Open the ingress.** Add the `/webhook/telegram` path to the Tailscale Funnel, deploy, reload, check `/health`.
+9. **Register the webhook.** Run the `setWebhook` CLI subcommand (D173), then confirm with `getWebhookInfo` that the
+   URL is set and `last_error_message` is empty.
+10. **Rehearse live.** Flows A, B and `personal_dni`, the commands, a photo and a document upload, a button press, an
+    admin alert and a gap notice, all from Telegram.
+11. **Runbook.** Token rotation: BotFather `/revoke`, store the new token, reload, run `setWebhook` again. Lost
+    owning account: create a new bot (steps 2–9) and tell senders the new username.
+

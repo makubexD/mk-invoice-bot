@@ -14,7 +14,7 @@ import re
 import shutil
 from pathlib import Path
 
-from invoicebot.channels.base import AttachmentKind, DownloadedMedia
+from invoicebot.channels.base import AttachmentKind, DownloadedMedia, MediaTransient, MediaUnusable
 from invoicebot.channels.media_limits import (
     DIRECTORY_MODE,
     FILE_NAME,
@@ -24,12 +24,16 @@ from invoicebot.channels.media_limits import (
     check_image_header,
     max_bytes_for,
 )
-from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient
+from invoicebot.channels.whatsapp.client import MediaInfo, WhatsAppClient, WhatsAppError
 from invoicebot.config.models import MediaLimits
 
 MEDIA_ID_PATTERN = r"[A-Za-z0-9_-]{1,128}"
 #: Whole-download deadline; must stay below the worker lease (300 s in queue/worker.py).
 DOWNLOAD_TIMEOUT_S = 120.0
+#: Meta answers a retry can fix: a 5xx, or an expired token, a lost permission, a timeout
+#: or a rate limit. Any other 4xx, or an error before the request, means the media is gone.
+HTTP_SERVER_ERROR = 500
+RETRYABLE_STATUSES = frozenset({401, 403, 408, 429})
 
 
 class MediaChecksumMismatch(Exception):
@@ -45,7 +49,11 @@ class WhatsAppMediaSource:
     async def download(
         self, media_ref: str, kind: AttachmentKind, out_dir: Path, limits: MediaLimits
     ) -> DownloadedMedia:
-        """Download one WhatsApp media item into ``out_dir`` (R-1.4, R-1.11)."""
+        """Download one WhatsApp media item into ``out_dir`` (R-1.4, R-1.11).
+
+        Raises ``MediaTransient`` when a retry may fix the failure and ``MediaUnusable``
+        when this media can never be kept, each wrapping the original as ``__cause__``.
+        """
         return await download_media(self._client, media_ref, kind, out_dir, limits)
 
 
@@ -60,29 +68,47 @@ async def download_media(
 
     Raises ``ValueError`` for a media id that could escape the destination
     directory, ``MediaRejected`` for an unsupported kind or a size over the cap,
-    ``MediaChecksumMismatch`` when the bytes differ from media_info's SHA-256,
-    and ``WhatsAppError`` for a Graph API failure. On any failure the partial
-    file and its directory are removed.
+    ``MediaTransient`` when a retry may fix a Graph API failure, and
+    ``MediaUnusable`` for a checksum mismatch or a failure a retry cannot fix.
+    The original exception is the ``__cause__`` of either neutral error. On any
+    failure the partial file and its directory are removed.
     """
     if re.fullmatch(MEDIA_ID_PATTERN, media_id) is None:
         raise ValueError("media_id must be a plain identifier")
     limit = max_bytes_for(kind, limits)
-    info = await client.media_info(media_id)
-    if info.size > limit:
-        raise MediaRejected("too_large")
     directory = dest_root / media_id
     path = directory / FILE_NAME
     try:
-        directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
-        path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
-        async with asyncio.timeout(DOWNLOAD_TIMEOUT_S):
-            size, sha256 = await _stream_to_file(client, info, path, ByteCap(limit), kind, limits)
-        if info.sha256 is not None and info.sha256.lower() != sha256.lower():
-            raise MediaChecksumMismatch(media_id)
-    except BaseException:
-        shutil.rmtree(directory, ignore_errors=True)
-        raise
+        info = await client.media_info(media_id)
+        if info.size > limit:
+            raise MediaRejected("too_large")
+        try:
+            directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
+            path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
+            async with asyncio.timeout(DOWNLOAD_TIMEOUT_S):
+                size, sha256 = await _stream_to_file(client, info, path, ByteCap(limit), kind, limits)
+            if info.sha256 is not None and info.sha256.lower() != sha256.lower():
+                raise MediaChecksumMismatch(media_id)
+        except BaseException:
+            shutil.rmtree(directory, ignore_errors=True)
+            raise
+    except WhatsAppError as err:
+        raise _neutral_error(err) from err
+    except MediaChecksumMismatch as err:
+        raise MediaUnusable("checksum_mismatch") from err
     return DownloadedMedia(path=path, sha256=sha256, size=size, mime=info.mime)
+
+
+def _retryable(exc: WhatsAppError) -> bool:
+    """Return whether a retry can fix the error: a server, rate, auth or timeout status (R-1.11)."""
+    return exc.status >= HTTP_SERVER_ERROR or exc.status in RETRYABLE_STATUSES
+
+
+def _neutral_error(exc: WhatsAppError) -> MediaTransient | MediaUnusable:
+    """Map a Graph API failure onto the neutral media error the pipeline sees (R-1.11)."""
+    if _retryable(exc):
+        return MediaTransient(str(exc))
+    return MediaUnusable(str(exc))
 
 
 async def _stream_to_file(

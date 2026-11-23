@@ -15,11 +15,11 @@ startup needs at least one enabled chat channel; `preferred_channel` must be an 
 Out of scope: anything Telegram-specific (T1), `ProfileIndex` reading per-channel ids through a mapping (no third
 channel needs it yet).
 
-## Step 1: D173–D178, roadmap rows `[inline: decision and spec wording]`
+## Step 1: D173–D179, roadmap rows `[inline: decision and spec wording]`
 
-1. `specs/05-open-questions.md`, after the last decision: rows D173–D178 exactly as worded in `docs/plan-telegram.md`
+1. `specs/05-open-questions.md`, after the last decision: rows D173–D179 exactly as worded in `docs/plan-telegram.md`
    § Decisions, each with status "(T0 plan, proposed)".
-2. `docs/plan-mvp.md`: a row `10` `telegram` (roadmap: `docs/plan-telegram.md`, D173–D178) after 9d2, and update the
+2. `docs/plan-mvp.md`: a row `10` `telegram` (roadmap: `docs/plan-telegram.md`, D173–D179) after 9d2, and update the
    "Carried over from the `whatsapp` review" Telegram bullet: media download is done (`MediaSource`, D165); the button
    codec, media errors and sender hash move in T0; checking the media id against its pattern at the parse boundary
    stays open for T1.

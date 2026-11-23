@@ -10,8 +10,8 @@ import pytest
 
 from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage
 from invoicebot.channels.profiles import ProfileIndex
+from invoicebot.channels.sender_hash import sender_hash
 from invoicebot.channels.whatsapp.parse import ParsedWebhook, parse_webhook
-from invoicebot.channels.whatsapp.signature import sender_hash
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 

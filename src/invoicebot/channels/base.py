@@ -106,11 +106,21 @@ class DownloadedMedia:
     mime: str
 
 
+class MediaTransient(Exception):
+    """A media download failed in a way a retry may fix (R-1.11)."""
+
+
+class MediaUnusable(Exception):
+    """This media can never be kept, so a retry will not help (R-1.11)."""
+
+
 class MediaSource(Protocol):
     """The port a channel implements to download one upload's media (R-1.5).
 
     Implementations write the file under ``out_dir`` and return the stored file with the
-    hash and size they wrote. They raise on failure and leave no partial file behind.
+    hash and size they wrote. They fail with ``MediaTransient`` when a retry may fix it,
+    ``MediaUnusable`` when this media can never be kept, or one of the ``media_limits``
+    rejections they raise today, and leave no partial file behind.
     """
 
     async def download(

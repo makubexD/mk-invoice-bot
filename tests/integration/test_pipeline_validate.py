@@ -13,7 +13,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ValidezApi
 from invoicebot.extract.fields import Field, Reading

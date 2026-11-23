@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.api.webhook import WebhookDeps, make_router
 from invoicebot.app import create_app
 from invoicebot.channels.profiles import ProfileIndex
@@ -53,18 +54,20 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
         admin=True,
     )
     deps = WebhookDeps(
-        pool=pool,
+        intake_deps=IntakeDeps(
+            pool=pool,
+            intake=IntakeSettings(
+                max_queued_per_sender=MAX_QUEUED,
+                media_max_bytes=MEDIA_MAX_BYTES,
+                timezone=TIMEZONE,
+                roles=NO_ROLES,
+            ),
+        ),
         index=ProfileIndex({profile_id: profile}),
         owner_profile=profile_id,
         app_secret=APP_KEY,
         verify_token=HANDSHAKE,
         sender_hash_key=HASH_KEY,
-        intake=IntakeSettings(
-            max_queued_per_sender=MAX_QUEUED,
-            media_max_bytes=MEDIA_MAX_BYTES,
-            timezone=TIMEZONE,
-            roles=NO_ROLES,
-        ),
     )
     app = FastAPI()
     app.include_router(make_router(deps))

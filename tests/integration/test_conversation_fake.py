@@ -18,10 +18,10 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import Attachment, InboundMessage
+from invoicebot.channels.buttons import button_id
 from invoicebot.channels.fake import FakeChannel
 from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
-from invoicebot.channels.whatsapp.payloads import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Brand, Config, MediaMaxBytes, RoutingRule, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading

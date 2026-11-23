@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import ChannelName
 from invoicebot.config.models import OneDriveFolderSink, SinkFiles
-from invoicebot.importer import Claim, ImportReport, read_claims, register_claims
+from invoicebot.importer import Claim, ImportReport, ImportTarget, read_claims, register_claims
 from invoicebot.pipeline.folder_status import _Inputs, _plan
 from invoicebot.states import DONE
 from invoicebot.store.flow_b import claim_seq
@@ -68,7 +68,12 @@ async def _register(
     """Run the import inside a transaction the test owns."""
     async with db_pool.connection() as conn, conn.transaction():
         return await register_claims(
-            conn, profile_id, flow_id, claims, drive_root=drive_root, dry_run=dry_run
+            conn,
+            profile_id,
+            ImportTarget(flow_id, drive_root),
+            claims,
+            origin_channel="whatsapp",
+            dry_run=dry_run,
         )
 
 
@@ -145,6 +150,27 @@ async def test_register_claims_files_sent_claims_done_with_their_seq(
         assert row[4] == int(SYNTHETIC_RUC)
         assert row[5] == Decimal("49.90")
         assert row[6]["fields"]["total"]["value"] == "49.90"
+
+
+@pytest.mark.parametrize("channel", ["whatsapp", "telegram"])
+async def test_register_claims_files_on_the_given_origin_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, channel: ChannelName
+) -> None:
+    """R-1.9: an imported claim's invoice takes the origin channel the import is given."""
+    profile_id = _unique("profile")
+    claims = _two_claims(tmp_path / "Reembolsos")
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await register_claims(
+            conn, profile_id, ImportTarget(_unique("flow"), DRIVE_ROOT), claims, origin_channel=channel
+        )
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT DISTINCT origin_channel FROM invoices WHERE profile_id = %s", (profile_id,)
+        )
+        rows = await cur.fetchall()
+    assert rows == [(channel,)]
 
 
 async def test_register_claims_stores_the_drive_path_under_the_sink_root(

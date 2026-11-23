@@ -131,19 +131,6 @@ source_modules =
     invoicebot.pipeline
 forbidden_modules =
     invoicebot.channels.whatsapp
-ignore_imports =
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.actions -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.deliver -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.questions -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.replies -> invoicebot.channels.whatsapp.payloads
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.client
-    # Telegram (ops): media port and button codec move then
-    invoicebot.pipeline.uploads -> invoicebot.channels.whatsapp.media
 
 [importlinter:contract:pure-readers]
 name = Extract and routing are pure: no pipeline, queue, store or channel imports
@@ -205,3 +192,16 @@ ignore_imports =
     invoicebot.fetchers.browser -> playwright
 # The browser helper lands in a later step of plan-mvp-fetch; until then the ignores match nothing.
 unmatched_ignore_imports_alerting = none
+
+[importlinter:contract:only-app-builds-channels]
+name = Only the composition root builds channels
+type = forbidden
+source_modules =
+    invoicebot.channels
+    invoicebot.pipeline
+    invoicebot.queue
+    invoicebot.store
+    invoicebot.rules
+    invoicebot.api
+forbidden_modules =
+    invoicebot.wiring

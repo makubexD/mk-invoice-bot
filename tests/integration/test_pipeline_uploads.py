@@ -19,8 +19,15 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, DownloadedMedia, InboundMessage
-from invoicebot.channels.whatsapp.client import WhatsAppError
+from invoicebot.channels.base import (
+    Attachment,
+    AttachmentKind,
+    ChannelName,
+    DownloadedMedia,
+    InboundMessage,
+    MediaTransient,
+    MediaUnusable,
+)
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MediaLimits, MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
@@ -134,11 +141,11 @@ class _FakeMediaSource:
         self,
         media: dict[str, tuple[str, bytes]],
         counts: dict[str, int] | None = None,
-        statuses: dict[str, int] | None = None,
+        failures: dict[str, Exception] | None = None,
     ) -> None:
         self.media = media
         self.counts = counts
-        self.statuses = statuses
+        self.failures = failures
         self.refs: list[str] = []
 
     async def download(
@@ -148,8 +155,8 @@ class _FakeMediaSource:
         self.refs.append(media_ref)
         if self.counts is not None:
             self.counts[media_ref] = self.counts.get(media_ref, 0) + 1
-        if self.statuses is not None and media_ref in self.statuses:
-            raise WhatsAppError(status=self.statuses[media_ref])
+        if self.failures is not None and media_ref in self.failures:
+            raise self.failures[media_ref]
         mime, body = self.media[media_ref]
         directory = out_dir / media_ref
         directory.mkdir(parents=True)
@@ -280,7 +287,7 @@ class _RunOptions:
 
     cfg: Config | None = None
     counts: dict[str, int] | None = None
-    statuses: dict[str, int] | None = None
+    failures: dict[str, Exception] | None = None
     channels: tuple[ChannelName, ...] = ("whatsapp",)
 
 
@@ -294,7 +301,7 @@ async def _run(
 ) -> None:
     """Run the attach handler once, serving ``media`` from the fake sources."""
     opts = options or _RunOptions()
-    sources = {channel: _FakeMediaSource(media, opts.counts, opts.statuses) for channel in opts.channels}
+    sources = {channel: _FakeMediaSource(media, opts.counts, opts.failures) for channel in opts.channels}
     handler = make_attach_handler(pool, opts.cfg or _config(), sources, tmp_path, _limits())
     await handler(_job(invoice_id, job_id))
 
@@ -801,7 +808,7 @@ async def test_media_info_404_is_skipped_and_a_valid_pdf_is_stored(
         tmp_path,
         invoice_id,
         {pdf_ref: (MIME["pdf"], PDF_BYTES)},
-        options=_RunOptions(statuses={broken_ref: 404}),
+        options=_RunOptions(failures={broken_ref: MediaUnusable("synthetic 404")}),
     )
 
     async with db_pool.connection() as conn:
@@ -827,8 +834,10 @@ async def test_media_info_503_fails_the_job_so_the_queue_retries(
         _Upload("pdf", pdf_ref, PDF_BYTES, datetime(2026, 11, 14, 10, tzinfo=UTC)),
     )
 
-    with pytest.raises(WhatsAppError):
-        await _run(db_pool, tmp_path, invoice_id, {}, options=_RunOptions(statuses={pdf_ref: 503}))
+    with pytest.raises(MediaTransient):
+        await _run(
+            db_pool, tmp_path, invoice_id, {}, options=_RunOptions(failures={pdf_ref: MediaTransient()})
+        )
 
     async with db_pool.connection() as conn:
         state = await _state(conn, invoice_id)

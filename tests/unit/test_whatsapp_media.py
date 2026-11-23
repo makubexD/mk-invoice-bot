@@ -11,8 +11,9 @@ from pathlib import Path
 import httpx
 import pytest
 
+from invoicebot.channels.base import MediaTransient, MediaUnusable
 from invoicebot.channels.media_limits import MEDIA_HEADER_BYTES, MediaRejected
-from invoicebot.channels.whatsapp.client import WhatsAppClient
+from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
 from invoicebot.channels.whatsapp.media import MediaChecksumMismatch, download_media
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 
@@ -221,8 +222,38 @@ async def test_jpeg_with_sof_past_64_kib_of_app1_is_accepted_and_stored(tmp_path
     assert media.size == len(body)
 
 
+@pytest.mark.parametrize(
+    ("status", "neutral_error"),
+    [(500, MediaTransient), (429, MediaTransient), (404, MediaUnusable)],
+)
+async def test_media_info_failure_maps_to_the_neutral_media_error(
+    tmp_path: Path,
+    status: int,
+    neutral_error: type[MediaTransient] | type[MediaUnusable],
+) -> None:
+    """R-1.11: a 5xx or 429 raises MediaTransient and a 404 raises MediaUnusable.
+
+    Either neutral error keeps the ``WhatsAppError`` as its ``__cause__``.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    async with _make_client(handler) as client:
+        with pytest.raises(neutral_error) as raised:
+            await download_media(client, MEDIA_ID, "photo", tmp_path, _limits())
+
+    cause = raised.value.__cause__
+    assert isinstance(cause, WhatsAppError)
+    assert cause.status == status
+    assert _entries(tmp_path) == []
+
+
 async def test_media_info_sha256_mismatch_raises_and_leaves_no_file(tmp_path: Path) -> None:
-    """R-1.4: a body whose SHA-256 differs from media_info raises MediaChecksumMismatch."""
+    """R-1.11: a body whose SHA-256 differs from media_info raises MediaUnusable (R-1.4).
+
+    The mismatch is the ``__cause__``.
+    """
     body = _png_header(2000, 1500) + b"\x00" * 50
     reported = hashlib.sha256(b"other bytes").hexdigest()
 
@@ -240,9 +271,10 @@ async def test_media_info_sha256_mismatch_raises_and_leaves_no_file(tmp_path: Pa
         return httpx.Response(200, content=body)
 
     async with _make_client(handler) as client:
-        with pytest.raises(MediaChecksumMismatch):
+        with pytest.raises(MediaUnusable) as raised:
             await download_media(client, MEDIA_ID, "photo", tmp_path, _limits())
 
+    assert isinstance(raised.value.__cause__, MediaChecksumMismatch)
     assert _entries(tmp_path) == []
 
 

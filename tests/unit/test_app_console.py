@@ -1,74 +1,82 @@
-"""Tests for wiring the console channel into the runtime (D165)."""
+"""Tests for wiring the console channel into the runtime (D165, D174)."""
 
 from __future__ import annotations
 
-import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
+import pytest
 import yaml
 
-from invoicebot.app import _console_transports, _media_sources
+from invoicebot.api.intake_route import IntakeDeps
+from invoicebot.app import _channel_builders
 from invoicebot.channels.console import CONSOLE, ConsoleMediaSource
-from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
+from invoicebot.pipeline.intake_config import intake_settings
+from invoicebot.secrets import SecretStore
+from invoicebot.wiring.channels import ChannelWiring
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
-PHONE_NUMBER_ID = "123456789"
-GRAPH_VERSION = "v23.0"
-BEARER = "synthetic-bearer-value"
-
-Handler = Callable[[httpx.Request], httpx.Response]
 
 
-def _unused(request: httpx.Request) -> httpx.Response:
-    """Fail when a test reaches the network instead of using the wiring."""
-    raise AssertionError(f"unexpected request: {request.url}")
-
-
-@contextlib.asynccontextmanager
-async def _client() -> AsyncIterator[WhatsAppClient]:
-    """Yield a WhatsApp client whose requests never leave the test (R-1.4)."""
-    async with httpx.AsyncClient(transport=httpx.MockTransport(_unused)) as http:
-        yield WhatsAppClient(
-            http,
-            phone_number_id=PHONE_NUMBER_ID,
-            graph_api_version=GRAPH_VERSION,
-            token=BEARER,
-        )
-
-
-def _config_with_console(tmp_path: Path) -> Config:
-    """Load the example config with a console channel appended (D165)."""
+def _console_only_config(tmp_path: Path) -> Config:
+    """Load the example config as a dev config whose only channel is the console (D174)."""
     document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    document["channels"].append({"kind": "console", "profile": "yo"})
+    document["channels"] = [{"kind": "console", "profile": "yo"}]
+    for profile in document["profiles"].values():
+        profile.pop("preferred_channel", None)
     path = tmp_path / "example.yaml"
     path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     return load_config(path)
 
 
-async def test_without_console_channel_wires_no_console_source_or_transport() -> None:
-    """D165: a config without a console channel keeps only the WhatsApp media source."""
+def _wirings(cfg: Config, data_dir: Path, http: httpx.AsyncClient) -> list[ChannelWiring]:
+    """Build the channel wirings the runtime builds at startup (D174)."""
+    deps = IntakeDeps(pool=cast(Any, None), intake=intake_settings(cfg))
+    store = SecretStore({})
+    return [w for b in _channel_builders(data_dir) if (w := b(cfg, store, http, deps)) is not None]
+
+
+def _no_request(request: httpx.Request) -> httpx.Response:
+    """Fail the test if building a channel makes an HTTP request."""
+    raise AssertionError(f"unexpected request to {request.url}")
+
+
+@pytest.fixture
+async def http() -> AsyncIterator[httpx.AsyncClient]:
+    """Return a client whose transport fails on any request (R-1.7)."""
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_no_request)) as client:
+        yield client
+
+
+async def test_console_only_development_config_starts_workers_and_outbox(
+    tmp_path: Path, http: httpx.AsyncClient
+) -> None:
+    """D174: a dev config whose only channel is the console wires a console transport and media source.
+
+    A non-empty wiring list is what starts the workers and the outbox: without it the
+    runtime fails closed. The console adds no router.
+    """
+    cfg = _console_only_config(tmp_path)
+
+    wirings = _wirings(cfg, tmp_path / "data", http)
+
+    assert [wiring.name for wiring in wirings] == [CONSOLE]
+    assert callable(wirings[0].transport)
+    assert isinstance(wirings[0].media_source, ConsoleMediaSource)
+    assert wirings[0].router is None
+
+
+async def test_config_without_console_channel_wires_no_console_wiring(
+    tmp_path: Path, http: httpx.AsyncClient
+) -> None:
+    """D165: a config with only WhatsApp builds no console wiring."""
     cfg = load_config(EXAMPLE)
-    async with _client() as client:
-        sources = _media_sources(cfg, client, Path())
 
-    assert _console_transports(cfg) == {}
-    assert set(sources) == {"whatsapp"}
+    wirings = _wirings(cfg, tmp_path / "data", http)
 
-
-async def test_console_channel_wires_one_source_and_one_transport(tmp_path: Path) -> None:
-    """D165: a console channel adds a console media source and outbox transport."""
-    cfg = _config_with_console(tmp_path)
-    async with _client() as client:
-        sources = _media_sources(cfg, client, tmp_path)
-
-    assert set(sources) == {"whatsapp", CONSOLE}
-    assert isinstance(sources[CONSOLE], ConsoleMediaSource)
-    transports = _console_transports(cfg)
-    assert set(transports) == {CONSOLE}
-    assert callable(transports[CONSOLE])
+    assert CONSOLE not in [wiring.name for wiring in wirings]

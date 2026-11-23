@@ -20,7 +20,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import (
     Brand,
