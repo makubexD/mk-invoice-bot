@@ -8,7 +8,8 @@ import json
 import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
-from typing import Any
+from types import MappingProxyType
+from typing import Any, NamedTuple
 
 import pytest
 from pydantic import BaseModel, ConfigDict, Field
@@ -479,3 +480,47 @@ def test_pydantic_extra_field_is_logged_and_redacted(log_stream: io.StringIO) ->
 
     assert _records(log_stream)[-1]["payload"] == {"label": "ops", "ruc": "[redacted]"}
     assert "20000000001" not in log_stream.getvalue()
+
+
+class _RucEntry(NamedTuple):
+    """A named tuple carrying a synthetic RUC and a count."""
+
+    ruc: str
+    count: int
+
+
+def test_namedtuple_keeps_field_names_and_redacts(log_stream: io.StringIO) -> None:
+    """R-9.12: a NamedTuple in extra= logs under its field names, so ruc is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _RucEntry(ruc="20000000001", count=2)})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "count": 2}
+    assert "20000000001" not in output
+
+
+def test_mapping_proxy_is_scrubbed_key_by_key(log_stream: io.StringIO) -> None:
+    """R-9.12: a read-only mapping in extra= is scrubbed key by key, so phone_number is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x",
+        extra={"payload": MappingProxyType({"phone_number": "51999999999", "count": 3})},
+    )
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"phone_number": "[redacted]", "count": 3}
+    assert "51999999999" not in output
+
+
+def test_frozenset_holding_a_secret_is_masked(log_stream: io.StringIO) -> None:
+    """R-9.12: a frozenset in extra= is scrubbed item by item, so a loaded secret is masked."""
+    secret = "synthetic-" + "secret-value-42"
+    configure_logging(secret_values=[secret], stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": frozenset({secret, "public-value"})})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == ["public-value", "***"]
+    assert secret not in output
