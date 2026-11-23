@@ -211,11 +211,25 @@ def _photo_attachment(photo: object) -> Attachment | None:
 
 
 def _chosen_size(sizes: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """Return the largest size within the getFile cap, else the largest of all (D181)."""
+    """Return the largest size within the getFile cap, else the largest of all (D181).
+
+    Telegram lists the sizes smallest first and ``file_size`` is optional, so
+    sizes rank by area, with the list position breaking a tie.
+    """
     if not sizes:
         return None
-    fitting = [entry for entry in sizes if _file_size(entry) <= GETFILE_MAX_BYTES]
-    return max(fitting or sizes, key=_file_size)
+    ranked = list(enumerate(sizes))
+    fitting = [item for item in ranked if _file_size(item[1]) <= GETFILE_MAX_BYTES]
+    return max(fitting or ranked, key=_size_rank)[1]
+
+
+def _size_rank(item: tuple[int, dict[str, Any]]) -> tuple[int, int]:
+    """Rank a photo size by area, then by list position, since ``file_size`` is optional (D181)."""
+    position, entry = item
+    width = _int_field(entry, "width")
+    height = _int_field(entry, "height")
+    area = width * height if width is not None and height is not None else 0
+    return area, position
 
 
 def _document_content(document: object, text: str) -> _Content | None:

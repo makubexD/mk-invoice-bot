@@ -146,6 +146,29 @@ def test_photo_keeps_the_largest_size_within_the_cap(index: ProfileIndex) -> Non
     ]
 
 
+def test_photo_sizes_without_file_size_rank_by_area(index: ProfileIndex) -> None:
+    """D181: with no file_size on any size, the largest area wins."""
+    photo = [
+        {"file_id": "small", "width": 90, "height": 90},
+        {"file_id": "middle", "width": 320, "height": 320},
+        {"file_id": "large", "width": 1280, "height": 1280},
+    ]
+    message = _only(_parse(_update(_message(photo=photo)), index))
+
+    assert message.attachments == [Attachment(kind="photo", media_ref="large", mime="image/jpeg", size=0)]
+
+
+def test_photo_with_only_the_largest_missing_file_size_keeps_the_largest(index: ProfileIndex) -> None:
+    """D181: a missing file_size qualifies, so the largest area is kept even with no size."""
+    photo = [
+        {"file_id": "middle", "width": 320, "height": 320, "file_size": 1024},
+        {"file_id": "large", "width": 1280, "height": 1280},
+    ]
+    message = _only(_parse(_update(_message(photo=photo)), index))
+
+    assert message.attachments == [Attachment(kind="photo", media_ref="large", mime="image/jpeg", size=0)]
+
+
 def test_document_kind_follows_mime(index: ProfileIndex) -> None:
     """R-1.7: a PDF document maps to the pdf attachment kind."""
     document = {"file_id": "document1", "mime_type": "application/pdf", "file_size": 2048}

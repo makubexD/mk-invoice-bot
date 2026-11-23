@@ -7,21 +7,25 @@ travel as an inline keyboard, one button per row, with the button id as the
 id, a text over Telegram's cap, a button id over the ``callback_data`` cap)
 raises ``PermanentSendError``, so the outbox kills the row at once. The id the
 row gets back is ``"<chat_id>:<message_id>"`` (D178), because Telegram message
-ids are unique only per chat.
+ids are unique only per chat. When Telegram accepted the message but its answer
+carried no ids, the row is delivered without one (D102).
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
 from invoicebot.channels.base import Button, OutboundMessage
-from invoicebot.channels.telegram.client import TelegramClient, TelegramError
+from invoicebot.channels.telegram.client import OK_STATUS, TelegramClient, TelegramError
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
-from invoicebot.queue.retry import RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
+from invoicebot.queue.retry import MAX_BACKOFF_MINUTES, RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
 
-#: Telegram's sendMessage text cap in characters (D180).
+logger = logging.getLogger(__name__)
+
+#: Telegram's sendMessage text cap in UTF-16 code units (D180).
 TEXT_MAX_CHARS = 4096
 #: Telegram's inline button callback_data cap in UTF-8 bytes (D180).
 CALLBACK_DATA_MAX_BYTES = 64
@@ -46,12 +50,15 @@ def make_transport(
     owner is alerted, then reschedules the row instead of failing it (BR-O03).
     """
 
-    async def transport(row: OutboxRow) -> str:
+    async def transport(row: OutboxRow) -> str | None:
         msg = OutboundMessage.model_validate(row.payload)
         payload = _payload(msg, _chat_id(row, user_ids))
         try:
             chat_id, message_id = await client.send_message(payload)
         except TelegramError as exc:
+            if exc.status == OK_STATUS:
+                logger.warning("outbox row %d was delivered without a channel message id", row.id)
+                return None
             later = await _send_later_for(exc, on_token_rejected)
             if later is not None:
                 raise later from exc
@@ -67,7 +74,8 @@ async def _send_later_for(
 ) -> SendLater | None:
     """Map a Telegram error to a reschedule, a permanent failure, or None to re-raise it."""
     if exc.retry_after is not None:
-        return SendLater(timedelta(seconds=exc.retry_after), RATE_LIMITED_REASON)
+        delay = min(exc.retry_after, MAX_BACKOFF_MINUTES * 60)
+        return SendLater(timedelta(seconds=delay), RATE_LIMITED_REASON)
     if exc.status == TOKEN_REJECTED_STATUS:
         await on_token_rejected()
         return SendLater(TOKEN_RETRY_DELAY, RULE_TOKEN_REJECTED)
@@ -89,10 +97,15 @@ def _chat_id(row: OutboxRow, user_ids: Mapping[str, int]) -> int:
         raise PermanentSendError(f"no Telegram user id for {row.to}") from exc
 
 
+def _text_length(text: str) -> int:
+    """Return ``text``'s length in UTF-16 code units, the unit Telegram's cap counts (D180)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
 def _payload(msg: OutboundMessage, chat_id: int) -> dict[str, Any]:
     """Build the sendMessage payload for ``msg``, refusing what Telegram would reject."""
-    if len(msg.text) > TEXT_MAX_CHARS:
-        raise PermanentSendError(f"Telegram text is over {TEXT_MAX_CHARS} characters")
+    if _text_length(msg.text) > TEXT_MAX_CHARS:
+        raise PermanentSendError(f"Telegram text is over {TEXT_MAX_CHARS} UTF-16 code units")
     payload: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
     if msg.buttons:
         payload["reply_markup"] = {"inline_keyboard": _keyboard(msg.buttons)}

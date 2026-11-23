@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
@@ -19,6 +20,7 @@ from invoicebot.channels.telegram.transport import (
     make_transport,
 )
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
+from invoicebot.queue.retry import MAX_BACKOFF_MINUTES
 
 PROFILE = "yo"
 USER_ID = 999001
@@ -129,6 +131,22 @@ async def test_the_returned_id_is_the_chat_and_message_ids() -> None:
         assert await transport(_row(_message())) == f"{CHAT_ID}:{MESSAGE_ID}"
 
 
+async def test_a_delivered_message_without_ids_returns_none_and_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D102: an ok answer without a chat or message id means the message went out, so the row returns None."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": MESSAGE_ID}})
+
+    with caplog.at_level(logging.WARNING, logger="invoicebot.channels.telegram.transport"):
+        async with _transport(handler) as (transport, sent):
+            assert await transport(_row(_message())) is None
+
+    assert len(sent) == 1
+    assert "outbox row 1" in caplog.text
+
+
 async def test_a_row_with_a_template_still_sends_its_plain_text() -> None:
     """R-1.10, D180: Telegram has no templates, so a row's template is ignored and its text is sent."""
     async with _transport() as (transport, sent):
@@ -153,6 +171,24 @@ async def test_a_text_over_the_cap_is_permanent_and_sends_nothing() -> None:
             await transport(_row(_message(text="a" * (TEXT_MAX_CHARS + 1))))
 
     assert sent == []
+
+
+async def test_a_text_over_the_cap_in_utf16_units_is_permanent_and_sends_nothing() -> None:
+    """D180: 2049 emoji are 4098 UTF-16 code units, over the 4096 cap, so no request is made."""
+    async with _transport() as (transport, sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(text="😀" * 2049)))
+
+    assert sent == []
+
+
+async def test_a_text_at_the_utf16_cap_is_sent() -> None:
+    """D180: 2048 emoji are 4096 UTF-16 code units, which Telegram accepts, so the row is sent."""
+    text = "😀" * 2048
+    async with _transport() as (transport, sent):
+        assert await transport(_row(_message(text=text))) == f"{CHAT_ID}:{MESSAGE_ID}"
+
+    assert sent == [{"chat_id": USER_ID, "text": text}]
 
 
 async def test_a_callback_id_over_the_cap_is_permanent_and_sends_nothing() -> None:
@@ -185,6 +221,27 @@ async def test_rate_limited_reschedules_by_the_retry_after() -> None:
 
     assert raised.value.delay == timedelta(seconds=3)
     assert raised.value.reason == "telegram_rate_limited"
+
+
+async def test_a_huge_retry_after_is_clamped_to_the_max_backoff() -> None:
+    """D180: a retry_after beyond the backoff cap waits MAX_BACKOFF_MINUTES, not the raw delay."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 999999",
+                "parameters": {"retry_after": 999999},
+            },
+        )
+
+    async with _transport(handler) as (transport, _sent):
+        with pytest.raises(SendLater) as raised:
+            await transport(_row(_message()))
+
+    assert raised.value.delay == timedelta(minutes=MAX_BACKOFF_MINUTES)
 
 
 async def test_a_rejected_token_alerts_once_and_reschedules() -> None:
