@@ -307,7 +307,7 @@ directly; `whatsapp` builds a Meta webhook payload and runs `parse_webhook`; `te
 channel name, reusing the fixtures pattern of `test_conversation_fake.py` (copy what is needed; do not import from
 another test module). Cases, docstring `S14.1` plus the rule:
 
-- one photo → the outbox holds the BR-S01 acknowledgement, addressed on the inbound channel;
+- one photo → the outbox holds the BR-S09 acknowledgement, addressed on the inbound channel;
 - the same delivery twice → one acknowledgement only (R-1.8);
 - a button press whose id names an invoice not waiting for it → BR-S02;
 - `/estado` from the owner → one reply on the inbound channel (S11.4).
