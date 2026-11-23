@@ -139,12 +139,12 @@ async def run_browser_job(
                 MAX_HELPER_OUTPUT_BYTES,
             )
     except TimeoutError:
-        logger.warning("portal helper timed out", extra={"portal_key": fetcher_name})
+        logger.warning("portal helper timed out", extra={"fetcher": fetcher_name})
         return FetchResult(FetchReason.TIMEOUT, (), fetcher_name)
     except RuntimeError as err:
         logger.warning(
             "portal helper failed",
-            extra={"portal_key": fetcher_name, "error": type(err).__name__},
+            extra={"fetcher": fetcher_name, "error": type(err).__name__},
         )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
     try:
@@ -152,7 +152,7 @@ async def run_browser_job(
     except ValidationError as err:
         logger.warning(
             "portal helper output invalid",
-            extra={"portal_key": fetcher_name, "error": type(err).__name__},
+            extra={"fetcher": fetcher_name, "error": type(err).__name__},
         )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
 

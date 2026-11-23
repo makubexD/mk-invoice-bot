@@ -14,8 +14,7 @@ from urllib.parse import urlsplit
 from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import Flow, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Reading
-from invoicebot.fetchers.base import TECHNICAL_REASONS as TECHNICAL_REASONS
-from invoicebot.fetchers.base import FetchReason
+from invoicebot.fetchers.base import TECHNICAL_REASONS, FetchReason
 from invoicebot.fetchers.chain import Attempt
 from invoicebot.rules.messages_es import (
     FETCH_AUTH_LINE,

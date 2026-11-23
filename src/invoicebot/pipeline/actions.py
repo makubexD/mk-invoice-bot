@@ -88,6 +88,7 @@ from invoicebot.store.invoices import (
     load_reading,
     mark_editing,
     set_state,
+    start_fetch_round,
 )
 from invoicebot.sunat.verdict import RULE_ANNULLED, RULE_NOT_AUTHORIZED
 
@@ -291,6 +292,7 @@ async def _invalid_ok(
         return ()
     _, rule_id = await _invoice_state(conn, invoice_id)
     await set_state(conn, invoice_id, FETCHING_DOCS, rule_id=rule_id, expected=CONFIRM_INVALID)
+    await start_fetch_round(conn, invoice_id)
     await enqueue(conn, invoice_id, FETCH_STEP)
     return ()
 

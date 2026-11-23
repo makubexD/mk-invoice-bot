@@ -407,7 +407,7 @@ async def test_fetch_helper_outliving_its_timeout_reports_timeout(
     assert result.files == ()
     records = [record for record in caplog.records if record.getMessage() == "portal helper timed out"]
     assert len(records) == 1
-    assert records[0].portal_key == "synthetic"
+    assert records[0].fetcher == "synthetic"
 
 
 async def test_fetch_helper_runtime_error_logs_portal_helper_failed(
@@ -420,7 +420,7 @@ async def test_fetch_helper_runtime_error_logs_portal_helper_failed(
     assert result.reason is FetchReason.TECHNICAL
     records = [record for record in caplog.records if record.getMessage() == "portal helper failed"]
     assert len(records) == 1
-    assert records[0].portal_key == "synthetic"
+    assert records[0].fetcher == "synthetic"
     assert records[0].error == "RuntimeError"
 
 
@@ -434,7 +434,7 @@ async def test_fetch_helper_validation_error_logs_portal_helper_output_invalid(
     assert result.reason is FetchReason.TECHNICAL
     records = [record for record in caplog.records if record.getMessage() == "portal helper output invalid"]
     assert len(records) == 1
-    assert records[0].portal_key == "synthetic"
+    assert records[0].fetcher == "synthetic"
     assert records[0].error == "ValidationError"
 
 

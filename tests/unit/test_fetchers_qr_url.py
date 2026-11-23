@@ -310,16 +310,22 @@ async def test_fetch_more_than_max_redirects_is_guard_blocked(tmp_path: Path) ->
     assert len(requested) == MAX_REDIRECTS + 1
 
 
-async def test_fetch_server_error_is_technical(tmp_path: Path) -> None:
-    """R-5.2, R-5.6: a non-200 answer is a technical failure."""
+async def test_fetch_server_error_is_technical_and_logs_its_status(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.2, R-5.6, R-5.7: a non-200 answer is a technical failure, logged with its status only."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500)
 
     async with _make_fetcher(handler) as fetcher:
-        result = await fetcher.fetch(_invoice(), tmp_path)
+        with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.qr_url"):
+            result = await fetcher.fetch(_invoice(), tmp_path)
 
     assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "qr url fetch failed"]
+    assert len(records) == 1
+    assert records[0].status == 500
 
 
 async def test_fetch_connect_error_logs_one_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

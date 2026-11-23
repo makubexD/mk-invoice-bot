@@ -10,7 +10,8 @@ from psycopg import AsyncConnection
 
 #: The FetchReason.OK value; the store does not import invoicebot.fetchers.
 OK_REASON = "ok"
-#: The FetchReason values BR-F03 counts as a technical failure (spec 06 §3).
+#: The FetchReason values BR-F03 counts as a technical failure (spec 06 §3); keep in step with
+#: ``fetchers.base.TECHNICAL_REASONS``, which the store may not import.
 _TECHNICAL_REASONS = frozenset({"technical", "timeout"})
 
 

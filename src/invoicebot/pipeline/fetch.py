@@ -195,8 +195,8 @@ def make_fetch_handler(
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
         decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for)
-        # A Wait means the latest try ended with a wait reason and retries remain; this job is the
-        # retry, since its run_after already held the delay (D65), so the fetcher runs now.
+        # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
+        # remains; this job is the retry, since its run_after already held the delay (D65, D167).
         if isinstance(decision, Run | Wait):
             outcome = await _run(inputs, reading, decision.fetcher, registry, schedule_for, data_dir)
         elif isinstance(decision, Exhausted):

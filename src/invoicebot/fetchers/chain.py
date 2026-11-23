@@ -35,7 +35,7 @@ class Run:
 
 @dataclass(frozen=True)
 class Wait:
-    """Run this fetcher again: its latest try was a wait reason and its retry is due (D65, D100)."""
+    """Run this fetcher again: its latest try waits or was a first technical failure (D65, D100, D167)."""
 
     fetcher: str
 

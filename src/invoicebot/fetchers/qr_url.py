@@ -129,6 +129,7 @@ class QrUrlFetcher:
             logger.warning("qr url fetch failed", extra={"error": type(err).__name__})
             return FetchResult(FetchReason.TECHNICAL, (), None)
         if reply.status != httpx.codes.OK:
+            logger.warning("qr url fetch failed", extra={"status": reply.status})
             return FetchResult(FetchReason.TECHNICAL, (), None)
         return _store(reply.body, out_dir, invoice, self._max_bytes)
 
