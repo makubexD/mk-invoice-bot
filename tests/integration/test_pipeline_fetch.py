@@ -1483,3 +1483,28 @@ async def test_the_failure_that_raises_the_gap_gets_no_retry(
     assert gaps == [(f"portal_broken:{PORTAL_KEY}", "PORTAL_BROKEN")]
     assert len(jobs) == 1
     assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_open_broken_gap_ends_the_retry_without_a_streak(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D170: an open gap alone ends the retry, even when this failure trips no BR-F03 streak."""
+    profile_id = f"fetch-{uuid4().hex}"
+    await _technical_failures(db_pool, tmp_path, profile_id, 3)
+    # A later invoice that ended not_found_yet breaks the streak; the gap stays open.
+    quiet_id = await _fetching_invoice(db_pool, profile_id)
+    async with db_pool.connection() as conn:
+        await record_attempt(
+            conn, quiet_id, "portal_registry", PORTAL_KEY, FetchReason.NOT_FOUND_YET.value, 1
+        )
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert gaps == [(f"portal_broken:{PORTAL_KEY}", "PORTAL_BROKEN")]
+    assert len(jobs) == 1
+    assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10

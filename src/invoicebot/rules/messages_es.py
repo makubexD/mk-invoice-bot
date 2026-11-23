@@ -540,7 +540,7 @@ REPROCESS_NOT_ALLOWED = (
 )
 #: /reprocesar's answer when the last fetch round is too recent (S4.9, D171).
 REPROCESS_TOO_SOON = (
-    "Ya reintenté el comprobante #{id} hace poco. Vuelve a usar /reprocesar {id} en unos minutos."
+    "Hace poco busqué los archivos del comprobante #{id}. Vuelve a usar /reprocesar {id} en unos minutos."
 )
 
 

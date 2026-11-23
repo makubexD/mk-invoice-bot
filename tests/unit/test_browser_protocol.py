@@ -7,7 +7,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from invoicebot.fetchers.browser.protocol import HelperOutput
+from invoicebot.fetchers.browser.protocol import HelperOutput, error_class_of
 
 
 def test_helper_output_keeps_the_error_class() -> None:
@@ -31,3 +31,16 @@ def test_helper_output_rejects_a_non_identifier_error_class(error_class: str) ->
 
     with pytest.raises(ValidationError):
         HelperOutput.model_validate_json(payload)
+
+
+def test_error_class_of_names_an_ordinary_exception() -> None:
+    """D169: an ordinary exception's class name is kept."""
+    assert error_class_of(ValueError("page text")) == "ValueError"
+
+
+@pytest.mark.parametrize("name", ["E" * 65, "Ërror"])
+def test_error_class_of_drops_a_name_the_model_would_reject(name: str) -> None:
+    """D169: a class name outside the pattern gives None, so the helper's except block cannot raise."""
+    error_type = type(name, (Exception,), {})
+
+    assert error_class_of(error_type()) is None

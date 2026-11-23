@@ -24,6 +24,7 @@ from invoicebot.fetchers.browser.protocol import (
     HelperOutput,
     SolCredentialsIn,
     SolRequest,
+    error_class_of,
     parse_helper_args,
 )
 from invoicebot.fetchers.browser.session import (
@@ -81,7 +82,7 @@ def main() -> int:
         )
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16, D169)
         logger.error("SOL browser helper failed: %s", type(error).__name__)
-        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=type(error).__name__))
+        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=error_class_of(error)))
     else:
         emit(output(result))
     return 0

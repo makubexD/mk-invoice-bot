@@ -24,6 +24,7 @@ from invoicebot.fetchers.browser.protocol import (
     BadRequest,
     HelperOutput,
     HelperRequest,
+    error_class_of,
     parse_helper_args,
 )
 from invoicebot.fetchers.browser.session import (
@@ -50,7 +51,7 @@ def main() -> int:
         asyncio.run(_run_browser(request, chromium_sandbox))
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
         logger.error("browser helper failed: %s", type(error).__name__)
-        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=type(error).__name__))
+        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=error_class_of(error)))
     return 0
 
 
