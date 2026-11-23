@@ -27,6 +27,7 @@ from invoicebot.config.models import (
     PickField,
     Portal,
     WhatsAppChannel,
+    google_accounts_in,
     parse_delay,
 )
 
@@ -140,6 +141,27 @@ def test_google_account_address_is_stored_lower_cased(tmp_path: Path) -> None:
 
     assert cfg.google is not None
     assert cfg.google.accounts["owner"] == "owner@example.com"
+
+
+def test_google_accounts_in_collects_both_sinks_and_a_gmail_inbox(tmp_path: Path) -> None:
+    """R-6.5, D138: a flow's Google accounts are its drive sink's, sheets sink's and gmail inbox's."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["google"]["accounts"].update({"drive_a": "drive@example.com", "sheets_a": "sheets@example.com"})
+    sinks = document["flows"]["personal_google"]["sinks"]
+    sinks[0]["account"] = "drive_a"
+    sinks[1]["account"] = "sheets_a"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    flow = load_config(path).flows["personal_google"]
+
+    assert set(google_accounts_in(flow)) == {"drive_a", "invoices_a", "sheets_a"}
+
+
+def test_google_accounts_in_skips_a_graph_inbox() -> None:
+    """R-6.5, D138: a Graph inbox names a Microsoft account, so it is no Google account."""
+    flow = load_config(EXAMPLE).flows["work_microsoft"]
+
+    assert google_accounts_in(flow) == []
 
 
 def test_example_config_maps_each_microsoft_account_to_its_mailbox() -> None:

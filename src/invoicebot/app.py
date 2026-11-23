@@ -42,6 +42,8 @@ from invoicebot.channels.whatsapp.transport import make_transport
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
+    GOOGLE_DRIVE_KIND,
+    GOOGLE_SHEETS_KIND,
     GRAPH_MODE,
     PERSONAL_MICROSOFT_ACCOUNT,
     Config,
@@ -154,8 +156,6 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
 #: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
-GOOGLE_DRIVE_KIND = "google_drive"
-GOOGLE_SHEETS_KIND = "google_sheets"
 ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0
