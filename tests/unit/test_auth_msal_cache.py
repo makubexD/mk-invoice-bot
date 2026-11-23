@@ -289,6 +289,18 @@ async def test_sign_in_accepts_the_pinned_mailbox_in_another_case(tmp_path: Path
     assert MAILBOX.upper() in saved
 
 
+async def test_cached_username_differing_by_case_and_spaces_is_the_same_mailbox(tmp_path: Path) -> None:
+    """D164: a cached username differing from the pinned mailbox only by case and spaces is that mailbox."""
+    fake = FakeHttpClient(ACCOUNT)
+    fake.mailbox = f"  {MAILBOX.upper()}  "
+    provider, _, _ = _provider(tmp_path, fake)
+    _login(provider)
+    fake.calls.clear()
+
+    assert await provider.token() == SIGNED_IN_ACCESS
+    assert fake.token_posts() == []
+
+
 async def test_sign_in_as_another_mailbox_is_refused_and_saves_no_cache(tmp_path: Path) -> None:
     """R-7.9, D164: signing in as another mailbox raises WrongMailbox and writes nothing."""
     fake = FakeHttpClient(ACCOUNT)
