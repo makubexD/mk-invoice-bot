@@ -68,7 +68,30 @@ Use this for a gap issue of kind `PORTAL_MISSING`, or for a new issuer.
    closes and its GitHub issue is commented and closed. If the fetch fails again, the gap goes back to `reported`,
    without a second issue.
 
-## 3. Set a portal to `broken`
+## 3. Install or replace the Excel template (D86, R-7.10)
+
+Use this for a gap issue of kind `TEMPLATE_INVALID`, or when the reimbursement form changes. The template is the
+owner's own file: it never goes in git (D86).
+
+1. Build a blank template from a filled form: clear the values of the cells the `excel_template` sink writes
+   (`cells:` in `config.yaml`) and the cached values of the formulas that read them. Keep the formulas, styles and
+   labels. The sheet name must match the sink's `sheet`, and the file must have no macros.
+2. Copy it into the live `appdata` volume:
+
+   ```sh
+   VOL=$(podman volume inspect invoicebot-live_appdata --format '{{.Mountpoint}}')
+   podman unshare sh -c "mkdir -p '$VOL/templates' && cp reembolsos.xlsx '$VOL/templates/' \
+       && chown -R 10001:10001 '$VOL/templates' && chmod 0640 '$VOL/templates/reembolsos.xlsx'"
+   podman exec "$APP" test -r /data/templates/reembolsos.xlsx && echo readable
+   ```
+
+3. Put the output of `sha256sum reembolsos.xlsx` in the sink's `template_sha256` in
+   `$LIVE_ROOT/config/config.yaml`, then **reload**.
+4. What happens next: on the restart, the `TEMPLATE_INVALID` gap for that sink is fixed because its entry changed, and
+   each invoice it parked goes back to delivery (D157). A template whose hash does not match parks them again with
+   BR-D02.
+
+## 4. Set a portal to `broken`
 
 Use this when a portal's site changed and every fetch fails.
 
@@ -78,7 +101,7 @@ Use this when a portal's site changed and every fetch fails.
 3. To fix it, update the portal's file in a PR, set it back to `active`, copy it to `$LIVE_ROOT/config/portals/`
    and **reload**. A `PORTAL_BROKEN` gap is fixed only when the portal is `active` and its entry changed (D157).
 
-## 4. Rotate secrets and the GitHub App key
+## 5. Rotate secrets and the GitHub App key
 
 1. Edit the age store. It decrypts to a private temp file and re-encrypts on save:
 
@@ -94,20 +117,20 @@ Use this when a portal's site changed and every fetch fails.
    passes (it runs at `gaps.digest_at`).
 5. For a channel token (WhatsApp), first rotate it with the provider, then update the store and reload.
 
-## 5. Handle a gap issue
+## 6. Handle a gap issue
 
 The bot opens one issue per gap in the ops repo and sends a daily digest. `/gaps` in chat lists the open ones.
 
 1. Read the issue's kind and subject.
 2. Fix it by kind:
    - `PORTAL_MISSING`: [section 2](#2-add-a-portal-and-a-store).
-   - `PORTAL_BROKEN`: [section 3](#3-set-a-portal-to-broken).
-   - `TEMPLATE_INVALID`: fix the flow's sink entry in `config.yaml`, then **reload**.
+   - `PORTAL_BROKEN`: [section 4](#4-set-a-portal-to-broken).
+   - `TEMPLATE_INVALID`: [section 3](#3-install-or-replace-the-excel-template-d86-r-710).
    - `PARSER_MISS` and `UNROUTED_BUYER`: these never resume on their own. Fix the parsing rules or the routing
      rules, then handle the parked invoices by hand.
 3. A fix you don't want to make: send `/gap ignorar <id>` in chat. The bot stops reporting that gap.
 
-## 6. Restore a backup
+## 7. Restore a backup
 
 1. Download the latest `db-<date>.dump.age` from the OneDrive backup folder. The matching age identity is kept off
    the bot host.
@@ -117,7 +140,7 @@ The bot opens one issue per gap in the ops repo and sends a daily digest. `/gaps
    restore the drilled dump into an empty live database with `pg_restore --no-owner`, then run
    `./deploy/deploy-live.sh <current tag>`. Rehearse it on dev before the first real use.
 
-## 7. Postgres is down
+## 8. Postgres is down
 
 1. `/health` answers 503 `{"db": "down"}`, and the uptime monitor alerts.
 2. The webhook answers 503 too, so Meta keeps retrying. Leave the webhook on: a 200 would drop the message (R-9.15,
@@ -128,7 +151,7 @@ The bot opens one issue per gap in the ops repo and sends a daily digest. `/gaps
 5. Messages Meta retried in the meantime are stored once. Jobs that were running are picked up again after their
    lease expires.
 
-## 8. Refresh the padrón by hand
+## 9. Refresh the padrón by hand
 
 The app refreshes it weekly, at `sunat.padron.refresh_cron`. A failed refresh shows up as a `padron refresh failed`
 warning in the logs, with its reason.
@@ -139,7 +162,7 @@ warning in the logs, with its reason.
 3. For a ZIP you downloaded yourself, copy it in with `podman cp`, then run
    `podman exec "$APP" python scripts/import_padron.py /data/<file>.zip`.
 
-## 9. Rehearse without WhatsApp (D165)
+## 10. Rehearse without WhatsApp (D165)
 
 While Meta verification is pending, the dev-only `console` channel runs the same intake as the webhook. Its replies
 stay in the outbox and are never sent anywhere. Config load refuses it with `env: production`.
