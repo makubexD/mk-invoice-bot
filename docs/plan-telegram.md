@@ -59,7 +59,7 @@ Not yet open/closed (adding Telegram today would edit these):
 | --- | --- | --- | --- |
 | T0 `telegram-seams` | Done 2026-11-23, `docs/archive/plan-telegram-seams.md` | Refactor with no behavior change: neutral button codec, media errors and sender hash; shared intake route; a channel registry (`wiring/`) so `app.py` iterates builders; any channel optional (D174). After T0, a channel is a new package plus one line in the builder tuple. | Nothing |
 | T1 `telegram-adapter` | Done 2026-11-23, `docs/archive/plan-telegram-adapter.md` | `channels/telegram/` client, parser, transport, media source; `api/telegram_webhook.py`; `wiring/telegram.py`; the conversation tests parametrized over fake, WhatsApp and Telegram fixtures (S14.1); cross-channel `/estado` and upload tests (S14.2, D176); token-in-URL redaction test (R-9.16). All offline with `httpx.MockTransport` (D182). | Nothing |
-| T2 `telegram-live` | drafted when T1 finishes | Bot from BotFather (owner setup below, D179); `telegram_bot_token` and `telegram_webhook_secret` in the age store; Funnel path; `setWebhook`; each profile's `telegram_user_id`; live rehearsal of flows A, B and `personal_dni`, commands, photo vs document upload, an admin alert, a gap notice; runbook entries (token rotation, "send /start first"). T1 review follow-ups: a strength rule for `telegram_webhook_secret` (Telegram allows `[A-Za-z0-9_-]{1,256}`; the owner picks the minimum), and a fallback channel for BR-O03 when the failing channel is the admin's preferred one (`shortcut:` in `wiring/channels.py`). | Bot token, user ids, the live run |
+| T2 `telegram-live` | `docs/plan-telegram-live.md` | Bot from BotFather (owner setup below, D179); `telegram_bot_token` and `telegram_webhook_secret` in the age store; Funnel path; `setWebhook`; each profile's `telegram_user_id`; live rehearsal of flows A, B and `personal_dni`, commands, photo vs document upload, an admin alert, a gap notice; runbook entries (token rotation, "send /start first"). T1 review follow-ups: a strength rule for `telegram_webhook_secret` (Telegram allows `[A-Za-z0-9_-]{1,256}`; the owner picks the minimum), and a fallback channel for BR-O03 when the failing channel is the admin's preferred one (`shortcut:` in `wiring/channels.py`). | Bot token, user ids, the live run |
 
 T1 sketch (sized for the step rules, ≤4 files each): config model and D-notes; client (`TelegramError(status,
 retry_after)`); parser (text, largest photo, document, `callback_query`, `reply_to_message`, `/cmd@bot` stripping,
@@ -106,10 +106,10 @@ The T2 plan turns these into its owner steps. Nothing here needs a second SIM or
    cannot write first (a 403 before that is permanent).
 7. **Collect user ids.** Before `setWebhook` (`getUpdates` stops working once a webhook is set), read each sender's
    numeric `from.id` from one message they sent the bot, and put it in their profile as `telegram_user_id` (D175).
-   T2 decides the tool (a CLI subcommand that reads the token from the store, so it is never typed).
+   Use `invoicebot telegram ids`, which reads the token from the store, so it is never typed (D186).
 8. **Open the ingress.** Add the `/webhook/telegram` path to the Tailscale Funnel, deploy, reload, check `/health`.
-9. **Register the webhook.** Run the `setWebhook` CLI subcommand (D173), then confirm with `getWebhookInfo` that the
-   URL is set and `last_error_message` is empty.
+9. **Register the webhook.** Run `invoicebot telegram webhook --url <https://…/webhook/telegram>` (D173, D186), then
+   confirm with `invoicebot telegram webhook --info` that the URL is set and `last_error_message` is empty.
 10. **Rehearse live.** Flows A, B and `personal_dni`, the commands, a photo and a document upload, a button press, an
     admin alert and a gap notice, all from Telegram.
 11. **Runbook.** Token rotation: BotFather `/revoke`, store the new token, reload, run `setWebhook` again. Lost

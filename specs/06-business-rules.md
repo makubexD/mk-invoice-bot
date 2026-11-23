@@ -151,7 +151,7 @@ BR-S06's owner answers (D118), outside the catalog: [Aprobar] sets the link `app
 |---|---|---|---|
 | BR-O01 | The outbox has more than 20 unsent rows, or one older than 15 min | Alert, rate-limited | `📮 Hay {n} mensajes sin enviar (el más antiguo de hace {age}).` |
 | BR-O02 | Disk usage on the data volume is above 80% | Alert, rate-limited | `💾 El disco está al {pct}%.` |
-| BR-O03 | A channel token is rejected (WhatsApp 401/190, Telegram 401) | Alert; sends on that channel wait in the outbox | `🔑 El token de {channel} no funciona. Renuévalo.` |
+| BR-O03 | A channel token is rejected (WhatsApp 401/190, Telegram 401) | Alert (on the admin's other chat channel when the rejected one is their preferred, D185); sends on that channel wait in the outbox | `🔑 El token de {channel} no funciona. Renuévalo.` |
 | BR-O04 | The nightly backup failed or wasn't uploaded | Alert | `🗄️ Falló la copia de seguridad de anoche ({reason_desc}).` |
 | BR-O05 | A `SIGHUP` reload found an invalid config (R-9.6, D155) | Alert, admins only; the bot keeps the old config | `⚙️ La nueva configuración no es válida; sigo con la anterior ({reason}).` |
 
