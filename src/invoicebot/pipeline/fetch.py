@@ -117,6 +117,8 @@ class _Inputs:
     invoice: FetchInvoice
     attempts: Sequence[Attempt]
     directory: StoreDirectory
+    #: Fetchers that get no D167 retry because their portal has an open broken gap (D170).
+    no_retry: frozenset[str]
 
 
 @dataclass(frozen=True)
@@ -159,6 +161,7 @@ def make_fetch_handler(
             reading = await load_reading(conn, job.invoice_id)
             flow_name = await load_flow(conn, job.invoice_id)
             rows = await list_attempts(conn, job.invoice_id)
+            broken = reading is not None and await _portal_is_broken(conn, reading, directory)
         if reading is None:
             raise RuntimeError(f"invoice {job.invoice_id} has no reading")
         if flow_name is None:
@@ -183,6 +186,7 @@ def make_fetch_handler(
             )
             return
 
+        no_retry = frozenset({PORTAL_FETCHER}) if broken else frozenset()
         inputs = _Inputs(
             pool=pool,
             cfg=cfg,
@@ -192,9 +196,10 @@ def make_fetch_handler(
             invoice=_fetch_invoice(reading, job.invoice_id),
             attempts=_attempts(rows),
             directory=directory,
+            no_retry=no_retry,
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
-        decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for)
+        decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for, inputs.no_retry)
         # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
         # remains; this job is the retry, since its run_after already held the delay (D65, D167).
         if isinstance(decision, Run | Wait):
@@ -259,7 +264,7 @@ async def _run(
         shutil.rmtree(out_dir, ignore_errors=True)
     schedule = schedule_for(fetcher)
     delay = (
-        technical_retry_delay(fetcher, inputs.attempts, schedule)
+        technical_retry_delay(fetcher, inputs.attempts, schedule, inputs.no_retry)
         if result.reason in TECHNICAL_REASONS
         else retry_delay(fetcher, inputs.attempts, schedule)
     )
@@ -275,7 +280,10 @@ async def _run(
             await record_attempt(
                 conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
             )
-            await _raise_broken_gap(conn, inputs, reading, result)
+            if await _raise_broken_gap(conn, inputs, reading, result) and fetcher == PORTAL_FETCHER:
+                # D170: the failure that raises the gap gets no retry; the next job's
+                # handle sees the open gap, so decide agrees with this at-once enqueue.
+                delay = None
             await _record_result(conn, inputs, fetcher, result, delay)
             committed = True
     except BaseException:
@@ -300,14 +308,20 @@ async def _is_current(conn: AsyncConnection[Any], job: Job) -> bool:
 
 async def _raise_broken_gap(
     conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, result: FetchResult
-) -> None:
-    """Raise PORTAL_BROKEN after the portal's newest attempts all failed technically (BR-F03)."""
+) -> bool:
+    """Raise PORTAL_BROKEN after the portal's newest attempts all failed technically (BR-F03).
+
+    Return True when the portal is now broken, so the run that raises the gap gets
+    no D167 retry (D170). An ignored gap is not broken: ``_portal_is_broken`` says
+    the same, so the retry still waits.
+    """
     if result.portal_key is None or result.reason not in TECHNICAL_REASONS:
-        return
+        return False
     if not await technical_streak(conn, result.portal_key, inputs.cfg.gaps.broken_after):
-        return
+        return False
     ctx = GapContext(profiles=inputs.cfg.profiles, gaps_cfg=inputs.cfg.gaps)
-    await raise_gap(conn, ctx, _broken_sighting(inputs, reading, result.portal_key, result.reason))
+    gap = await raise_gap(conn, ctx, _broken_sighting(inputs, reading, result.portal_key, result.reason))
+    return gap.state in _BROKEN_GAP_STATES
 
 
 def _broken_sighting(inputs: _Inputs, reading: Reading, portal_key: str, reason: FetchReason) -> GapSighting:
@@ -417,7 +431,7 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             inputs.attempts,
             inputs.directory,
             gap_line=_gap_line(gap),
-            portal_broken=await _portal_is_broken(conn, inputs, reading),
+            portal_broken=await _portal_is_broken(conn, reading, inputs.directory),
         )
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_EXHAUSTED, expected=FETCHING_DOCS
@@ -427,12 +441,12 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 
 
-async def _portal_is_broken(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> bool:
+async def _portal_is_broken(conn: AsyncConnection[Any], reading: Reading, directory: StoreDirectory) -> bool:
     """Return True when the issuer's portal has an open or reported PORTAL_BROKEN gap (BR-F03)."""
     ruc_emisor = reading.value("ruc_emisor")
     if ruc_emisor is None:
         return False
-    portal = portal_for(ruc_emisor, inputs.directory)
+    portal = portal_for(ruc_emisor, directory)
     if portal is None:
         return False
     gap = await get_gap(conn, fingerprint(PORTAL_BROKEN, portal.key))

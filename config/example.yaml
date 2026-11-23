@@ -286,3 +286,4 @@ limits:
   heavy_concurrency: 1
   browser_idle_close_s: 60
   per_domain_min_interval_s: 10
+  reprocess_min_interval_s: 600   # D171 · /reprocesar waits this long after the last fetch round

@@ -5,17 +5,19 @@ from __future__ import annotations
 import io
 import json
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Coroutine
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import yaml
 
 from invoicebot.config.models import MediaMaxBytes, Portal, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.browser import sol
 from invoicebot.fetchers.browser.sol import SolCredentialsIn, SolRequest, main, run_sol
 
 _CONFIG = Path(__file__).resolve().parents[2] / "config" / "sunat_sol.yaml"
@@ -179,9 +181,33 @@ def test_main_never_prints_a_password_from_a_bad_request(
     assert main() == 0
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"reason": "technical", "files": []}
+    assert json.loads(captured.out) == {"reason": "technical", "files": [], "error_class": None}
     assert HIDDEN_TEXT not in captured.out
     assert HIDDEN_TEXT not in captured.err
+
+
+def _run_raising_value_error(coro: Coroutine[Any, Any, None]) -> None:
+    """Close the coroutine and fail the way a page error would (D169)."""
+    coro.close()
+    raise ValueError("secret page text")
+
+
+def test_main_prints_the_failure_class_without_page_text(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D169: a top-level failure prints technical with its class and no page text."""
+    request = SimpleNamespace(max_bytes=object(), site=SimpleNamespace(query=object()), page_timeout_ms=0)
+    monkeypatch.setattr(sol, "parse_helper_args", lambda argv: False)
+    monkeypatch.setattr(sol, "read_request", lambda model: request)
+    monkeypatch.setattr(sol, "limit_resources", lambda max_bytes: None)
+    monkeypatch.setattr(sol, "asyncio", SimpleNamespace(run=_run_raising_value_error))
+
+    assert main() == 0
+
+    printed = capsys.readouterr().out
+    assert json.loads(printed) == {"reason": "technical", "files": [], "error_class": "ValueError"}
+    assert "secret page text" not in printed
 
 
 def test_a_sol_request_repr_hides_the_password(tmp_path: Path) -> None:

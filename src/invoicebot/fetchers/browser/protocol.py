@@ -6,6 +6,7 @@ bot can import it without loading a browser.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
@@ -82,10 +83,30 @@ class HelperFile(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+#: The exception's class name only, never page text: a Python identifier of at most 64
+#: characters (R-9.16, D169).
+ERROR_CLASS_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+
+
+def error_class_of(error: BaseException) -> str | None:
+    """Return the error's class name when it fits ``ERROR_CLASS_PATTERN``, else ``None`` (D169).
+
+    The helper calls this inside its top-level ``except``, so a name the model would
+    reject must not raise there: the result line is still printed, without the class.
+    """
+    name = type(error).__name__
+    return name if re.fullmatch(ERROR_CLASS_PATTERN, name, flags=re.ASCII) else None
+
+
 class HelperOutput(BaseModel):
-    """The helper's one stdout line: the reason and its files (S10.1)."""
+    """The helper's one stdout line: the reason, its files and a failure's class (S10.1, D169).
+
+    ``error_class`` names the exception a top-level boundary caught and is null otherwise;
+    it holds an identifier only, never page text (R-9.16, D169).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     reason: FetchReason
     files: tuple[HelperFile, ...] = ()
+    error_class: str | None = Field(default=None, pattern=ERROR_CLASS_PATTERN)

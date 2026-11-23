@@ -61,5 +61,6 @@ def intake_settings(cfg: Config) -> IntakeSettings:
             payment_flow=payment_flow(cfg),
             laptop_flows=laptop_flow_ids(cfg),
             teach=teach_setup(cfg),
+            reprocess_min_interval_s=cfg.limits.reprocess_min_interval_s,
         ),
     )

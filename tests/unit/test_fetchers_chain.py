@@ -166,3 +166,26 @@ def test_technical_retry_delay(
 ) -> None:
     """D167: a technical failure's one retry waits the fetcher's first scheduled delay."""
     assert technical_retry_delay(FETCHER, history, schedule) == expected
+
+
+def test_technical_retry_delay_respects_no_retry() -> None:
+    """D170: a fetcher in no_retry gets no technical retry; another fetcher still does."""
+    schedule = schedule_for(FETCHER)
+    assert technical_retry_delay(FETCHER, [], schedule, no_retry={FETCHER}) is None
+    assert technical_retry_delay(FETCHER, [], schedule, no_retry={"other"}) == timedelta(hours=1)
+
+
+def test_decide_no_retry_moves_to_the_next_fetcher() -> None:
+    """D170: with an open broken gap a technical failure moves on instead of waiting."""
+    history = [Attempt(FETCHER, FetchReason.TECHNICAL)]
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for, no_retry={FETCHER}) == Run(
+        "email_inbox"
+    )
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Wait(FETCHER)
+
+
+def test_technical_then_not_found_yet_waits_on_the_second_slot() -> None:
+    """D170: a technical attempt before a wait reason does not use a wait slot."""
+    history = [Attempt(FETCHER, FetchReason.TECHNICAL), Attempt(FETCHER, FetchReason.NOT_FOUND_YET)]
+    assert decide(ORDER, REGISTERED, history, schedule_for) == Wait(FETCHER)
+    assert retry_delay(FETCHER, history, schedule_for(FETCHER)) == timedelta(hours=6)

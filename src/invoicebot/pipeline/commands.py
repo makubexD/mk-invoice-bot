@@ -52,6 +52,7 @@ from invoicebot.rules.messages_es import (
     PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
+    REPROCESS_TOO_SOON,
     STATUS,
     STATUS_RULE,
     STATUS_RULE_ONLY,
@@ -68,6 +69,7 @@ from invoicebot.store.gaps import GapRow, ignore_gap, open_gaps
 from invoicebot.store.invoices import (
     InvoiceHead,
     PendingRow,
+    fetch_round_started_within,
     get_state_rule,
     list_pending,
     load_invoice_head,
@@ -105,12 +107,17 @@ class PaymentFlow:
 
 @dataclass(frozen=True)
 class CommandContext:
-    """What a command needs beyond its message: admin ids, the timezone, the payment flow and teaching."""
+    """What a command needs beyond its message: admins, the timezone, the payment flow and teaching.
+
+    ``reprocess_min_interval_s`` is the least time between two fetch rounds that
+    ``/reprocesar`` may start; 0 means no wait (D171).
+    """
 
     admins: frozenset[str]
     timezone: str
     payment_flow: PaymentFlow | None = None
     teach: TeachSetup | None = None
+    reprocess_min_interval_s: int = 0
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.
@@ -270,11 +277,16 @@ async def _reprocesar(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96)."""
+    """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96, D171)."""
     target = await resolve_target(conn, msg, "reprocesar", arg, context.admins)
     if target is None:
         return
     invoice_id, head = target
+    if head.state in (FAILED, MANUAL_REQUIRED) and await fetch_round_started_within(
+        conn, invoice_id, context.reprocess_min_interval_s
+    ):
+        await _reply(conn, msg, None, REPROCESS_TOO_SOON.format(id=invoice_id))
+        return
     if await _requeue(conn, invoice_id, head.state):
         await _reply(conn, msg, None, REPROCESS_STARTED.format(id=invoice_id))
         return

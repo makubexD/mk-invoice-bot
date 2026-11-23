@@ -145,7 +145,7 @@ def test_helper_reports_guard_blocked_for_disallowed_http_portal(tmp_path: Path)
     completed = _run_helper(json.dumps(_request(tmp_path)).encode())
 
     assert completed.returncode == 0
-    assert json.loads(completed.stdout) == {"reason": "guard_blocked", "files": []}
+    assert json.loads(completed.stdout) == {"reason": "guard_blocked", "files": [], "error_class": None}
 
 
 def test_helper_reports_technical_for_malformed_stdin() -> None:
@@ -153,4 +153,4 @@ def test_helper_reports_technical_for_malformed_stdin() -> None:
     completed = _run_helper(b"not json")
 
     assert completed.returncode == 0
-    assert json.loads(completed.stdout) == {"reason": "technical", "files": []}
+    assert json.loads(completed.stdout) == {"reason": "technical", "files": [], "error_class": None}

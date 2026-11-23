@@ -34,18 +34,23 @@ async def record_attempt(
 
 
 async def technical_streak(conn: AsyncConnection[Any], portal_key: str, n: int) -> bool:
-    """Return True when the portal's newest ``n`` attempts all failed technically (BR-F03).
+    """Return True when the newest ``n`` invoices that tried the portal all ended technical (BR-F03, D170).
 
-    ``n`` rows must exist and every one must be ``technical`` or ``timeout``; a
-    portal with fewer attempts has no streak. Does not commit.
+    An invoice counts once, by its newest attempt on the portal, however many attempts it
+    had. ``n`` invoices must exist and every one must have ended ``technical`` or
+    ``timeout``; a portal with fewer invoices has no streak. Does not commit.
     """
     if n < 1:
         return False
     cur = await conn.execute(
         """
         SELECT reason
-        FROM fetch_attempts
-        WHERE portal_key = %s
+        FROM (
+            SELECT DISTINCT ON (invoice_id) reason, at, id
+            FROM fetch_attempts
+            WHERE portal_key = %s
+            ORDER BY invoice_id, at DESC, id DESC
+        ) AS latest
         ORDER BY at DESC, id DESC
         LIMIT %s
         """,

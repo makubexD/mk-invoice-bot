@@ -149,6 +149,12 @@ elif MODE == "utf16":
     report("ok", [write("xml", "invoice.xml", xml_bytes(utf16=True))])
 elif MODE == "crash":
     sys.exit(3)
+elif MODE == "error_class":
+    print(json.dumps({"reason": "technical", "files": [], "error_class": "TargetClosedError"}))
+elif MODE == "not_found_yet":
+    print(json.dumps({"reason": "not_found_yet", "files": []}))
+elif MODE == "bad_error_class":
+    print(json.dumps({"reason": "technical", "files": [], "error_class": "bad class"}))
 elif MODE == "invalid_json":
     print("{not json")
 elif MODE == "outside":
@@ -422,6 +428,56 @@ async def test_fetch_helper_runtime_error_logs_portal_helper_failed(
     assert len(records) == 1
     assert records[0].fetcher == "synthetic"
     assert records[0].error == "RuntimeError"
+
+
+async def test_fetch_helper_nonzero_exit_logs_our_detail(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D169: the "portal helper failed" record carries our own message, never page text."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "crash").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "portal helper failed"]
+    assert len(records) == 1
+    assert records[0].detail == "helper exited with code 3"
+
+
+async def test_fetch_helper_error_class_logs_portal_helper_failed_inside(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D169: a helper that reports an error class logs it, never page text."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "error_class").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "portal helper failed inside"]
+    assert len(records) == 1
+    assert records[0].fetcher == "synthetic"
+    assert records[0].error == "TargetClosedError"
+
+
+async def test_fetch_helper_no_error_class_logs_no_failed_inside(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D169: a helper with no error class logs no "portal helper failed inside" warning."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "not_found_yet").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.NOT_FOUND_YET
+    assert [record for record in caplog.records if record.getMessage() == "portal helper failed inside"] == []
+
+
+async def test_fetch_helper_bad_error_class_logs_portal_helper_output_invalid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D169: an error class that is not an identifier makes the output invalid."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "bad_error_class").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "portal helper output invalid"]
+    assert len(records) == 1
 
 
 async def test_fetch_helper_validation_error_logs_portal_helper_output_invalid(
