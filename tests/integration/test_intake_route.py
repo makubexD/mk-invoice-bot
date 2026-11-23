@@ -20,7 +20,7 @@ from fastapi import FastAPI, Request, Response
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.api.intake_route import MAX_BODY_BYTES, IntakeDeps, intake, read_body
+from invoicebot.api.intake_route import MAX_BODY_BYTES, IntakeDeps, intake, parse_json, read_body
 from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.handlers import MEGABYTE
@@ -150,3 +150,8 @@ async def test_unavailable_database_returns_503(
 
     assert response.status_code == 503
     assert response.body == b""
+
+
+def test_deeply_nested_body_is_refused_instead_of_raising() -> None:
+    """R-1.3: a body nested past the decoder's recursion limit gets 400, not a crash."""
+    assert parse_json(b"[" * 100_000) is None
