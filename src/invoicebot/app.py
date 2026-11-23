@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from invoicebot.api.webhook import WebhookDeps, make_router
-from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GOOGLE_OAUTH_ADAPTER, GoogleTokens
+from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.providers import (
     GMAIL_PROVIDER,
     build_token_provider,
@@ -641,11 +641,6 @@ def _sol_site(cfg: Config, directory: StoreDirectory) -> SunatSolSite | None:
     return site
 
 
-def _google_secrets(store: SecretStore) -> Secrets:
-    """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
-    return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
-
-
 def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) -> str | None:
     """Return the first secret the candidate config needs but the store lacks (R-9.6, R-9.9, R-9.10, D155).
 
@@ -657,7 +652,7 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     failed = {
         "secrets:whatsapp": _whatsapp_channel(cfg) is None or not _whatsapp_secrets(store).enabled,
         "secrets:sunat_validez": validation is not None and not validation.enabled,
-        "secrets:google": cfg.google is not None and not _google_secrets(store).enabled,
+        "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
         "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,
         "secrets:laptop": _laptop_flow(cfg) is not None and not _laptop_secrets(store).enabled,
         "secrets:sunat_sol": _sol_secrets_unusable(cfg, directory, store),
@@ -691,7 +686,7 @@ def _google_tokens(
     google = cfg.google
     if google is None:
         return {}
-    secrets = _google_secrets(store)
+    secrets = google_secrets(store)
     if not secrets.enabled:
         raise ValueError(
             f"google config needs the missing secret(s) {', '.join(sorted(secrets.missing))} (R-9.9)"
