@@ -7,9 +7,11 @@ rejection carries one of the reasons channels map to a chat message.
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import struct
 import zipfile
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 from typing import Literal
 
@@ -134,6 +136,49 @@ def document_kind(mime: str) -> AttachmentKind | None:
     if mime.startswith("image/"):
         return "photo"
     return DOCUMENT_KINDS.get(mime)
+
+
+async def write_capped_stream(
+    chunks: AsyncIterator[bytes],
+    path: Path,
+    cap: ByteCap,
+    kind: AttachmentKind,
+    limits: MediaLimits,
+) -> tuple[int, str]:
+    """Stream the body into ``path`` and return the bytes written and their hex SHA-256.
+
+    A photo's first 512 KiB are held in memory until ``check_image_header``
+    passes, so a rejected image never reaches the disk (BR-E07). The larger
+    window keeps the SOF marker findable behind a long EXIF/APP1 segment.
+    """
+    digest = hashlib.sha256()
+    written = 0
+    pending: bytearray | None = bytearray() if kind == "photo" else None
+    async for chunk in chunks:
+        cap.add(len(chunk))
+        digest.update(chunk)
+        if pending is not None:
+            pending.extend(chunk)
+            if len(pending) < MEDIA_HEADER_BYTES:
+                continue
+            check_image_header(bytes(pending), limits.max_megapixels)
+            written += len(pending)
+            await asyncio.to_thread(_append_bytes, path, bytes(pending))
+            pending = None
+        else:
+            written += len(chunk)
+            await asyncio.to_thread(_append_bytes, path, chunk)
+    if pending is not None:
+        check_image_header(bytes(pending), limits.max_megapixels)
+        written += len(pending)
+        await asyncio.to_thread(_append_bytes, path, bytes(pending))
+    return written, digest.hexdigest()
+
+
+def _append_bytes(path: Path, data: bytes) -> None:
+    """Append ``data`` to ``path``; runs in a worker thread so the loop is not blocked."""
+    with path.open("ab") as file:
+        file.write(data)
 
 
 def check_zip(path: Path, max_entries: int, max_ratio: int) -> None:

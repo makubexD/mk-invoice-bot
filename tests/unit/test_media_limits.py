@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import struct
 import zipfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 
 from invoicebot.channels.base import AttachmentKind
 from invoicebot.channels.media_limits import (
+    MEDIA_HEADER_BYTES,
     ByteCap,
     MediaRejected,
     check_image_header,
@@ -17,6 +20,7 @@ from invoicebot.channels.media_limits import (
     document_kind,
     image_megapixels,
     max_bytes_for,
+    write_capped_stream,
 )
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 
@@ -166,3 +170,69 @@ def test_jpeg_segment_length_zero_returns_none() -> None:
 def test_empty_head_returns_none() -> None:
     """R-1.11: an empty head declares no dimensions."""
     assert image_megapixels(b"") is None
+
+
+async def test_pdf_chunks_under_the_cap_are_written_with_their_hash(tmp_path: Path) -> None:
+    """R-1.11: two PDF chunks under the cap are written whole with their SHA-256 and size."""
+    chunks = [b"first-", b"second"]
+    body = b"".join(chunks)
+    path = tmp_path / "file"
+    path.write_bytes(b"")
+
+    async def body_chunks() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    size, sha256 = await write_capped_stream(body_chunks(), path, ByteCap(100), "pdf", _limits())
+
+    assert path.read_bytes() == body
+    assert size == len(body)
+    assert sha256 == hashlib.sha256(body).hexdigest()
+
+
+async def test_pdf_chunks_over_the_cap_raise_too_large(tmp_path: Path) -> None:
+    """R-1.11: PDF chunks whose total exceeds the cap raise too_large."""
+    chunks = [b"a" * 60, b"b" * 60]
+    path = tmp_path / "file"
+    path.write_bytes(b"")
+
+    async def body_chunks() -> AsyncIterator[bytes]:
+        for chunk in chunks:
+            yield chunk
+
+    with pytest.raises(MediaRejected) as exc:
+        await write_capped_stream(body_chunks(), path, ByteCap(100), "pdf", _limits())
+
+    assert exc.value.reason == "too_large"
+
+
+async def test_photo_with_a_bad_header_is_rejected_before_writing(tmp_path: Path) -> None:
+    """BR-E07: a photo whose first 512 KiB fail the header check leaves the file empty."""
+    bad_head = b"GIF89a" + b"\x00" * (MEDIA_HEADER_BYTES - len(b"GIF89a"))
+    path = tmp_path / "file"
+    path.write_bytes(b"")
+
+    async def body_chunks() -> AsyncIterator[bytes]:
+        yield bad_head
+
+    with pytest.raises(MediaRejected) as exc:
+        await write_capped_stream(body_chunks(), path, ByteCap(5_000_000), "photo", _limits())
+
+    assert exc.value.reason == "unsupported_type"
+    assert path.read_bytes() == b""
+
+
+async def test_valid_photo_under_the_header_window_is_written_whole(tmp_path: Path) -> None:
+    """BR-E07: a valid small PNG in one chunk is written whole after the header check."""
+    body = _png_header(2000, 1500) + b"\x00" * 50
+    path = tmp_path / "file"
+    path.write_bytes(b"")
+
+    async def body_chunks() -> AsyncIterator[bytes]:
+        yield body
+
+    size, sha256 = await write_capped_stream(body_chunks(), path, ByteCap(5_000_000), "photo", _limits())
+
+    assert path.read_bytes() == body
+    assert size == len(body)
+    assert sha256 == hashlib.sha256(body).hexdigest()
