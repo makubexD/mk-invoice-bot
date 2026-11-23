@@ -19,6 +19,7 @@ from typing import Any, Literal
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import ChannelName
+from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.config.models import Config, OneDriveFolderSink
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.ubl import MAX_XML_BYTES, XmlRejected, parse_invoice_xml
@@ -284,11 +285,7 @@ def import_origin_channel(cfg: Config) -> ChannelName:
     Raises:
         ValueError: the owner profile has no preferred channel.
     """
-    profile_id = cfg.owner.profile
-    channel = cfg.profiles[profile_id].preferred_channel
-    if channel is None:
-        raise ValueError(f"owner profile {profile_id!r} has no preferred channel")
-    return channel
+    return ProfileIndex.from_config(cfg).admin_channel(cfg.owner.profile)
 
 
 def folder_sink_root(cfg: Config, flow_id: str) -> str:

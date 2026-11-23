@@ -54,14 +54,17 @@ async def http() -> AsyncIterator[httpx.AsyncClient]:
 async def test_builder_without_whatsapp_config_returns_none(
     http: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """R-1.7: a config with no WhatsApp channel builds no wiring and logs the fail-closed reason."""
+    """R-1.7, D174: a config with no WhatsApp channel builds no wiring and logs no error.
+
+    WhatsApp is optional since D174, so its absence is not a fail-closed alert.
+    """
     cfg = _config().model_copy(update={"channels": []})
 
     with caplog.at_level(logging.ERROR):
         wiring = whatsapp_wiring(cfg, SecretStore(_secrets()), http, _intake_deps(cfg))
 
     assert wiring is None
-    assert "whatsapp channel disabled: missing ['channel config']" in caplog.messages
+    assert caplog.messages == []
 
 
 async def test_builder_without_whatsapp_secrets_returns_none(

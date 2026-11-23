@@ -615,7 +615,6 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     validation = _validation_secrets(cfg, store)
     enabled = enabled_chat_channels(cfg.channels)
     console_enabled = console_channel(cfg) is not None
-    chat_enabled = bool(enabled) or console_enabled
     # A console-only dev config starts, so a reload must accept it too (D174, D165).
     failed: dict[str, bool] = {"channels:none": not enabled and not console_enabled}
     for builder in CHANNEL_BUILDERS:
@@ -624,7 +623,8 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
             failed[problem] = True
     failed.update(
         {
-            "secrets:channels": chat_enabled and not channel_secrets(store).enabled,
+            # The console reads no shared channel secret, so only a network channel needs them.
+            "secrets:channels": bool(enabled) and not channel_secrets(store).enabled,
             "secrets:sunat_validez": validation is not None and not validation.enabled,
             "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
             "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,

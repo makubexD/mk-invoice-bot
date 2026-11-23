@@ -137,7 +137,8 @@ def _preferred_channel_is_reachable(profile_id: str, profile: Profile, enabled: 
         return
     if channel not in enabled:
         raise ValueError(f"profile '{profile_id}' prefers disabled channel '{channel}' (D174)")
-    sender_id = profile.whatsapp if channel == "whatsapp" else profile.telegram_user_id
+    sender_ids = {"whatsapp": profile.whatsapp, "telegram": profile.telegram_user_id}
+    sender_id = sender_ids[channel]
     if sender_id is None:
         raise ValueError(f"profile '{profile_id}' prefers channel '{channel}' without an id for it (D174)")
 

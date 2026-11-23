@@ -44,12 +44,12 @@ class WhatsAppBuilder:
         """Return the WhatsApp wiring, or ``None`` when it must stay disabled (D174)."""
         secrets, shared = _whatsapp_secrets(store), channel_secrets(store)
         channel = _whatsapp_channel(cfg)
-        if channel is None or not secrets.enabled or not shared.enabled:
-            # Fail closed: without its secrets or config the webhook is not mounted.
-            logger.error(
-                "whatsapp channel disabled: missing %s",
-                sorted(secrets.missing | shared.missing) or ["channel config"],
-            )
+        if channel is None:
+            # Not configured: WhatsApp is optional since D174, so this is not an error.
+            return None
+        if not secrets.enabled or not shared.enabled:
+            # Fail closed: a configured channel without its secrets is not mounted.
+            logger.error("whatsapp channel disabled: missing %s", sorted(secrets.missing | shared.missing))
             return None
         client = WhatsAppClient(
             http,

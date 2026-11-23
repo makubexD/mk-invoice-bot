@@ -19,7 +19,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Mail
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import ARRIVED_ACTION, SELF_SEND_ACTION, VIA_LAPTOP_ACTION

@@ -39,7 +39,7 @@ from invoicebot.app import (
 )
 from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Config, StoreDirectory, SunatSolSite
+from invoicebot.config.models import Config, ConsoleChannel, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
 from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
@@ -480,6 +480,17 @@ def test_secret_problem_without_the_sender_hash_key_is_channels(tmp_path: Path) 
     del values[SENDER_HASH_KEY]
 
     assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(values)) == "secrets:channels"
+
+
+def test_secret_problem_for_a_console_only_candidate_needs_no_channel_secret(tmp_path: Path) -> None:
+    """D174, D165: a console-only candidate starts without the shared hash key, so a reload accepts it."""
+    cfg = _without_google(tmp_path)
+    console = ConsoleChannel(kind="console", profile=cfg.owner.profile)
+    cfg = cfg.model_copy(update={"channels": [console]})
+    values = _base_secrets()
+    del values[SENDER_HASH_KEY]
+
+    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(values)) is None
 
 
 def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path: Path) -> None:

@@ -13,7 +13,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import InboundMessage
-from invoicebot.channels.whatsapp.payloads import button_id
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import INVALID_OK_ACTION, send_not_confirmed

@@ -152,6 +152,27 @@ async def test_register_claims_files_sent_claims_done_with_their_seq(
         assert row[6]["fields"]["total"]["value"] == "49.90"
 
 
+@pytest.mark.parametrize("channel", ["whatsapp", "telegram"])
+async def test_register_claims_files_on_the_given_origin_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, channel: ChannelName
+) -> None:
+    """R-1.9: an imported claim's invoice takes the origin channel the import is given."""
+    profile_id = _unique("profile")
+    claims = _two_claims(tmp_path / "Reembolsos")
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await register_claims(
+            conn, profile_id, ImportTarget(_unique("flow"), DRIVE_ROOT), claims, origin_channel=channel
+        )
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT DISTINCT origin_channel FROM invoices WHERE profile_id = %s", (profile_id,)
+        )
+        rows = await cur.fetchall()
+    assert rows == [(channel,)]
+
+
 async def test_register_claims_stores_the_drive_path_under_the_sink_root(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
