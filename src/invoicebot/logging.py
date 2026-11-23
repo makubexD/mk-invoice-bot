@@ -125,16 +125,18 @@ def _is_personal(key: str) -> bool:
 
 
 def _fields_of(value: Any) -> dict[str, Any] | None:
-    """Return a dataclass instance's or pydantic model's fields, or ``None`` (R-9.12).
+    """Return a dataclass instance's or pydantic model's shown fields, or ``None`` (R-9.12).
 
     A dataclass class has no field values, so only an instance converts. Fields
     are read, not copied with ``asdict``, so the caller's depth cap still
-    applies to the values.
+    applies to the values. A field declared ``repr=False`` is left out, as the
+    class's own text form hides it (``SolCredentials``, R-9.16).
     """
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
+        return {field.name: getattr(value, field.name) for field in dataclasses.fields(value) if field.repr}
     if isinstance(value, BaseModel):
-        return dict(value)
+        shown = type(value).model_fields
+        return {name: item for name, item in value if name not in shown or shown[name].repr}
     return None
 
 

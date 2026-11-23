@@ -255,8 +255,14 @@ async def test_technical_streak_breaks_a_tie_by_attempt_id(
         await record_attempt(conn, invoice_id, "portal_registry", ok_then_technical_portal, "ok", 10)
         await record_attempt(conn, invoice_id, "portal_registry", ok_then_technical_portal, "technical", 10)
     async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(DISTINCT at) FROM fetch_attempts WHERE portal_key = ANY(%s) GROUP BY portal_key",
+            ([technical_then_ok_portal, ok_then_technical_portal],),
+        )
+        distinct_ats = [row[0] for row in await cur.fetchall()]
         technical_then_ok = await technical_streak(conn, technical_then_ok_portal, 1)
         ok_then_technical = await technical_streak(conn, ok_then_technical_portal, 1)
 
+    assert distinct_ats == [1, 1]
     assert technical_then_ok is False
     assert ok_then_technical is True

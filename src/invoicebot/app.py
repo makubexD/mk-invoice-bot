@@ -155,7 +155,8 @@ LAPTOP_AGENT_KEY = "laptop_agent_key"
 #: The GitHub gap-issue transport and the App private key it signs JWTs with (R-11.5, R-11.10).
 GITHUB_ADAPTER = "github"
 GITHUB_APP_PRIVATE_KEY = "github_app_private_key"
-#: The sink kinds the deliver dispatcher picks a flow's deliverer by (D132).
+#: The OneDrive sink kind the deliver dispatcher picks a flow's deliverer by (D132); the Google kinds
+#: live in ``config.models``.
 ONEDRIVE_FOLDER_KIND = "onedrive_folder"
 #: Pause between two outbox passes.
 OUTBOX_INTERVAL_S = 2.0

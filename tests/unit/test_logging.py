@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from invoicebot.logging import PROPAGATING_LOGGERS, JsonFormatter, configure_logging, step_timer
 
@@ -387,3 +387,38 @@ def test_configure_logging_twice_keeps_one_handler(log_stream: io.StringIO) -> N
     assert logging.getLogger("httpx").propagate is True
     logging.getLogger("invoicebot.demo").info("once")
     assert len(_records(log_stream)) == 1
+
+
+@dataclasses.dataclass(frozen=True)
+class _Hidden:
+    """A dataclass shaped like ``SolCredentials``: short values its repr hides."""
+
+    user: str = dataclasses.field(repr=False)
+    label: str = "ops"
+
+
+class _HiddenModel(BaseModel):
+    """A pydantic model with a field its repr hides."""
+
+    memo: str = Field(repr=False)
+    label: str
+
+
+def test_dataclass_field_hidden_from_repr_is_left_out(log_stream: io.StringIO) -> None:
+    """R-9.12, R-9.16: a dataclass field declared repr=False never reaches the log, however short."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _Hidden(user="u7q")})
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops"}
+    assert "u7q" not in log_stream.getvalue()
+
+
+def test_pydantic_field_hidden_from_repr_is_left_out(log_stream: io.StringIO) -> None:
+    """R-9.12, R-9.16: a pydantic field declared repr=False never reaches the log."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _HiddenModel(memo="t9z", label="ops")})
+
+    assert _records(log_stream)[-1]["payload"] == {"label": "ops"}
+    assert "t9z" not in log_stream.getvalue()

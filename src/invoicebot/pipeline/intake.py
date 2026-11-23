@@ -83,8 +83,8 @@ class IntakeRoles:
     ``teach`` is the profiles and resolver a /portal or BR-F02 answer teaches with,
     None when ``gaps.teach_via_chat`` is off (R-11.4), and ``reprocess_min_interval_s``
     is the least time between two fetch rounds ``/reprocesar`` may start, 0 for no
-    wait (D171). It has no default, as in ``CommandContext``, so a new entry point
-    cannot drop D171's brake.
+    wait (D171). It has no default, as in ``CommandContext``, so roles built by hand
+    cannot drop D171's brake; ``NO_ROLES`` (tests, callers without config) has none.
     """
 
     reprocess_min_interval_s: int
