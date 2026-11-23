@@ -47,7 +47,7 @@ from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.runtime_config import ConfigRejected
 from invoicebot.sandbox import HelperPrefixes
-from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.secrets import SecretNotDeclared, Secrets, SecretStore
 from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
@@ -310,6 +310,20 @@ def test_google_secret_view_declares_only_the_client_secret() -> None:
     assert store.scoped_calls == [(GOOGLE_OAUTH_ADAPTER, frozenset({GOOGLE_CLIENT_SECRET}))]
     assert view.missing == frozenset({GOOGLE_CLIENT_SECRET})
     assert not view.enabled
+
+
+def test_google_secret_view_is_enabled_when_the_client_secret_is_present() -> None:
+    """R-9.10: a Google view holding its client secret is enabled and refuses an undeclared key."""
+    store = _RecordingStore(
+        {"google_client_secret": "synthetic-client-secret", "other_key": "synthetic-other-value"}
+    )
+
+    view = google_secrets(store)
+
+    assert view.enabled
+    assert view.missing == frozenset()
+    with pytest.raises(SecretNotDeclared):
+        view.get("other_key")
 
 
 @pytest.mark.parametrize(
