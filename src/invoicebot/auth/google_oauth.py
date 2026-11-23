@@ -13,6 +13,7 @@ appears in a message, a log line or an exception (R-9.9, R-9.16).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from collections.abc import Callable
@@ -26,8 +27,12 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.sinks.google_api import GoogleError, GoogleTransient
 
+logger = logging.getLogger(__name__)
+
 #: The token endpoint every Google OAuth client refreshes against (D128).
 TOKEN_URL = "https://oauth2.googleapis.com/token"  # noqa: S105  # nosec B105  # public endpoint, not a secret
+#: The endpoint that revokes a grant (D138).
+REVOKE_URL = "https://oauth2.googleapis.com/revoke"
 #: The adapter and secret the Google OAuth clients sign in with (R-9.10, D128).
 GOOGLE_OAUTH_ADAPTER = "google_oauth"
 #: The age-store key that holds the OAuth client secret (D128).
@@ -44,6 +49,22 @@ INVALID_GRANT = "invalid_grant"
 def google_secrets(store: SecretStore) -> Secrets:
     """Return the age-store view the Google OAuth clients read their secret through (R-9.10)."""
     return store.scoped(GOOGLE_OAUTH_ADAPTER, {GOOGLE_CLIENT_SECRET})
+
+
+async def revoke(client: httpx.AsyncClient, token: str) -> None:
+    """Revoke a grant at Google, logging a failure rather than raising it (D138).
+
+    Called when a sign-in is refused, so the grant it obtained does not linger. The
+    token never reaches a log line, and the caller's refusal stands whether or not the
+    revocation succeeds. The call runs under ``client``'s configured timeout.
+    """
+    try:
+        response = await client.post(REVOKE_URL, data={"token": token})
+    except httpx.HTTPError as err:
+        logger.warning("Google token revocation could not reach Google (%s)", type(err).__name__)
+        return
+    if not response.is_success:
+        logger.warning("Google token revocation answered %s", response.status_code)
 
 
 class GoogleTokens:
