@@ -312,6 +312,14 @@ async def _updated_at(conn: AsyncConnection[Any], invoice_id: int) -> datetime:
     return cast(datetime, row[0])
 
 
+async def _fetch_round_at(conn: AsyncConnection[Any], invoice_id: int) -> datetime | None:
+    """Return the stored fetch_round_at of invoice_id, for the D171 brake tests."""
+    cur = await conn.execute("SELECT fetch_round_at FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return cast(datetime | None, row[0])
+
+
 async def _invoice_payloads(conn: AsyncConnection[Any], invoice_id: int) -> list[dict[str, Any]]:
     """Return the outbox payloads linked to invoice_id, oldest first."""
     cur = await conn.execute(
@@ -704,6 +712,59 @@ async def test_reprocesar_too_soon_refuses_the_round_and_keeps_the_state(
 
     assert head is not None
     assert head.state == "MANUAL_REQUIRED"
+    assert jobs == []
+    assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_a_failed_invoice_too_soon_keeps_the_state_and_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: /reprocesar from the sender refuses a FAILED invoice whose fetch round is recent."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+    context = CommandContext(admins=frozenset(), timezone=TIMEZONE, reprocess_min_interval_s=600)
+
+    async with db_pool.connection() as conn:
+        before = await _fetch_round_at(conn, invoice_id)
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        after = await _fetch_round_at(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "FAILED"
+    assert after == before
+    assert jobs == []
+    assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_on_another_senders_invoice_too_soon_refuses_an_admin(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: an admin's /reprocesar gets the same brake on another sender's recent fetch round."""
+    owner_profile = _profile()
+    invoice_id = await _invoice_in(db_pool, owner_profile, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    await _set_fetch_round(db_pool, invoice_id, minutes_ago=1)
+    admin_profile = _profile()
+    msg = _message(admin_profile, f"/reprocesar {invoice_id}")
+    context = CommandContext(
+        admins=frozenset({admin_profile}), timezone=TIMEZONE, reprocess_min_interval_s=600
+    )
+
+    async with db_pool.connection() as conn:
+        before = await _fetch_round_at(conn, invoice_id)
+        await handle_command(conn, msg, "reprocesar", str(invoice_id), context=context)
+        head = await load_invoice_head(conn, invoice_id)
+        after = await _fetch_round_at(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, admin_profile)
+
+    assert head is not None
+    assert head.state == "MANUAL_REQUIRED"
+    assert after == before
     assert jobs == []
     assert replies == [(REPROCESS_TOO_SOON.format(id=invoice_id), None)]
 
