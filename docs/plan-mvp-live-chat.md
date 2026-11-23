@@ -10,10 +10,11 @@ Flow B uses one personal Microsoft account (D164); the work tenant is out of sco
 
 From the `harden-later` review (`docs/plan-mvp.md` § "Carried over from the `harden-later` review"). Does not wait for Meta.
 
-1. Build and deploy the current `main` image with the owner's pinned single-account config: one Microsoft account `personal`, its mailbox pinned, Graph send (`modes: [graph]`), no `bot` account and no `inbox_rule`.
-2. Reload the service and check `/health`.
-3. Run `auth-microsoft --account personal` and confirm the pin accepts the signed-in mailbox.
-4. Remove the unused `bot.msal.age` from `/data/tokens`.
+1. Retire the stale WhatsApp outbox rows before Meta goes live: the `pending` and `dead` admin alerts queued while the token was restricted would otherwise all go out at once. Mark them `dead` with one `UPDATE outbox SET state = 'dead' WHERE channel = 'whatsapp' AND state = 'pending'`, after checking the count.
+2. Build and deploy the current `main` image with the owner's pinned single-account config: one Microsoft account `personal`, its mailbox pinned, Graph send (`modes: [graph]`), no `bot` account and no `inbox_rule`.
+3. Reload the service and check `/health`.
+4. Run `auth-microsoft --account personal` and confirm the pin accepts the signed-in mailbox.
+5. Remove the unused `bot.msal.age` from `/data/tokens`.
 
 Test: `/health` is ok after the reload, `auth-microsoft --account personal` succeeds, and `/data/tokens` has no `bot.msal.age`.
 
