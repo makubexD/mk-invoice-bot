@@ -33,7 +33,7 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.channels.base import MediaSource
-from invoicebot.channels.console import CONSOLE, ConsoleMediaSource, console_channel, console_transport
+from invoicebot.channels.console import console_channel
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -128,6 +128,7 @@ from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
 from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring, channel_secrets
+from invoicebot.wiring.console import ConsoleBuilder
 from invoicebot.wiring.whatsapp import whatsapp_wiring
 
 logger = logging.getLogger(__name__)
@@ -140,8 +141,15 @@ _FetcherBuilder = Callable[[str, Flow], Fetcher | None]
 #: Builds one flow's mailbox and, when it cannot, the reason it is disabled (D98).
 _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 
-#: Builds each chat channel's wiring, or ``None`` when the channel is not enabled (D174).
+#: Builds the chat channels that need no process state, or ``None`` when not enabled (D174).
 CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring,)
+
+
+def _channel_builders(data_dir: Path) -> tuple[ChannelBuilder, ...]:
+    """Return this process's channel builders, the console one bound to ``data_dir`` (D165, D174)."""
+    return (*CHANNEL_BUILDERS, ConsoleBuilder(data_dir))
+
+
 #: Per-request timeout for the shared HTTP clients and the GitHub App (R-1.4, R-11.10).
 HTTP_TIMEOUT_S = 30.0
 #: The Microsoft account flow B files through and the backup uploads with (R-7.1, D119).
@@ -277,7 +285,11 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             timeout=HTTP_TIMEOUT_S,
         ) as guarded_http,
     ):
-        wirings = [w for b in CHANNEL_BUILDERS if (w := b(cfg, store, http, intake_deps)) is not None]
+        wirings = [
+            w
+            for b in _channel_builders(settings.data_dir)
+            if (w := b(cfg, store, http, intake_deps)) is not None
+        ]
         if not wirings:
             # Fail closed (D174): without an enabled chat channel no router is mounted and
             # nothing is started.
@@ -313,7 +325,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         # One token source per Google account for the whole process: two instances on the
         # same token file would race on a refresh (D135).
         google_tokens = _google_tokens(settings, cfg, http, store)
-        sources = _media_sources(wirings, cfg, settings.data_dir)
+        sources = _media_sources(wirings)
         handlers = {
             **_media_handlers(cfg, sources, settings, pool),
             EXTRACT_STEP: make_extract_handler(
@@ -349,7 +361,6 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         transports: dict[str, Transport] = {
             **{wiring.name: wiring.transport for wiring in wirings},
             **_github_transports(cfg, github_app, http, pool),
-            **_console_transports(cfg),
         }
         sender = OutboxSender(pool, transports)
         drive = _personal_drive(settings, cfg, http)
@@ -456,14 +467,9 @@ def _load_secrets(settings: Settings) -> SecretStore:
     return SecretStore.load(settings.secrets_path, settings.age_identity_path)
 
 
-def _media_sources(wirings: list[ChannelWiring], cfg: Config, data_dir: Path) -> dict[str, MediaSource]:
-    """Return each wiring's media source plus the console source when configured (R-1.4, D165)."""
-    sources: dict[str, MediaSource] = {
-        wiring.name: wiring.media_source for wiring in wirings if wiring.media_source is not None
-    }
-    if console_channel(cfg) is not None:
-        sources[CONSOLE] = ConsoleMediaSource(data_dir)
-    return sources
+def _media_sources(wirings: list[ChannelWiring]) -> dict[str, MediaSource]:
+    """Return each wiring's media source (R-1.4, D165)."""
+    return {wiring.name: wiring.media_source for wiring in wirings if wiring.media_source is not None}
 
 
 def _media_handlers(
@@ -474,13 +480,6 @@ def _media_handlers(
         DOWNLOAD_STEP: make_download_handler(pool, sources, settings.data_dir, cfg.limits.media),
         ATTACH_STEP: make_attach_handler(pool, cfg, sources, settings.data_dir, cfg.limits.media),
     }
-
-
-def _console_transports(cfg: Config) -> dict[str, Transport]:
-    """Return the console outbox transport, or none without a console channel (D165)."""
-    if console_channel(cfg) is None:
-        return {}
-    return {CONSOLE: console_transport()}
 
 
 def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:
@@ -615,8 +614,10 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     """
     validation = _validation_secrets(cfg, store)
     enabled = enabled_chat_channels(cfg.channels)
-    chat_enabled = bool(enabled) or console_channel(cfg) is not None
-    failed: dict[str, bool] = {"channels:none": not enabled}
+    console_enabled = console_channel(cfg) is not None
+    chat_enabled = bool(enabled) or console_enabled
+    # A console-only dev config starts, so a reload must accept it too (D174, D165).
+    failed: dict[str, bool] = {"channels:none": not enabled and not console_enabled}
     for builder in CHANNEL_BUILDERS:
         problem = builder.secret_problem(cfg, store)
         if problem is not None:

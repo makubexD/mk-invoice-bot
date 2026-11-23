@@ -65,6 +65,15 @@ def _no_channel_document() -> dict[str, Any]:
     return document
 
 
+def _console_only_document() -> dict[str, Any]:
+    """Return the example config whose only channel is the console (D165, D174)."""
+    document: dict[str, Any] = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["channels"] = [{"kind": "console", "profile": "yo"}]
+    for profile in document["profiles"].values():
+        profile.pop("preferred_channel", None)
+    return document
+
+
 @pytest.fixture
 def runtime_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, test_database_url: str) -> Iterator[Path]:
     """Point Settings at ``tmp_path`` and clear secret-looking variables (R-9.9)."""
@@ -145,6 +154,14 @@ async def test_reload_refuses_a_config_with_no_chat_channel(runtime_env: Path) -
         _check_reload_candidate(Settings())
 
     assert raised.value.reason == "channels:none"
+
+
+async def test_reload_accepts_a_console_only_config(runtime_env: Path) -> None:
+    """D174: a console-only dev config is not refused as channels:none on reload."""
+    _write_config(runtime_env, _console_only_document())
+    _write_secrets(runtime_env, SECRET_VALUES)
+
+    assert _check_reload_candidate(Settings()) is not None
 
 
 async def test_failed_startup_check_mounts_no_webhook(
