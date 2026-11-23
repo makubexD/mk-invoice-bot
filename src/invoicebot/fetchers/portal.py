@@ -115,7 +115,8 @@ async def run_browser_job(
     removed after the run, and its output is capped at ``MAX_HELPER_OUTPUT_BYTES`` (R-9.2).
     The fetch folder reaches the sandbox wrapper as ``HELPER_OUT_DIR`` (D150).
     ``fetcher_name`` becomes the ``portal_key`` of a failure result, so each fetcher reports
-    itself (R-5.7).
+    itself (R-5.7). A helper that reports an ``error_class``, and one that exits non-zero,
+    log a warning naming only the error class and our own message, never page text (D169).
 
     Returns:
         The helper's parsed output, or the ``FetchResult`` saying why the job failed:
@@ -144,17 +145,24 @@ async def run_browser_job(
     except RuntimeError as err:
         logger.warning(
             "portal helper failed",
-            extra={"fetcher": fetcher_name, "error": type(err).__name__},
+            # Our own message, no page text (D169).
+            extra={"fetcher": fetcher_name, "error": type(err).__name__, "detail": str(err)},
         )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
     try:
-        return HelperOutput.model_validate_json(stdout)
+        output = HelperOutput.model_validate_json(stdout)
     except ValidationError as err:
         logger.warning(
             "portal helper output invalid",
             extra={"fetcher": fetcher_name, "error": type(err).__name__},
         )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
+    if output.error_class is not None:
+        logger.warning(
+            "portal helper failed inside",
+            extra={"fetcher": fetcher_name, "error": output.error_class},
+        )
+    return output
 
 
 def helper_env(tmp_dir: Path) -> dict[str, str]:
