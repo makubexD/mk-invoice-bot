@@ -21,8 +21,8 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage, MediaSource
-from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
+from invoicebot.channels.base import Attachment, ButtonPress, InboundMessage, MediaSource, MediaTransient
+from invoicebot.channels.whatsapp.client import WhatsAppClient
 from invoicebot.channels.whatsapp.media import WhatsAppMediaSource
 from invoicebot.config.models import MediaLimits, MediaMaxBytes
 from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE, make_download_handler
@@ -402,7 +402,7 @@ async def test_oversized_pdf_cancels_the_invoice_and_replies_br_e07(
 async def test_media_info_failure_raises_and_changes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-1.4: a Meta 500 on media_info raises WhatsAppError and leaves the invoice alone."""
+    """R-1.4: a Meta 500 on media_info raises MediaTransient and leaves the invoice alone."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": {"message": "boom"}})
@@ -411,7 +411,7 @@ async def test_media_info_failure_raises_and_changes_nothing(
     invoice_id = await _queue_photo(db_pool, profile_id, f"ref-{uuid4().hex}")
     async with _make_client(handler) as client:
         download = make_download_handler(db_pool, _sources(client), tmp_path, _limits())
-        with pytest.raises(WhatsAppError):
+        with pytest.raises(MediaTransient):
             await download(_job(invoice_id))
 
     async with db_pool.connection() as conn:
