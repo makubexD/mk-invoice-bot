@@ -15,7 +15,6 @@ import argparse
 import sys
 from pathlib import Path
 
-from invoicebot.channels.whatsapp.payloads import BUTTONS_LABEL_MAX_CHARS
 from invoicebot.config.checks import flow_problems, label_problems, run_checks
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.sinks.drive_files import DRIVE_LINK_NAMES
@@ -51,7 +50,7 @@ def main(argv: list[str] | None = None) -> int:
 
     problems = run_checks(cfg, directory, changed_portals=_portal_keys(args.pr))
     problems.extend(flow_problems(cfg, field_names=field_names, drive_links=DRIVE_LINK_NAMES))
-    problems.extend(label_problems(cfg, directory, max_chars=BUTTONS_LABEL_MAX_CHARS))
+    problems.extend(label_problems(cfg, directory))
     for problem in problems:
         print(f"{problem.code} {problem.path}: {problem.message}")
     return 1 if any(problem.blocking for problem in problems) else 0
