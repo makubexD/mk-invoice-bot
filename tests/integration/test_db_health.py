@@ -20,7 +20,7 @@ from invoicebot.app import create_app
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.pipeline.handlers import MEGABYTE
-from invoicebot.pipeline.intake import IntakeSettings
+from invoicebot.pipeline.intake import NO_ROLES, IntakeSettings
 from invoicebot.store.db import Pool, create_pool, ping
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -63,6 +63,7 @@ def _webhook_app(pool: Pool, profile_id: str, number: str) -> FastAPI:
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
+            roles=NO_ROLES,
         ),
     )
     app = FastAPI()

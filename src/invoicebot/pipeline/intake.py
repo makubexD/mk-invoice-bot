@@ -105,13 +105,14 @@ class IntakeSettings:
     ``max_queued_per_sender``, ``media_max_bytes`` and ``timezone`` are the
     per-message knobs the webhook and the console CLI share; ``roles`` carries
     the admins, payment flow, laptop flows and teaching setup
-    (:class:`IntakeRoles`).
+    (:class:`IntakeRoles`). ``roles`` has no default, so an entry point built from
+    config cannot drop D171's brake.
     """
 
     max_queued_per_sender: int
     media_max_bytes: MediaMaxBytes
     timezone: str
-    roles: IntakeRoles = NO_ROLES
+    roles: IntakeRoles
 
 
 async def handle_inbound(

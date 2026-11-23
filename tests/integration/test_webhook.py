@@ -29,7 +29,7 @@ from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.whatsapp.signature import sender_hash
 from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.pipeline.handlers import MEGABYTE
-from invoicebot.pipeline.intake import IntakeSettings, handle_inbound
+from invoicebot.pipeline.intake import NO_ROLES, IntakeSettings, handle_inbound
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool, create_pool
 
@@ -90,6 +90,7 @@ def _deps(pool: Pool, sender: _Sender) -> WebhookDeps:
             max_queued_per_sender=MAX_QUEUED,
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
+            roles=NO_ROLES,
         ),
     )
 
