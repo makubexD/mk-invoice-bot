@@ -33,6 +33,7 @@ from invoicebot.rules.messages_es import (
     GAPS_HEADER,
     GAPS_ISSUE,
     GAPS_LINE,
+    GAPS_TRUNCATED,
     HELP_AYUDA,
     HELP_CANCELAR,
     HELP_ESTADO,
@@ -91,8 +92,6 @@ PENDING_REQUEUES = 3
 PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 #: The most open gaps ``/gaps`` lists before it says there are more (S8.9, D139).
 MAX_GAP_LINES = 20
-#: The last line of ``/gaps`` when exactly :data:`MAX_GAP_LINES` gaps came back (S8.9, D139).
-GAPS_TRUNCATED = "…"
 #: The ``/gap`` argument that ignores a gap (S8.9, D139).
 GAP_IGNORE_ARG = "ignorar"
 
@@ -406,12 +405,12 @@ async def _gaps(
     _context: CommandContext,
 ) -> None:
     """List the open or reported gaps, most recently seen first (S8.9, D139)."""
-    rows = await open_gaps(conn, MAX_GAP_LINES)
+    rows = await open_gaps(conn, MAX_GAP_LINES + 1)
     if not rows:
         await _reply(conn, msg, None, GAPS_EMPTY)
         return
-    lines = [GAPS_HEADER, *(_gap_line(row) for row in rows)]
-    if len(rows) == MAX_GAP_LINES:
+    lines = [GAPS_HEADER, *(_gap_line(row) for row in rows[:MAX_GAP_LINES])]
+    if len(rows) > MAX_GAP_LINES:
         lines.append(GAPS_TRUNCATED)
     await _reply(conn, msg, None, "\n".join(lines))
 
