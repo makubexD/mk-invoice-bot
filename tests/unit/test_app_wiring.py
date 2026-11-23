@@ -529,6 +529,22 @@ def test_secret_problem_with_a_whatsapp_channel_is_not_channels_none(tmp_path: P
     )
 
 
+def test_secret_problem_with_a_telegram_channel_is_not_channels_none(tmp_path: Path) -> None:
+    """D183: a Telegram-only candidate has a chat channel, so a reload does not refuse it as channels:none."""
+    cfg = _without_google(tmp_path)
+    channels = [
+        channel.model_copy(update={"enabled": True}) for channel in cfg.channels if channel.kind == "telegram"
+    ]
+    cfg = cfg.model_copy(update={"channels": channels})
+
+    assert (
+        _secret_problem(
+            cfg, _sol_directory("todo"), SecretStore(_base_secrets()), _channel_builders(tmp_path)
+        )
+        != "channels:none"
+    )
+
+
 def test_secret_problem_without_any_channel_is_channels_none(tmp_path: Path) -> None:
     """D183: a candidate with no chat channel at all is refused as channels:none."""
     cfg = _without_google(tmp_path).model_copy(update={"channels": []})

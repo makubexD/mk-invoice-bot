@@ -64,6 +64,9 @@ class ChannelBuilder(Protocol):
 
 async def alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
     """Queue BR-O03's rate-limited owner alert for a rejected channel token (BR-O03)."""
+    # shortcut: the alert goes to each admin's preferred channel, which may be the very channel
+    # whose token was rejected; then only this error log reaches anyone. A fallback channel
+    # needs a routing decision of its own (review follow-up, T2).
     logger.error("channel token rejected", extra={"channel": channel})
     async with pool.connection() as conn, conn.transaction():
         await queue_rate_limited_alert(

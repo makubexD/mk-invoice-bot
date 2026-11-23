@@ -144,6 +144,25 @@ _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
 CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring, telegram_wiring)
 
 
+def _build_channels(
+    cfg: Config,
+    builders: tuple[ChannelBuilder, ...],
+    build: Callable[[ChannelBuilder], ChannelWiring | None],
+) -> tuple[list[ChannelWiring], str | None]:
+    """Build the chat channels and say why startup must fail closed, if it must (D174, D183).
+
+    A configured channel that did not build stops startup too, as the reload check
+    refuses the same config: a profile preferring it would lose its replies and alerts.
+    """
+    built = [(builder, build(builder)) for builder in builders]
+    wirings = [wiring for _, wiring in built if wiring is not None]
+    if not wirings:
+        return wirings, "no chat channel enabled"
+    if any(wiring is None and builder.configured(cfg) for builder, wiring in built):
+        return wirings, "a configured chat channel is missing its secrets"
+    return wirings, None
+
+
 def _channel_builders(data_dir: Path) -> tuple[ChannelBuilder, ...]:
     """Return this process's channel builders, the console one bound to ``data_dir`` (D165, D174)."""
     return (*CHANNEL_BUILDERS, ConsoleBuilder(data_dir))
@@ -284,15 +303,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             timeout=HTTP_TIMEOUT_S,
         ) as guarded_http,
     ):
-        wirings = [
-            w
-            for b in _channel_builders(settings.data_dir)
-            if (w := b(cfg, store, http, intake_deps)) is not None
-        ]
-        if not wirings:
-            # Fail closed (D174): without an enabled chat channel no router is mounted and
-            # nothing is started.
-            logger.error("no chat channel enabled")
+        wirings, channel_problem = _build_channels(
+            cfg, _channel_builders(settings.data_dir), lambda b: b(cfg, store, http, intake_deps)
+        )
+        if channel_problem is not None:
+            # Fail closed (D174): no router is mounted and nothing is started.
+            logger.error(channel_problem)
             yield
             return
         sunat_secrets = _validation_secrets(cfg, store)
