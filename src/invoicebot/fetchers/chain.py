@@ -60,19 +60,21 @@ def decide(
     registered: Collection[str],
     attempts: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
+    no_retry: Collection[str] = frozenset(),
 ) -> Decision:
-    """Choose the next step of the chain (R-5.1, D65).
+    """Choose the next step of the chain (R-5.1, D65, D170).
 
     Walks ``order`` keeping only registered fetchers. A fetcher with no attempt
     runs; one whose latest attempt is ``ok`` is done; one whose latest attempt
     is in ``WAIT_REASONS`` waits on its schedule until it is used up; one whose
-    latest attempt is technical waits once on its first schedule entry (D167);
-    any other reason is final and the next fetcher gets its turn.
+    latest attempt is technical waits once on its first schedule entry (D167),
+    unless it is in ``no_retry`` (an open broken gap, D170); any other reason is
+    final and the next fetcher gets its turn.
     """
     for fetcher in order:
         if fetcher not in registered:
             continue
-        decision = _decide_one(fetcher, attempts, schedule_for)
+        decision = _decide_one(fetcher, attempts, schedule_for, no_retry)
         if decision is not None:
             return decision
     return Exhausted()
@@ -82,6 +84,7 @@ def _decide_one(
     fetcher: str,
     attempts: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
+    no_retry: Collection[str],
 ) -> Run | Wait | Done | None:
     """Decide for one fetcher; ``None`` means it is used up, try the next."""
     history = [attempt for attempt in attempts if attempt.fetcher == fetcher]
@@ -93,7 +96,7 @@ def _decide_one(
     if latest in WAIT_REASONS:
         return _wait_or_none(fetcher, history, schedule_for)
     if latest in TECHNICAL_REASONS:
-        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher)) is None:
+        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher), no_retry) is None:
             return None
         return Wait(fetcher)
     return None
@@ -132,14 +135,18 @@ def technical_retry_delay(
     fetcher: str,
     attempts: Sequence[Attempt],
     schedule: Sequence[timedelta],
+    no_retry: Collection[str] = frozenset(),
 ) -> timedelta | None:
-    """Return the wait after this technical failure, or ``None`` when its one retry is spent (D167).
+    """Return the wait after this technical failure, or ``None`` when its one retry is spent (D167, D170).
 
     ``attempts`` excludes the run being judged: an earlier technical or timeout
     attempt for the same fetcher uses up the retry. Any other earlier reason,
     a wait reason included, leaves it, so the wait is ``schedule[0]``; an empty
-    schedule has no retry.
+    schedule has no retry. A fetcher in ``no_retry`` gets no retry at all: its
+    portal has an open broken gap (D170).
     """
+    if fetcher in no_retry:
+        return None
     if not schedule:
         return None
     if any(attempt.fetcher == fetcher and attempt.reason in TECHNICAL_REASONS for attempt in attempts):

@@ -1436,3 +1436,50 @@ async def test_broken_third_invoices_br_f07_names_the_broken_portal(
     text = outbox[0][0]
     assert MESSAGES["BR-F03"].format(portal=PORTAL_KEY) in text
     assert FETCH_TECHNICAL_LINE.format(fetcher=fetcher_desc(PORTAL_FETCHER)) not in text
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_open_broken_gap_ends_the_portals_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D170: with an open PORTAL_BROKEN gap, a technical portal failure retries at once and moves on."""
+    profile_id = f"fetch-{uuid4().hex}"
+    await _technical_failures(db_pool, tmp_path, profile_id, 3)
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    first = FakeFetcher(FetchReason.TECHNICAL)
+    second = FakeFetcher(FetchReason.OK)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("portal_registry", "manual")),
+        _directory(),
+        {FLOW: {"portal_registry": first, "manual": second}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert len(jobs) == 1
+    assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10
+
+    await handler(_job(invoice_id, next_job_id))
+
+    assert (first.calls, second.calls) == (1, 1)
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_the_failure_that_raises_the_gap_gets_no_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D170: the technical failure that raises PORTAL_BROKEN enqueues its next job with no delay."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_ids = await _technical_failures(db_pool, tmp_path, profile_id, 3)
+    invoice_id = invoice_ids[-1]
+
+    async with db_pool.connection() as conn:
+        gaps = await _gaps(conn)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert gaps == [(f"portal_broken:{PORTAL_KEY}", "PORTAL_BROKEN")]
+    assert len(jobs) == 1
+    assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10
