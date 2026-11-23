@@ -82,10 +82,20 @@ class HelperFile(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+#: The exception's class name only, never page text: a Python identifier of at most 64
+#: characters (R-9.16, D169).
+ERROR_CLASS_PATTERN = r"^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+
+
 class HelperOutput(BaseModel):
-    """The helper's one stdout line: the reason and its files (S10.1)."""
+    """The helper's one stdout line: the reason, its files and a failure's class (S10.1, D169).
+
+    ``error_class`` names the exception a top-level boundary caught and is absent otherwise;
+    it holds an identifier only, never page text (R-9.16, D169).
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     reason: FetchReason
     files: tuple[HelperFile, ...] = ()
+    error_class: str | None = Field(default=None, pattern=ERROR_CLASS_PATTERN)

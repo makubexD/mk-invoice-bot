@@ -8,7 +8,8 @@ route guard, fills the form and downloads the invoice's files, then prints exact
 line: ``{"reason": <code>, "files": [...]}``. Playwright
 and Chromium live only in this process and exit with it, so the bot never holds them while
 idle (R-9.1). Nothing from the page is printed, and every unexpected error becomes
-``technical`` with exit code 0; stderr gets only the exception's class name (R-9.16).
+``technical`` with exit code 0; stderr gets only the exception's class name, which the
+result line repeats in ``error_class`` (R-9.16, D169).
 """
 
 from __future__ import annotations
@@ -49,7 +50,7 @@ def main() -> int:
         asyncio.run(_run_browser(request, chromium_sandbox))
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16)
         logger.error("browser helper failed: %s", type(error).__name__)
-        emit(HelperOutput(reason=FetchReason.TECHNICAL))
+        emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=type(error).__name__))
     return 0
 
 
