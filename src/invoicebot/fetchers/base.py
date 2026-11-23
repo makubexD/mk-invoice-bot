@@ -57,6 +57,10 @@ class FetchReason(StrEnum):
     MISSING_DOCS = "missing_docs"
 
 
+#: The reasons that count as a technical failure: the source broke or timed out (D167, spec 06 §3).
+TECHNICAL_REASONS = frozenset({FetchReason.TECHNICAL, FetchReason.TIMEOUT})
+
+
 @dataclass(frozen=True)
 class FetchedFile:
     """One file a fetcher downloaded, by reference."""

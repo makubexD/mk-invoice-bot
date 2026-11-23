@@ -11,6 +11,7 @@ downloaded files.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import sys
 import tempfile
@@ -27,6 +28,8 @@ from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, Fet
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.helper import run_helper
 from invoicebot.sandbox import check_no_parent_dir
+
+logger = logging.getLogger(__name__)
 
 #: The browser helper module; ``-P`` keeps the working directory off its import path.
 DEFAULT_HELPER_COMMAND = (sys.executable, "-P", "-m", "invoicebot.fetchers.browser")
@@ -136,12 +139,21 @@ async def run_browser_job(
                 MAX_HELPER_OUTPUT_BYTES,
             )
     except TimeoutError:
+        logger.warning("portal helper timed out", extra={"fetcher": fetcher_name})
         return FetchResult(FetchReason.TIMEOUT, (), fetcher_name)
-    except RuntimeError:
+    except RuntimeError as err:
+        logger.warning(
+            "portal helper failed",
+            extra={"fetcher": fetcher_name, "error": type(err).__name__},
+        )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
     try:
         return HelperOutput.model_validate_json(stdout)
-    except ValidationError:
+    except ValidationError as err:
+        logger.warning(
+            "portal helper output invalid",
+            extra={"fetcher": fetcher_name, "error": type(err).__name__},
+        )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
 
 

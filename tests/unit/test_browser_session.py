@@ -6,7 +6,7 @@ import pytest
 
 from invoicebot.config.models import Portal
 from invoicebot.fetchers.browser.protocol import BadRequest, parse_helper_args
-from invoicebot.fetchers.browser.session import launch_options
+from invoicebot.fetchers.browser.session import LAUNCH_ARGS, launch_options
 
 
 def _portal() -> Portal:
@@ -20,6 +20,23 @@ def test_launch_options_pass_the_chromium_sandbox_flag(sandbox: bool) -> None:
     options = launch_options(_portal(), 8080, chromium_sandbox=sandbox)
 
     assert options["chromium_sandbox"] is sandbox
+
+
+@pytest.mark.parametrize(("sandbox", "expected"), [(True, 0), (False, 1)])
+def test_launch_options_drop_no_zygote_with_the_sandbox(sandbox: bool, expected: int) -> None:
+    """D168: --no-zygote is absent with Chromium's sandbox on and present once with it off."""
+    args = launch_options(_portal(), 8080, chromium_sandbox=sandbox)["args"]
+
+    assert args.count("--no-zygote") == expected
+
+
+@pytest.mark.parametrize("sandbox", [True, False])
+def test_launch_options_keep_the_other_launch_args(sandbox: bool) -> None:
+    """D168: every other launch flag is present once whichever way the sandbox is set."""
+    args = launch_options(_portal(), 8080, chromium_sandbox=sandbox)["args"]
+
+    for flag in LAUNCH_ARGS:
+        assert args.count(flag) == 1
 
 
 @pytest.mark.parametrize(("argv", "expected"), [([], False), (["--chromium-sandbox"], True)])

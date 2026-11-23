@@ -21,6 +21,7 @@ from invoicebot.pipeline.questions import INVALID_OK_ACTION
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job
 from invoicebot.secrets import Secrets, SecretStore
+from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
 from invoicebot.sunat.token import ADAPTER, SECRETS
 
@@ -247,6 +248,25 @@ async def test_validation_off_sends_summary_and_moves_on(
         {"id": button_id(invoice_id, "edit"), "title": "Editar"},
         {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
     ]
+
+
+async def test_validation_after_an_edit_starts_a_new_fetch_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D166, D97: re-validating an edited invoice starts a new fetch round; old attempts no longer count."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _validating_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+    async with db_pool.connection() as conn, conn.transaction():
+        await record_attempt(conn, invoice_id, "qr_url", None, "not_found_yet", 1)
+
+    await _run(db_pool, cfg, invoice_id, secrets=None, transport=httpx.MockTransport(_unreachable))
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        attempts = await list_attempts(conn, invoice_id)
+    assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
+    assert attempts == []
 
 
 async def test_estado_cp_1_stores_the_status_without_a_sunat_line(

@@ -46,6 +46,7 @@ from invoicebot.store.invoices import (
     load_reading,
     set_state,
     set_sunat_status,
+    start_fetch_round,
 )
 from invoicebot.store.padron import PadronRow, lookup
 from invoicebot.sunat.token import SunatUnavailable, forget, token
@@ -189,6 +190,7 @@ async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) 
     """Send the summary and move the invoice on, exactly as routing did before (D124)."""
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction)
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
+    await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
     await _reply(
         conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, summary_buttons(inputs.invoice_id)
@@ -202,6 +204,7 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
         return
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, _extra_lines(verdict))
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
+    await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
     run_after = await recheck_run_after(conn, verdict, 1)
     if run_after is not None:

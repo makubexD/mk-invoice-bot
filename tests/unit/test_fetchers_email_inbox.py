@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -301,6 +302,21 @@ async def test_fetch_with_a_mailbox_error_is_technical(tmp_path: Path) -> None:
     assert result.reason is FetchReason.TECHNICAL
 
 
+async def test_fetch_with_a_mailbox_error_logs_one_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.2, R-5.6, R-5.7, S11.9: a mailbox failure logs one warning with the exception class."""
+    mailbox = FakeMailbox([], {}, {}, error=MailboxError("refused"))
+
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.email_inbox"):
+        result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "email inbox fetch failed"]
+    assert len(records) == 1
+    assert records[0].error == "MailboxError"
+
+
 async def test_fetch_with_an_http_error_is_technical(tmp_path: Path) -> None:
     """R-5.2, R-5.6, S11.9: an HTTP failure is a technical failure."""
     mailbox = FakeMailbox([], {}, {}, error=httpx.ConnectError("down"))
@@ -308,6 +324,21 @@ async def test_fetch_with_an_http_error_is_technical(tmp_path: Path) -> None:
     result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
 
     assert result.reason is FetchReason.TECHNICAL
+
+
+async def test_fetch_with_an_http_error_logs_one_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.2, R-5.6, R-5.7, S11.9: an HTTP failure logs one warning with the exception class."""
+    mailbox = FakeMailbox([], {}, {}, error=httpx.ConnectError("down"))
+
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.email_inbox"):
+        result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "email inbox fetch failed"]
+    assert len(records) == 1
+    assert records[0].error == "ConnectError"
 
 
 async def test_fetch_with_only_the_xml_is_ok(tmp_path: Path) -> None:
@@ -322,6 +353,20 @@ async def test_fetch_with_only_the_xml_is_ok(tmp_path: Path) -> None:
     assert result.reason is FetchReason.OK
     (file,) = result.files
     assert file.kind == "xml"
+
+
+async def test_fetch_ok_logs_no_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """R-5.2, R-5.6, R-5.7, S11.9: a successful fetch logs no warning."""
+    xml = _xml()
+    message = _message("M1", datetime(2026, 11, 13, 10, 0, tzinfo=UTC))
+    attachment = _attachment("A1", "F001-123.xml", len(xml))
+    mailbox = FakeMailbox([message], {"M1": [attachment]}, {"A1": xml})
+
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.email_inbox"):
+        result = await EmailInboxFetcher(mailbox, MEDIA_MAX_BYTES).fetch(_invoice(), tmp_path)
+
+    assert result.reason is FetchReason.OK
+    assert [record for record in caplog.records if record.name == "invoicebot.fetchers.email_inbox"] == []
 
 
 async def test_fetch_drops_a_pdf_attachment_that_is_not_a_pdf(tmp_path: Path) -> None:

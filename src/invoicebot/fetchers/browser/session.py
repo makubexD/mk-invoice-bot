@@ -33,11 +33,12 @@ MAX_CPU_SECONDS = 120
 #: proxy and could probe internal addresses (R-5.10).
 LAUNCH_ARGS: tuple[str, ...] = (
     "--disable-dev-shm-usage",
-    "--no-zygote",
     "--renderer-process-limit=1",
     "--disable-gpu",
     "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
 )
+#: Only without Chromium's own sandbox, which refuses to start alongside it (D168).
+NO_ZYGOTE = "--no-zygote"
 #: Disables image loading for portals without a captcha.
 IMAGES_OFF = "--blink-settings=imagesEnabled=false"
 #: Results a blocked navigation turns into ``guard_blocked``; a not-found page keeps its reason.
@@ -141,11 +142,17 @@ def guarded_result(result: FetchResult, block: GuardReason | None) -> FetchResul
     return FetchResult(reason=FetchReason.GUARD_BLOCKED, files=(), portal_key=result.portal_key)
 
 
-def _launch_args(portal: Portal) -> list[str]:
-    """Spec 03 §8's flags, with image loading off unless a captcha needs images."""
+def _launch_args(portal: Portal, chromium_sandbox: bool) -> list[str]:
+    """Spec 03 §8's flags, with image loading off unless a captcha needs images.
+
+    ``--no-zygote`` is added only when Chromium's own sandbox is off, since Chromium
+    refuses to start with both (D168).
+    """
     args = list(LAUNCH_ARGS)
     if portal.captcha == "none":
         args.append(IMAGES_OFF)
+    if not chromium_sandbox:
+        args.append(NO_ZYGOTE)
     return args
 
 
@@ -154,11 +161,12 @@ def launch_options(portal: Portal, proxy_port: int, chromium_sandbox: bool) -> d
 
     Playwright already adds ``--proxy-bypass-list=<-loopback>`` for a launch proxy, so
     loopback goes through the proxy too; passing that flag again would duplicate it.
-    ``chromium_sandbox`` turns Chromium's own sandbox on (D147).
+    ``chromium_sandbox`` turns Chromium's own sandbox on (D147), which drops
+    ``--no-zygote`` from the flags (D168).
     """
     return {
         "headless": True,
-        "args": _launch_args(portal),
+        "args": _launch_args(portal, chromium_sandbox),
         "proxy": {"server": f"http://127.0.0.1:{proxy_port}"},
         "chromium_sandbox": chromium_sandbox,
     }

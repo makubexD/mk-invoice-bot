@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import MediaMaxBytes
+from invoicebot.fetchers.chain import Run, decide
 from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.net.guard import Resolver
 from invoicebot.pipeline.actions import cancel_invoice
@@ -67,6 +68,7 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.states import StateMoved
 from invoicebot.store import taught_links
+from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
 from invoicebot.store.gaps import mark_reported, upsert_gap
 from invoicebot.store.invoices import (
@@ -667,6 +669,38 @@ async def test_reprocesar_on_manual_required_refetches(
     assert head.state == "FETCHING_DOCS"
     assert jobs == ["fetch"]
     assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+
+
+async def test_reprocesar_after_used_up_fetchers_runs_the_chain_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D96, D166: /reprocesar starts a new fetch round, so fetchers used up earlier run again."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+    flow = load_config(EXAMPLE).flows[FLOW]
+    for fetcher in flow.fetchers:
+        # Two technical attempts use the fetcher up today and after D167's one retry is spent.
+        for _ in range(2):
+            async with db_pool.connection() as conn, conn.transaction():
+                await record_attempt(conn, invoice_id, fetcher, None, "technical", 1)
+    msg = _message(profile_id, f"/reprocesar {invoice_id}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        attempts = await list_attempts(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert attempts == []
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
+    assert decide(flow.fetchers, flow.fetchers, [], lambda _fetcher: ()) == Run(flow.fetchers[0])
 
 
 async def test_reprocesar_on_a_failed_batch_redelivers(

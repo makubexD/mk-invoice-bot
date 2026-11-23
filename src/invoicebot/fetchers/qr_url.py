@@ -9,6 +9,7 @@ and writes the invoice's files by kind.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -29,6 +30,8 @@ from invoicebot.fetchers.base import (
 from invoicebot.fetchers.portal import sha256_hex, xml_reason
 from invoicebot.net.guard import GuardReason
 from invoicebot.net.http import GuardBlocked
+
+logger = logging.getLogger(__name__)
 
 SUNAT_DOMAIN = "sunat.gob.pe"
 
@@ -116,13 +119,17 @@ class QrUrlFetcher:
         try:
             async with asyncio.timeout(self._timeout_s):
                 reply = await self._follow(url)
-        except (GuardBlocked, _TooManyRedirects):
+        except (GuardBlocked, _TooManyRedirects) as err:
+            logger.warning("qr url fetch blocked", extra={"error": type(err).__name__})
             return FetchResult(FetchReason.GUARD_BLOCKED, (), None)
-        except (TimeoutError, httpx.TimeoutException):
+        except (TimeoutError, httpx.TimeoutException) as err:
+            logger.warning("qr url fetch timed out", extra={"error": type(err).__name__})
             return _TIMEOUT_RESULT
-        except (httpx.HTTPError, _BodyTooLarge):
+        except (httpx.HTTPError, _BodyTooLarge) as err:
+            logger.warning("qr url fetch failed", extra={"error": type(err).__name__})
             return FetchResult(FetchReason.TECHNICAL, (), None)
         if reply.status != httpx.codes.OK:
+            logger.warning("qr url fetch failed", extra={"status": reply.status})
             return FetchResult(FetchReason.TECHNICAL, (), None)
         return _store(reply.body, out_dir, invoice, self._max_bytes)
 

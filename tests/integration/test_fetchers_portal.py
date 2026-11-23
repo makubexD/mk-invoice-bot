@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import sys
 import tempfile
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+
+import pytest
 
 from invoicebot.config.models import Brand, MediaMaxBytes, Portal, Store, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
@@ -144,6 +147,10 @@ elif MODE == "doctype":
     report("ok", [write("xml", "invoice.xml", xml_bytes(doctype=True))])
 elif MODE == "utf16":
     report("ok", [write("xml", "invoice.xml", xml_bytes(utf16=True))])
+elif MODE == "crash":
+    sys.exit(3)
+elif MODE == "invalid_json":
+    print("{not json")
 elif MODE == "outside":
     path = out_dir.parent / "outside.xml"
     path.write_bytes(b"<Invoice/>")
@@ -387,14 +394,57 @@ async def test_fetch_for_a_todo_portal_is_inactive(tmp_path: Path) -> None:
     assert result.files == ()
 
 
-async def test_fetch_helper_outliving_its_timeout_reports_timeout(tmp_path: Path) -> None:
-    """R-5.6: a helper that outlives helper_timeout_s reports timeout."""
-    result = await _fetcher(tmp_path, "sleep", helper_timeout_s=SLEEP_TIMEOUT_S).fetch(
-        _invoice(), tmp_path / OUT_DIR_NAME
-    )
+async def test_fetch_helper_outliving_its_timeout_reports_timeout(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.6, R-5.7: a helper that outlives helper_timeout_s reports timeout and logs it."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "sleep", helper_timeout_s=SLEEP_TIMEOUT_S).fetch(
+            _invoice(), tmp_path / OUT_DIR_NAME
+        )
 
     assert result.reason is FetchReason.TIMEOUT
     assert result.files == ()
+    records = [record for record in caplog.records if record.getMessage() == "portal helper timed out"]
+    assert len(records) == 1
+    assert records[0].fetcher == "synthetic"
+
+
+async def test_fetch_helper_runtime_error_logs_portal_helper_failed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.7, R-9.2: a helper that exits non-zero logs the portal key and the exception class."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "crash").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "portal helper failed"]
+    assert len(records) == 1
+    assert records[0].fetcher == "synthetic"
+    assert records[0].error == "RuntimeError"
+
+
+async def test_fetch_helper_validation_error_logs_portal_helper_output_invalid(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R-5.7, R-9.2: a helper that prints invalid JSON logs the portal key and the exception class."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "invalid_json").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.TECHNICAL
+    records = [record for record in caplog.records if record.getMessage() == "portal helper output invalid"]
+    assert len(records) == 1
+    assert records[0].fetcher == "synthetic"
+    assert records[0].error == "ValidationError"
+
+
+async def test_fetch_helper_ok_logs_no_warning(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    """R-5.7, R-9.2: a helper that reports ok logs no warning."""
+    with caplog.at_level(logging.WARNING, logger="invoicebot.fetchers.portal"):
+        result = await _fetcher(tmp_path, "match").fetch(_invoice(), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.OK
+    assert [record for record in caplog.records if record.name == "invoicebot.fetchers.portal"] == []
 
 
 async def test_fetch_helper_uses_its_own_tmp_dir_and_removes_it(tmp_path: Path) -> None:

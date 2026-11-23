@@ -26,6 +26,7 @@ from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.queue.jobs import Job
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
+from invoicebot.store.fetch_attempts import record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -44,6 +45,13 @@ TOTAL = "49.90"
 DOCUMENT_URL = "https://portal.example/invoice"
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 GAP_FINGERPRINT = fingerprint("PORTAL_MISSING", ISSUER_RUC)
+#: A final reason per fetcher, as a flow that ran to exhaustion leaves its attempts (R-5.4).
+EXHAUSTED_REASON = {
+    "qr_url": "technical",
+    "portal_registry": "no_portal",
+    "email_inbox": "not_found",
+    "manual": "missing_docs",
+}
 
 XML_BYTES = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"
@@ -235,6 +243,73 @@ async def test_an_active_portal_resumes_the_invoice_and_its_fetch_closes_the_gap
             "INSERT INTO invoice_gaps (invoice_id, fingerprint) VALUES (%s, %s)",
             (invoice_id, GAP_FINGERPRINT),
         )
+
+    await reevaluate(db_pool, _config(), directory)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice_state(conn, invoice_id) == FETCHING_DOCS
+        assert await _sender_outbox(conn, profile_id) == [
+            ("BR-F12", MESSAGES["BR-F12"].format(id=invoice_id), "whatsapp")
+        ]
+        job = await _fetch_job(conn, invoice_id)
+
+    cfg = _fetch_config()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_portal_reply)) as http:
+        fetcher = QrUrlFetcher(
+            http,
+            allowed_hosts(directory),
+            cfg.limits.media.max_bytes,
+            cfg.retrieval.portal_timeout_s,
+        )
+        handler = make_fetch_handler(
+            db_pool,
+            cfg,
+            directory,
+            {FLOW: {"qr_url": fetcher}},
+            tmp_path / "data",
+        )
+        await handler(job)
+
+    async with db_pool.connection() as conn:
+        assert await _invoice_state(conn, invoice_id) == DELIVERING
+        assert await _gap_state(conn, GAP_FINGERPRINT) == "closed"
+        assert await _github_rows(conn) == [("close_issue", ISSUE_URL)]
+
+
+async def test_an_active_portal_resumes_an_invoice_whose_fetchers_were_used_up(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """R-11.9, D157, D166: an active portal resumes an invoice whose fetchers were used up."""
+    profile_id = f"resume-{uuid4().hex}"
+    config_dir = _copy_directory_fixture(tmp_path)
+    assert ISSUER_RUC not in load_directory(config_dir).stores
+
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, _reading())
+        await set_flow(conn, invoice_id, FLOW)
+        await set_state(conn, invoice_id, MANUAL_REQUIRED, rule_id="BR-F07")
+        await conn.execute(
+            """
+            INSERT INTO gaps (fingerprint, kind, subject, state, raised_at, issue_url)
+            VALUES (%s, %s, %s, 'reported', now(), %s)
+            """,
+            (GAP_FINGERPRINT, "PORTAL_MISSING", f"RUC {ISSUER_RUC}", ISSUE_URL),
+        )
+        await conn.execute(
+            "INSERT INTO invoice_gaps (invoice_id, fingerprint) VALUES (%s, %s)",
+            (invoice_id, GAP_FINGERPRINT),
+        )
+
+    for fetcher in _config().flows[FLOW].fetchers:
+        # Two attempts use the fetcher up today and after D167's one retry is spent.
+        for _ in range(2):
+            async with db_pool.connection() as conn, conn.transaction():
+                await record_attempt(conn, invoice_id, fetcher, None, EXHAUSTED_REASON[fetcher], 1)
+
+    _add_active_store(config_dir)
+    directory = load_directory(config_dir)
 
     await reevaluate(db_pool, _config(), directory)
 

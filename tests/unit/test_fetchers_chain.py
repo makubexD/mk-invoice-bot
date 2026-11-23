@@ -15,6 +15,7 @@ from invoicebot.fetchers.chain import (
     Wait,
     decide,
     retry_delay,
+    technical_retry_delay,
 )
 
 FETCHER = "portal_registry"
@@ -39,19 +40,43 @@ def attempts(reason: FetchReason, count: int) -> list[Attempt]:
         pytest.param(attempts(FetchReason.NOT_FOUND_YET, 1), Wait(FETCHER), id="wait-after-first"),
         pytest.param(attempts(FetchReason.NOT_FOUND_YET, 2), Wait(FETCHER), id="wait-after-second"),
         pytest.param(attempts(FetchReason.NOT_FOUND_YET, 3), Exhausted(), id="schedule-used-up"),
-        pytest.param(attempts(FetchReason.TECHNICAL, 1), Exhausted(), id="technical-is-final"),
+        pytest.param(attempts(FetchReason.TECHNICAL, 1), Wait(FETCHER), id="first-technical-waits"),
+        pytest.param(attempts(FetchReason.TIMEOUT, 1), Wait(FETCHER), id="first-timeout-waits"),
+        pytest.param(attempts(FetchReason.TECHNICAL, 2), Exhausted(), id="second-technical-is-final"),
+        pytest.param(
+            [Attempt(FETCHER, FetchReason.TECHNICAL), Attempt(FETCHER, FetchReason.TIMEOUT)],
+            Exhausted(),
+            id="timeout-after-technical-is-final",
+        ),
+        pytest.param(
+            [Attempt(FETCHER, FetchReason.NOT_FOUND_YET), Attempt(FETCHER, FetchReason.TECHNICAL)],
+            Wait(FETCHER),
+            id="technical-after-a-wait-reason-waits",
+        ),
         pytest.param(attempts(FetchReason.XML_MISMATCH, 1), Exhausted(), id="xml-mismatch-is-final"),
     ],
 )
 def test_decide_one_registered_fetcher(history: list[Attempt], expected: object) -> None:
-    """R-5.1: a fetcher runs, waits on its schedule, is done, or is used up (D65)."""
+    """R-5.1: a fetcher runs, waits on its schedule, is done, or is used up (D65, D167)."""
     assert decide(ORDER, REGISTERED, history, schedule_for) == expected
 
 
 def test_technical_failure_passes_to_the_next_fetcher() -> None:
-    """R-5.1: a fetcher's final failure moves the chain to the next fetcher in order."""
-    history = [Attempt(FETCHER, FetchReason.TECHNICAL)]
+    """D167: a fetcher's second technical failure is final and the chain moves to the next fetcher."""
+    history = attempts(FetchReason.TECHNICAL, 2)
     assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Run("email_inbox")
+
+
+def test_technical_failure_without_a_schedule_moves_on() -> None:
+    """D167: a technical failure with an empty schedule has no retry; the chain moves on."""
+
+    def no_schedule(fetcher: str) -> list[timedelta]:
+        del fetcher
+        return []
+
+    history = attempts(FetchReason.TECHNICAL, 1)
+    assert decide(ORDER, {FETCHER, "email_inbox"}, history, no_schedule) == Run("email_inbox")
+    assert decide(ORDER, REGISTERED, history, no_schedule) == Exhausted()
 
 
 def test_empty_order_is_exhausted() -> None:
@@ -113,3 +138,31 @@ def test_wait_reasons_exhaust_the_schedule_and_move_on() -> None:
         Attempt(FETCHER, FetchReason.AUTH_REQUIRED),
     ]
     assert decide(ORDER, {FETCHER, "email_inbox"}, history, schedule_for) == Run("email_inbox")
+
+
+@pytest.mark.parametrize(
+    ("history", "schedule", "expected"),
+    [
+        pytest.param([], schedule_for(FETCHER), timedelta(hours=1), id="no-earlier-attempt"),
+        pytest.param(
+            attempts(FetchReason.TIMEOUT, 1),
+            schedule_for(FETCHER),
+            None,
+            id="earlier-timeout-spends-it",
+        ),
+        pytest.param(
+            attempts(FetchReason.NOT_FOUND_YET, 1),
+            schedule_for(FETCHER),
+            timedelta(hours=1),
+            id="earlier-not-found-yet-leaves-it",
+        ),
+        pytest.param([], [], None, id="empty-schedule"),
+    ],
+)
+def test_technical_retry_delay(
+    history: list[Attempt],
+    schedule: list[timedelta],
+    expected: timedelta | None,
+) -> None:
+    """D167: a technical failure's one retry waits the fetcher's first scheduled delay."""
+    assert technical_retry_delay(FETCHER, history, schedule) == expected

@@ -10,7 +10,8 @@ from psycopg import AsyncConnection
 
 #: The FetchReason.OK value; the store does not import invoicebot.fetchers.
 OK_REASON = "ok"
-#: The FetchReason values BR-F03 counts as a technical failure (spec 06 §3).
+#: The FetchReason values BR-F03 counts as a technical failure (spec 06 §3); keep in step with
+#: ``fetchers.base.TECHNICAL_REASONS``, which the store may not import.
 _TECHNICAL_REASONS = frozenset({"technical", "timeout"})
 
 
@@ -55,13 +56,19 @@ async def technical_streak(conn: AsyncConnection[Any], portal_key: str, n: int) 
 
 
 async def list_attempts(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[str, str]]:
-    """Return the invoice's ``(fetcher, reason)`` attempts in insertion order (R-5.7)."""
+    """Return the invoice's current-round ``(fetcher, reason)`` attempts in insertion order (R-5.7, D166).
+
+    A fetch round starts at ``invoices.fetch_round_at``; every attempt at or after it
+    belongs to the round, and an invoice with no round keeps every attempt.
+    """
     cur = await conn.execute(
         """
-        SELECT fetcher, reason
-        FROM fetch_attempts
-        WHERE invoice_id = %s
-        ORDER BY id
+        SELECT a.fetcher, a.reason
+        FROM fetch_attempts AS a
+        JOIN invoices AS i ON i.id = a.invoice_id
+        WHERE a.invoice_id = %s
+          AND (i.fetch_round_at IS NULL OR a.at >= i.fetch_round_at)
+        ORDER BY a.id
         """,
         (invoice_id,),
     )
