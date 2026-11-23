@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import logging
@@ -10,8 +11,31 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from invoicebot.logging import PROPAGATING_LOGGERS, JsonFormatter, configure_logging, step_timer
+
+
+@dataclasses.dataclass(frozen=True)
+class _Invoice:
+    """A dataclass value carrying a synthetic RUC and a count."""
+
+    ruc: str
+    count: int
+
+
+@dataclasses.dataclass(frozen=True)
+class _Node:
+    """A dataclass that nests another value, for the depth test."""
+
+    child: Any = None
+
+
+class _Contact(BaseModel):
+    """A pydantic model value with a personal field and a plain one."""
+
+    phone_number: str
+    label: str
 
 
 @pytest.fixture
@@ -284,6 +308,55 @@ def test_value_nested_past_the_cap_becomes_nested(log_stream: io.StringIO) -> No
         value = value["level"]
     assert value == "[nested]"
     assert "deep" not in log_stream.getvalue()
+
+
+def test_dataclass_value_is_scrubbed_field_by_field(log_stream: io.StringIO) -> None:
+    """R-9.12: a dataclass in extra= is written as its fields, so its ruc is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _Invoice(ruc="20000000001", count=2)})
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"ruc": "[redacted]", "count": 2}
+    assert "20000000001" not in output
+
+
+def test_pydantic_model_value_is_scrubbed_field_by_field(log_stream: io.StringIO) -> None:
+    """R-9.12: a pydantic model in extra= is written as its fields, so phone_number is redacted."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info(
+        "x", extra={"payload": _Contact(phone_number="51999999999", label="ops")}
+    )
+
+    output = log_stream.getvalue()
+    assert _records(log_stream)[-1]["payload"] == {"phone_number": "[redacted]", "label": "ops"}
+    assert "51999999999" not in output
+
+
+def test_dataclass_nested_past_the_cap_becomes_nested(log_stream: io.StringIO) -> None:
+    """R-9.12: a dataclass nested deeper than five levels is written as [nested]."""
+    configure_logging(stream=log_stream)
+    nested: Any = _Node(child="deep")
+    for _ in range(5):
+        nested = _Node(child=nested)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": nested})
+
+    value = _records(log_stream)[-1]["payload"]
+    for _ in range(5):
+        value = value["child"]
+    assert value == "[nested]"
+    assert "deep" not in log_stream.getvalue()
+
+
+def test_dataclass_class_is_logged_as_text(log_stream: io.StringIO) -> None:
+    """R-9.12: a dataclass class, not an instance, is logged as its str instead of its fields."""
+    configure_logging(stream=log_stream)
+
+    logging.getLogger("invoicebot.demo").info("x", extra={"payload": _Invoice})
+
+    assert _records(log_stream)[-1]["payload"] == str(_Invoice)
 
 
 def test_extra_number_stays_a_number(log_stream: io.StringIO) -> None:

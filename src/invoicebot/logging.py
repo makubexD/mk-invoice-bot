@@ -18,6 +18,7 @@ it must not import itself instead of :mod:`logging`.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
@@ -27,6 +28,8 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, TextIO
+
+from pydantic import BaseModel
 
 #: Event fields copied from ``extra=`` onto the JSON object, in output order.
 EXTRA_FIELDS = (
@@ -121,10 +124,30 @@ def _is_personal(key: str) -> bool:
     return any(f"_{personal}_" in f"_{words}_" for personal in _PERSONAL_KEYS)
 
 
+def _fields_of(value: Any) -> dict[str, Any] | None:
+    """Return a dataclass instance's or pydantic model's fields, or ``None`` (R-9.12).
+
+    A dataclass class has no field values, so only an instance converts. Fields
+    are read, not copied with ``asdict``, so the caller's depth cap still
+    applies to the values.
+    """
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return {field.name: getattr(value, field.name) for field in dataclasses.fields(value)}
+    if isinstance(value, BaseModel):
+        return dict(value)
+    return None
+
+
 def _scrub(value: Any, secret_re: re.Pattern[str] | None, depth: int = 0) -> Any:
-    """Redact personal keys and secrets in ``value`` down to ``_SCRUB_MAX_DEPTH`` (R-9.12)."""
+    """Redact personal keys and secrets in ``value`` down to ``_SCRUB_MAX_DEPTH`` (R-9.12).
+
+    Dataclasses and pydantic models are scrubbed as their fields (R-9.12).
+    """
     if depth >= _SCRUB_MAX_DEPTH:
         return _NESTED
+    fields = _fields_of(value)
+    if fields is not None:
+        value = fields
     if isinstance(value, dict):
         return {
             _redact(str(key), secret_re): (
