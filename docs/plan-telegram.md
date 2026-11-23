@@ -57,7 +57,7 @@ Not yet open/closed (adding Telegram today would edit these):
 
 | Phase | Plan | What | Needs from the owner |
 | --- | --- | --- | --- |
-| T0 `telegram-seams` | `docs/plan-telegram-seams.md` | Refactor with no behavior change: neutral button codec, media errors and sender hash; shared intake route; a channel registry (`wiring/`) so `app.py` iterates builders; any channel optional (D174). After T0, a channel is a new package plus one line in the builder tuple. | Nothing |
+| T0 `telegram-seams` | Done 2026-11-23, `docs/archive/plan-telegram-seams.md` | Refactor with no behavior change: neutral button codec, media errors and sender hash; shared intake route; a channel registry (`wiring/`) so `app.py` iterates builders; any channel optional (D174). After T0, a channel is a new package plus one line in the builder tuple. | Nothing |
 | T1 `telegram-adapter` | drafted when T0 finishes | `channels/telegram/` client, parser, transport, media source; `api/telegram_webhook.py`; `wiring/telegram.py`; `TelegramChannel` config (`mode` fixed to webhook, `api_base`); the conversation tests parametrized over fake, WhatsApp and Telegram fixtures (S14.1); cross-channel `/estado` and upload tests (S14.2, D176); token-in-URL redaction test (R-9.16). All offline with `httpx.MockTransport`. | Nothing |
 | T2 `telegram-live` | drafted when T1 finishes | Bot from BotFather (owner setup below, D179); `telegram_bot_token` and `telegram_webhook_secret` in the age store; Funnel path; `setWebhook`; each profile's `telegram_user_id`; live rehearsal of flows A, B and `personal_dni`, commands, photo vs document upload, an admin alert, a gap notice; runbook entries (token rotation, "send /start first"). | Bot token, user ids, the live run |
 
@@ -66,6 +66,19 @@ retry_after)`); parser (text, largest photo, document, `callback_query`, `reply_
 non-private chats refused); transport (plain text, one inline button per row, 429 → `SendLater`, 400/403 →
 `PermanentSendError`, 401 → BR-O03); media source (`getFile`, 20 MB cap before reading); webhook router; callback
 acknowledgement; wiring builder; parity and cross-channel tests; redaction test.
+
+T0 review follow-ups for T1 (2026-11-23):
+- Startup and the reload check must agree: `_secret_problem` iterates `CHANNEL_BUILDERS` and special-cases the console,
+  while startup keeps whichever builders return a wiring. Give both one rule from the builders (e.g. a `configured(cfg)`
+  predicate on the port), so the console builder is not special-cased and "no channel" comes from the builders.
+- Until `wiring/telegram.py` exists, `telegram.enabled: true` passes config validation with no transport behind it.
+  The T1 builder closes this; if T1 slips, have `check_config` block it.
+- `import_origin_channel` uses the owner's preferred channel even when `import_claims --profile` names another profile.
+- `tests/unit/test_app_wiring.py` imports the private `_whatsapp_secrets`; test through `secret_problem` instead.
+- The `.importlinter` "Only the composition root builds channels" contract lists only some packages; forbid
+  `invoicebot.wiring` everywhere except `invoicebot.app`.
+- `BUTTON_TITLE_MAX` (config) and `BUTTONS_LABEL_MAX_CHARS` (WhatsApp payloads) both hold 20; a test should pin the
+  config cap to at most each channel's cap.
 
 Telegram facts the design relies on: `callback_data` ≤ 64 bytes (today's longest button id is 49); `sendMessage` ≤
 4096 characters, sent without `parse_mode`; `getFile` downloads ≤ 20 MB; about 1 message/s per chat and 30/s overall;
