@@ -9,6 +9,7 @@ description, and the retry delay, never the URL or the token.
 from __future__ import annotations
 
 import contextlib
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
@@ -21,10 +22,13 @@ GETFILE_MAX_BYTES = 20 * 1024 * 1024  # R-1.11: Telegram's own getFile limit
 NOT_SENT_STATUS = 0  # the status of an error raised before any answer
 OK_STATUS = 200  # the Bot API answers every ok: true call with 200, so a bad result keeps it
 FILE_PATH_MAX_CHARS = 256
+#: A file path Telegram may name: plain segments only, no character a shell or a URL parser treats specially.
+FILE_PATH_PATTERN = r"[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*"
+UNSAFE_PATH_SEGMENTS = frozenset({".", ".."})
 
 
 class TelegramError(Exception):
-    """A Bot API failure, with Telegram's error code and retry delay when present (R-9.16)."""
+    """A Bot API failure, with Telegram's error code, description and retry delay when present (R-9.16)."""
 
     def __init__(
         self,
@@ -33,10 +37,12 @@ class TelegramError(Exception):
         code: int | None = None,
         message: str | None = None,
         retry_after: int | None = None,
+        description: str | None = None,
     ) -> None:
         self.status = status
         self.code = code
         self.retry_after = retry_after
+        self.description = description
         super().__init__(_error_message(status, code, message))
 
 
@@ -92,13 +98,21 @@ def _error_for(response: httpx.Response, body: object) -> TelegramError:
     """Turn an unsuccessful or ``ok: false`` answer into ``TelegramError``."""
     code = None
     message = None
+    description = None
     retry_after = None
     if isinstance(body, dict):
         code = _int_field(body.get("error_code"))
-        description = body.get("description")
-        message = description if isinstance(description, str) else None
+        raw_description = body.get("description")
+        description = raw_description if isinstance(raw_description, str) else None
+        message = description
         retry_after = _retry_after(body)
-    return TelegramError(status=response.status_code, code=code, message=message, retry_after=retry_after)
+    return TelegramError(
+        status=response.status_code,
+        code=code,
+        message=message,
+        retry_after=retry_after,
+        description=description,
+    )
 
 
 def _result_of(response: httpx.Response) -> object:
@@ -110,13 +124,12 @@ def _result_of(response: httpx.Response) -> object:
 
 
 def _is_safe_file_path(file_path: str) -> bool:
-    """True when ``file_path`` stays inside the bot's file tree and fits the cap."""
-    return (
-        bool(file_path)
-        and len(file_path) <= FILE_PATH_MAX_CHARS
-        and not file_path.startswith("/")
-        and ".." not in file_path
-    )
+    """True when ``file_path`` matches the allow-list, fits the cap and holds no dot segment."""
+    if len(file_path) > FILE_PATH_MAX_CHARS:
+        return False
+    if re.fullmatch(FILE_PATH_PATTERN, file_path) is None:
+        return False
+    return all(segment not in UNSAFE_PATH_SEGMENTS for segment in file_path.split("/"))
 
 
 def _file_info(result: object) -> FileInfo:
@@ -182,8 +195,8 @@ class TelegramClient:
         """Stream a file's bytes from the bot file endpoint (R-1.11).
 
         Raises ``TelegramError`` when the download answers with a non-2xx status,
-        or with ``NOT_SENT_STATUS`` and no chain when the request cannot be made,
-        since the URL holds the token (R-9.16).
+        or with ``NOT_SENT_STATUS`` and no chain when the request cannot be made
+        or the body fails mid-stream, since the URL holds the token (R-9.16).
         """
         url = f"{API_BASE_URL}/file/bot{self._token}/{file_path}"
         async with contextlib.AsyncExitStack() as stack:
@@ -198,4 +211,20 @@ class TelegramClient:
                 raise response
             if not response.is_success:
                 raise TelegramError(status=response.status_code)
-            yield response.aiter_bytes()
+            yield _stream_chunks(response)
+
+
+async def _stream_chunks(response: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield ``response`` bytes, mapping a mid-stream transport failure to a chainless error (R-9.16).
+
+    The error is raised outside the ``except`` block so neither ``__cause__`` nor
+    ``__context__`` can carry the request URL, which holds the token.
+    """
+    error: TelegramError | None = None
+    try:
+        async for chunk in response.aiter_bytes():
+            yield chunk
+    except httpx.HTTPError as exc:
+        error = TelegramError(status=NOT_SENT_STATUS, message=type(exc).__name__)
+    if error is not None:
+        raise error

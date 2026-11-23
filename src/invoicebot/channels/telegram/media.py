@@ -1,7 +1,7 @@
 """Download Telegram media under a byte cap and, for photos, a pixel cap (R-1.4, R-1.11).
 
 ``getFile`` is called on every attempt, so a retried download never reuses an
-expired file path. Bytes stream straight to a private directory under
+expired file path. Bytes stream straight to a unique private directory under
 ``dest_root`` and are hashed as they arrive; a rejected download leaves
 nothing behind.
 """
@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import re
 import shutil
+import uuid
 from pathlib import Path
 
 from invoicebot.channels.base import AttachmentKind, DownloadedMedia, MediaTransient, MediaUnusable
@@ -31,12 +32,16 @@ from invoicebot.channels.telegram.client import (
 from invoicebot.config.models import MediaLimits
 
 FILE_ID_PATTERN = r"[A-Za-z0-9_-]{1,255}"
-#: Whole-download deadline; must stay below the worker lease (300 s in queue/worker.py).
+#: Deadline for one whole download, ``getFile`` included; stays below the worker lease
+#: (300 s in queue/worker.py).
 DOWNLOAD_TIMEOUT_S = 120.0
 #: Failures a retry can fix: no answer at all (NOT_SENT_STATUS), a 5xx, a rejected token,
 #: a timeout or a rate limit. Any other status means the media is gone.
 HTTP_SERVER_ERROR = 500
 RETRYABLE_STATUSES = frozenset({401, 408, 429})
+#: Telegram answers ``getFile`` for a file over its own size limit with a 400 and this description (R-1.11).
+TOO_BIG_STATUS = 400
+TOO_BIG_DESCRIPTION = "file is too big"
 #: The mime type each attachment kind is stored as (R-1.4).
 _MIME_BY_KIND: dict[AttachmentKind, str] = {
     "photo": "image/jpeg",
@@ -69,35 +74,39 @@ async def download_media(
     dest_root: Path,
     limits: MediaLimits,
 ) -> DownloadedMedia:
-    """Download one media item into ``dest_root`` and return its path, hash and size.
+    """Download one media item into its own directory under ``dest_root`` and return its path, hash and size.
 
     Raises ``ValueError`` for a file id that could escape the destination
-    directory, ``MediaRejected`` for an unsupported kind or a size over the cap,
-    ``MediaTransient`` when a retry may fix a Bot API failure, and
-    ``MediaUnusable`` for a failure a retry cannot fix. The original exception
-    is the ``__cause__`` of either neutral error. On any failure the partial
-    file and its directory are removed.
+    directory, ``MediaRejected`` for an unsupported kind, a size over the cap or a
+    file Telegram itself calls too big, ``MediaTransient`` when a retry may fix a
+    Bot API failure or the download exceeds its deadline, and ``MediaUnusable``
+    for a failure a retry cannot fix. The original exception is the ``__cause__``
+    of either neutral error. On any failure the partial file and its directory
+    are removed.
     """
     if re.fullmatch(FILE_ID_PATTERN, file_id) is None:
         raise ValueError("file_id must be a plain identifier")
     limit = min(max_bytes_for(kind, limits), GETFILE_MAX_BYTES)
-    directory = dest_root / file_id
+    # Telegram reuses a file_id for a re-sent or forwarded file, so two invoices must not share a folder.
+    directory = dest_root / f"{file_id}-{uuid.uuid4().hex}"
     path = directory / FILE_NAME
     try:
-        info = await client.get_file(file_id)
-        if info.size is not None and info.size > limit:
-            raise MediaRejected("too_large")
         try:
-            directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
-            path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
             async with asyncio.timeout(DOWNLOAD_TIMEOUT_S):
+                info = await client.get_file(file_id)
+                if info.size is not None and info.size > limit:
+                    raise MediaRejected("too_large")
+                directory.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
+                path.write_bytes(b"")  # start empty, so the returned path exists even for an empty body
                 async with client.stream_file(info.file_path) as body:
                     size, sha256 = await write_capped_stream(body, path, ByteCap(limit), kind, limits)
-        except BaseException:
-            shutil.rmtree(directory, ignore_errors=True)
-            raise
-    except TelegramError as err:
-        raise _neutral_error(err) from err
+        except TelegramError as err:
+            raise _neutral_error(err) from err
+        except TimeoutError as exc:
+            raise MediaTransient("download timed out") from exc
+    except BaseException:
+        shutil.rmtree(directory, ignore_errors=True)
+        raise
     return DownloadedMedia(path=path, sha256=sha256, size=size, mime=_MIME_BY_KIND[kind])
 
 
@@ -108,8 +117,14 @@ def _retryable(exc: TelegramError) -> bool:
     )
 
 
-def _neutral_error(exc: TelegramError) -> MediaTransient | MediaUnusable:
+def _neutral_error(exc: TelegramError) -> MediaTransient | MediaUnusable | MediaRejected:
     """Map a Bot API failure onto the neutral media error the pipeline sees (R-1.11)."""
+    if (
+        exc.status == TOO_BIG_STATUS
+        and exc.description is not None
+        and TOO_BIG_DESCRIPTION in exc.description
+    ):
+        return MediaRejected("too_large")
     if _retryable(exc):
         return MediaTransient(str(exc))
     return MediaUnusable(str(exc))

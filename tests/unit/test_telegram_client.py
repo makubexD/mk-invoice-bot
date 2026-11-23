@@ -26,6 +26,14 @@ FILE_ID = "AgACAgQAAx0Cfake-file-id"
 Handler = Callable[[httpx.Request], httpx.Response]
 
 
+class _ReadErrorAfterFirstChunk(httpx.AsyncByteStream):
+    """Yield one chunk, then fail as a dropped connection does mid-body."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield b"jpeg-bytes"
+        raise httpx.ReadError("connection reset")
+
+
 @contextlib.asynccontextmanager
 async def _make_client(handler: Handler) -> AsyncIterator[TelegramClient]:
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
@@ -78,7 +86,7 @@ async def test_send_message_posts_to_the_token_path_and_returns_ids() -> None:
 
 
 async def test_send_message_raises_with_the_retry_delay_on_429() -> None:
-    """R-1.7: a 429 answer raises TelegramError with its status, code and retry_after."""
+    """R-1.7: a 429 answer raises TelegramError with its status, code, description and retry_after."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -98,6 +106,7 @@ async def test_send_message_raises_with_the_retry_delay_on_429() -> None:
     error = raised.value
     assert error.status == 429
     assert error.code == 429
+    assert error.description == "Too Many Requests: retry after 7"
     assert error.retry_after == 7
 
 
@@ -183,9 +192,25 @@ async def test_get_file_returns_the_path_and_size() -> None:
     assert json.loads(requests[0].content) == {"file_id": FILE_ID}
 
 
-@pytest.mark.parametrize("file_path", ["../x", "/x", ""])
+@pytest.mark.parametrize("file_path", ["photos/file_1.jpg", "documents/a.b.pdf"])
+async def test_get_file_accepts_a_safe_file_path(file_path: str) -> None:
+    """R-1.11: a plain nested file path is allowed through."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"file_path": file_path}})
+
+    async with _make_client(handler) as client:
+        info = await client.get_file(FILE_ID)
+
+    assert info.file_path == file_path
+
+
+@pytest.mark.parametrize(
+    "file_path",
+    ["../x", "/x", "", "photos/../x", "a/./b", "x#y", "x?y", "a\\b", "a b", "%2e%2e/x"],
+)
 async def test_get_file_rejects_an_unusable_file_path(file_path: str) -> None:
-    """R-1.11: a returned file_path that is empty, absolute or holds .. raises TelegramError."""
+    """R-1.11: a returned file_path outside the allow-list raises TelegramError."""
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"ok": True, "result": {"file_path": file_path}})
@@ -276,3 +301,25 @@ async def test_stream_file_connect_error_has_no_chain() -> None:
     assert raised.value.status == NOT_SENT_STATUS
     assert raised.value.__cause__ is None
     assert raised.value.__context__ is None
+
+
+async def test_stream_file_read_error_after_the_first_chunk_has_no_chain() -> None:
+    """R-9.16: a body failure mid-stream carries no cause or context that could hold the token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, stream=_ReadErrorAfterFirstChunk())
+
+    seen: list[bytes] = []
+    async with _make_client(handler) as client:
+        with pytest.raises(TelegramError, match="ReadError") as raised:
+            async with client.stream_file("photos/file_1.jpg") as chunks:
+                async for chunk in chunks:
+                    seen.append(chunk)
+
+    error = raised.value
+    assert seen == [b"jpeg-bytes"]
+    assert error.status == NOT_SENT_STATUS
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert TOKEN not in str(error)
+    assert "ABC-fake-token" not in str(error)
