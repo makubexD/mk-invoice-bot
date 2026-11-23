@@ -74,14 +74,15 @@ async def token(
     return access_token
 
 
-async def forget(pool: Pool) -> None:
+async def forget(pool: Pool, rejected: str) -> None:
     """Drop the cached token so the next :func:`token` call fetches a fresh one (R-4.3).
 
-    Uses a short connection and transaction of its own, so no connection is held
-    across the caller's HTTP calls.
+    Only ``rejected``, the token that got the 401, is deleted: a token another
+    worker fetched in the meantime survives. Uses a short connection and
+    transaction of its own, so no connection is held across the caller's HTTP calls.
     """
     async with pool.connection() as conn, conn.transaction():
-        await kv.delete(conn, CACHE_KEY)
+        await kv.delete_if(conn, CACHE_KEY, rejected)
 
 
 async def _fetch(http: httpx.AsyncClient, secrets: Secrets, cfg: ValidezApi) -> tuple[str, int]:

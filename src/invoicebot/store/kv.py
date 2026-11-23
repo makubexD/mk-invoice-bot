@@ -31,6 +31,12 @@ DELETE_SQL = """
     WHERE key = %s
 """
 
+#: The conditional delete: drops a cached value only while it still holds ``value`` (R-4.3).
+DELETE_IF_SQL = """
+    DELETE FROM kv
+    WHERE key = %s AND value = %s
+"""
+
 
 async def get(conn: AsyncConnection[Any], key: str) -> str | None:
     """Return the live value for ``key``, or None when absent or expired (R-4.3).
@@ -57,3 +63,12 @@ async def delete(conn: AsyncConnection[Any], key: str) -> None:
     Does not commit.
     """
     await conn.execute(DELETE_SQL, (key,))
+
+
+async def delete_if(conn: AsyncConnection[Any], key: str, value: str) -> bool:
+    """Remove ``key`` only while it still holds ``value``, and say whether a row went (R-4.3).
+
+    A value another writer stored under ``key`` in the meantime stays. Does not commit.
+    """
+    cur = await conn.execute(DELETE_IF_SQL, (key, value))
+    return cur.rowcount == 1
