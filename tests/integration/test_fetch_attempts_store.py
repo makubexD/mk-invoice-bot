@@ -1,6 +1,8 @@
 """Integration tests for fetch-attempt persistence (R-5.7)."""
 
+from collections.abc import Sequence
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from psycopg import AsyncConnection
@@ -14,6 +16,25 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 CHANNEL: ChannelName = "whatsapp"
 PORTAL_KEY = "sunat_factura"
+
+
+def _fresh_portal_key() -> str:
+    """Return a portal key no other test in the session database uses."""
+    return f"sunat_factura_{uuid4().hex}"
+
+
+async def _record_portal_attempts(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    portal_key: str,
+    invoice_reasons: Sequence[Sequence[str]],
+) -> None:
+    """Create one invoice per reason list and record each portal attempt in its own transaction."""
+    for reasons in invoice_reasons:
+        async with db_pool.connection() as conn:
+            invoice_id = await create_invoice(conn, "yo", CHANNEL)
+        for reason in reasons:
+            async with db_pool.connection() as conn:
+                await record_attempt(conn, invoice_id, "portal_registry", portal_key, reason, 10)
 
 
 async def test_record_attempt_lists_attempts_in_insertion_order(
@@ -133,14 +154,72 @@ async def test_technical_streak_counts_attempts_from_before_the_round(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """D166: technical_streak is per portal and ignores rounds, so three earlier technicals still count."""
-    async with db_pool.connection() as conn:
-        invoice_id = await create_invoice(conn, "yo", CHANNEL)
-        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "technical", 10)
-        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "timeout", 10)
-        await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "technical", 10)
-    async with db_pool.connection() as conn:
-        await start_fetch_round(conn, invoice_id)
+    invoice_ids = []
+    for _ in range(3):
+        async with db_pool.connection() as conn:
+            invoice_id = await create_invoice(conn, "yo", CHANNEL)
+            await record_attempt(conn, invoice_id, "portal_registry", PORTAL_KEY, "technical", 10)
+            invoice_ids.append(invoice_id)
+    for invoice_id in invoice_ids:
+        async with db_pool.connection() as conn:
+            await start_fetch_round(conn, invoice_id)
     async with db_pool.connection() as conn:
         streak = await technical_streak(conn, PORTAL_KEY, 3)
+
+    assert streak is True
+
+
+async def test_technical_streak_counts_invoices_not_attempts(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F03, D170: two invoices with two technical attempts each are not a streak of three."""
+    portal_key = _fresh_portal_key()
+    await _record_portal_attempts(
+        db_pool,
+        portal_key,
+        [("technical", "technical"), ("technical", "technical")],
+    )
+    async with db_pool.connection() as conn:
+        streak = await technical_streak(conn, portal_key, 3)
+
+    assert streak is False
+
+
+async def test_technical_streak_counts_one_technical_attempt_per_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F03, D170: three invoices with one technical attempt each are a streak of three."""
+    portal_key = _fresh_portal_key()
+    await _record_portal_attempts(db_pool, portal_key, [("technical",)] * 3)
+    async with db_pool.connection() as conn:
+        streak = await technical_streak(conn, portal_key, 3)
+
+    assert streak is True
+
+
+async def test_technical_streak_uses_each_invoices_newest_attempt(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F03, D170: an invoice whose newest portal attempt is not_found_yet breaks the streak."""
+    portal_key = _fresh_portal_key()
+    await _record_portal_attempts(
+        db_pool,
+        portal_key,
+        [("technical",), ("technical", "not_found_yet"), ("technical",)],
+    )
+    async with db_pool.connection() as conn:
+        streak = await technical_streak(conn, portal_key, 3)
+
+    assert streak is False
+
+
+async def test_technical_streak_counts_timeouts_as_technical(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F03, D170: three invoices whose newest attempt is timeout are a streak."""
+    portal_key = _fresh_portal_key()
+    await _record_portal_attempts(db_pool, portal_key, [("timeout",)] * 3)
+    async with db_pool.connection() as conn:
+        streak = await technical_streak(conn, portal_key, 3)
 
     assert streak is True
