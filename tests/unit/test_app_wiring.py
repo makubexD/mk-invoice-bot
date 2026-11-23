@@ -20,6 +20,7 @@ from invoicebot.app import (
     LAPTOP_ADAPTER,
     LAPTOP_AGENT_KEY,
     DailyRuns,
+    _channel_builders,
     _check_reload_candidate,
     _daily_tasks,
     _deliver_handlers,
@@ -51,7 +52,7 @@ from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
 from invoicebot.wiring.channels import CHANNEL_ADAPTER, CHANNEL_SECRETS, SENDER_HASH_KEY, channel_secrets
-from invoicebot.wiring.whatsapp import WHATSAPP_ADAPTER, WHATSAPP_SECRETS, _whatsapp_secrets
+from invoicebot.wiring.whatsapp import WHATSAPP_ADAPTER, WHATSAPP_SECRETS, whatsapp_wiring
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -352,7 +353,6 @@ def test_google_secret_view_is_enabled_when_the_client_secret_is_present() -> No
 @pytest.mark.parametrize(
     ("view", "keys"),
     [
-        (_whatsapp_secrets, WHATSAPP_SECRETS),
         (_github_secrets, {GITHUB_APP_PRIVATE_KEY}),
         (_laptop_secrets, {LAPTOP_AGENT_KEY}),
         (_sol_secrets, SECRETS),
@@ -368,11 +368,12 @@ def test_feature_secret_view_is_enabled_only_with_every_key(
 
 def test_whatsapp_secret_view_no_longer_declares_the_sender_hash_key() -> None:
     """R-9.10: the WhatsApp view declares its three keys and not the shared sender hash key."""
+    cfg = load_config(EXAMPLE)
     store = _RecordingStore({})
 
-    _whatsapp_secrets(store)
+    whatsapp_wiring.secret_problem(cfg, store)
 
-    assert store.scoped_calls == [(WHATSAPP_ADAPTER, WHATSAPP_SECRETS)]
+    assert store.scoped_calls[0] == (WHATSAPP_ADAPTER, WHATSAPP_SECRETS)
 
 
 def test_channel_secret_view_declares_only_the_sender_hash_key() -> None:
@@ -460,7 +461,7 @@ def test_secret_problem_with_every_needed_secret_is_none(tmp_path: Path) -> None
     cfg = _without_google(tmp_path)
     store = SecretStore(_base_secrets())
 
-    assert _secret_problem(cfg, _sol_directory("todo"), store) is None
+    assert _secret_problem(cfg, _sol_directory("todo"), store, _channel_builders(tmp_path)) is None
 
 
 def test_secret_problem_without_the_whatsapp_token_is_whatsapp(tmp_path: Path) -> None:
@@ -470,7 +471,9 @@ def test_secret_problem_without_the_whatsapp_token_is_whatsapp(tmp_path: Path) -
     del values["whatsapp_token"]
     store = SecretStore(values)
 
-    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:whatsapp"
+    assert (
+        _secret_problem(cfg, _sol_directory("todo"), store, _channel_builders(tmp_path)) == "secrets:whatsapp"
+    )
 
 
 def test_secret_problem_without_the_sender_hash_key_is_channels(tmp_path: Path) -> None:
@@ -479,7 +482,10 @@ def test_secret_problem_without_the_sender_hash_key_is_channels(tmp_path: Path) 
     values = _base_secrets()
     del values[SENDER_HASH_KEY]
 
-    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(values)) == "secrets:channels"
+    assert (
+        _secret_problem(cfg, _sol_directory("todo"), SecretStore(values), _channel_builders(tmp_path))
+        == "secrets:channels"
+    )
 
 
 def test_secret_problem_for_a_console_only_candidate_needs_no_channel_secret(tmp_path: Path) -> None:
@@ -490,7 +496,49 @@ def test_secret_problem_for_a_console_only_candidate_needs_no_channel_secret(tmp
     values = _base_secrets()
     del values[SENDER_HASH_KEY]
 
-    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(values)) is None
+    assert (
+        _secret_problem(cfg, _sol_directory("todo"), SecretStore(values), _channel_builders(tmp_path)) is None
+    )
+
+
+def test_secret_problem_with_a_console_channel_is_not_channels_none(tmp_path: Path) -> None:
+    """D183: a console-only candidate has a chat channel, so a reload does not refuse it as channels:none."""
+    cfg = _without_google(tmp_path)
+    console = ConsoleChannel(kind="console", profile=cfg.owner.profile)
+    cfg = cfg.model_copy(update={"channels": [console]})
+
+    assert (
+        _secret_problem(
+            cfg, _sol_directory("todo"), SecretStore(_base_secrets()), _channel_builders(tmp_path)
+        )
+        != "channels:none"
+    )
+
+
+def test_secret_problem_with_a_whatsapp_channel_is_not_channels_none(tmp_path: Path) -> None:
+    """D183: a WhatsApp-only candidate has a chat channel, so a reload does not refuse it as channels:none."""
+    cfg = _without_google(tmp_path)
+    channels = [channel for channel in cfg.channels if channel.kind == "whatsapp_cloud"]
+    cfg = cfg.model_copy(update={"channels": channels})
+
+    assert (
+        _secret_problem(
+            cfg, _sol_directory("todo"), SecretStore(_base_secrets()), _channel_builders(tmp_path)
+        )
+        != "channels:none"
+    )
+
+
+def test_secret_problem_without_any_channel_is_channels_none(tmp_path: Path) -> None:
+    """D183: a candidate with no chat channel at all is refused as channels:none."""
+    cfg = _without_google(tmp_path).model_copy(update={"channels": []})
+
+    assert (
+        _secret_problem(
+            cfg, _sol_directory("todo"), SecretStore(_base_secrets()), _channel_builders(tmp_path)
+        )
+        == "channels:none"
+    )
 
 
 def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path: Path) -> None:
@@ -498,15 +546,20 @@ def test_secret_problem_with_validation_on_and_no_keys_is_sunat_validez(tmp_path
     cfg = _sunat_config(tmp_path, enabled=True)
     store = SecretStore(_base_secrets())
 
-    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:sunat_validez"
+    assert (
+        _secret_problem(cfg, _sol_directory("todo"), store, _channel_builders(tmp_path))
+        == "secrets:sunat_validez"
+    )
 
 
-def test_secret_problem_with_google_and_no_client_secret_is_google() -> None:
+def test_secret_problem_with_google_and_no_client_secret_is_google(tmp_path: Path) -> None:
     """R-9.6: a candidate with google config but no client secret is refused as secrets:google."""
     cfg = load_config(EXAMPLE)
     store = SecretStore(_base_secrets())
 
-    assert _secret_problem(cfg, _sol_directory("todo"), store) == "secrets:google"
+    assert (
+        _secret_problem(cfg, _sol_directory("todo"), store, _channel_builders(tmp_path)) == "secrets:google"
+    )
 
 
 def test_secret_problem_with_an_active_sol_site_whose_ruc_differs_is_sunat_sol(tmp_path: Path) -> None:
@@ -518,7 +571,10 @@ def test_secret_problem_with_an_active_sol_site_whose_ruc_differs_is_sunat_sol(t
     )
     store = SecretStore(values)
 
-    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+    assert (
+        _secret_problem(cfg, _sol_directory("active"), store, _channel_builders(tmp_path))
+        == "secrets:sunat_sol"
+    )
 
 
 def test_secret_problem_with_an_active_sol_site_and_no_sol_keys_is_sunat_sol(tmp_path: Path) -> None:
@@ -526,7 +582,10 @@ def test_secret_problem_with_an_active_sol_site_and_no_sol_keys_is_sunat_sol(tmp
     cfg = _with_owner_ruc(_without_google(tmp_path), "20000000010")
     store = SecretStore(_base_secrets())
 
-    assert _secret_problem(cfg, _sol_directory("active"), store) == "secrets:sunat_sol"
+    assert (
+        _secret_problem(cfg, _sol_directory("active"), store, _channel_builders(tmp_path))
+        == "secrets:sunat_sol"
+    )
 
 
 def test_secret_problem_with_an_active_sol_site_and_matching_keys_is_none(tmp_path: Path) -> None:
@@ -537,7 +596,10 @@ def test_secret_problem_with_an_active_sol_site_and_matching_keys_is_none(tmp_pa
         {"sol_ruc": "20000000010", "sol_user": "synthetic-user", "sol_password": "synthetic-password"}
     )
 
-    assert _secret_problem(cfg, _sol_directory("active"), SecretStore(values)) is None
+    assert (
+        _secret_problem(cfg, _sol_directory("active"), SecretStore(values), _channel_builders(tmp_path))
+        is None
+    )
 
 
 def test_secret_problem_with_github_on_and_no_app_key_is_github(tmp_path: Path) -> None:
@@ -545,16 +607,21 @@ def test_secret_problem_with_github_on_and_no_app_key_is_github(tmp_path: Path) 
     values = _base_secrets()
     del values[GITHUB_APP_PRIVATE_KEY]
 
-    assert _secret_problem(_without_google(tmp_path), _sol_directory("todo"), SecretStore(values)) == (
-        "secrets:github"
-    )
+    assert _secret_problem(
+        _without_google(tmp_path), _sol_directory("todo"), SecretStore(values), _channel_builders(tmp_path)
+    ) == ("secrets:github")
 
 
 def test_secret_problem_with_a_laptop_mode_and_no_agent_key_is_laptop(tmp_path: Path) -> None:
     """R-9.6: a flow listing laptop_outlook without the agent key is refused as secrets:laptop."""
     cfg = _with_laptop_mode(tmp_path)
 
-    assert _secret_problem(cfg, _sol_directory("todo"), SecretStore(_base_secrets())) == "secrets:laptop"
+    assert (
+        _secret_problem(
+            cfg, _sol_directory("todo"), SecretStore(_base_secrets()), _channel_builders(tmp_path)
+        )
+        == "secrets:laptop"
+    )
 
 
 def test_secret_problem_with_a_laptop_mode_and_its_agent_key_is_none(tmp_path: Path) -> None:
@@ -562,7 +629,7 @@ def test_secret_problem_with_a_laptop_mode_and_its_agent_key_is_none(tmp_path: P
     cfg = _with_laptop_mode(tmp_path)
     store = SecretStore({**_base_secrets(), LAPTOP_AGENT_KEY: "synthetic-key"})
 
-    assert _secret_problem(cfg, _sol_directory("todo"), store) is None
+    assert _secret_problem(cfg, _sol_directory("todo"), store, _channel_builders(tmp_path)) is None
 
 
 def _reload_settings(tmp_path: Path, plaintext: bytes) -> Settings:

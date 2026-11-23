@@ -33,7 +33,6 @@ from invoicebot.auth.providers import (
     scopes_for,
 )
 from invoicebot.channels.base import MediaSource
-from invoicebot.channels.console import console_channel
 from invoicebot.config.models import (
     DEFAULT_RETRY_SCHEDULE,
     EMAIL_INBOX_FETCHER,
@@ -52,7 +51,6 @@ from invoicebot.config.models import (
     OneDriveFolderSink,
     StoreDirectory,
     SunatSolSite,
-    enabled_chat_channels,
 )
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
@@ -127,7 +125,7 @@ from invoicebot.store.gaps import get_gap
 from invoicebot.store.retention import prune
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
-from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring, channel_secrets
+from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring
 from invoicebot.wiring.console import ConsoleBuilder
 from invoicebot.wiring.whatsapp import whatsapp_wiring
 
@@ -448,7 +446,7 @@ def _check_reload_candidate(settings: Settings) -> RuntimeConfig:
         store = _load_secrets(settings)
     except (OSError, ValueError, pyrage.DecryptError, pyrage.IdentityError) as err:
         raise ConfigRejected("secrets") from err
-    problem = _secret_problem(runtime.cfg, runtime.directory, store)
+    problem = _secret_problem(runtime.cfg, runtime.directory, store, _channel_builders(settings.data_dir))
     if problem is not None:
         raise ConfigRejected(problem)
     return runtime
@@ -605,7 +603,12 @@ def _sol_site(cfg: Config, directory: StoreDirectory) -> SunatSolSite | None:
     return site
 
 
-def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) -> str | None:
+def _secret_problem(
+    cfg: Config,
+    directory: StoreDirectory,
+    store: SecretStore,
+    builders: tuple[ChannelBuilder, ...],
+) -> str | None:
     """Return the first secret the candidate needs but the store lacks (R-9.6, R-9.9, R-9.10, D155, D174).
 
     Startup keeps its own fail-closed checks; this one lets a reload refuse the same
@@ -613,18 +616,13 @@ def _secret_problem(cfg: Config, directory: StoreDirectory, store: SecretStore) 
     a key or a value.
     """
     validation = _validation_secrets(cfg, store)
-    enabled = enabled_chat_channels(cfg.channels)
-    console_enabled = console_channel(cfg) is not None
-    # A console-only dev config starts, so a reload must accept it too (D174, D165).
-    failed: dict[str, bool] = {"channels:none": not enabled and not console_enabled}
-    for builder in CHANNEL_BUILDERS:
+    failed: dict[str, bool] = {"channels:none": not any(builder.configured(cfg) for builder in builders)}
+    for builder in builders:
         problem = builder.secret_problem(cfg, store)
         if problem is not None:
             failed[problem] = True
     failed.update(
         {
-            # The console reads no shared channel secret, so only a network channel needs them.
-            "secrets:channels": bool(enabled) and not channel_secrets(store).enabled,
             "secrets:sunat_validez": validation is not None and not validation.enabled,
             "secrets:google": cfg.google is not None and not google_secrets(store).enabled,
             "secrets:github": cfg.gaps.github.enabled and not _github_secrets(store).enabled,
