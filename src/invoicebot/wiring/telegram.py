@@ -15,9 +15,12 @@ import httpx
 
 from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.api.telegram_webhook import TelegramWebhookDeps, make_router
-from invoicebot.channels.base import ChannelName
 from invoicebot.channels.profiles import ProfileIndex
-from invoicebot.channels.telegram.client import TelegramClient
+from invoicebot.channels.telegram.client import (
+    TELEGRAM_ADAPTER,
+    TelegramClient,
+    telegram_secrets,
+)
 from invoicebot.channels.telegram.media import TelegramMediaSource
 from invoicebot.channels.telegram.transport import make_transport
 from invoicebot.config.models import Config, TelegramChannel
@@ -34,9 +37,6 @@ from invoicebot.wiring.channels import (
 
 logger = logging.getLogger(__name__)
 
-TELEGRAM_ADAPTER: ChannelName = "telegram"
-#: Secrets the Telegram channel declares (R-9.10).
-TELEGRAM_SECRETS = frozenset({"telegram_bot_token", "telegram_webhook_secret"})
 #: Telegram's webhook secret charset and length, at least 32 characters (D184).
 WEBHOOK_SECRET_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
 
@@ -56,7 +56,7 @@ class TelegramBuilder:
         if channel is None:
             # Not configured: Telegram is optional since D174, so this is not an error.
             return None
-        secrets, shared = _telegram_secrets(store), channel_secrets(store)
+        secrets, shared = telegram_secrets(store), channel_secrets(store)
         if not secrets.enabled or not shared.enabled:
             # Fail closed: a configured channel without its secrets is not mounted.
             logger.error("telegram channel disabled: missing %s", sorted(secrets.missing | shared.missing))
@@ -73,7 +73,7 @@ class TelegramBuilder:
         """Return the code of the first secret a configured Telegram channel lacks (R-9.6)."""
         if not self.configured(cfg):
             return None
-        secrets = _telegram_secrets(store)
+        secrets = telegram_secrets(store)
         if not secrets.enabled:
             return "secrets:telegram"
         if WEBHOOK_SECRET_PATTERN.fullmatch(secrets.get("telegram_webhook_secret")) is None:
@@ -121,8 +121,3 @@ def _telegram_channel(cfg: Config) -> TelegramChannel | None:
         (channel for channel in cfg.channels if isinstance(channel, TelegramChannel) and channel.enabled),
         None,
     )
-
-
-def _telegram_secrets(store: SecretStore) -> Secrets:
-    """Return the age-store view the Telegram channel reads its secrets through (R-9.10)."""
-    return store.scoped(TELEGRAM_ADAPTER, set(TELEGRAM_SECRETS))

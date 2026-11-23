@@ -71,6 +71,7 @@ The `invoicebot` command (inside the container, or `uv run invoicebot`):
 | `invoicebot auth-google --account <a>`      | Signs a Google account in and resumes the invoices it holds     |
 | `invoicebot google-setup --flow <f>`        | Creates or checks a flow's Drive folder and spreadsheet         |
 | `invoicebot rehearse send\|replies`         | Runs the dev-only console channel and prints its replies (D165) |
+| `invoicebot telegram ids\|webhook`          | Lists the bot's sender ids; sets, shows or deletes its webhook (D186) |
 
 Scripts in `scripts/`. The Python ones run with `uv run python scripts/<name>`;
 `restore_drill.sh` runs with bash on the host and `laptop_agent.ps1` with

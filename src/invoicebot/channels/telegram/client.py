@@ -16,6 +16,9 @@ from typing import Any
 
 import httpx
 
+from invoicebot.channels.base import ChannelName
+from invoicebot.secrets import Secrets, SecretStore
+
 API_BASE_URL = "https://api.telegram.org"
 REQUEST_TIMEOUT_SECONDS = 30.0
 GETFILE_MAX_BYTES = 20 * 1024 * 1024  # R-1.11: Telegram's own getFile limit
@@ -25,6 +28,10 @@ FILE_PATH_MAX_CHARS = 256
 #: A file path Telegram may name: plain segments only, no character a shell or a URL parser treats specially.
 FILE_PATH_PATTERN = r"[A-Za-z0-9_-]+(/[A-Za-z0-9_.-]+)*"
 UNSAFE_PATH_SEGMENTS = frozenset({".", ".."})
+
+TELEGRAM_ADAPTER: ChannelName = "telegram"
+#: Secrets the Telegram channel declares (R-9.10).
+TELEGRAM_SECRETS = frozenset({"telegram_bot_token", "telegram_webhook_secret"})
 
 
 class TelegramError(Exception):
@@ -140,6 +147,11 @@ def _file_info(result: object) -> FileInfo:
     if not isinstance(file_path, str) or not _is_safe_file_path(file_path):
         raise TelegramError(status=OK_STATUS, message="getFile result has an unusable file_path")
     return FileInfo(file_path=file_path, size=_int_field(result.get("file_size")))
+
+
+def telegram_secrets(store: SecretStore) -> Secrets:
+    """Return the age-store view the Telegram channel reads its secrets through (R-9.10)."""
+    return store.scoped(TELEGRAM_ADAPTER, set(TELEGRAM_SECRETS))
 
 
 class TelegramClient:

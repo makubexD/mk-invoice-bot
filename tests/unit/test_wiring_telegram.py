@@ -13,13 +13,14 @@ import pytest
 from fastapi import APIRouter
 
 from invoicebot.api.intake_route import IntakeDeps
+from invoicebot.channels.telegram.client import TELEGRAM_SECRETS
 from invoicebot.channels.telegram.media import TelegramMediaSource
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, TelegramChannel
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.secrets import SecretStore
 from invoicebot.wiring.channels import CHANNEL_SECRETS, SENDER_HASH_KEY
-from invoicebot.wiring.telegram import TELEGRAM_SECRETS, telegram_wiring
+from invoicebot.wiring.telegram import telegram_wiring
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
