@@ -199,7 +199,9 @@ def make_fetch_handler(
             no_retry=no_retry,
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
-        decision = decide(flow.fetchers, registry.keys(), inputs.attempts, schedule_for, inputs.no_retry)
+        decision = decide(
+            flow.fetchers, registry.keys(), inputs.attempts, schedule_for, no_retry=inputs.no_retry
+        )
         # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
         # remains; this job is the retry, since its run_after already held the delay (D65, D167).
         if isinstance(decision, Run | Wait):
@@ -264,7 +266,7 @@ async def _run(
         shutil.rmtree(out_dir, ignore_errors=True)
     schedule = schedule_for(fetcher)
     delay = (
-        technical_retry_delay(fetcher, inputs.attempts, schedule, inputs.no_retry)
+        technical_retry_delay(fetcher, inputs.attempts, schedule, no_retry=inputs.no_retry)
         if result.reason in TECHNICAL_REASONS
         else retry_delay(fetcher, inputs.attempts, schedule)
     )

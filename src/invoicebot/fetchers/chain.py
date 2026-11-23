@@ -60,7 +60,8 @@ def decide(
     registered: Collection[str],
     attempts: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
-    no_retry: Collection[str] = frozenset(),
+    *,
+    no_retry: Collection[str],
 ) -> Decision:
     """Choose the next step of the chain (R-5.1, D65, D170).
 
@@ -69,7 +70,8 @@ def decide(
     is in ``WAIT_REASONS`` waits on its schedule until it is used up; one whose
     latest attempt is technical waits once on its first schedule entry (D167),
     unless it is in ``no_retry`` (an open broken gap, D170); any other reason is
-    final and the next fetcher gets its turn.
+    final and the next fetcher gets its turn. ``no_retry`` is required so no
+    caller loses D170's brake by omission.
     """
     for fetcher in order:
         if fetcher not in registered:
@@ -96,7 +98,7 @@ def _decide_one(
     if latest in WAIT_REASONS:
         return _wait_or_none(fetcher, history, schedule_for)
     if latest in TECHNICAL_REASONS:
-        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher), no_retry) is None:
+        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher), no_retry=no_retry) is None:
             return None
         return Wait(fetcher)
     return None
@@ -135,7 +137,8 @@ def technical_retry_delay(
     fetcher: str,
     attempts: Sequence[Attempt],
     schedule: Sequence[timedelta],
-    no_retry: Collection[str] = frozenset(),
+    *,
+    no_retry: Collection[str],
 ) -> timedelta | None:
     """Return the wait after this technical failure, or ``None`` when its one retry is spent (D167, D170).
 
@@ -143,7 +146,8 @@ def technical_retry_delay(
     attempt for the same fetcher uses up the retry. Any other earlier reason,
     a wait reason included, leaves it, so the wait is ``schedule[0]``; an empty
     schedule has no retry. A fetcher in ``no_retry`` gets no retry at all: its
-    portal has an open broken gap (D170).
+    portal has an open broken gap (D170). ``no_retry`` is required so no caller
+    loses D170's brake by omission.
     """
     if fetcher in no_retry:
         return None
