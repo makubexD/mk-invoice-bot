@@ -83,6 +83,7 @@ from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
+from invoicebot.text import normalize_email
 
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: How long the Google sign-in waits for the browser's redirect (D128).
@@ -608,7 +609,7 @@ async def _require_pinned_mailbox(
         isinstance(address, str)
         and claims is not None
         and claims.get("email_verified") is True
-        and address.casefold() == expected
+        and normalize_email(address) == normalize_email(expected)
     ):
         return
     token = _token_to_revoke(response)

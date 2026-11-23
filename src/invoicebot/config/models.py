@@ -26,6 +26,7 @@ from pydantic import (
 )
 
 from invoicebot.sunat_origins import is_sunat_origin
+from invoicebot.text import normalize_email
 
 #: D143: the owner's DNI, eight digits, used by BR-R10 to route boletas made out to it.
 DNI_PATTERN = re.compile(r"^[0-9]{8}$")
@@ -331,7 +332,7 @@ def _account_addresses(value: dict[str, str]) -> dict[str, str]:
     for name, address in value.items():
         if _ACCOUNT_NAME.fullmatch(name) is None:
             raise ValueError(f"account name {name!r} is not lowercase letters, digits or '_'")
-        address = address.casefold()
+        address = normalize_email(address)
         if _EMAIL_ADDRESS.fullmatch(address) is None:
             raise ValueError(f"account '{name}' is not an email address")
         addresses[name] = address

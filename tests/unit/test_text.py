@@ -1,10 +1,16 @@
-"""Tests for the unsafe-character check and the formula escape (R-12.8, R-6.6)."""
+"""Tests for the unsafe-character check, the formula escape and email normalization (R-12.8, R-6.6, D138)."""
 
 from __future__ import annotations
 
 import pytest
 
-from invoicebot.text import FORMULA_PREFIXES, escape_formula, has_unsafe_char, replace_unsafe_chars
+from invoicebot.text import (
+    FORMULA_PREFIXES,
+    escape_formula,
+    has_unsafe_char,
+    normalize_email,
+    replace_unsafe_chars,
+)
 
 
 @pytest.mark.parametrize(
@@ -55,3 +61,16 @@ def test_escape_formula_escapes_a_whitespace_lead_and_full_width_prefixes(value:
 def test_escape_formula_leaves_plain_text(value: str) -> None:
     """R-6.6, R-7.10: plain text and an empty string are unchanged."""
     assert escape_formula(value) == value
+
+
+@pytest.mark.parametrize(
+    ("address", "normalized"),
+    [
+        pytest.param("Owner@Example.COM", "owner@example.com", id="case"),
+        pytest.param("  owner@example.com  ", "owner@example.com", id="surrounding-spaces"),
+        pytest.param("Straße@Example.com", "strasse@example.com", id="sharp-s-casefolds-to-ss"),
+    ],
+)
+def test_normalize_email_returns_the_compared_form(address: str, normalized: str) -> None:
+    """D138: a mailbox normalizes to the case-folded, stripped form mailbox pins are compared in."""
+    assert normalize_email(address) == normalized
