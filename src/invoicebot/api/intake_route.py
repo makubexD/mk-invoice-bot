@@ -69,7 +69,7 @@ def parse_json(body: bytes) -> dict[str, Any] | None:
     """Decode a webhook body, or return ``None`` when it is not a JSON object."""
     try:
         payload = json.loads(body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 

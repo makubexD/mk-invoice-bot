@@ -1,9 +1,11 @@
 """Telegram webhook route: secret check and intake (R-1.7, R-1.8, D173, D177).
 
-The body is untrusted: its size is capped while reading, and the
-``X-Telegram-Bot-Api-Secret-Token`` header is compared with the configured
-secret before any JSON parsing. Senders outside the profile index are only ever
-logged through their keyed digest. A button press is acknowledged with
+The body is untrusted: the ``X-Telegram-Bot-Api-Secret-Token`` header is
+compared with the configured secret before the body is read, so an
+unauthenticated caller never makes the server read up to the cap; an
+authenticated body's size is capped while reading, and only then is it parsed
+as JSON. Senders outside the profile index are only ever logged through their
+keyed digest. A button press is acknowledged with
 ``answerCallbackQuery`` right after it is stored (D177); that call is an
 acknowledgement, not a message, so it bypasses the outbox and a failure is
 logged and ignored.
@@ -58,11 +60,11 @@ def make_router(deps: TelegramWebhookDeps) -> APIRouter:
     @router.post("/webhook/telegram")
     async def receive(request: Request) -> Response:
         """Verify, parse and persist one update (D173, R-1.7, R-1.8)."""
+        if not _secret_matches(request.headers.get(WEBHOOK_HEADER), deps.webhook_secret):
+            return Response(status_code=401)
         body = await read_body(request)
         if body is None:
             return Response(status_code=413)
-        if not _secret_matches(request.headers.get(WEBHOOK_HEADER), deps.webhook_secret):
-            return Response(status_code=401)
         payload = parse_json(body)
         if payload is None:
             return Response(status_code=400)
