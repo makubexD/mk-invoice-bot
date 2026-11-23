@@ -26,6 +26,7 @@ from invoicebot.app import (
     _deliver_handlers,
     _deliver_registry,
     _fetch_schedules,
+    _github_health_run,
     _github_secrets,
     _google_deliver_handler,
     _google_tokens,
@@ -255,6 +256,24 @@ def test_daily_tasks_without_github_health_add_no_check() -> None:
     tasks = _daily_tasks(cfg, _runs())
 
     assert "github_health" not in {task.key for task in tasks}
+
+
+def test_github_health_run_without_an_app_is_none() -> None:
+    """BR-D05: with no GitHub App there is no daily health check to run."""
+    cfg = load_config(EXAMPLE)
+
+    assert _github_health_run(None, cast(Any, None), cfg) is None
+
+
+def test_github_health_run_with_an_app_is_bound_to_it() -> None:
+    """BR-D05: with a GitHub App the daily health check is a call bound to that App."""
+    cfg = load_config(EXAMPLE)
+    github_app = cast(Any, object())
+
+    run = _github_health_run(github_app, cast(Any, None), cfg)
+
+    assert run is not None
+    assert cast(Any, run).args[0] is github_app
 
 
 def test_sunat_validation_off_reads_no_secret(tmp_path: Path) -> None:

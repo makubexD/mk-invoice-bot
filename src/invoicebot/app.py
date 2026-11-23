@@ -378,7 +378,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 housekeeping=partial(housekeep, pool, settings.data_dir),
                 padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
                 digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
-                github_health=None if github_app is None else partial(_github_health, github_app, pool, cfg),
+                github_health=_github_health_run(github_app, pool, cfg),
             ),
         )
         background: dict[str, TaskFactory] = {
@@ -819,6 +819,15 @@ def _github_transports(
             hooks=hooks,
         )
     }
+
+
+def _github_health_run(
+    github_app: GitHubApp | None, pool: Pool, cfg: Config
+) -> Callable[..., Awaitable[None]] | None:
+    """Return the daily GitHub App health check, or None without a GitHub App (BR-D05)."""
+    if github_app is None:
+        return None
+    return partial(_github_health, github_app, pool, cfg)
 
 
 async def _github_health(app: TokenSource, pool: Pool, cfg: Config) -> None:
