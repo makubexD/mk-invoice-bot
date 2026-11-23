@@ -29,6 +29,7 @@ from invoicebot.store.invoices import (
     claim_natural_key,
     count_active_jobs,
     create_invoice,
+    fetch_round_started_within,
     get_file_path,
     get_state,
     get_waiting,
@@ -46,6 +47,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
     set_sunat_status,
+    start_fetch_round,
     sunat_rechecks,
     touch_window,
     unpark,
@@ -878,3 +880,72 @@ async def test_migration_0004_downgrades_to_0003_and_upgrades_again(
         await asyncio.to_thread(_run_alembic, db_pool.conninfo, "head")
 
     assert await _has_table(db_pool, "channel_windows") is True
+
+
+async def test_fetch_round_started_within_is_false_without_a_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: an invoice that never started a fetch round has no round within the interval."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+    async with db_pool.connection() as conn:
+        recent = await fetch_round_started_within(conn, invoice_id, 600)
+
+    assert recent is False
+
+
+async def test_fetch_round_started_within_is_true_after_a_round(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: a fetch round started a moment ago is within 600 seconds."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        recent = await fetch_round_started_within(conn, invoice_id, 600)
+
+    assert recent is True
+
+
+async def test_fetch_round_started_within_is_false_after_the_interval(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: a round started 20 minutes ago is outside the 600-second interval."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "UPDATE invoices SET fetch_round_at = now() - interval '20 minutes' WHERE id = %s",
+            (invoice_id,),
+        )
+    async with db_pool.connection() as conn:
+        recent = await fetch_round_started_within(conn, invoice_id, 600)
+
+    assert recent is False
+
+
+async def test_fetch_round_started_within_is_false_for_zero_seconds(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: with no interval, a round from an earlier transaction is not within it."""
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, "yo", CHANNEL)
+    async with db_pool.connection() as conn:
+        await start_fetch_round(conn, invoice_id)
+    async with db_pool.connection() as conn:
+        recent = await fetch_round_started_within(conn, invoice_id, 0)
+
+    assert recent is False
+
+
+async def test_fetch_round_started_within_is_false_for_an_unknown_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D171: an unknown invoice id has no round, so it is never within the interval."""
+    async with db_pool.connection() as conn:
+        recent = await fetch_round_started_within(conn, UNKNOWN_INVOICE_ID, 600)
+
+    assert recent is False

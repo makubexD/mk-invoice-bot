@@ -794,6 +794,9 @@ class Limits(BaseModel):
     heavy_concurrency: int
     browser_idle_close_s: int
     per_domain_min_interval_s: int
+    #: D171: a /reprocesar waits this long after the invoice's last fetch round; the
+    #: default keeps existing private configs valid.
+    reprocess_min_interval_s: int = Field(default=600, ge=0)
 
 
 #: D93: a profile id is the natural key, so it cannot carry the ``|`` the key encodes.

@@ -179,6 +179,20 @@ async def start_fetch_round(conn: AsyncConnection[Any], invoice_id: int) -> None
     )
 
 
+async def fetch_round_started_within(conn: AsyncConnection[Any], invoice_id: int, seconds: int) -> bool:
+    """Whether invoice_id's fetch round started within the last ``seconds`` (D171).
+
+    A NULL round and a missing invoice count as not recent. Reads the database clock
+    and does not commit.
+    """
+    cur = await conn.execute(
+        "SELECT fetch_round_at > now() - make_interval(secs => %s) FROM invoices WHERE id = %s",
+        (seconds, invoice_id),
+    )
+    row = await cur.fetchone()
+    return row is not None and bool(row[0])
+
+
 async def load_flow(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
     """Return the flow the invoice was routed to, or None before routing or when it does not exist."""
     cur = await conn.execute("SELECT flow_id FROM invoices WHERE id = %s", (invoice_id,))
