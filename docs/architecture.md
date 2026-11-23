@@ -20,10 +20,13 @@ port (`Handler`, `Transport`) that `app.py` wires at startup.
 ```mermaid
 flowchart LR
     meta(["WhatsApp Cloud API"])
+    telegram(["Telegram Bot API"])
 
     subgraph edge["Edge"]
         api["api: WhatsApp webhook"]
+        telegram_api["api: Telegram webhook"]
         channels["channels: Channel port, WhatsApp adapter"]
+        telegram_channel["channels: Telegram adapter"]
     end
 
     subgraph core["Core"]
@@ -55,9 +58,13 @@ flowchart LR
     events["events (v1.1)"]
 
     meta -- webhook --> api
+    telegram -- webhook --> telegram_api
     api --> pipeline
+    telegram_api --> pipeline
     api --> channels
+    telegram_api --> telegram_channel
     api --> store
+    telegram_api --> store
     queue -. runs jobs .-> pipeline
     pipeline --> routing
     pipeline --> rules
@@ -70,8 +77,10 @@ flowchart LR
     pipeline --> store
     pipeline --> queue
     queue -. outbox .-> channels
+    queue -. outbox .-> telegram_channel
     queue -. outbox .-> github
     channels --> meta
+    telegram_channel --> telegram
     extract -. heavy work .-> helpers
     fetchers -. browser .-> helpers
     fetchers --> net
@@ -79,7 +88,9 @@ flowchart LR
     sinks --> auth
     ops --> pipeline
     wiring --> channels
+    wiring --> telegram_channel
     wiring --> api
+    wiring --> telegram_api
     ops --> sinks
     ops --> store
     routing --> config
