@@ -78,7 +78,11 @@ class InvoiceRef:
 
 @dataclass(frozen=True)
 class PendingRow:
-    """An invoice that waits on the sender, for ``/pendientes`` (S4.8, S11.4)."""
+    """An invoice that waits on the sender, for ``/pendientes`` (S4.8, S11.4).
+
+    ``razon_social`` is the invoice's own name, else the padrón's for its ``ruc_emisor``
+    (R-2.5): extraction keeps the padrón name in the reading, not in the column.
+    """
 
     id: int
     state: str
@@ -399,12 +403,13 @@ async def list_pending(
                i.state,
                i.waiting_state,
                i.waiting_rule_id,
-               i.razon_social,
+               COALESCE(i.razon_social, p.razon_social),
                i.total,
                (i.updated_at AT TIME ZONE %s)::date,
                count(*) OVER () AS total_count
         FROM invoices AS i
         LEFT JOIN batches AS b ON b.id = i.batch_id
+        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
         WHERE i.profile_id = %s
           AND (
                 i.state = ANY(%s)
@@ -461,9 +466,10 @@ async def list_recent(
                i.state,
                i.waiting_state,
                i.waiting_rule_id,
-               i.razon_social,
+               COALESCE(i.razon_social, p.razon_social),
                i.total
         FROM invoices AS i
+        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
         WHERE i.profile_id = %s
         ORDER BY i.created_at DESC, i.id DESC
         LIMIT %s
