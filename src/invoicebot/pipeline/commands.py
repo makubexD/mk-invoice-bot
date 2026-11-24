@@ -8,7 +8,7 @@ cannot be probed (R-10.1). Everything here happens in the caller's transaction.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -199,8 +199,18 @@ def help_text(is_admin: bool) -> str:
     An admin command's line is listed only when ``is_admin`` is true, so a sender who
     cannot run it does not learn it exists (R-10.1).
     """
-    lines = [command.help for command in COMMANDS.values() if is_admin or not command.admin_only]
+    lines = [command.help for _name, command in _visible(is_admin)]
     return "\n".join([HELP_HEADER, *lines])
+
+
+def menu_entries(is_admin: bool) -> list[tuple[str, str]]:
+    """Return the chat menu's ``(command, description)`` pairs the sender may run, in help order (D187)."""
+    return [(name, command.help.partition(": ")[2]) for name, command in _visible(is_admin)]
+
+
+def _visible(is_admin: bool) -> Iterator[tuple[str, Command]]:
+    """Yield the commands ``is_admin`` may run, in help order (R-10.1)."""
+    return ((name, command) for name, command in COMMANDS.items() if is_admin or not command.admin_only)
 
 
 def _invoice_id(arg: str) -> int | None:
