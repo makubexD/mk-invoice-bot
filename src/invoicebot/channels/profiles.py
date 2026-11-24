@@ -27,10 +27,10 @@ class ProfileIndex:
         self._profiles = profiles
         self._ids: dict[ChannelName, dict[str, str]] = {"whatsapp": {}, "telegram": {}}
         for profile_id, profile in profiles.items():
-            if profile.whatsapp is not None:
-                self._ids["whatsapp"][str(profile.whatsapp)] = profile_id
-            if profile.telegram_user_id is not None:
-                self._ids["telegram"][str(profile.telegram_user_id)] = profile_id
+            for channel in self._ids:
+                sender_id = profile.sender_id(channel)
+                if sender_id is not None:
+                    self._ids[channel][sender_id] = profile_id
 
     @classmethod
     def from_config(cls, cfg: Config) -> ProfileIndex:

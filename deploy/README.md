@@ -201,12 +201,13 @@ Install Tailscale from tailscale.com, then sign in:
 sudo tailscale up
 ```
 
-Expose only the webhook and the health endpoint, both proxied to the app's
+Expose only the webhooks and the health endpoint, both proxied to the app's
 loopback port:
 
 ```sh
 sudo tailscale funnel --bg --set-path /webhook/whatsapp http://127.0.0.1:8080/webhook/whatsapp
 sudo tailscale funnel --bg --set-path /health http://127.0.0.1:8080/health
+sudo tailscale funnel --bg --set-path /webhook/telegram http://127.0.0.1:8080/webhook/telegram  # when Telegram is enabled
 tailscale funnel status
 ```
 

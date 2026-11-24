@@ -127,7 +127,7 @@ def _run(settings: Settings, transport: GoogleTransport, *, flow: str = FLOW) ->
     return main(
         ["google-setup", "--flow", flow],
         settings=settings,
-        google_transport=httpx.MockTransport(transport),
+        http_transport=httpx.MockTransport(transport),
     )
 
 

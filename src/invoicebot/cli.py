@@ -1,5 +1,5 @@
 """The ``invoicebot`` command line: ``portal-test`` (S10.5), ``auth-microsoft`` (R-7.9),
-``auth-google`` (R-6.4, R-6.5) and ``google-setup`` (R-6.2, D129).
+``auth-google`` (R-6.4, R-6.5), ``google-setup`` (R-6.2, D129) and ``telegram`` (D186).
 
 ``portal-test`` reads one sample invoice from a YAML file and runs the named portal through
 the browser helper into a temporary folder. It prints the reason, each file's kind and
@@ -10,7 +10,9 @@ installed-app sign-in with a loopback redirect and PKCE, stores the account's en
 refresh token and resumes the same waiting invoices (R-6.4, R-6.5, D128). ``google-setup``
 takes a flow name: it creates the flow's Drive folder (only when the flow has a Drive
 sink) and either creates its spreadsheet with the header or checks an existing one, then
-prints the ids for the private config (R-6.2, D129, D145).
+prints the ids for the private config (R-6.2, D129, D145). ``telegram`` lists the private
+senders who pressed Start and registers, inspects or deletes the bot's webhook, reading its
+token and secret from the age store (D186, R-9.9).
 """
 
 from __future__ import annotations
@@ -60,6 +62,20 @@ from invoicebot.auth.providers import (
     microsoft_accounts,
     scopes_for,
 )
+from invoicebot.channels.telegram.client import (
+    TelegramClient,
+    TelegramError,
+    telegram_secrets,
+    webhook_secret_is_strong,
+)
+from invoicebot.channels.telegram.setup import (
+    WebhookActive,
+    delete_webhook,
+    publish_menus,
+    sender_ids,
+    set_webhook,
+    webhook_info,
+)
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     SHEETS_KEY_COLUMN,
@@ -69,14 +85,16 @@ from invoicebot.config.models import (
     GoogleDriveSink,
     GoogleSheetsSink,
     StoreDirectory,
+    enabled_chat_channels,
 )
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
+from invoicebot.pipeline.commands import menu_entries
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.pipeline.pending_auth import GOOGLE, MICROSOFT
 from invoicebot.queue.jobs import enqueue
-from invoicebot.secrets import SecretStore, load_identity
+from invoicebot.secrets import Secrets, SecretStore, load_identity
 from invoicebot.settings import Settings
 from invoicebot.sinks.google_api import GoogleError
 from invoicebot.sinks.google_drive import GoogleDrive
@@ -142,7 +160,7 @@ def main(
     token_provider_factory: TokenProviderFactory = build_token_provider,
     settings: Settings | None = None,
     show: Callable[[str], None] = _show,
-    google_transport: httpx.AsyncBaseTransport | None = None,
+    http_transport: httpx.AsyncBaseTransport | None = None,
 ) -> int:
     """Parse ``argv`` and run the chosen command, returning its exit status (S10.5)."""
     parser = _parser()
@@ -152,13 +170,13 @@ def main(
     if args.command == "auth-microsoft":
         return _auth_microsoft(parser, resolved, cfg, args.account, token_provider_factory)
     if args.command == "auth-google":
-        return _auth_google(parser, resolved, cfg, args.account, show, google_transport)
+        return _auth_google(parser, resolved, cfg, args.account, show, http_transport)
     if args.command == "google-setup":
-        return _google_setup(parser, resolved, cfg, args, google_transport)
+        return _google_setup(parser, resolved, cfg, args, http_transport)
+    if args.command == "telegram":
+        return _telegram(parser, resolved, cfg, args, show, http_transport)
     if args.command == "rehearse":
-        if args.rehearse_command == "replies":
-            return _rehearse_replies(parser, resolved, cfg, args)
-        return _rehearse_send(parser, resolved, cfg, args)
+        return _rehearse(parser, resolved, cfg, args)
     directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
@@ -196,6 +214,18 @@ def _parser() -> argparse.ArgumentParser:
         help="Drive folder to create under the account's root",
     )
     setup.add_argument("--sheet-title", default=GOOGLE_SETUP_SHEET_TITLE, help="spreadsheet title")
+    telegram = subparsers.add_parser(
+        "telegram",
+        help="collect the bot's sender ids and register its webhook (D186)",
+    )
+    telegram_sub = telegram.add_subparsers(dest="telegram_command", required=True)
+    telegram_sub.add_parser("ids", help="list the private senders who pressed Start")
+    telegram_sub.add_parser("commands", help="publish the bot command menu")
+    webhook = telegram_sub.add_parser("webhook", help="set, inspect or delete the bot's webhook")
+    webhook_action = webhook.add_mutually_exclusive_group(required=True)
+    webhook_action.add_argument("--url", help="the public https URL to register")
+    webhook_action.add_argument("--info", action="store_true", help="print the webhook's current state")
+    webhook_action.add_argument("--delete", action="store_true", help="delete the webhook")
     rehearse = subparsers.add_parser(
         "rehearse",
         help="run the live pipeline through the dev-only console channel (D165)",
@@ -348,6 +378,139 @@ def _google_setup(
     for line in lines:
         sys.stdout.write(line + "\n")
     return 0
+
+
+def _telegram(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+    show: Callable[[str], None],
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Collect sender ids, manage the bot's webhook or publish its menu (D186, D187, R-9.16).
+
+    The token and the webhook secret come from the age store, so neither is typed
+    or printed. A failure names the missing secret or Telegram's status, never a
+    value or the request URL.
+    """
+    if "telegram" not in enabled_chat_channels(cfg.channels):
+        parser.error("the telegram channel is not enabled in the config")
+    secrets_path, identity_path = settings.secrets_path, settings.age_identity_path
+    if secrets_path is None or identity_path is None:
+        parser.error("SECRETS_PATH and AGE_IDENTITY_PATH must be set to run telegram")
+    secrets = telegram_secrets(SecretStore.load(secrets_path, identity_path))
+    needed = {"telegram_bot_token"}
+    if args.telegram_command == "webhook" and args.url is not None:
+        needed.add("telegram_webhook_secret")
+    missing = secrets.missing & needed
+    if missing:
+        parser.error(f"the secret store lacks {', '.join(sorted(missing))}")
+    _check_webhook_secret(parser, secrets, args)
+    try:
+        return asyncio.run(_run_telegram(args, secrets, cfg, show, transport))
+    except ValueError as error:
+        parser.error(str(error))
+    except TelegramError as error:
+        sys.stderr.write(f"{error}\n")
+        return 1
+
+
+def _check_webhook_secret(
+    parser: argparse.ArgumentParser,
+    secrets: Secrets,
+    args: argparse.Namespace,
+) -> None:
+    """Refuse to register a webhook with a weak stored secret (D184).
+
+    The value is never printed: the message names the secret and how to replace it.
+    """
+    if args.telegram_command != "webhook" or args.url is None:
+        return
+    if not webhook_secret_is_strong(secrets.get("telegram_webhook_secret")):
+        parser.error("the secret store has a weak telegram_webhook_secret (D184): make a new one")
+
+
+async def _run_telegram(
+    args: argparse.Namespace,
+    secrets: Secrets,
+    cfg: Config,
+    show: Callable[[str], None],
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Run the chosen Telegram command over one Bot API client (D186)."""
+    async with httpx.AsyncClient(transport=transport) as http:
+        client = TelegramClient(http, token=secrets.get("telegram_bot_token"))
+        if args.telegram_command == "ids":
+            return await _telegram_ids(client, show)
+        if args.telegram_command == "commands":
+            await _telegram_commands(client, cfg, show)
+            return 0
+        await _telegram_webhook(client, secrets, args, show)
+    return 0
+
+
+async def _telegram_ids(client: TelegramClient, show: Callable[[str], None]) -> int:
+    """Print one line per private sender, or the delete hint when a webhook is set (D186)."""
+    try:
+        senders = await sender_ids(client)
+    except WebhookActive:
+        sys.stderr.write("a webhook is set; run `invoicebot telegram webhook --delete` first\n")
+        return 1
+    if not senders:
+        show("no messages yet: press Start in the bot, then run again")
+    for user_id, username in senders:
+        show(f"{user_id} @{username}" if username else f"{user_id} -")
+    return 0
+
+
+async def _telegram_commands(
+    client: TelegramClient,
+    cfg: Config,
+    show: Callable[[str], None],
+) -> None:
+    """Publish the default menu and each admin's own, naming profiles never ids (D187)."""
+    names = await publish_menus(client, cfg.profiles, menu_entries(False), menu_entries(True))
+    for name in names:
+        show(f"menu set: {name}")
+
+
+async def _telegram_webhook(
+    client: TelegramClient,
+    secrets: Secrets,
+    args: argparse.Namespace,
+    show: Callable[[str], None],
+) -> None:
+    """Set, print or delete the bot's webhook (D186)."""
+    if args.url is not None:
+        await set_webhook(client, args.url, secrets.get("telegram_webhook_secret"))
+        show("webhook set")
+    elif args.info:
+        info = await webhook_info(client)
+        show(f"url: {info.url}")
+        show(f"pending: {info.pending}")
+        show(f"last_error_date: {_shown(info.last_error_date)}")
+        show(f"last_error_message: {_shown(info.last_error_message)}")
+    else:
+        await delete_webhook(client)
+        show("webhook deleted")
+
+
+def _shown(value: object) -> str:
+    """Render a webhook info field, with ``-`` when Telegram reported none (D186)."""
+    return "-" if value is None else str(value)
+
+
+def _rehearse(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+) -> int:
+    """Dispatch the ``rehearse`` subcommands (D165)."""
+    if args.rehearse_command == "replies":
+        return _rehearse_replies(parser, settings, cfg, args)
+    return _rehearse_send(parser, settings, cfg, args)
 
 
 def _rehearse_send(

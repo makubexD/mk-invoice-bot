@@ -193,7 +193,7 @@ async def _run_cli(
         ["auth-google", "--account", account],
         settings=settings,
         show=show,
-        google_transport=transport,
+        http_transport=transport,
     )
 
 

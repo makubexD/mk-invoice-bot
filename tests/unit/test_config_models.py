@@ -29,6 +29,7 @@ from invoicebot.config.models import (
     Padron,
     PickField,
     Portal,
+    Profile,
     WhatsAppChannel,
     google_accounts_in,
     parse_delay,
@@ -1262,6 +1263,47 @@ def test_example_config_preferred_channels_are_reachable() -> None:
     cfg = load_config(EXAMPLE)
 
     assert cfg.profiles["yo"].preferred_channel == "whatsapp"
+
+
+@pytest.mark.parametrize(
+    ("channel", "expected"),
+    [("whatsapp", "51999999999"), ("telegram", "100000001")],
+)
+def test_profile_sender_id_is_the_id_on_that_channel(channel: str, expected: str) -> None:
+    """D174: a profile's sender id is its WhatsApp number or its Telegram user id as text."""
+    profile = Profile(
+        name="Yo",
+        legal_name="PERSONA DE EJEMPLO",
+        whatsapp="51999999999",
+        telegram_user_id=100000001,
+        flows=["personal_google"],
+    )
+
+    assert profile.sender_id(channel) == expected
+
+
+def test_profile_sender_id_is_none_for_a_missing_id() -> None:
+    """D174: a profile with no Telegram id has no sender id on Telegram."""
+    profile = Profile(
+        name="Asistente",
+        legal_name="ASISTENTE DE EJEMPLO",
+        whatsapp="51988888888",
+        flows=["personal_google"],
+    )
+
+    assert profile.sender_id("telegram") is None
+
+
+def test_profile_sender_id_is_none_for_an_unknown_channel() -> None:
+    """D174: a channel the profile cannot be addressed on has no sender id."""
+    profile = Profile(
+        name="Yo",
+        legal_name="PERSONA DE EJEMPLO",
+        whatsapp="51999999999",
+        flows=["personal_google"],
+    )
+
+    assert profile.sender_id("email") is None
 
 
 def _config_with_profile(tmp_path: Path, profile_id: str) -> Path:

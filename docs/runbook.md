@@ -103,19 +103,26 @@ Use this when a portal's site changed and every fetch fails.
 
 ## 5. Rotate secrets and the GitHub App key
 
-1. Edit the age store. It decrypts to a private temp file and re-encrypts on save:
+1. Edit the age store. It decrypts to a private temp file and re-encrypts on save. The identity file belongs to the
+   container's user, so the edit runs inside `podman unshare`, and the store goes back to mode 644 afterwards (the
+   container reads it through that bit):
 
    ```sh
-   uv run python scripts/secrets_edit.py "$LIVE_ROOT/config/secrets.age" \
+   podman unshare "$(command -v uv)" run python scripts/secrets_edit.py "$LIVE_ROOT/config/secrets.age" \
        --identity "$LIVE_ROOT/config/age-identity.txt"
+   chmod 644 "$LIVE_ROOT/config/secrets.age"
    ```
+
+   A Telegram token copied from BotFather can pick up a space where its message wraps: the token never has one.
 
 2. Type each new value yourself. Never paste one into a chat.
 3. **Reload.** Secrets are read again on the restart.
 4. **GitHub App key:** in the App's settings, generate a new private key and put the whole PEM in
    `github_app_private_key` (steps 1–3). Delete the old key in GitHub only after the next daily GitHub App check
    passes (it runs at `gaps.digest_at`).
-5. For a channel token (WhatsApp), first rotate it with the provider, then update the store and reload.
+5. For a channel token (WhatsApp or Telegram), first rotate it with the provider, then update the store and reload.
+   Telegram also needs §11 step 7, and so does a new `telegram_webhook_secret`: until `setWebhook` runs again,
+   every update is refused with 401 and lost.
 
 ## 6. Handle a gap issue
 
@@ -204,3 +211,45 @@ stay in the outbox and are never sent anywhere. Config load refuses it with `env
 
 **Known limit:** a reply still `pending` has no channel message id yet, so a quote of it does not resolve and the
 upload is handled as if unquoted.
+
+## 11. Telegram bot (D179, D186)
+
+The bot belongs to the owner's personal Telegram account. Senders see only the bot, never the owner's number. The
+roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each step.
+
+1. **Protect the owning account (recommended).** In Telegram: Settings → Privacy and Security → Two-Step Verification,
+   with a password and a recovery email.
+2. **Create the bot.** In `@BotFather` send `/newbot`, a display name and a username ending in `bot`. The username is
+   public and cannot be changed.
+3. **Store the secrets (§5).** Put BotFather's token in the age store as `telegram_bot_token`, then delete
+   BotFather's message. Make `telegram_webhook_secret` with
+   `uv run python -c "import secrets; print(secrets.token_urlsafe(32))"`. The app refuses a secret shorter than 32
+   characters or outside `A-Z a-z 0-9 _ -` (D184). Never paste either value into a chat, the repo or a shell variable.
+4. **Close the bot to groups.** In BotFather: `/setjoingroups` → Disable. Optional: `/setdescription` and
+   `/setcommands`.
+5. **Every sender presses Start.** Each sender opens `t.me/<username>` and presses **Start**. A bot cannot write
+   first: until a sender has pressed Start, a send to them fails for good (403).
+6. **Collect the sender ids** before any webhook is set (Telegram keeps the messages until then). The command reads
+   the live config, so first set the `telegram` channel to `enabled: true` there and **reload**; no profile needs a
+   `telegram_user_id` yet. Then:
+
+   ```sh
+   podman exec "$APP" invoicebot telegram ids
+   ```
+
+   It prints `<id> @<username>` per sender. Put each id in its profile as `telegram_user_id` in the live config,
+   then **reload**. `a webhook is set` means step 7 already ran: run
+   `telegram webhook --delete`, send a message to the bot, and try again.
+
+7. **Register the webhook.** The Funnel must serve `/webhook/telegram` (`deploy/README.md` § 5). Then:
+
+   ```sh
+   podman exec "$APP" invoicebot telegram webhook --url https://<machine>.<tailnet>.ts.net/webhook/telegram
+   podman exec "$APP" invoicebot telegram webhook --info
+   ```
+
+   `--info` should show the URL, `pending: 0` and `last_error_message: -`. Send `/ayuda` to the bot to confirm.
+
+8. **Rotate the token.** In BotFather: `/revoke`. Store the new token (§5), **reload**, and run step 7 again.
+9. **Lost owning account.** Create a new bot (steps 2–7) and tell every sender the new username. The old bot is no
+   longer reachable.

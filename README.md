@@ -64,13 +64,14 @@ The app reads these environment variables (names only; see
 
 The `invoicebot` command (inside the container, or `uv run invoicebot`):
 
-| Command                                     | What it does                                                    |
-| ------------------------------------------- | --------------------------------------------------------------- |
-| `invoicebot portal-test <key> --sample <f>` | Runs one portal fetch on a sample invoice                       |
-| `invoicebot auth-microsoft --account <a>`   | Signs a Microsoft account in and resumes the invoices it holds  |
-| `invoicebot auth-google --account <a>`      | Signs a Google account in and resumes the invoices it holds     |
-| `invoicebot google-setup --flow <f>`        | Creates or checks a flow's Drive folder and spreadsheet         |
-| `invoicebot rehearse send\|replies`         | Runs the dev-only console channel and prints its replies (D165) |
+| Command                                      | What it does                                                    |
+| -------------------------------------------- | --------------------------------------------------------------- |
+| `invoicebot portal-test <key> --sample <f>`  | Runs one portal fetch on a sample invoice                       |
+| `invoicebot auth-microsoft --account <a>`    | Signs a Microsoft account in and resumes the invoices it holds  |
+| `invoicebot auth-google --account <a>`       | Signs a Google account in and resumes the invoices it holds     |
+| `invoicebot google-setup --flow <f>`         | Creates or checks a flow's Drive folder and spreadsheet         |
+| `invoicebot rehearse send\|replies`          | Runs the dev-only console channel and prints its replies (D165) |
+| `invoicebot telegram ids\|webhook\|commands` | Lists sender ids; manages the webhook and menu (D186, D187)     |
 
 Scripts in `scripts/`. The Python ones run with `uv run python scripts/<name>`;
 `restore_drill.sh` runs with bash on the host and `laptop_agent.ps1` with
