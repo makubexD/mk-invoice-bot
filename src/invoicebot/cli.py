@@ -62,12 +62,17 @@ from invoicebot.auth.providers import (
     microsoft_accounts,
     scopes_for,
 )
-from invoicebot.channels.telegram.client import TelegramClient, TelegramError, telegram_secrets
+from invoicebot.channels.telegram.client import (
+    TelegramClient,
+    TelegramError,
+    telegram_secrets,
+    webhook_secret_is_strong,
+)
 from invoicebot.channels.telegram.setup import (
     WebhookActive,
     delete_webhook,
+    publish_menus,
     sender_ids,
-    set_commands,
     set_webhook,
     webhook_info,
 )
@@ -401,6 +406,7 @@ def _telegram(
     missing = secrets.missing & needed
     if missing:
         parser.error(f"the secret store lacks {', '.join(sorted(missing))}")
+    _check_webhook_secret(parser, secrets, args)
     try:
         return asyncio.run(_run_telegram(args, secrets, cfg, show, transport))
     except ValueError as error:
@@ -408,6 +414,21 @@ def _telegram(
     except TelegramError as error:
         sys.stderr.write(f"{error}\n")
         return 1
+
+
+def _check_webhook_secret(
+    parser: argparse.ArgumentParser,
+    secrets: Secrets,
+    args: argparse.Namespace,
+) -> None:
+    """Refuse to register a webhook with a weak stored secret (D184).
+
+    The value is never printed: the message names the secret and how to replace it.
+    """
+    if args.telegram_command != "webhook" or args.url is None:
+        return
+    if not webhook_secret_is_strong(secrets.get("telegram_webhook_secret")):
+        parser.error("the secret store has a weak telegram_webhook_secret (D184): make a new one")
 
 
 async def _run_telegram(
@@ -449,12 +470,9 @@ async def _telegram_commands(
     show: Callable[[str], None],
 ) -> None:
     """Publish the default menu and each admin's own, naming profiles never ids (D187)."""
-    await set_commands(client, menu_entries(False))
-    show("menu set: default")
-    for profile_id, profile in cfg.profiles.items():
-        if profile.admin and profile.telegram_user_id is not None:
-            await set_commands(client, menu_entries(True), chat_id=profile.telegram_user_id)
-            show(f"menu set: {profile_id}")
+    names = await publish_menus(client, cfg.profiles, menu_entries(False), menu_entries(True))
+    for name in names:
+        show(f"menu set: {name}")
 
 
 async def _telegram_webhook(

@@ -6,7 +6,7 @@ imported by the running bot.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from invoicebot.channels.telegram.client import (
@@ -14,6 +14,7 @@ from invoicebot.channels.telegram.client import (
     TelegramClient,
     TelegramError,
 )
+from invoicebot.config.models import Profile
 
 WEBHOOK_PATH = "/webhook/telegram"  # D186: the path the funnel and the API route share
 WEBHOOK_ACTIVE_STATUS = 409  # getUpdates is refused while a webhook is set
@@ -66,6 +67,8 @@ async def sender_ids(client: TelegramClient) -> list[tuple[int, str | None]]:
 
     Message text is never read. Raises ``WebhookActive`` when Telegram answers 409.
     """
+    # shortcut: one getUpdates returns at most 100 updates, so senders beyond those are missed;
+    # fine for a handful of owner profiles.
     try:
         result = await client.call("getUpdates", {"allowed_updates": ["message"], "timeout": 0})
     except TelegramError as error:
@@ -137,3 +140,23 @@ async def set_commands(
         scope = {"type": "chat", "chat_id": chat_id}
     commands = [{"command": command, "description": description} for command, description in entries]
     await client.call("setMyCommands", {"commands": commands, "scope": scope})
+
+
+async def publish_menus(
+    client: TelegramClient,
+    profiles: Mapping[str, Profile],
+    user_entries: Sequence[tuple[str, str]],
+    admin_entries: Sequence[tuple[str, str]],
+) -> list[str]:
+    """Set the default menu, then each admin's chat-scoped one; return what was set (D187).
+
+    The returned names are ``"default"`` first, then the profile ids of the admins
+    that have a ``telegram_user_id``. An admin without one gets no chat menu.
+    """
+    await set_commands(client, user_entries)
+    names = ["default"]
+    for profile_id, profile in profiles.items():
+        if profile.admin and profile.telegram_user_id is not None:
+            await set_commands(client, admin_entries, chat_id=profile.telegram_user_id)
+            names.append(profile_id)
+    return names

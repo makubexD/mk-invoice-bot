@@ -19,6 +19,7 @@ EXAMPLE_CONFIG = REPO_ROOT / "config" / "example.yaml"
 TOKEN = "synthetic-bot-token"  # noqa: S105  # a synthetic test value
 #: 43 characters, the shape ``secrets.token_urlsafe(32)`` gives (D184).
 WEBHOOK_SECRET = "synthetic_webhook_secret_0123456789abcdefgh"  # noqa: S105  # a synthetic test value
+WEAK_WEBHOOK_SECRET = "synthetic-weak-secret"  # noqa: S105  # a synthetic test value
 WEBHOOK_URL = "https://h.example.ts.net/webhook/telegram"
 ERROR_STATUS = 401
 WEBHOOK_ACTIVE_STATUS = 409
@@ -55,12 +56,17 @@ def _config_path(tmp_path: Path, *, telegram_enabled: bool) -> Path:
     return path
 
 
-def _settings(tmp_path: Path, *, telegram_enabled: bool = True) -> Settings:
+def _settings(
+    tmp_path: Path,
+    *,
+    telegram_enabled: bool = True,
+    webhook_secret: str = WEBHOOK_SECRET,
+) -> Settings:
     """Build settings on a config whose Telegram channel is enabled, with a synthetic age store."""
     identity = pyrage.x25519.Identity.generate()
     identity_path = tmp_path / "identity.txt"
     identity_path.write_text(str(identity), encoding="utf-8")
-    values = {"telegram_bot_token": TOKEN, "telegram_webhook_secret": WEBHOOK_SECRET}
+    values = {"telegram_bot_token": TOKEN, "telegram_webhook_secret": webhook_secret}
     plaintext = yaml.safe_dump(values).encode("utf-8")
     secrets_path = tmp_path / "secrets.age"
     secrets_path.write_bytes(pyrage.encrypt(plaintext, [identity.to_public()]))
@@ -135,6 +141,30 @@ def test_webhook_url_registers_the_stored_secret(
         "allowed_updates": ["message", "callback_query"],
         "drop_pending_updates": True,
     }
+
+
+def test_webhook_url_with_a_weak_stored_secret_exits_two_without_a_request(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D184: webhook --url refuses a weak stored secret before any request and never prints it."""
+    api = BotApi("setWebhook", result=True)
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run(
+            _settings(tmp_path, webhook_secret=WEAK_WEBHOOK_SECRET),
+            api,
+            "webhook",
+            "--url",
+            WEBHOOK_URL,
+        )
+
+    assert exit_info.value.code == 2
+    assert api.requests == []
+    captured = capsys.readouterr()
+    assert "weak telegram_webhook_secret" in captured.err
+    assert WEAK_WEBHOOK_SECRET not in captured.err
+    assert WEAK_WEBHOOK_SECRET not in captured.out
 
 
 def test_webhook_info_prints_four_lines(

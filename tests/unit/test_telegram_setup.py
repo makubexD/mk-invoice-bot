@@ -14,11 +14,13 @@ from invoicebot.channels.telegram.setup import (
     WebhookActive,
     WebhookInfo,
     delete_webhook,
+    publish_menus,
     sender_ids,
     set_commands,
     set_webhook,
     webhook_info,
 )
+from invoicebot.config.models import Profile
 
 # Split so the scanner does not read the synthetic value as a committed credential.
 TOKEN = "123456" + ":ABC-fake-token"
@@ -267,3 +269,65 @@ async def test_set_commands_with_no_entries_sends_an_empty_list() -> None:
         await set_commands(client, [])
 
     assert json.loads(requests[0].content) == {"commands": [], "scope": {"type": "default"}}
+
+
+def _profile(*, admin: bool, telegram_user_id: int | None) -> Profile:
+    """Build one synthetic profile for the menu tests (D187)."""
+    return Profile(
+        name="Synthetic",
+        legal_name="SYNTHETIC",
+        flows=["personal_google"],
+        admin=admin,
+        telegram_user_id=telegram_user_id,
+    )
+
+
+async def test_publish_menus_sets_the_default_then_the_admins_chat_menu() -> None:
+    """D187: the default menu goes first, then one chat-scoped menu per admin with a Telegram id."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    profiles = {
+        "100000001": _profile(admin=True, telegram_user_id=100000001),
+        "assistant": _profile(admin=False, telegram_user_id=100000002),
+    }
+    user_entries = [("factura", "Upload an invoice")]
+    admin_entries = [("factura", "Upload an invoice"), ("gaps", "Show the gaps")]
+
+    async with _make_client(handler) as client:
+        names = await publish_menus(client, profiles, user_entries, admin_entries)
+
+    assert names == ["default", "100000001"]
+    assert len(requests) == 2
+    default_menu, admin_menu = (json.loads(request.content) for request in requests)
+    assert default_menu["scope"] == {"type": "default"}
+    assert default_menu["commands"] == [{"command": "factura", "description": "Upload an invoice"}]
+    assert admin_menu["scope"] == {"type": "chat", "chat_id": 100000001}
+    assert admin_menu["commands"] == [
+        {"command": "factura", "description": "Upload an invoice"},
+        {"command": "gaps", "description": "Show the gaps"},
+    ]
+
+
+async def test_publish_menus_skips_an_admin_without_a_telegram_id() -> None:
+    """D187: an admin profile with no telegram_user_id gets no chat-scoped request."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with _make_client(handler) as client:
+        names = await publish_menus(
+            client,
+            {"owner": _profile(admin=True, telegram_user_id=None)},
+            [("factura", "Upload an invoice")],
+            [("gaps", "Show the gaps")],
+        )
+
+    assert names == ["default"]
+    assert len(requests) == 1
+    assert json.loads(requests[0].content)["scope"] == {"type": "default"}
