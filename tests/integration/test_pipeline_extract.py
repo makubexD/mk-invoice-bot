@@ -20,7 +20,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import uuid4
 
 import cv2
@@ -33,6 +33,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import AttachmentKind
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading, reading_to_json
@@ -51,6 +52,7 @@ from invoicebot.pipeline.extract import (
 from invoicebot.pipeline.gaps import RULE_GAP_ADMIN, GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.queue.jobs import Job
+from invoicebot.rules.messages_es import BUTTON_CANCEL, BUTTON_EDIT
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -354,6 +356,20 @@ def _ocr_reading() -> Reading:
     )
 
 
+def _partial_ocr_reading() -> Reading:
+    """Return a QR-less OCR reading missing the invoice's date and total (D188)."""
+    reading = parse_qr_payload(VALID_PAYLOAD)
+    assert reading is not None
+    return replace(
+        reading,
+        fields={
+            name: replace(field, source="ocr")
+            for name, field in reading.fields.items()
+            if name not in {"fecha_emision", "total"}
+        },
+    )
+
+
 async def _run_handler_with_reading(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     invoice_id: int,
@@ -420,6 +436,22 @@ async def _outbox_rows(conn: AsyncConnection[Any], profile_id: str, rule_id: str
         (profile_id, rule_id),
     )
     return [str(text) for (text,) in await cur.fetchall()]
+
+
+async def _outbox_buttons(
+    conn: AsyncConnection[Any], profile_id: str, rule_id: str
+) -> list[list[dict[str, str]]]:
+    """Return the button lists of the outbox rows for ``profile_id`` under ``rule_id``."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s AND payload_json->>'rule_id' = %s
+        ORDER BY id
+        """,
+        (profile_id, rule_id),
+    )
+    return [cast(list[dict[str, str]], buttons) for (buttons,) in await cur.fetchall()]
 
 
 async def _clear_gaps(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -671,11 +703,50 @@ async def test_blank_photo_fails_with_br_e01(
         state, rule_id = await _invoice_row(conn, invoice_id)
         route_jobs = await _job_count(conn, invoice_id, ROUTE_STEP)
         messages = await _outbox_rows(conn, profile_id, "BR-E01")
+        buttons = await _outbox_buttons(conn, profile_id, "BR-E01")
 
     assert (state, rule_id) == ("EXTRACT_FAILED", "BR-E01")
     assert route_jobs == 0
     assert len(messages) == 1
     assert "No pude leer este comprobante" in messages[0]
+    assert buttons == [
+        [
+            {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+            {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+        ]
+    ]
+
+
+async def test_partial_reading_sends_br_e01_naming_the_fields(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D188, BR-E01: a partial reading sends the text naming the fields read and missing, with buttons."""
+    invoice_id, profile_id = await _invoice_with_photo(
+        db_pool, _write_blank_photo(tmp_path / f"partial{PNG}")
+    )
+
+    await _run_handler_with_reading(db_pool, invoice_id, _partial_ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+        buttons = await _outbox_buttons(conn, profile_id, "BR-E01")
+
+    assert (state, rule_id) == ("EXTRACT_FAILED", "BR-E01")
+    assert len(messages) == 1
+    assert f"Leí parte del comprobante #{invoice_id}" in messages[0]
+    assert "✅ Leído: " in messages[0]
+    assert "❓ Falta: fecha, total" in messages[0]
+    assert "fecha=dd/mm/aaaa" in messages[0]
+    assert "total=…" in messages[0]
+    assert buttons == [
+        [
+            {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+            {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+        ]
+    ]
 
 
 async def test_two_unreadable_photos_raise_parser_miss_on_the_second(

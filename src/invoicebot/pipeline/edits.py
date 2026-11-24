@@ -13,7 +13,7 @@ a ``PENDING_USER`` invoice is unparked first (D94).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from types import MappingProxyType
@@ -21,7 +21,7 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
 from invoicebot.pipeline.extract import ROUTE_STEP
@@ -32,7 +32,8 @@ from invoicebot.pipeline.overrides import (
     edit_target,
     without_accents,
 )
-from invoicebot.pipeline.unreadable import ALIASES, RULE_UNREADABLE
+from invoicebot.pipeline.questions import unreadable_buttons
+from invoicebot.pipeline.unreadable import ALIASES, RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     EDIT_INVALID,
@@ -192,7 +193,14 @@ async def apply_edits(
     await _drop_stale_answers(conn, invoice_id, edits.fields)
     if state == EXTRACT_FAILED and reading.missing_required():
         # The pin stays: BR-E01 asks for more fields of this same invoice (D90).
-        await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)
+        await _reply(
+            conn,
+            msg,
+            invoice_id,
+            unreadable_text(invoice_id, reading),
+            rule_id=RULE_UNREADABLE,
+            buttons=unreadable_buttons(invoice_id),
+        )
         return invoice_id
     await clear_editing(conn, invoice_id)
     await set_state(conn, invoice_id, ROUTING, expected=state)
@@ -261,6 +269,7 @@ async def _reply(
     text: str,
     *,
     rule_id: str | None = None,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue one reply to the message's sender in the caller's transaction."""
     await queue_message(
@@ -269,6 +278,7 @@ async def _reply(
         text,
         invoice_id=invoice_id,
         rule_id=rule_id,
+        buttons=buttons,
     )
 
 

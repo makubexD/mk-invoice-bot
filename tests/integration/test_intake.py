@@ -32,7 +32,7 @@ from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
-from invoicebot.rules.messages_es import EDIT_LATE, MESSAGES, state_desc
+from invoicebot.rules.messages_es import BUTTON_CANCEL, BUTTON_EDIT, EDIT_LATE, MESSAGES, state_desc
 from invoicebot.store import taught_links
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
@@ -161,6 +161,17 @@ def _reading(
     )
 
 
+def _partial_reading(fecha: date) -> Reading:
+    """Build a reading missing its date and total, as a partial OCR read leaves it (D188)."""
+    reading = _reading(fecha)
+    return Reading(
+        fields={
+            name: field for name, field in reading.fields.items() if name not in {"fecha_emision", "total"}
+        },
+        document_url=None,
+    )
+
+
 async def _invoice_in(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     profile_id: str,
@@ -280,6 +291,20 @@ async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[st
     )
     rows = await cur.fetchall()
     return [(str(text), rule_id) for text, rule_id in rows]
+
+
+async def _reply_buttons(conn: AsyncConnection[Any], profile_id: str) -> list[list[dict[str, str]]]:
+    """Return the outbox rows' buttons for ``profile_id``, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [cast(list[dict[str, str]], buttons) for (buttons,) in await cur.fetchall()]
 
 
 def _teach_roles(profile_id: str) -> IntakeRoles:
@@ -889,7 +914,7 @@ async def test_complete_edit_resumes_a_parked_extract_failed_invoice(
 async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.5, BR-E01: only total=10.00 leaves a required field missing, so BR-E01 repeats."""
+    """R-3.5, BR-E01, D188: only total=10.00 leaves a required field missing, so BR-E01 repeats."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", None, rule_id="BR-E01")
     msg = _message(profile_id, external_id=_external_id(), text="total=10.00")
@@ -901,10 +926,67 @@ async def test_incomplete_edit_on_extract_failed_asks_for_data_and_stays(
         state_rule = await _state_rule(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
         replies = await _replies(conn, profile_id)
+        buttons = await _reply_buttons(conn, profile_id)
 
     assert state_rule == ("EXTRACT_FAILED", "BR-E01")
     assert jobs == []
-    assert replies == [(MESSAGES["BR-E01"], "BR-E01")]
+    assert len(replies) == 1
+    text, rule_id = replies[0]
+    assert rule_id == "BR-E01"
+    assert f"Leí parte del comprobante #{invoice_id}" in text
+    assert "✅ Leído: total S/ 10.00" in text
+    assert "❓ Falta: RUC del emisor, tipo de comprobante, serie, número, fecha" in text
+    assert buttons == [
+        [
+            {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+            {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+        ]
+    ]
+
+
+async def test_br_e01_reask_lists_only_the_field_still_missing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E01: a date edit still missing the total re-asks for only the total, then routes."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "EXTRACT_FAILED", _partial_reading(await _today(db_pool)), rule_id="BR-E01"
+    )
+    fecha = _message(profile_id, external_id=_external_id(), text="fecha=05/11/2026")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, fecha, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        after_fecha = await _state_rule(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+        buttons = await _reply_buttons(conn, profile_id)
+
+    assert after_fecha == ("EXTRACT_FAILED", "BR-E01")
+    assert len(replies) == 1
+    text, rule_id = replies[0]
+    assert rule_id == "BR-E01"
+    assert f"Leí parte del comprobante #{invoice_id}" in text
+    assert "❓ Falta: total" in text
+    assert "❓ Falta: fecha" not in text
+    assert "total=…" in text
+    assert buttons == [
+        [
+            {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+            {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+        ]
+    ]
+
+    total = _message(profile_id, external_id=_external_id(), text="total=30.90")
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, total, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        after_total = await _state_rule(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert after_total == ("ROUTING", None)
+    assert jobs == ["route"]
 
 
 async def test_edit_in_delivering_is_refused_as_late(
