@@ -311,6 +311,8 @@ SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
 #: The last line of a summary whose invoice goes on without waiting, so its buttons read
 #: as corrections, not as a question (D188).
 SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
+#: The last line of a summary that carries no buttons: nothing is being asked (D189).
+SUMMARY_MOVING_QUIET = "⏳ Lo estoy archivando."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
 #: ``{issuer}`` when the padrón or the reading named the issuer, and when it did not (D188).

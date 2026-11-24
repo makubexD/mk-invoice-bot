@@ -33,7 +33,7 @@ from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING
+from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING, SUMMARY_MOVING_QUIET
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
 from invoicebot.store.db import Pool
@@ -191,13 +191,14 @@ async def ask_sunat(
 
 async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) -> None:
     """Send the summary and move the invoice on, exactly as routing did before (D124)."""
-    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (SUMMARY_MOVING,))
+    buttons = summary_buttons(inputs.invoice_id, inputs.reading)
+    text = summary_text(
+        inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (_moving_line(buttons),)
+    )
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
-    await _reply(
-        conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, summary_buttons(inputs.invoice_id)
-    )
+    await _reply(conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, buttons)
 
 
 async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdict: Verdict) -> None:
@@ -205,7 +206,8 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
     if verdict.ask:
         await _ask(conn, inputs, verdict)
         return
-    extra_lines = (*_extra_lines(verdict), SUMMARY_MOVING)
+    buttons = summary_buttons(inputs.invoice_id, inputs.reading)
+    extra_lines = (*_extra_lines(verdict), _moving_line(buttons))
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, extra_lines)
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
@@ -213,9 +215,7 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
     run_after = await recheck_run_after(conn, verdict, 1)
     if run_after is not None:
         await enqueue(conn, inputs.invoice_id, SUNAT_RECHECK_STEP, run_after)
-    await _reply(
-        conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, summary_buttons(inputs.invoice_id)
-    )
+    await _reply(conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, buttons)
 
 
 async def _ask(conn: AsyncConnection[Any], inputs: _Inputs, verdict: Verdict) -> None:
@@ -260,6 +260,11 @@ async def _now_plus(conn: AsyncConnection[Any], *, hours: int, minutes: int) -> 
     if row is None:
         raise RuntimeError("the database returned no time")
     return cast(datetime, row[0])
+
+
+def _moving_line(buttons: Sequence[Button]) -> str:
+    """Return the summary's last line: it invites a press only when it carries buttons (D189)."""
+    return SUMMARY_MOVING if buttons else SUMMARY_MOVING_QUIET
 
 
 async def _reply(

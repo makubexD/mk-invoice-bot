@@ -27,7 +27,7 @@ from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.routing.router import CompiledRule
-from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID, SUMMARY_MOVING
+from invoicebot.rules.messages_es import SUMMARY_MOVING, SUMMARY_MOVING_QUIET
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
@@ -369,10 +369,7 @@ async def test_validate_off_sends_the_routed_summary(
     assert "Trabajo (Microsoft)" in text
     assert "Revisa" not in text
     assert "Deducido" not in text
-    assert buttons == [
-        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
-        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
-    ]
+    assert buttons == []  # D189: every required field came from the QR
 
 
 async def test_happy_path_sends_ack_and_summary(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -502,7 +499,7 @@ async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     row, texts = await _route_and_validate_one(db_pool, _reading(old), answers={"confirmed": True})
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: fecha", SUMMARY_MOVING]
+    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: fecha", SUMMARY_MOVING_QUIET]
 
 
 async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -516,7 +513,7 @@ async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: número", SUMMARY_MOVING]
+    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: número", SUMMARY_MOVING_QUIET]
 
 
 async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -526,7 +523,10 @@ async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnecti
     row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-2:] == ["ℹ️ Deducido del comprobante: tipo de comprobante", SUMMARY_MOVING]
+    assert texts[0].splitlines()[-2:] == [
+        "ℹ️ Deducido del comprobante: tipo de comprobante",
+        SUMMARY_MOVING_QUIET,
+    ]
 
 
 async def test_low_confidence_without_flag_is_not_named(
@@ -636,10 +636,7 @@ async def test_total_at_cap_routes_without_a_question(
     assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
-    assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
-        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
-    ]
+    assert outbox[0][2] == []  # D189: every required field came from the QR
 
 
 async def test_flow_without_reimbursement_is_not_asked(
@@ -663,16 +660,13 @@ async def test_flow_without_reimbursement_is_not_asked(
     assert jobs == [VALIDATE_STEP, "fetch"]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
-    assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
-        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
-    ]
+    assert outbox[0][2] == []  # D189: every required field came from the QR
 
 
-async def test_routed_summary_has_edit_and_cancel_buttons(
+async def test_routed_summary_from_qr_has_no_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-3.4: a routed invoice's summary carries [Editar] then [Cancelar]."""
+    """R-3.4, D189: a summary whose required fields all came from the QR carries no buttons."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
     invoice_id = await _routing_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
@@ -683,10 +677,7 @@ async def test_routed_summary_has_edit_and_cancel_buttons(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     assert len(outbox) == 1
-    assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
-        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
-    ]
+    assert outbox[0][2] == []  # D189: every required field came from the QR
 
 
 async def test_dni_buyer_asks_which_flow(
