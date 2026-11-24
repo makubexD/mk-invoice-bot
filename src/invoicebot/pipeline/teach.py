@@ -25,6 +25,7 @@ from invoicebot.config.models import Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import TaughtUrlError, check_taught_url, is_dont_know, looks_like_url
+from invoicebot.pipeline.failed import RULE_DEAD
 from invoicebot.pipeline.outgoing import (
     RULE_STALE_BUTTON,
     Addressee,
@@ -54,7 +55,9 @@ MESSAGE_DONT_KNOW_MANUAL = "BR-F02_dont_know_manual"
 #: Rules whose messages are never the question a typed answer or a BR-F14 press waits
 #: on: BR-S02 answers a stale press, and BR-F13's buttons are gated by the invoice's
 #: state, so a BR-F13 sent for another invoice must not hide a pending BR-F02 (D189).
-NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED})
+#: BR-F02's "no sé" answer and BR-S03's notice ask nothing either, so a URL typed after
+#: them still answers the pending BR-F02 (D190).
+NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED, RULE_DONT_KNOW, RULE_DEAD})
 #: The admin's answer after [Aprobar] (BR-S06, D118).
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).

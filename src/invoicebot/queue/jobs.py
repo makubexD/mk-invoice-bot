@@ -60,6 +60,20 @@ async def _fail_invoice(conn: AsyncConnection[Any], invoice_id: int, reason: str
     )
 
 
+async def _notify_parked(conn: AsyncConnection[Any], on_dead: OnDead, invoice_id: int, step: str) -> None:
+    """Run ``on_dead`` for a crash-looped job in a savepoint (BR-S03, D190).
+
+    A failing ``on_dead`` loses only the notice: rolling back ``claim`` instead would
+    leave the job first in line with its crash uncounted, and every later claim would
+    fail on it, stopping the whole queue.
+    """
+    try:
+        async with conn.transaction():
+            await on_dead(conn, invoice_id, step, CRASH_LOOP_ERROR)
+    except Exception:  # the queue's boundary: no notice failure may stop it
+        logger.exception("job for invoice %d parked without its BR-S03 notice", invoice_id)
+
+
 async def enqueue(
     conn: AsyncConnection[Any],
     invoice_id: int,
@@ -100,8 +114,8 @@ async def claim(
     SKIP LOCKED`` in ``run_after, id`` order. A candidate whose lease expired
     is a worker death: its ``crashes`` counter is incremented and, once it
     reaches ``MAX_CRASHES``, the job is parked and its invoice failed with
-    ``BR-S03`` (R-1.11), and ``on_dead`` is called, before the loop moves to
-    the next candidate.
+    ``BR-S03`` (R-1.11), and ``on_dead`` is called in a savepoint, before the
+    loop moves to the next candidate.
     """
     logger.info("worker %s: claiming a job", worker_id)
     async with conn.transaction():
@@ -145,7 +159,7 @@ async def claim(
                         {"job_id": job_id, "crashes": crashes, "reason": CRASH_LOOP_ERROR},
                     )
                     await _fail_invoice(conn, invoice_id, CRASH_LOOP_ERROR)
-                    await on_dead(conn, invoice_id, step, CRASH_LOOP_ERROR)
+                    await _notify_parked(conn, on_dead, invoice_id, step)
                     continue
                 logger.info(
                     "worker %s: re-leasing job %d after a worker death",

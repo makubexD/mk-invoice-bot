@@ -364,6 +364,41 @@ async def test_answer_url_still_answers_br_f02_after_another_invoices_br_f13(
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
 
 
+async def test_answer_url_after_dont_know_still_proposes_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D190: a URL typed after the "no sé" answer still answers BR-F02."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        assert await answer(conn, setup, _message(SENDER, "no sé")) is True
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is True
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+
+
+async def test_answer_url_still_answers_br_f02_after_another_invoices_br_s03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D190: a BR-S03 notice for another invoice sent after BR-F02 does not hide BR-F02."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        other_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        await queue_message(
+            conn, Addressee("whatsapp", SENDER), "BR-S03 dead", invoice_id=other_id, rule_id="BR-S03"
+        )
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is True
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+
+
 async def test_answer_dont_know_stores_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

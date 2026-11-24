@@ -493,3 +493,33 @@ async def test_a_failing_on_dead_rolls_the_death_back(
         invoice = await cur.fetchone()
     assert job_row == (MAX_ATTEMPTS - 1, True, True)
     assert invoice == ("MANUAL_REQUIRED", None)
+
+
+async def test_a_failing_on_dead_in_claim_still_parks_the_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S03: when on_dead raises in claim, the crash-looped job is parked and the queue goes on."""
+    async with db_pool.connection() as conn:
+        await _clear_jobs(conn)
+        invoice_id = await _insert_invoice(conn)
+        job_id = await _enqueue(conn, invoice_id)
+        next_id = await _enqueue(conn, invoice_id)
+
+    for crash in range(MAX_CRASHES):
+        claimed = await _claim(db_pool, f"worker-{crash}", on_dead=_raise_dead)
+        assert claimed is not None
+        assert claimed.id == job_id
+        await _expire_lease(db_pool, job_id)
+    claimed = await _claim(db_pool, "worker-last", on_dead=_raise_dead)
+
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT run_after = 'infinity'::timestamptz FROM jobs WHERE id = %s", (job_id,)
+        )
+        parked = await cur.fetchone()
+        cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+        invoice = await cur.fetchone()
+    assert claimed is not None
+    assert claimed.id == next_id
+    assert parked == (True,)
+    assert invoice == ("FAILED", "BR-S03")

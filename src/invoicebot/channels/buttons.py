@@ -26,7 +26,7 @@ _BUTTON_NO_ARG_COMMANDS = frozenset({"pendientes"})
 _BUTTON_OPTIONAL_ID_COMMANDS = frozenset({"estado"})
 
 _ACTION_PATTERN = rf"[a-z_]{{1,{ACTION_MAX_CHARS}}}"
-_BUTTON_ID_PATTERN = rf"([0-9]{{1,9}}):({_ACTION_PATTERN})(?::([0-9]):([0-9]{{1,4}}))?"
+_BUTTON_ID_PATTERN = rf"([0-9]{{1,{COMMAND_ARG_MAX_DIGITS}}}):({_ACTION_PATTERN})(?::([0-9]):([0-9]{{1,4}}))?"
 
 
 def command_button_id(command: str, arg: str = "") -> str:

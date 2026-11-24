@@ -7,11 +7,11 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Button
-from invoicebot.channels.buttons import command_button_id
 from invoicebot.config.models import Profile
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
-from invoicebot.rules.messages_es import BUTTON_RETRY, MESSAGES
+from invoicebot.pipeline.questions import retry_button
+from invoicebot.queue.jobs import CRASH_LOOP_ERROR
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store.invoices import load_invoice_head
 
 #: Rule that tells the sender the job died (BR-S03).
@@ -20,6 +20,8 @@ RULE_DEAD = "BR-S03"
 RULE_DEAD_ADMIN = "BR-S03_admin"
 #: How many characters of the failure's first word the admin alert carries (BR-S03).
 ERROR_CODE_MAX_CHARS = 40
+#: The admin alert's ``{error_code}`` when the worker died twice on the job (BR-S03).
+CRASH_LOOP_CODE = "crash_loop"
 
 
 async def notify_dead(
@@ -43,7 +45,7 @@ async def notify_dead(
         MESSAGES[RULE_DEAD].format(id=invoice_id),
         invoice_id=invoice_id,
         rule_id=RULE_DEAD,
-        buttons=[_retry_button(invoice_id)],
+        buttons=[retry_button(invoice_id)],
     )
     await queue_admin_alert(
         conn,
@@ -57,12 +59,12 @@ async def notify_dead(
     )
 
 
-def _retry_button(invoice_id: int) -> Button:
-    """Return BR-S03's [Reintentar] button, which runs ``/reprocesar <invoice_id>`` (D190)."""
-    return Button(id=command_button_id("reprocesar", str(invoice_id)), title=BUTTON_RETRY)
-
-
 def _error_code(error: str) -> str:
-    """Return the first word of ``error``, at most 40 characters (BR-S03)."""
+    """Return the failure's exception name, at most 40 characters, or ``crash_loop`` (BR-S03).
+
+    ``describe_error`` writes ``Type: message``, so the first word ends in a colon.
+    """
+    if error == CRASH_LOOP_ERROR:
+        return CRASH_LOOP_CODE
     words = error.split(maxsplit=1)
-    return words[0][:ERROR_CODE_MAX_CHARS] if words else ""
+    return words[0].rstrip(":")[:ERROR_CODE_MAX_CHARS] if words else ""

@@ -4,9 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import date
-from typing import Any, cast
-
-from psycopg import AsyncConnection
 
 from invoicebot.config.checks import ISSUER_NAME_MAX
 from invoicebot.config.models import Extraction, Flow
@@ -112,12 +109,3 @@ def flow_line(flow: Flow, rule_id: str) -> str:
     if rule_id == RULE_ASK:
         return MESSAGES["BR-R02"].format(flow=flow)
     return MESSAGES[rule_id].format(flow=flow)
-
-
-async def summary_today(conn: AsyncConnection[Any], timezone: str) -> date:
-    """Return today's date in the owner's timezone, from the database clock."""
-    cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("the database returned no date")
-    return cast(date, row[0])

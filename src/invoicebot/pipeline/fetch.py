@@ -67,13 +67,17 @@ from invoicebot.pipeline.manual_message import (
     portal_for,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
-from invoicebot.pipeline.questions import RULE_DOCS_NEEDED, docs_needed_buttons, dont_know_button
+from invoicebot.pipeline.questions import (
+    RULE_DOCS_NEEDED,
+    docs_needed_buttons,
+    dont_know_button,
+    retry_button,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
-    BUTTON_RETRY,
     BUTTON_VOID,
     FETCH_WAITING,
     GAP_LINE_PORTAL,
@@ -83,6 +87,7 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import taught_links
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
 from invoicebot.store.gaps import GapRow, get_gap
@@ -426,11 +431,8 @@ async def _wait_notice(
     owner_timezone = ZoneInfo(inputs.cfg.owner.timezone)
     inbox_schedule = _schedule_entries(EMAIL_INBOX_FETCHER, inputs.flow, inputs.invoice, inputs.schedules)
     last_at = next_at + sum(inbox_schedule[1:], timedelta())
-    cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (inputs.cfg.owner.timezone,))
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("SELECT now() AT TIME ZONE yielded no row")
-    looks = LookTimes(last_at.astimezone(owner_timezone), row[0])
+    today = await owner_today(conn, inputs.cfg.owner.timezone)
+    looks = LookTimes(last_at.astimezone(owner_timezone), today)
     text = docs_needed_text(
         invoice_id,
         reading,
@@ -496,7 +498,7 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             RULE_EXHAUSTED,
             text,
             [
-                Button(id=command_button_id("reprocesar", str(inputs.job.invoice_id)), title=BUTTON_RETRY),
+                retry_button(inputs.job.invoice_id),
                 Button(id=command_button_id("cancelar", str(inputs.job.invoice_id)), title=BUTTON_VOID),
             ],
         )

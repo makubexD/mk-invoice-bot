@@ -16,7 +16,6 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import cast
 
 import httpx
 import pyrage  # type: ignore[import-untyped]  # pyrage ships no type information
@@ -121,6 +120,7 @@ from invoicebot.sinks.google_sheets import GoogleSheets
 from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.onedrive import GraphDrive
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool, create_pool, ping
 from invoicebot.store.gaps import get_gap
 from invoicebot.store.retention import prune
@@ -913,11 +913,7 @@ def _backup_job(settings: Settings, cfg: Config) -> BackupJob:
 async def _owner_today(pool: Pool, timezone: str) -> date:
     """Return the owner's local date from the database clock, for the artifact names (D119)."""
     async with pool.connection() as conn:
-        cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
-        row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("SELECT (now() AT TIME ZONE %s)::date yielded no row")
-    return cast(date, row[0])
+        return await owner_today(conn, timezone)
 
 
 async def _run_backup(settings: Settings, cfg: Config, pool: Pool, drive: Drive) -> None:

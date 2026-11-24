@@ -48,7 +48,7 @@ from invoicebot.pipeline.questions import (
     confirm_buttons,
     flow_question,
 )
-from invoicebot.pipeline.summary import flow_line, issuer_desc, summary_text, summary_today
+from invoicebot.pipeline.summary import flow_line, issuer_desc, summary_text
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
@@ -72,6 +72,7 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.sinks.folders import comercio_for
 from invoicebot.states import CANCELLED, CONFIRMING, ROUTING, VALIDATING
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import (
@@ -158,7 +159,7 @@ def make_route_handler(
                 return
             reading = await load_reading(conn, job.invoice_id)
             flow_data = await load_flow_data(conn, job.invoice_id)
-            today = await summary_today(conn, cfg.owner.timezone)
+            today = await owner_today(conn, cfg.owner.timezone)
         if reading is None:
             raise RuntimeError(f"invoice {job.invoice_id} has no reading")
         profile = cfg.profiles.get(invoice.profile_id)

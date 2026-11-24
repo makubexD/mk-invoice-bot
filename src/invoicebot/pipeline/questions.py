@@ -13,7 +13,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
-from invoicebot.channels.buttons import button_id
+from invoicebot.channels.buttons import button_id, command_button_id
 from invoicebot.config.models import Flow, Store
 from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.routing.router import RULE_ASK
@@ -25,6 +25,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_DONT_KNOW,
     BUTTON_EDIT,
     BUTTON_FIX,
+    BUTTON_RETRY,
     BUTTON_SEND_PDF,
     BUTTON_TEACH_PORTAL,
     BUTTON_VOID,
@@ -206,3 +207,8 @@ def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Bu
         Button(id=button_id(invoice_id, EDIT_ACTION), title=edit_title),
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=cancel_title),
     ]
+
+
+def retry_button(invoice_id: int) -> Button:
+    """Return [🔄 Reintentar], which runs ``/reprocesar <invoice_id>`` (BR-F07, BR-D03, BR-S03, D190)."""
+    return Button(id=command_button_id("reprocesar", str(invoice_id)), title=BUTTON_RETRY)

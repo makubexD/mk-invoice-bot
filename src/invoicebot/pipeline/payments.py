@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 from psycopg import AsyncConnection
 
@@ -40,6 +40,7 @@ from invoicebot.rules.messages_es import (
     PAYMENT_SET_LINE,
 )
 from invoicebot.states import DONE
+from invoicebot.store.clock import owner_today
 from invoicebot.store.payments import (
     CONFIRMED,
     EXPIRED,
@@ -84,7 +85,7 @@ async def pagado(
     if flow is None:
         await _reply(conn, msg, None, HELP_PAGADO)
         return
-    parsed = parse_pagado(arg, await _today(conn, context.timezone))
+    parsed = parse_pagado(arg, await owner_today(conn, context.timezone))
     if parsed is None:
         await _reply(conn, msg, None, HELP_PAGADO)
         return
@@ -196,15 +197,6 @@ async def _answer_stale(
         invoice_id=proposal.sets[0][0],
         state=DONE,
     )
-
-
-async def _today(conn: AsyncConnection[Any], timezone: str) -> date:
-    """Return today's date on the database clock, in the owner's timezone (R-7.12)."""
-    cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (timezone,))
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("SELECT now() AT TIME ZONE yielded no row")
-    return cast(date, row[0])
 
 
 async def _answer_amount(

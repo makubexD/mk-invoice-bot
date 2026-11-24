@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -42,6 +43,7 @@ import cv2
 import httpx
 import numpy as np
 from fastapi import FastAPI
+from psycopg import AsyncConnection
 
 from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.api.webhook import WebhookDeps, make_router
@@ -338,12 +340,16 @@ async def _ack_count(pool: Pool, profile_id: str) -> int:
     return int(row[0])
 
 
+async def _no_dead_notice(_conn: AsyncConnection[Any], _invoice_id: int, _step: str, _error: str) -> None:
+    """Queue no BR-S03 notice: the profile measures invoices that succeed (D160, D190)."""
+
+
 async def _run_worker(
     pool: Pool, setup: _Setup, media: FakeChannel, posts: list[_Post], timeout_s: float
 ) -> _Report:
     """Run the real worker and record when each invoice's summary reaches the outbox (D160)."""
     async with httpx.AsyncClient() as http:
-        worker = Worker(pool, _handlers(pool, setup, media, http))
+        worker = Worker(pool, _handlers(pool, setup, media, http), on_dead=_no_dead_notice)
         task = asyncio.create_task(worker.run())
         try:
             found = await _wait_for_summaries(pool, setup.summary_rule, posts, timeout_s)

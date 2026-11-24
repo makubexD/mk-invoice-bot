@@ -14,6 +14,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.buttons import command_button_id
 from invoicebot.config.loader import load_config
 from invoicebot.pipeline.failed import notify_dead
+from invoicebot.queue.jobs import CRASH_LOOP_ERROR
 from invoicebot.rules.messages_es import BUTTON_RETRY, MESSAGES
 from invoicebot.store.invoices import create_invoice
 
@@ -98,3 +99,24 @@ async def test_unknown_invoice_notifies_nobody(
         admins = await _outbox(conn, ADMIN)
     assert sender == []
     assert admins == []
+
+
+@pytest.mark.parametrize(
+    ("error", "error_code"),
+    [
+        ("ConnectTimeout: the portal did not answer", "ConnectTimeout"),
+        (CRASH_LOOP_ERROR, "crash_loop"),
+    ],
+)
+async def test_admin_alert_names_the_exception_without_its_colon(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], error: str, error_code: str
+) -> None:
+    """BR-S03: the admin alert's code is the exception name, or crash_loop for a crash loop."""
+    cfg = load_config(EXAMPLE)
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, SENDER, "whatsapp")
+        await notify_dead(conn, invoice_id, STEP, error, cfg.profiles)
+
+    async with db_pool.connection() as conn:
+        admins = await _outbox(conn, ADMIN)
+    assert admins[0][0] == MESSAGES["BR-S03_admin"].format(step=STEP, id=invoice_id, error_code=error_code)
