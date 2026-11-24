@@ -397,8 +397,6 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
 
 #: Status line while a portal has not published the invoice yet (D65).
 FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar más tarde."
-#: Status line while the invoice's mailbox has not received it yet (D100).
-FETCH_WAITING_MAIL = "⏳ Comprobante #{id}: esperando correo del comercio. Lo vuelvo a buscar más tarde."
 #: One BR-F07 bullet for a fetcher whose last reason has no BR-F text of its own.
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
 #: BR-F07 bullet: the store has no known portal to fetch from (S7.4).

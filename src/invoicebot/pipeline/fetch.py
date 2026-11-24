@@ -20,9 +20,11 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
+from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
+from invoicebot.channels.base import Button
 from invoicebot.channels.media_limits import DIRECTORY_MODE
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -58,17 +60,18 @@ from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
     RULE_EXHAUSTED,
+    docs_needed_text,
     manual_message,
     portal_for,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
+from invoicebot.pipeline.questions import RULE_DOCS_NEEDED, docs_needed_buttons
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     FETCH_WAITING,
-    FETCH_WAITING_MAIL,
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
     MESSAGES,
@@ -99,8 +102,6 @@ PORTAL_BROKEN = "PORTAL_BROKEN"
 _BROKEN_GAP_STATES = frozenset({"open", "reported"})
 #: The rule id of the question asking the sender for an unknown issuer's portal (BR-F02).
 RULE_ASK_PORTAL = "BR-F02"
-#: The first-wait text per fetcher; every other fetcher says the portal line (D100).
-_WAITING_TEXTS: Mapping[str, str] = {EMAIL_INBOX_FETCHER: FETCH_WAITING_MAIL}
 #: How one fetcher's retry delays are chosen from its flow and invoice (D65, D98).
 type Schedule = Callable[[Flow, FetchInvoice], tuple[timedelta, ...]]
 
@@ -286,7 +287,7 @@ async def _run(
                 # D170: the failure that raises the gap gets no retry; the next job's
                 # handle sees the open gap, so decide agrees with this at-once enqueue.
                 delay = None
-            await _record_result(conn, inputs, fetcher, result, delay)
+            await _record_result(conn, inputs, reading, fetcher, result, delay)
             committed = True
     except BaseException:
         # R-9.2: a run that did not commit leaves no files behind; a committed run keeps them.
@@ -352,6 +353,7 @@ def _broken_sighting(inputs: _Inputs, reading: Reading, portal_key: str, reason:
 async def _record_result(
     conn: AsyncConnection[Any],
     inputs: _Inputs,
+    reading: Reading,
     fetcher: str,
     result: FetchResult,
     delay: timedelta | None,
@@ -384,10 +386,8 @@ async def _record_result(
     elif result.reason in WAIT_REASONS:
         run_after = None if delay is None else await _run_after(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
-        if delay is not None and _is_first_attempt(inputs.attempts, fetcher, WAIT_REASONS):
-            await _notify(
-                conn, inputs.head, inputs.job.invoice_id, None, _waiting_text(fetcher, inputs.job.invoice_id)
-            )
+        if run_after is not None and _is_first_attempt(inputs.attempts, fetcher, WAIT_REASONS):
+            await _wait_notice(conn, inputs, reading, fetcher, run_after)
         if result.reason is FetchReason.AUTH_REQUIRED and _is_first_attempt(
             inputs.attempts, fetcher, {FetchReason.AUTH_REQUIRED}
         ):
@@ -404,9 +404,45 @@ def _is_first_attempt(attempts: Sequence[Attempt], fetcher: str, reasons: Collec
     return not any(attempt.fetcher == fetcher and attempt.reason in reasons for attempt in attempts)
 
 
-def _waiting_text(fetcher: str, invoice_id: int) -> str:
-    """Return ``fetcher``'s first-wait text; every fetcher but the inbox says the portal line (D100)."""
-    return _WAITING_TEXTS.get(fetcher, FETCH_WAITING).format(id=invoice_id)
+async def _wait_notice(
+    conn: AsyncConnection[Any],
+    inputs: _Inputs,
+    reading: Reading,
+    fetcher: str,
+    next_at: datetime,
+) -> None:
+    """Queue the first wait's message: BR-F13 for the inbox, the portal line for any other (D100, D189)."""
+    invoice_id = inputs.job.invoice_id
+    if fetcher != EMAIL_INBOX_FETCHER:
+        await _notify(conn, inputs.head, invoice_id, None, FETCH_WAITING.format(id=invoice_id))
+        return
+    text = docs_needed_text(
+        invoice_id,
+        reading,
+        inputs.flow,
+        inputs.attempts,
+        inputs.directory,
+        next_at.astimezone(ZoneInfo(inputs.cfg.owner.timezone)),
+    )
+    offer_portal = await _offer_portal(conn, inputs, reading)
+    await _notify(
+        conn,
+        inputs.head,
+        invoice_id,
+        RULE_DOCS_NEEDED,
+        text,
+        docs_needed_buttons(invoice_id, offer_portal),
+    )
+
+
+async def _offer_portal(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> bool:
+    """Return True when BR-F13 offers [🔗]: teaching is on and the issuer has no portal or link (D189)."""
+    ruc_emisor = reading.value("ruc_emisor")
+    if not inputs.cfg.gaps.teach_via_chat or ruc_emisor is None:
+        return False
+    if portal_for(ruc_emisor, inputs.directory) is not None:
+        return False
+    return not await taught_links.exists(conn, int(ruc_emisor))
 
 
 async def _alert_sign_in(conn: AsyncConnection[Any], inputs: _Inputs) -> None:
@@ -510,7 +546,12 @@ def _portal_sighting(inputs: _Inputs, reading: Reading, ruc_emisor: str) -> GapS
 
 
 async def _notify(
-    conn: AsyncConnection[Any], head: InvoiceHead, invoice_id: int, rule_id: str | None, text: str
+    conn: AsyncConnection[Any],
+    head: InvoiceHead,
+    invoice_id: int,
+    rule_id: str | None,
+    text: str,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue ``text`` for the invoice's sender in the caller's transaction."""
     await queue_message(
@@ -519,6 +560,7 @@ async def _notify(
         invoice_id=invoice_id,
         rule_id=rule_id,
         text=text,
+        buttons=buttons,
     )
 
 

@@ -20,7 +20,10 @@ from invoicebot.rules.messages_es import (
     BUTTON_CONTINUE,
     BUTTON_EDIT,
     BUTTON_FIX,
+    BUTTON_SEND_PDF,
+    BUTTON_TEACH_PORTAL,
     BUTTON_VOID,
+    BUTTON_WAIT_MAIL,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -40,6 +43,12 @@ STATUS_ACTION = "status"
 INVALID_OK_ACTION = "invalid_ok"
 #: D126's [Confirmar]: the sender accepts the routed summary before validation.
 CONFIRM_ACTION = "confirm"
+#: BR-F13's three actions: send the PDF, teach the portal, or keep waiting (D189).
+SEND_PDF_ACTION = "send_pdf"
+TEACH_PORTAL_ACTION = "teach_portal"
+WAIT_MAIL_ACTION = "wait_mail"
+#: BR-F13: the question asking the sender for the documents no fetcher could get.
+RULE_DOCS_NEEDED = "BR-F13"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
@@ -152,6 +161,15 @@ def confirm_buttons(invoice_id: int) -> list[Button]:
         Button(id=button_id(invoice_id, CONFIRM_ACTION), title=BUTTON_CONFIRM),
         *_edit_cancel(invoice_id, BUTTON_EDIT, BUTTON_CANCEL),
     ]
+
+
+def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
+    """Return BR-F13's [📎], [🔗] and [⏳] buttons, the portal one only when offered (D189)."""
+    buttons = [Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF)]
+    if offer_portal:
+        buttons.append(Button(id=button_id(invoice_id, TEACH_PORTAL_ACTION), title=BUTTON_TEACH_PORTAL))
+    buttons.append(Button(id=button_id(invoice_id, WAIT_MAIL_ACTION), title=BUTTON_WAIT_MAIL))
+    return buttons
 
 
 def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:
