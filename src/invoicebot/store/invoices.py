@@ -4,7 +4,7 @@ Every function takes the caller's connection and never commits: the caller
 owns the transaction (R-1.1, R-1.4, R-1.10).
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -91,6 +91,8 @@ class PendingRow:
     razon_social: str | None
     total: Decimal | None
     batch_prepared_at: date | None
+    serie: str | None
+    numero: str | None
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -406,7 +408,9 @@ async def list_pending(
                COALESCE(i.razon_social, p.razon_social),
                i.total,
                (i.updated_at AT TIME ZONE %s)::date,
-               count(*) OVER () AS total_count
+               count(*) OVER () AS total_count,
+               i.serie,
+               i.numero
         FROM invoices AS i
         LEFT JOIN batches AS b ON b.id = i.batch_id
         LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
@@ -442,10 +446,42 @@ async def list_pending(
             razon_social=None if row[4] is None else str(row[4]),
             total=cast(Decimal | None, row[5]),
             batch_prepared_at=cast(date, row[6]) if str(row[1]) == BATCHED else None,
+            serie=None if row[8] is None else str(row[8]),
+            numero=None if row[9] is None else str(row[9]),
         )
         for row in raw
     ]
     return rows, (int(raw[0][7]) if raw else 0)
+
+
+#: The columns and joins a list row carries; :func:`list_recent` and its filters share them.
+_LIST_SELECT = """
+    SELECT i.id,
+           i.state,
+           i.waiting_state,
+           i.waiting_rule_id,
+           COALESCE(i.razon_social, p.razon_social),
+           i.total,
+           i.serie,
+           i.numero
+    FROM invoices AS i
+    LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
+"""
+
+
+def _pending_row(row: Sequence[Any]) -> PendingRow:
+    """Map a ``_LIST_SELECT`` row to a :class:`PendingRow`; a listed invoice is not a batch (D188)."""
+    return PendingRow(
+        id=int(row[0]),
+        state=str(row[1]),
+        waiting_state=None if row[2] is None else str(row[2]),
+        waiting_rule_id=None if row[3] is None else str(row[3]),
+        razon_social=None if row[4] is None else str(row[4]),
+        total=cast(Decimal | None, row[5]),
+        batch_prepared_at=None,
+        serie=None if row[6] is None else str(row[6]),
+        numero=None if row[7] is None else str(row[7]),
+    )
 
 
 async def list_recent(
@@ -461,34 +497,45 @@ async def list_recent(
     commit.
     """
     cur = await conn.execute(
-        """
-        SELECT i.id,
-               i.state,
-               i.waiting_state,
-               i.waiting_rule_id,
-               COALESCE(i.razon_social, p.razon_social),
-               i.total
-        FROM invoices AS i
-        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
+        _LIST_SELECT
+        + """
         WHERE i.profile_id = %s
         ORDER BY i.created_at DESC, i.id DESC
         LIMIT %s
         """,
         (profile_id, limit),
     )
-    raw = await cur.fetchall()
-    return [
-        PendingRow(
-            id=int(row[0]),
-            state=str(row[1]),
-            waiting_state=None if row[2] is None else str(row[2]),
-            waiting_rule_id=None if row[3] is None else str(row[3]),
-            razon_social=None if row[4] is None else str(row[4]),
-            total=cast(Decimal | None, row[5]),
-            batch_prepared_at=None,
-        )
-        for row in raw
-    ]
+    return [_pending_row(row) for row in await cur.fetchall()]
+
+
+async def list_recent_in(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    states: Collection[str],
+    limit: int,
+    *,
+    batch_state: str | None = None,
+) -> list[PendingRow]:
+    """Return the profile's newest invoices in ``states``, newest first (D189, S4.9).
+
+    Same columns, order and ``limit`` as :func:`list_recent`, but only the invoices whose
+    state is in ``states``; an empty ``states`` returns nothing. With ``batch_state``, a
+    ``BATCHED`` invoice is listed only when its batch is in that state, so ``/reprocesar``
+    lists only the batches it can resend. Does not commit.
+    """
+    cur = await conn.execute(
+        _LIST_SELECT
+        + """
+        LEFT JOIN batches AS b ON b.id = i.batch_id
+        WHERE i.profile_id = %s
+          AND i.state = ANY(%s)
+          AND (i.state <> %s OR %s::text IS NULL OR b.state = %s)
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT %s
+        """,
+        (profile_id, list(states), BATCHED, batch_state, batch_state, limit),
+    )
+    return [_pending_row(row) for row in await cur.fetchall()]
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:

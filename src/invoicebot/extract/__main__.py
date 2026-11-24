@@ -216,7 +216,7 @@ def _pdf_reading(text: str, rules: ParsingRules) -> Reading:
         name: replace(field, source="pdf", confidence=FULL_CONFIDENCE)
         for name, field in reading.fields.items()
     }
-    return Reading(fields=fields, document_url=reading.document_url)
+    return Reading(fields=fields, document_url=reading.document_url, printed_url=reading.printed_url)
 
 
 def _non_space_chars(text: str) -> int:

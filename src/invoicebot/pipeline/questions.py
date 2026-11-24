@@ -6,12 +6,16 @@ carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
-from invoicebot.channels.base import Button
+from psycopg import AsyncConnection
+
+from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Flow, Store
-from invoicebot.extract.fields import Reading
+from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
@@ -20,7 +24,10 @@ from invoicebot.rules.messages_es import (
     BUTTON_CONTINUE,
     BUTTON_EDIT,
     BUTTON_FIX,
+    BUTTON_SEND_PDF,
+    BUTTON_TEACH_PORTAL,
     BUTTON_VOID,
+    BUTTON_WAIT_MAIL,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -40,12 +47,29 @@ STATUS_ACTION = "status"
 INVALID_OK_ACTION = "invalid_ok"
 #: D126's [Confirmar]: the sender accepts the routed summary before validation.
 CONFIRM_ACTION = "confirm"
+#: BR-F13's three actions: send the PDF, teach the portal, or keep waiting (D189).
+SEND_PDF_ACTION = "send_pdf"
+TEACH_PORTAL_ACTION = "teach_portal"
+WAIT_MAIL_ACTION = "wait_mail"
+#: BR-F13: the question asking the sender for the documents no fetcher could get.
+RULE_DOCS_NEEDED = "BR-F13"
 #: The rule ids of the questions only routing asks.
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
 RULE_CAP = "BR-D06"
 #: The confirmation question's rule when BR-E03's date check did not ask it (D126).
 RULE_CONFIRM = "BR-S10"
+#: The sources whose field was read from the printed document (D189): a required field
+#: from one of these makes the summary doubtful and worth its buttons.
+PRINTED_SOURCES = frozenset({"ocr", "llm"})
+
+#: An action applied to its invoice in the caller's transaction; the resolved press carries
+#: the choice and its menu. It returns the photo files whose rows it cleared, for the
+#: caller to delete after commit (R-9.7).
+type Action = Callable[
+    [AsyncConnection[Any], int, InboundMessage, ButtonPress, frozenset[str]],
+    Awaitable[tuple[Path, ...]],
+]
 
 
 def candidate_flows(
@@ -123,9 +147,19 @@ def invalid_question(invoice_id: int, rule_id: str) -> tuple[str, list[Button]]:
     return MESSAGES[rule_id], buttons
 
 
-def summary_buttons(invoice_id: int) -> list[Button]:
-    """Return the moving summary's [✏️ Corregir] and [✖️ Anular] buttons (R-3.4, D188)."""
-    return _edit_cancel(invoice_id, BUTTON_FIX, BUTTON_VOID)
+def summary_buttons(invoice_id: int, reading: Reading) -> list[Button]:
+    """Return the moving summary's [✏️ Corregir] and [✖️ Anular] buttons, or none (R-3.4, D189).
+
+    The buttons appear only when a required field (R-2.13) was read from the printed
+    text. A summary whose required fields all came from the QR, an XML, the padrón or the
+    sender is not asking the sender for anything, so it carries no buttons; ``/cancelar
+    {id}`` still works.
+    """
+    printed = any(
+        (field := reading.fields.get(name)) is not None and field.source in PRINTED_SOURCES
+        for name in REQUIRED
+    )
+    return _edit_cancel(invoice_id, BUTTON_FIX, BUTTON_VOID) if printed else []
 
 
 def unreadable_buttons(invoice_id: int) -> list[Button]:
@@ -139,6 +173,15 @@ def confirm_buttons(invoice_id: int) -> list[Button]:
         Button(id=button_id(invoice_id, CONFIRM_ACTION), title=BUTTON_CONFIRM),
         *_edit_cancel(invoice_id, BUTTON_EDIT, BUTTON_CANCEL),
     ]
+
+
+def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
+    """Return BR-F13's [📎], [🔗] and [⏳] buttons, the portal one only when offered (D189)."""
+    buttons = [Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF)]
+    if offer_portal:
+        buttons.append(Button(id=button_id(invoice_id, TEACH_PORTAL_ACTION), title=BUTTON_TEACH_PORTAL))
+    buttons.append(Button(id=button_id(invoice_id, WAIT_MAIL_ACTION), title=BUTTON_WAIT_MAIL))
+    return buttons
 
 
 def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:

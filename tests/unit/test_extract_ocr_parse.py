@@ -21,6 +21,7 @@ WRONG_CHECK_DIGIT_RUC = "20000000002"
 DEFAULT_CONFIDENCE = 0.95
 LONG_FILLER = "A" * 100_000
 RULE_MATCH_CAP = 50
+LONG_URL = "https://portal.example.pe/" + "a" * 224
 
 
 @pytest.fixture(scope="module")
@@ -313,3 +314,90 @@ def test_parse_ocr_rule_with_forty_nine_rejected_matches_reads_next(rules: Parsi
     fields = _fields(_ocr(f"{rejected} {SYNTHETIC_RUC}"), rules)
 
     assert fields["ruc_emisor"] == SYNTHETIC_RUC
+
+
+def test_parse_ocr_reads_printed_url_with_scheme(rules: ParsingRules) -> None:
+    """D189: the first https address printed on the ticket is kept as the printed URL."""
+    reading = parse_ocr(_ocr("Consulte su comprobante en https://sy.ecomprobantes.pe/pebsa"), rules).reading
+
+    assert reading.printed_url == "https://sy.ecomprobantes.pe/pebsa"
+
+
+def test_parse_ocr_reads_bare_printed_url_without_trailing_dot(rules: ParsingRules) -> None:
+    """D189: a bare host and path become an https URL and the sentence's dot is dropped."""
+    reading = parse_ocr(_ocr("sy.ecomprobantes.pe/pebsa."), rules).reading
+
+    assert reading.printed_url == "https://sy.ecomprobantes.pe/pebsa"
+
+
+def test_parse_ocr_printed_url_scheme_and_host_are_normalized(rules: ParsingRules) -> None:
+    """D189: an uppercase http URL becomes https with a lowercase host and keeps the path."""
+    reading = parse_ocr(_ocr("HTTP://Facturas.Example.PE/consulta"), rules).reading
+
+    assert reading.printed_url == "https://facturas.example.pe/consulta"
+
+
+def test_parse_ocr_skips_a_sunat_printed_url(rules: ParsingRules) -> None:
+    """D189: SUNAT's generic query page is skipped and the next printed address is kept."""
+    reading = parse_ocr(_ocr("www.sunat.gob.pe/consulta https://portal.example.pe/x"), rules).reading
+
+    assert reading.printed_url == "https://portal.example.pe/x"
+
+
+def test_parse_ocr_does_not_read_an_email_as_printed_url(rules: ParsingRules) -> None:
+    """D189: an e-mail address alone is not a printed URL."""
+    reading = parse_ocr(_ocr("ventas@example.pe"), rules).reading
+
+    assert reading.printed_url is None
+
+
+def test_parse_ocr_text_without_an_address_has_no_printed_url(rules: ParsingRules) -> None:
+    """D189: a ticket that prints no web address has no printed URL."""
+    reading = parse_ocr(_ocr(f"RUC {SYNTHETIC_RUC}", "TOTAL S/ 12.50"), rules).reading
+
+    assert reading.printed_url is None
+
+
+def test_parse_ocr_too_long_printed_url_is_not_kept(rules: ParsingRules) -> None:
+    """D189: a printed URL longer than 200 characters is not kept."""
+    reading = parse_ocr(_ocr(f"Consulte en {LONG_URL}"), rules).reading
+
+    assert len(LONG_URL) == 250
+    assert reading.printed_url is None
+
+
+def test_parse_ocr_printed_url_does_not_change_the_fields(rules: ParsingRules) -> None:
+    """D189: adding a printed URL to a ticket leaves every field it already read unchanged."""
+    without_url = _ocr(
+        f"RUC {SYNTHETIC_RUC}",
+        "FACTURA ELECTRÓNICA",
+        "F001-123",
+        "Fecha de emisión: 13/11/2026",
+        "TOTAL S/ 12.50",
+    )
+    with_url = _ocr(
+        f"RUC {SYNTHETIC_RUC}",
+        "FACTURA ELECTRÓNICA",
+        "F001-123",
+        "Fecha de emisión: 13/11/2026",
+        "TOTAL S/ 12.50",
+        "Consulte su comprobante en https://sy.ecomprobantes.pe/pebsa",
+    )
+
+    assert _fields(with_url, rules) == _fields(without_url, rules)
+    assert parse_ocr(with_url, rules).reading.printed_url == "https://sy.ecomprobantes.pe/pebsa"
+
+
+@pytest.mark.parametrize("unsafe", ["‮", "​", "ñ", " "])
+def test_parse_ocr_printed_url_path_stops_at_a_non_ascii_character(rules: ParsingRules, unsafe: str) -> None:
+    """D189: a bidi, zero-width or other non-ASCII character ends the printed path and is never kept."""
+    reading = parse_ocr(_ocr(f"https://portal.example.pe/con{unsafe}sulta"), rules).reading
+
+    assert reading.printed_url == "https://portal.example.pe/con"
+
+
+def test_parse_ocr_skips_a_punycode_printed_host(rules: ParsingRules) -> None:
+    """D189: an internationalized (xn--) host is skipped, so a lookalike domain is never offered."""
+    reading = parse_ocr(_ocr("https://xn--sunt-gra.pe/x https://portal.example.pe/y"), rules).reading
+
+    assert reading.printed_url == "https://portal.example.pe/y"

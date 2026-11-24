@@ -41,9 +41,9 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 5. the matched routing rule's own message, e.g. `➡️ {flow.label}` (BR-R01, BR-R02);
 6. only when a field was repaired from the QR (D79): `ℹ️ Deducido del comprobante: {fields_desc}`;
 7. only when a field is doubtful (low confidence, a failed R-2.4 check, or a date in the future or older than `max_invoice_age_days`): `⚠️ Revisa: {fields_desc}`. Until replies are handled (`widen-b`), the invoice goes on (D80).
-8. only when the invoice goes on without waiting (not `CONFIRMING`): `⏳ Lo estoy archivando. Toca un botón solo si algo está mal.` (D188).
+8. only when the invoice goes on without waiting (not `CONFIRMING`): `⏳ Lo estoy archivando. Toca un botón solo si algo está mal.` (D188) when it carries buttons, else `⏳ Lo estoy archivando.` (D189).
 
-That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel actions as [Editar] [Cancelar], worded so nothing reads as pending; a question that waits (BR-E01, the `CONFIRMING` summary) keeps [Editar] [Cancelar] (D188).
+That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel actions as [Editar] [Cancelar], worded so nothing reads as pending, and only when a required field was read from the printed text (source `ocr` or `llm`); a summary whose required fields all came from the QR, an XML, the padrón or the sender has no buttons, and `/cancelar {id}` still works (D189); a question that waits (BR-E01, the `CONFIRMING` summary) keeps [Editar] [Cancelar] (D188).
 
 `{fields_desc}` names the fields in Spanish, comma separated: `fecha`, `tipo de comprobante`, `total`.
 
@@ -80,7 +80,7 @@ That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
 | BR-F01 | Flow B: `sunat_sol` isn't applicable (not the owner's RUC) | Skipped by design; **not a gap** | *(only listed in the F07 message)* `• SUNAT: no aplica (solo para facturas de tu empresa)` |
-| BR-F02 | The chain ended in `MANUAL_REQUIRED`, and the issuer RUC has no portal entry and no `qr_url` | Raises gap `PORTAL_MISSING`; asks the user to teach the link (once per issuer). A taught link is used only after the owner approves it (BR-S06) | `No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. Si no, responde "no sé".` |
+| BR-F02 | The chain ended in `MANUAL_REQUIRED`, and the issuer RUC has no portal entry and no `qr_url`; or the sender pressed [🔗 Enseñar el portal] (BR-F13) and there is no URL to offer, or answered [No] to BR-F14 (D189) | At the chain's end: raises gap `PORTAL_MISSING`; asks the user to teach the link (once per issuer). From BR-F13 or BR-F14 it only asks and raises no gap (R-11.4). A taught link is used only after the owner approves it (BR-S06) | `No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. Si no, responde "no sé".` |
 | BR-F03 | The newest `broken_after` (default 3) invoices that tried a portal adapter all ended on a technical failure there (selectors, HTTP 4xx/5xx, timeouts; not "invoice not found") | Raises gap `PORTAL_BROKEN`; the chain continues; while the gap is open, the portal gets no D167 retry (D170) | *(only in the F07 message)* `• Portal {portal}: con fallas, ya avisé para arreglarlo` |
 | BR-F04 | reCAPTCHA or hCaptcha, and no paid solver | Skip to the next fetcher | *(only in F07)* `• Portal {portal}: captcha que no puedo resolver` |
 | BR-F05 | The user doesn't answer an image captcha within `ask_user_timeout_s` | Skip to the next fetcher | `Se venció el tiempo del captcha; sigo con otras opciones.` |
@@ -90,12 +90,14 @@ That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel
 | BR-F11 | The store has no website (`portal: manual`, D73) | Skipped; the chain goes on | *(only in F07)* `• {comercio}: no tiene portal; pídele los archivos al comercio` |
 | BR-F10 | *(post-MVP, D57)* An XML from email or a user upload has no valid XMLDSig signature, or the signer's RUC ≠ `ruc_emisor` | Kept as a **hint**: the file is stored and delivered, but its values don't replace the read data | *(one line in the summary)* `ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos.` |
 | BR-F12 | A fixed gap re-enqueued the invoice (R-11.9, D157) | Notice only; the invoice is already back at its fetch or delivery step | `🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.` |
+| BR-F13 | The mailbox fetcher's first wait (S11.9, D189) | Notice with buttons; the chain goes on. [📎] moves `FETCHING_DOCS` → `MANUAL_REQUIRED` (rule BR-F13) and answers `Envíame el PDF aquí, como archivo, y lo completo.` (`BR-F13_upload`); [⏳] changes nothing and answers `Listo. Sigo buscando el correo y te aviso cuando llegue.` (`BR-F13_wait`); [🔗] asks BR-F14, or BR-F02 when there is no URL to offer. [🔗] is shown only when the issuer has no portal entry, no taught link and `gaps.teach_via_chat` is on. `{searched_lines}` is `Ya busqué:` and the BR-F07 bullets of the attempts so far, and the line is left out when there is no bullet | `⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.` + `{searched_lines}` + `Vuelvo a mirar el correo a las {next_at:%H:%M}.` + `Si lo tienes, me ayudas:` [📎 Te envío el PDF] [🔗 Enseñar el portal] [⏳ Espero el correo] |
+| BR-F14 | [🔗] was pressed and the reading has a URL to offer: the URL printed on the ticket, else a QR link whose host `qr_url` may not fetch (D189) | [Sí] teaches that URL (BR-S06; used only after the owner approves); [No] asks BR-F02; [No sé] answers `BR-F02_dont_know`. The bot never fetches the offered URL itself | `¿Es este el portal de {razon_social}?` + `{url}` [Sí] [No] [No sé] |
 | BR-F07 | Every fetcher failed | `MANUAL_REQUIRED` (auto-resumable when a linked gap is fixed) | `❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:` + one `•` line per fetcher + `Puedes enviarme {manual_docs_desc} aquí y lo completo. {gap_line}` |
 
 **Texts outside the catalog** (`rules/messages_es.py` constants, not rules of their own):
 
 - BR-F07's other bullets (D100): `• {fetcher}: no encontré el comprobante` (not found), `• Portal del comercio: no lo conozco` (no portal entry), `• Portal {portal}: todavía no sé consultarlo` (portal `todo`), `• {fetcher}: falló por un error técnico` (technical failure or timeout), `• Correo: el buzón necesita reconectarse; ya avisé al administrador` (the mailbox needs a sign-in).
-- While the mailbox is retried (S11.9): `⏳ Comprobante #{id}: esperando correo del comercio. Lo vuelvo a buscar más tarde.`
+- While the mailbox is retried (S11.9): its first wait sends BR-F13 (D189); later waits send nothing.
 - Replies to an uploaded XML (D101), sent under BR-F06 and BR-F09: `El XML que enviaste no corresponde a {serie}-{numero}; no lo guardé.` and `El XML que enviaste no es válido; no lo guardé.`
 
 `{gap_line}`, when a gap is linked: `Ya avisé para agregar este portal; cuando esté listo lo reintento solo.`

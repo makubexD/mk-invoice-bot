@@ -7,16 +7,16 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import STATUS, STATUS_RULE, STATUS_RULE_ONLY, state_desc
+from invoicebot.rules.messages_es import STATUS, STATUS_RULE, state_desc
 from invoicebot.store.invoices import get_state_rule
 
 
 async def status_text(conn: AsyncConnection[Any], invoice_id: int) -> str:
     """Return the invoice's state and, when it waits on a rule, that rule's last text.
 
-    The second line names the rule and repeats its newest stored question, or just the
-    rule when the invoice has no stored text (S4.9, R-11.1). The caller has already
-    checked that the sender may see the invoice (R-10.1).
+    The second line repeats the rule's newest stored question; an invoice whose rule left
+    no stored text gets only the state line, and the rule id is never shown (S4.9, R-11.1,
+    D189). The caller has already checked that the sender may see the invoice (R-10.1).
 
     Raises:
         RuntimeError: the invoice does not exist.
@@ -29,9 +29,6 @@ async def status_text(conn: AsyncConnection[Any], invoice_id: int) -> str:
     if rule_id is None:
         return text
     last = await outbox.last_text(conn, invoice_id, rule_id)
-    line = (
-        STATUS_RULE.format(rule_id=rule_id, text=last)
-        if last is not None
-        else STATUS_RULE_ONLY.format(rule_id=rule_id)
-    )
-    return f"{text}\n{line}"
+    if last is None:
+        return text
+    return f"{text}\n{STATUS_RULE.format(text=last)}"

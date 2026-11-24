@@ -14,13 +14,21 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.config.models import MediaMaxBytes
-from invoicebot.pipeline.actions import handle_press
-from invoicebot.pipeline.commands import CommandContext, PaymentFlow, handle_command, parse_command
+from invoicebot.pipeline.actions import PressResult, handle_press
+from invoicebot.pipeline.commands import (
+    COMMAND_BUTTON_PREFIX,
+    CommandContext,
+    PaymentFlow,
+    handle_command,
+    parse_command,
+)
 from invoicebot.pipeline.edits import apply_edits, parse_edits
 from invoicebot.pipeline.handlers import MEGABYTE, RULE_MEDIA_REJECTED
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
+from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX
+from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.teach import (
     BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
@@ -128,8 +136,9 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), except a payment proposal press (R-7.12) or a BR-S06 decision
-    press (D118), which are answered as stored without an invoice. A photo, and a PDF
+    ``stored`` (R-3.5), except a command button (D189), a payment proposal press
+    (R-7.12), a BR-S06 decision press (D118) or a BR-F14 portal offer press (D189),
+    which are answered as stored without an invoice. A photo, and a PDF
     with no open invoice for the sender, becomes an invoice with its caption's overrides,
     a ``download_media`` job and a BR-S09 acknowledgement (R-1.1, D121), unless the
     sender already has ``max_queued_per_sender`` active jobs, in which case it is
@@ -148,18 +157,49 @@ async def handle_inbound(
             return IntakeResult(status="duplicate", invoice_id=None)
         await touch_window(conn, msg.channel, msg.profile_id, msg.received_at)
         if msg.button_id is not None:
-            if msg.button_id.startswith(PAYMENT_BUTTON_PREFIX):
-                await handle_payment_press(conn, msg)
+            pressed = await _handle_press(conn, msg, msg.button_id, roles, timezone)
+            if pressed is None:
                 return IntakeResult(status="stored", invoice_id=None)
-            if msg.button_id.startswith(TEACH_BUTTON_PREFIX) and roles.teach is not None:
-                await handle_teach_press(conn, msg, roles.teach)
-                return IntakeResult(status="stored", invoice_id=None)
-            pressed = await handle_press(conn, msg, roles.laptop_flows)
         else:
             return await _handle_non_press(conn, msg, roles, timezone, max_queued_per_sender, media_max_bytes)
     for path in pressed.photo_paths:
         await asyncio.to_thread(path.unlink, missing_ok=True)
     return IntakeResult(status="stored", invoice_id=pressed.invoice_id)
+
+
+async def _handle_press(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    button_id: str,
+    roles: IntakeRoles,
+    timezone: str,
+) -> PressResult | None:
+    """Run one button press, or return None when a special prefix's press is already answered (D189).
+
+    A command button, a payment proposal, a BR-S06 decision and a BR-F14 portal offer
+    change no invoice; every other button goes through :func:`handle_press`.
+    """
+    if button_id.startswith(COMMAND_BUTTON_PREFIX):
+        command = parse_command(button_id)
+        if command is not None:
+            await handle_command(
+                conn,
+                msg,
+                command[0],
+                command[1],
+                context=_command_context(roles, timezone),
+            )
+        return None
+    if button_id.startswith(PAYMENT_BUTTON_PREFIX):
+        await handle_payment_press(conn, msg)
+        return None
+    if button_id.startswith(TEACH_BUTTON_PREFIX) and roles.teach is not None:
+        await handle_teach_press(conn, msg, roles.teach)
+        return None
+    if button_id.startswith(OFFER_BUTTON_PREFIX) and roles.teach is not None:
+        await handle_offer_press(conn, msg, roles.teach)
+        return None
+    return await handle_press(conn, msg, roles.laptop_flows)
 
 
 async def _handle_non_press(
@@ -240,6 +280,17 @@ async def _refuse_lone_xml(
     return IntakeResult(status="stored", invoice_id=None)
 
 
+def _command_context(roles: IntakeRoles, timezone: str) -> CommandContext:
+    """Build the context a command runs with, shared by a typed command and a command button (D189)."""
+    return CommandContext(
+        admins=roles.admins,
+        timezone=timezone,
+        payment_flow=roles.payment_flow,
+        teach=roles.teach,
+        reprocess_min_interval_s=roles.reprocess_min_interval_s,
+    )
+
+
 async def _store_with_overrides(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -260,14 +311,7 @@ async def _store_with_overrides(
         return IntakeResult(status="stored", invoice_id=await _link_upload(conn, msg))
     command = parse_command(msg.text)
     if command is not None:
-        context = CommandContext(
-            admins=roles.admins,
-            timezone=timezone,
-            payment_flow=roles.payment_flow,
-            teach=roles.teach,
-            reprocess_min_interval_s=roles.reprocess_min_interval_s,
-        )
-        await handle_command(conn, msg, command[0], command[1], context=context)
+        await handle_command(conn, msg, command[0], command[1], context=_command_context(roles, timezone))
         return IntakeResult(status="stored", invoice_id=None)
     if roles.teach is not None and await answer(conn, roles.teach, msg):
         return IntakeResult(status="stored", invoice_id=None)

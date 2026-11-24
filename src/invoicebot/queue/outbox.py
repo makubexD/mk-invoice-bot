@@ -14,7 +14,7 @@ clock.
 """
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any, cast
@@ -206,12 +206,15 @@ async def last_rule(conn: AsyncConnection[Any], invoice_id: int, ignore: str) ->
     return str(row[0])
 
 
-async def last_question(conn: AsyncConnection[Any], recipient: str, ignore: str) -> tuple[str, int] | None:
-    """Return the recipient's newest question's ``(rule_id, invoice_id)``, skipping ``ignore``.
+async def last_question(
+    conn: AsyncConnection[Any], recipient: str, ignore: Collection[str]
+) -> tuple[str, int] | None:
+    """Return the recipient's newest question's ``(rule_id, invoice_id)``, skipping ``ignore``'s rules.
 
     A question is an outbox row addressed to ``recipient`` (a profile id) that carries
-    both a rule id and an invoice id (R-11.4). BR-S02 answers a stale press, not the
-    question the invoice waits on, so callers pass it as ``ignore``. A row without one
+    both a rule id and an invoice id (R-11.4). BR-S02 answers a stale press and BR-F13
+    is a notice whose buttons the invoice's state gates, so neither is a question a typed
+    answer or a BR-F14 press waits on: callers pass them in ``ignore``. A row without one
     of the two ids, and a recipient with no such row, give None. Does not commit.
     """
     cur = await conn.execute(
@@ -220,12 +223,12 @@ async def last_question(conn: AsyncConnection[Any], recipient: str, ignore: str)
         FROM outbox
         WHERE "to" = %(recipient)s
           AND payload_json->>'rule_id' IS NOT NULL
-          AND payload_json->>'rule_id' <> %(ignore)s
+          AND NOT (payload_json->>'rule_id' = ANY(%(ignore)s))
           AND invoice_id IS NOT NULL
         ORDER BY id DESC
         LIMIT 1
         """,
-        {"recipient": recipient, "ignore": ignore},
+        {"recipient": recipient, "ignore": list(ignore)},
     )
     row = await cur.fetchone()
     if row is None or row[0] is None or row[1] is None:

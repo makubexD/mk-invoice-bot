@@ -30,10 +30,9 @@ from invoicebot.fetchers.base import (
 from invoicebot.fetchers.portal import sha256_hex, xml_reason
 from invoicebot.net.guard import GuardReason
 from invoicebot.net.http import GuardBlocked
+from invoicebot.sunat_origins import is_sunat_host
 
 logger = logging.getLogger(__name__)
-
-SUNAT_DOMAIN = "sunat.gob.pe"
 
 #: The name this fetcher uses in a flow's ``fetchers`` list (R-5.2).
 QR_URL_FETCHER = "qr_url"
@@ -74,8 +73,7 @@ def is_allowed(url: str, hosts: frozenset[str]) -> bool:
     host = parts.hostname
     if host is None:
         return False
-    host = host.lower()
-    return host == SUNAT_DOMAIN or host.endswith("." + SUNAT_DOMAIN) or host in hosts
+    return is_sunat_host(host) or host.lower() in hosts
 
 
 @dataclass(frozen=True)

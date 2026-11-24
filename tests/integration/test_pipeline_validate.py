@@ -20,7 +20,6 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.questions import INVALID_OK_ACTION
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job
-from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID
 from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
@@ -245,10 +244,7 @@ async def test_validation_off_sends_summary_and_moves_on(
     assert rule_id == "BR-R02"
     assert text.startswith(f"🧾 Factura F001-{reading.value('numero')} · {await _today(db_pool):%d/%m/%Y}")
     assert "Trabajo (Microsoft)" in text
-    assert buttons == [
-        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
-        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
-    ]
+    assert buttons == []  # D189: every required field came from the QR
 
 
 async def test_validation_after_an_edit_starts_a_new_fetch_round(

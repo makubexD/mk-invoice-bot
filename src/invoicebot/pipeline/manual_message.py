@@ -9,6 +9,7 @@ the comercio's name) come from the store directory; the flow decides whether SUN
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from urllib.parse import urlsplit
 
 from invoicebot.config.checks import MANUAL_PORTAL
@@ -23,6 +24,7 @@ from invoicebot.rules.messages_es import (
     FETCH_PORTAL_TODO_LINE,
     FETCH_TECHNICAL_LINE,
     MESSAGES,
+    SEARCHED_HEADER,
     STORE_FALLBACK,
     STORE_FALLBACK_OF,
     docs_desc,
@@ -59,15 +61,15 @@ def manual_message(
     """
     store = _store_for(reading, directory)
     portal = portal_for(reading.value("ruc_emisor") or "", directory)
-    fetcher_lines = _fetcher_lines(attempts, store, portal, portal_broken)
+    lines = fetcher_lines(attempts, store, portal, portal_broken)
     if SUNAT_SOL not in flow.fetchers:
-        fetcher_lines = "\n".join(line for line in (fetcher_lines, MESSAGES["BR-F01"]) if line)
+        lines = "\n".join(line for line in (lines, MESSAGES["BR-F01"]) if line)
     return (
         MESSAGES[RULE_EXHAUSTED]
         .format(
             serie=reading.value("serie") or "",
             numero=reading.value("numero") or "",
-            fetcher_lines=fetcher_lines,
+            fetcher_lines=lines,
             manual_docs_desc=docs_desc(flow.required_docs),
             gap_line=gap_line,
         )
@@ -75,18 +77,43 @@ def manual_message(
     )
 
 
+def docs_needed_text(
+    invoice_id: int,
+    reading: Reading,
+    flow: Flow,
+    attempts: Sequence[Attempt],
+    directory: StoreDirectory,
+    next_at: datetime,
+) -> str:
+    """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D189).
+
+    ``next_at`` is when the bot looks again; its time is shown as ``%H:%M``.
+    """
+    store = _store_for(reading, directory)
+    portal = portal_for(reading.value("ruc_emisor") or "", directory)
+    bullets = fetcher_lines(attempts, store, portal, portal_broken=False)
+    searched_lines = "\n".join((SEARCHED_HEADER, bullets)) if bullets else ""
+    text = MESSAGES["BR-F13"].format(
+        id=invoice_id,
+        docs_desc=docs_desc(flow.required_docs),
+        searched_lines=searched_lines,
+        next_at=next_at,
+    )
+    return text if searched_lines else text.replace("\n\n", "\n")
+
+
 def _store_for(reading: Reading, directory: StoreDirectory) -> Store | None:
     """Return the issuer's store, or None when the directory does not know it (R-5.8)."""
     return directory.stores.get(reading.value("ruc_emisor") or "")
 
 
-def _fetcher_lines(
+def fetcher_lines(
     attempts: Sequence[Attempt],
     store: Store | None,
     portal: Portal | None,
     portal_broken: bool,
 ) -> str:
-    """Return one BR-F07 bullet per fetcher in first-attempt order, from its last reason (BR-F07)."""
+    """Return one bullet per fetcher in first-attempt order, from its last reason (BR-F07, BR-F13)."""
     last: dict[str, FetchReason] = {attempt.fetcher: attempt.reason for attempt in attempts}
     lines = (_reason_line(fetcher, reason, store, portal, portal_broken) for fetcher, reason in last.items())
     return "\n".join(line for line in lines if line)

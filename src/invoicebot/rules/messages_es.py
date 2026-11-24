@@ -86,6 +86,15 @@ MESSAGES: dict[str, str] = {
         "ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos."
     ),
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
+    "BR-F13": (
+        "⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
+        "{searched_lines}\n"
+        "Vuelvo a mirar el correo a las {next_at:%H:%M}.\n"
+        "Si lo tienes, me ayudas:"
+    ),
+    "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
+    "BR-F13_wait": "Listo. Sigo buscando el correo y te aviso cuando llegue.",
+    "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
         "{fetcher_lines}\n"
@@ -302,6 +311,8 @@ SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
 #: The last line of a summary whose invoice goes on without waiting, so its buttons read
 #: as corrections, not as a question (D188).
 SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
+#: The last line of a summary that carries no buttons: nothing is being asked (D189).
+SUMMARY_MOVING_QUIET = "⏳ Lo estoy archivando."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
 #: ``{issuer}`` when the padrón or the reading named the issuer, and when it did not (D188).
@@ -386,8 +397,6 @@ def buyer_desc(tipo_doc: str, num_doc: str) -> str:
 
 #: Status line while a portal has not published the invoice yet (D65).
 FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar más tarde."
-#: Status line while the invoice's mailbox has not received it yet (D100).
-FETCH_WAITING_MAIL = "⏳ Comprobante #{id}: esperando correo del comercio. Lo vuelvo a buscar más tarde."
 #: One BR-F07 bullet for a fetcher whose last reason has no BR-F text of its own.
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
 #: BR-F07 bullet: the store has no known portal to fetch from (S7.4).
@@ -398,6 +407,8 @@ FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
 FETCH_TECHNICAL_LINE = "• {fetcher}: falló por un error técnico"
 #: BR-F07 bullet: the mailbox needs a new sign-in, which the owner was already told (S7.4).
 FETCH_AUTH_LINE = "• Correo: el buzón necesita reconectarse; ya avisé al administrador"
+#: BR-F13's heading over the fetcher bullets already tried (D189).
+SEARCHED_HEADER = "Ya busqué:"
 #: BR-F11's ``{comercio}`` when the store directory does not know the issuer (BR-F07).
 STORE_FALLBACK = "el comercio"
 #: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
@@ -462,6 +473,11 @@ BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
 BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
+#: BR-F13's three offered actions and BR-F14's [No sé] answer (D189).
+BUTTON_SEND_PDF = "📎 Te envío el PDF"
+BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"
+BUTTON_WAIT_MAIL = "⏳ Espero el correo"
+BUTTON_DONT_KNOW = "No sé"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
 BUTTON_REJECT = "Rechazar"
@@ -562,24 +578,33 @@ PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepa
 #: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_MORE = "…y {count} más."
-#: The line after the newest invoices when ``/estado`` has no id (D188).
+#: The line after the newest invoices when ``/estado`` has no id (D188, D189).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-ESTADO_HINT = "Para ver uno: /estado 12"
+ESTADO_HINT = "Para ver uno: /estado {id}"
 #: ``/estado`` with no id when the sender has no invoices (D188).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 ESTADO_NONE = "Aún no tengo comprobantes tuyos."
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."
-#: The second line of ``/estado``'s answer, with the last stored question text (S4.9).
+#: The second line of ``/estado``'s answer, with the last stored question text (S4.9, D189).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-STATUS_RULE = "Último aviso ({rule_id}): {text}"
-#: The second line of ``/estado``'s answer when the rule left no stored text (S4.9).
-#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-STATUS_RULE_ONLY = "Motivo: {rule_id}."
+STATUS_RULE = "Último aviso: {text}"
 #: The answer when a command that needs an invoice id is sent without one (R-10.1).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
+#: The line above the buttons a bare ``/cancelar`` or ``/reprocesar`` answers (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK = "¿Cuál quieres {verb}?"
+#: The answer when a bare ``/cancelar`` or ``/reprocesar`` has nothing to list (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_NONE = "No tienes comprobantes que pueda {verb}."
+#: A pick button's title when the invoice has its serie and numero (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_TITLE = "#{id} · {serie}-{numero}"
+#: A pick button's title when serie or numero is missing or the long title is too long (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_TITLE_SHORT = "#{id}"
 #: ``/cancelar``'s answer when the invoice is past CANCELLABLE (S4.9, D96).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 CANCEL_LATE = "El comprobante #{id} ya está {state_desc}; ya no se puede cancelar."

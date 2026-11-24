@@ -16,6 +16,15 @@ SUNAT_ORIGINS = frozenset({"https://api-seguridad.sunat.gob.pe", "https://e-menu
 
 _ALLOWED_PORTS = (None, 443)
 
+#: SUNAT's own domain: its hosts serve SUNAT's pages, never an issuer's portal (R-5.2, D189).
+SUNAT_DOMAIN = "sunat.gob.pe"
+
+
+def is_sunat_host(host: str) -> bool:
+    """True when ``host`` is SUNAT's domain or one of its subdomains, in any case (R-5.2, D189)."""
+    host = host.lower()
+    return host == SUNAT_DOMAIN or host.endswith(f".{SUNAT_DOMAIN}")
+
 
 def is_sunat_origin(url: str) -> bool:
     """True only for an ``https`` URL on one of :data:`SUNAT_ORIGINS` (R-9.10).

@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from invoicebot.config.models import Brand, Flow, Store
-from invoicebot.extract.fields import Field, Reading
+from invoicebot.extract.fields import REQUIRED, Field, Reading, Source
 from invoicebot.pipeline.questions import (
     brand_question,
     buyer_question,
     candidate_flows,
     flow_question,
+    summary_buttons,
 )
+from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID
 
 OWNER_RUC = "20000000001"
 UNKNOWN_BUYER_RUC = "20000000002"
+#: One synthetic value per required field (R-2.13), for the summary-button tests.
+REQUIRED_VALUES = {
+    "ruc_emisor": "51900000000",
+    "tipo": "01",
+    "serie": "F001",
+    "numero": "1234",
+    "fecha_emision": "2026-11-24",
+    "total": "49.90",
+}
 
 
 def _flow(label: str, accepted_tipos: list[str]) -> Flow:
@@ -96,6 +107,49 @@ def test_question_choice_button_ids_carry_the_menu_and_cancel_does_not() -> None
             assert button.id.endswith(f":{menu}")
         assert buttons[-1].id.endswith(":cancel")
         assert f":{menu}" not in buttons[-1].id
+
+
+def _reading_with_sources(**sources: Source) -> Reading:
+    """Build a reading whose required fields come from ``sources``, the QR by default."""
+    fields = {
+        name: Field(value=REQUIRED_VALUES[name], source=sources.get(name, "qr"), confidence=1.0)
+        for name in REQUIRED
+    }
+    return Reading(fields=fields, document_url=None)
+
+
+def test_summary_buttons_are_empty_when_every_required_field_came_from_the_qr() -> None:
+    """D189, R-3.4: a summary read fully from the QR carries no buttons."""
+    assert summary_buttons(42, _reading_with_sources()) == []
+
+
+def test_summary_buttons_are_offered_when_one_required_field_came_from_ocr() -> None:
+    """D189, R-3.4: one OCR required field makes the summary offer [Corregir] and [Anular]."""
+    buttons = summary_buttons(42, _reading_with_sources(total="ocr"))
+
+    assert [button.id for button in buttons] == ["42:edit", "42:cancel"]
+    assert [button.title for button in buttons] == [BUTTON_FIX, BUTTON_VOID]
+
+
+def test_summary_buttons_are_offered_when_one_required_field_came_from_the_llm() -> None:
+    """D189, R-3.4: one LLM required field makes the summary offer both buttons."""
+    buttons = summary_buttons(42, _reading_with_sources(fecha_emision="llm"))
+
+    assert [button.id for button in buttons] == ["42:edit", "42:cancel"]
+    assert [button.title for button in buttons] == [BUTTON_FIX, BUTTON_VOID]
+
+
+def test_summary_buttons_ignore_a_non_required_field_from_ocr() -> None:
+    """D189, R-3.4: an OCR value outside the required fields does not make the summary doubtful."""
+    reading = _reading_with_sources()
+    fields = {**reading.fields, "igv": Field(value="7.61", source="ocr", confidence=1.0)}
+
+    assert summary_buttons(42, Reading(fields=fields, document_url=None)) == []
+
+
+def test_summary_buttons_are_empty_when_required_fields_came_from_qr_and_sender() -> None:
+    """D189, R-3.4: required fields from the QR and from the sender carry no buttons."""
+    assert summary_buttons(42, _reading_with_sources(ruc_emisor="user", numero="user")) == []
 
 
 def test_candidate_flows_keeps_config_order() -> None:

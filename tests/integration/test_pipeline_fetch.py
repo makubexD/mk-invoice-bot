@@ -10,6 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 import pytest_asyncio
@@ -31,13 +32,19 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchedFile, Fetcher, FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.manual_message import portal_for
+from invoicebot.pipeline.questions import (
+    RULE_DOCS_NEEDED,
+    SEND_PDF_ACTION,
+    TEACH_PORTAL_ACTION,
+    WAIT_MAIL_ACTION,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    FETCH_NO_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     FETCH_WAITING,
-    FETCH_WAITING_MAIL,
     GAP_LINE_PORTAL,
     MESSAGES,
     fetcher_desc,
@@ -51,6 +58,8 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 # From tests/synthetic_rucs.txt; no real RUC appears here.
 STORE_RUC = "20000000001"
+# A synthetic issuer the store directory does not know.
+UNKNOWN_RUC = "20000000010"
 PORTAL_KEY = "synthetic_portal"
 FLOW = "work_microsoft"
 PROFILE = "yo"
@@ -128,6 +137,13 @@ def _reading() -> Reading:
         },
         document_url=None,
     )
+
+
+def _reading_for(ruc_emisor: str) -> Reading:
+    """Build the complete synthetic reading with ``ruc_emisor`` as its issuer."""
+    fields = dict(_reading().fields)
+    fields["ruc_emisor"] = _field(ruc_emisor)
+    return Reading(fields=fields, document_url=None)
 
 
 def _written(out_dir: Path, kind: Literal["pdf", "xml"], data: bytes) -> FetchedFile:
@@ -374,6 +390,19 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
         (profile_id,),
     )
     return [(str(text), rule_id) for text, rule_id in await cur.fetchall()]
+
+
+async def _outbox_buttons(conn: AsyncConnection[Any], profile_id: str) -> list[list[str]]:
+    cur = await conn.execute(
+        """
+        SELECT payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [[str(button["id"]) for button in buttons] for (buttons,) in await cur.fetchall()]
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -1067,10 +1096,10 @@ async def test_inbox_second_not_found_yet_retries_in_1h(
     assert MINUTES_55 <= row[0].total_seconds() / 60 <= MINUTES_65
 
 
-async def test_inbox_first_wait_says_waiting_for_mail_once(
+async def test_first_wait_sends_each_fetchers_text_once(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """S7.1, S11.9, D100: each fetcher's first wait sends its own text, once."""
+    """S7.1, S11.9, D100 (D189): each fetcher's first wait sends its own text, once."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     portal = FakeFetcher(FetchReason.NOT_FOUND_YET)
@@ -1099,8 +1128,130 @@ async def test_inbox_first_wait_says_waiting_for_mail_once(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     texts = [text for text, _rule_id in outbox]
+    rule_ids = [rule_id for _text, rule_id in outbox]
     assert texts.count(FETCH_WAITING.format(id=invoice_id)) == 1
-    assert texts.count(FETCH_WAITING_MAIL.format(id=invoice_id)) == 1
+    assert rule_ids.count(RULE_DOCS_NEEDED) == 1
+
+
+async def _run_portal_then_inbox(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, tmp_path: Path
+) -> tuple[Config, FakeFetcher, FakeFetcher]:
+    """Run an unknown issuer's portal (no portal) and then its first inbox wait."""
+    portal = FakeFetcher(FetchReason.NO_PORTAL)
+    inbox = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    directory = _directory()
+    cfg = _config(("portal_registry", "email_inbox"))
+    handler = make_fetch_handler(
+        db_pool,
+        cfg,
+        directory,
+        {FLOW: {"portal_registry": portal, "email_inbox": inbox}},
+        tmp_path,
+        schedules={EMAIL_INBOX_FETCHER: _inbox_schedule, PORTAL_FETCHER: _portal_schedule(directory)},
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        second_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, second_job_id))
+    return cfg, portal, inbox
+
+
+async def test_inbox_first_wait_offers_the_docs_needed_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D189 (BR-F13): an unknown issuer's first inbox wait offers [📎] [🔗] [⏳] and the no-portal bullet."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+
+    cfg, _portal, _inbox = await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_buttons(conn, profile_id)
+        cur = await conn.execute(
+            "SELECT max(run_after) FROM jobs WHERE invoice_id = %s AND step = %s",
+            (invoice_id, FETCH_STEP),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    next_at = row[0].astimezone(ZoneInfo(cfg.owner.timezone))
+    assert [rule_id for _text, rule_id in outbox] == [RULE_DOCS_NEEDED]
+    text = outbox[0][0]
+    assert FETCH_NO_PORTAL_LINE in text
+    assert f"Vuelvo a mirar el correo a las {next_at:%H:%M}." in text
+    assert buttons == [
+        [
+            f"{invoice_id}:{SEND_PDF_ACTION}",
+            f"{invoice_id}:{TEACH_PORTAL_ACTION}",
+            f"{invoice_id}:{WAIT_MAIL_ACTION}",
+        ]
+    ]
+
+
+async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D189 (BR-F13): an issuer with a taught link gets [📎] and [⏳] only."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
+            VALUES (%s, %s, %s, 'proposed')
+            """,
+            (int(UNKNOWN_RUC), "https://portal.example.pe/consulta", profile_id),
+        )
+
+    await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        buttons = await _outbox_buttons(conn, profile_id)
+    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}", f"{invoice_id}:{WAIT_MAIL_ACTION}"]]
+
+
+async def test_inbox_second_wait_sends_no_new_message(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D189 (BR-F13): only the inbox's first wait queues the docs-needed message."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    inbox = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("email_inbox",)),
+        _directory(),
+        {FLOW: {"email_inbox": inbox}},
+        tmp_path,
+        schedules={EMAIL_INBOX_FETCHER: _inbox_schedule},
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, retry_job_id))
+
+    async with db_pool.connection() as conn:
+        rule_ids = [rule_id for _text, rule_id in await _outbox(conn, profile_id)]
+    assert inbox.calls == 2
+    assert rule_ids == [RULE_DOCS_NEEDED]
+
+
+async def test_portal_first_wait_says_waiting_without_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D100 (D189): a portal fetcher's first wait keeps FETCH_WAITING and carries no buttons."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND_YET), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_buttons(conn, profile_id)
+    assert outbox == [(FETCH_WAITING.format(id=invoice_id), None)]
+    assert buttons == [[]]
 
 
 async def test_inbox_auth_required_alerts_admins_once_and_retries(

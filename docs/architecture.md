@@ -128,6 +128,21 @@ Two rules shape the arrows:
   semaphore), so the main process stays small. Portal traffic from the browser
   goes through `GuardProxy`, which applies the `net` checks.
 
+## Chat intake
+
+`pipeline/intake.py` handles one inbound message inside the caller's
+transaction: a redelivery is a duplicate (R-1.8), the channel window is
+refreshed, and the message is stored. A text beginning with `/` runs a command
+(R-10.1); a button press changes no invoice when its prefix already answers it.
+
+Presses are dispatched by the id's prefix, in this order: `/` is a command
+button, parsed and run through `handle_command` like a typed command; `p` is a
+payment proposal (R-7.12); `t` is a BR-S06 decision; `u` is a BR-F14 portal
+offer press (`pipeline/portal_offer.py`); anything else goes to
+`actions.handle_press`. Bare `/cancelar` and `/reprocesar` answer with one
+button per open invoice, each carrying the command and the invoice id it runs
+(D189).
+
 ## Deploy topology (local MVP host)
 
 The MVP runs on the owner's Ubuntu machine (D141) as the rootless Podman
@@ -211,6 +226,7 @@ stateDiagram-v2
     FETCHING_DOCS --> WAITING_CAPTCHA: captcha (not built yet, D99)
     WAITING_CAPTCHA --> FETCHING_DOCS: answered or timed out
     FETCHING_DOCS --> MANUAL_REQUIRED: fetcher chain exhausted (BR-F07)
+    FETCHING_DOCS --> MANUAL_REQUIRED: BR-F13 [📎]
     MANUAL_REQUIRED --> DELIVERING: user uploads the files, or template fixed
     MANUAL_REQUIRED --> FETCHING_DOCS: gap fixed or /reprocesar
     DELIVERING --> PENDING_AUTH: token expired (BR-D01)
@@ -250,6 +266,19 @@ Not drawn, to keep the picture readable:
 - **Terminal:** `DONE`, `CANCELLED` and `FAILED`; only `FAILED` can be
   reprocessed. Payment is not a state: `/pagado` links a payment to a `DONE`
   flow B invoice (R-7.12).
+
+## Fetching documents
+
+The fetcher chain is spec 03 §6's. The email inbox fetcher's first wait sends
+BR-F13 (`docs_needed_text`) with [📎 send_pdf] and [⏳ wait_mail], plus
+[🔗 teach_portal] only when chat teaching is on (`gaps.teach_via_chat`) and the
+issuer has no portal entry and no taught link; any other fetcher's wait keeps
+`FETCH_WAITING`. Either way the same fetcher runs again at `run_after`.
+
+The buttons are `pipeline/docs_help.py`'s. [📎] moves `FETCHING_DOCS` →
+`MANUAL_REQUIRED` under BR-F13 and asks for the PDF; [⏳] only answers and
+changes no state; [🔗] offers the printed URL as BR-F14, or asks BR-F02 when
+there is nothing to offer.
 
 ## Flow A (RK EXPORT, Google)
 
