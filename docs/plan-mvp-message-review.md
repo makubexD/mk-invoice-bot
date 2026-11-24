@@ -290,3 +290,76 @@ the fetching text; `/cancelar 999999` → BR-S07 with [📋 Mis comprobantes], a
 Record the results in `specs/spikes/message-review.md`.
 
 Test: `uv run pytest -q tests/unit/test_docs.py`
+
+## Step 16: The owner's live-run wording in the specs and the roadmap `[inline: user-facing copy the owner reviews]`
+
+The owner's notes in `specs/spikes/message-review.md`. Files: `specs/06-business-rules.md`,
+`specs/05-open-questions.md`, `src/invoicebot/rules/messages_es.py`, `docs/plan-mvp.md`.
+
+- Spec 06, summary item 8: `⏳ Busco sus archivos para archivarlo. Toca un botón solo si algo está mal.` with buttons,
+  else `⏳ Busco sus archivos para archivarlo.` The summary goes out before the fetchers run, so it must not claim
+  filing; the words match `/estado`'s `buscando sus archivos`.
+- Spec 06, BR-F13 row: the text becomes `⏳ Comprobante #{id}: falta {docs_desc} para archivarlo.` +
+  `{searched_lines}` + `Lo busco en tu correo hasta {last_desc}; si llega, lo archivo solo y te aviso. Si no llega,
+te pido que me lo envíes.` + `También puedes:` [📎 Te envío el PDF] [🔗 Enseñar el portal]. No next look and no
+  [⏳ Espero el correo]: waiting is what the bot does anyway. A [⏳] press on a message already sent still answers
+  `BR-F13_wait`.
+- Spec 05, D190: one bullet `Live-run amendment (2026-11-24)` naming the two changes above.
+- `messages_es.py`: `SUMMARY_MOVING` and `SUMMARY_MOVING_QUIET` take the new texts (the tests read the constants).
+- `docs/plan-mvp.md`, the 9v `portal-guess` row (notes 3 and 4): BR-F02 and BR-F14 take answers by button
+  ([Sí, es este] [✏️ Corregir] [No sé]); typed text only after [✏️ Corregir]; the bot echoes the URL it understood for
+  a [Sí] [Corregir] confirmation; text it cannot read as a URL gets a clear retry, never another path. The PEBSA
+  ticket of the spike is 9v's live case.
+
+Test: `uv run pytest -q tests/unit/test_docs.py tests/integration/test_pipeline_route.py`
+
+## Step 17: BR-F13 names only the last look `[worker]`
+
+Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/manual_message.py`,
+`tests/unit/test_manual_message.py`, `tests/integration/test_pipeline_fetch.py`.
+
+- `MESSAGES["BR-F13"]` takes step 16's spec 06 text, lines joined with `\n`, placeholders `{id}`, `{docs_desc}`,
+  `{searched_lines}`, `{last_desc}`.
+- `docs_needed_text` stops passing `next_desc`; everything else stays (`LookTimes.next_at` goes in step 19).
+- `test_manual_message.py`: each BR-F13 case expects the new text: no `Próxima revisión`, the line
+  `Lo busco en tu correo hasta {last_desc}; …` with `hoy a las HH:MM` / `mañana a las HH:MM` / a date as before, and
+  `También puedes:` last.
+- `test_pipeline_fetch.py`: the BR-F13 text assertions stop expecting `next_desc` and expect the last look instead.
+
+Test: `uv run pytest -q tests/unit/test_manual_message.py tests/integration/test_pipeline_fetch.py`
+
+## Step 18: BR-F13 drops [⏳ Espero el correo] `[worker]`
+
+Files: `src/invoicebot/pipeline/questions.py`, `src/invoicebot/rules/messages_es.py`,
+`tests/integration/test_pipeline_fetch.py`.
+
+- `docs_needed_buttons` returns [📎] and, when offered, [🔗]; its docstring says so. `BUTTON_WAIT_MAIL` is removed
+  (no other user). `WAIT_MAIL_ACTION` and its handler stay, so a [⏳] on a message already sent still answers
+  `BR-F13_wait`.
+- `test_pipeline_fetch.py`: the BR-F13 button rows expect `[[…:SEND_PDF_ACTION, …:TEACH_PORTAL_ACTION]]` or
+  `[[…:SEND_PDF_ACTION]]`, with no `WAIT_MAIL_ACTION`.
+
+Test cases: the button rows above; `tests/integration/test_pipeline_docs_help.py`'s existing [⏳] press tests pass
+unchanged (an old button still works).
+
+Test: `uv run pytest -q tests/integration/test_pipeline_fetch.py tests/integration/test_pipeline_docs_help.py`
+
+## Step 19: `LookTimes` loses `next_at` `[worker:low]`
+
+Files: `src/invoicebot/pipeline/manual_message.py`, `src/invoicebot/pipeline/fetch.py`,
+`tests/unit/test_manual_message.py`.
+
+- `LookTimes` keeps `last_at` and `today` (docstring: the last inbox look in the owner's timezone, and the owner's
+  date); `fetch.py` still computes `last_at` from the next look plus the schedule, and builds `LookTimes(last_at,
+today)`.
+- `test_manual_message.py`: every `LookTimes(...)` drops its first argument; the expected texts do not change.
+
+Test: `uv run pytest -q tests/unit/test_manual_message.py tests/integration/test_pipeline_fetch.py`
+
+## Step 20: Live re-check on Telegram `[inline: needs the owner's chat]`
+
+Deploy the branch image to the live stack and, with the owner, send the PEBSA ticket: the summary ends
+`⏳ Busco sus archivos para archivarlo.`; BR-F13 names only the last look and shows [📎] [🔗]. Add the results to
+`specs/spikes/message-review.md` under `## Re-check after the wording fix`.
+
+Test: `uv run pytest -q tests/unit/test_docs.py`
