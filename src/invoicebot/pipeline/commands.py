@@ -347,7 +347,7 @@ async def _pendientes(
     if total > len(rows):
         lines.append(PENDING_MORE.format(count=total - len(rows)))
     await _reply(conn, msg, None, "\n".join(lines))
-    await _requeue_parked(conn, rows)
+    await _requeue_parked(conn, msg, rows)
 
 
 async def _pending_lines(conn: AsyncConnection[Any], rows: Sequence[PendingRow]) -> list[str]:
@@ -387,15 +387,27 @@ def _pending_line(row: PendingRow, *, missing: str | None = None) -> str:
     )
 
 
-async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) -> None:
-    """Queue the stored question again for the first few parked invoices (S4.8, D94)."""
+async def _requeue_parked(conn: AsyncConnection[Any], msg: InboundMessage, rows: list[PendingRow]) -> None:
+    """Queue the stored question again for the first few parked invoices (S4.8, D94).
+
+    The re-ask goes to the channel the ``/pendientes`` came from and to its sender
+    (D188, R-3.7).
+    """
+    addressee = Addressee(msg.channel, msg.profile_id)
     requeued = 0
     for row in rows:
         if requeued == PENDING_REQUEUES:
             return
         if row.state != PENDING_USER or row.waiting_rule_id is None:
             continue
-        await outbox.requeue_last(conn, row.id, row.waiting_rule_id, PENDING_REQUEUE_INTERVAL)
+        await outbox.requeue_last(
+            conn,
+            row.id,
+            row.waiting_rule_id,
+            PENDING_REQUEUE_INTERVAL,
+            channel=addressee.channel,
+            to=addressee.profile_id,
+        )
         requeued += 1
 
 

@@ -238,21 +238,25 @@ async def requeue_last(
     invoice_id: int,
     rule_id: str,
     min_interval: timedelta,
+    *,
+    channel: str,
+    to: str,
 ) -> bool:
     """Queue the invoice's newest message for rule_id again, returning whether it did.
 
-    ``/pendientes`` sends a parked question again with the same channel, recipient and
-    payload, buttons included, as a new pending row in the caller's transaction
-    (S4.8, D94). An invoice with no stored message for the rule queues nothing, so a
-    missing question is never invented; one sent within ``min_interval`` is not sent
-    again, measured on the database clock. Does not commit.
+    ``/pendientes`` sends a parked question again with the same payload, buttons
+    included, as a new pending row in the caller's transaction (S4.8, D94). The
+    re-ask goes to the channel the ``/pendientes`` came from and to the profile that
+    sent it (D188, R-3.7). An invoice with no stored message for the rule queues
+    nothing, so a missing question is never invented; one sent within ``min_interval``
+    is not sent again, measured on the database clock. Does not commit.
     """
     cur = await conn.execute(
         """
         INSERT INTO outbox (channel, "to", payload_json, template, state, invoice_id)
-        SELECT channel, "to", payload_json, template, 'pending', invoice_id
+        SELECT %(channel)s, %(to)s, payload_json, template, 'pending', invoice_id
         FROM (
-            SELECT channel, "to", payload_json, template, invoice_id, created_at
+            SELECT payload_json, template, invoice_id, created_at
             FROM outbox
             WHERE invoice_id = %(invoice_id)s
               AND payload_json->>'rule_id' = %(rule_id)s
@@ -265,6 +269,8 @@ async def requeue_last(
             "invoice_id": invoice_id,
             "rule_id": rule_id,
             "min_interval": min_interval,
+            "channel": channel,
+            "to": to,
         },
     )
     return cur.rowcount == 1

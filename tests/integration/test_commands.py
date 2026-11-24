@@ -17,7 +17,7 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.channels.base import Button, ChannelName, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
@@ -121,10 +121,10 @@ def _profile() -> str:
     return f"profile-{uuid4().hex}"
 
 
-def _message(profile_id: str, text: str) -> InboundMessage:
-    """Build a canonical text message for profile_id."""
+def _message(profile_id: str, text: str, channel: ChannelName = "whatsapp") -> InboundMessage:
+    """Build a canonical text message for profile_id, on ``channel`` by default."""
     return InboundMessage(
-        channel="whatsapp",
+        channel=channel,
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
@@ -180,21 +180,14 @@ async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
 async def _question(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     invoice_id: int,
-    profile_id: str,
+    to: Addressee,
     rule_id: str,
     text: str,
     buttons: Sequence[Button] = (),
 ) -> None:
-    """Store a question outbox row linked to invoice_id and naming rule_id."""
+    """Store a question outbox row for invoice_id and rule_id, addressed to ``to``."""
     async with pool.connection() as conn, conn.transaction():
-        await queue_message(
-            conn,
-            Addressee("whatsapp", profile_id),
-            text,
-            invoice_id=invoice_id,
-            rule_id=rule_id,
-            buttons=buttons,
-        )
+        await queue_message(conn, to, text, invoice_id=invoice_id, rule_id=rule_id, buttons=buttons)
 
 
 async def _backdate_questions(
@@ -347,6 +340,15 @@ async def _invoice_payloads(conn: AsyncConnection[Any], invoice_id: int) -> list
         (invoice_id,),
     )
     return [cast(dict[str, Any], payload) for (payload,) in await cur.fetchall()]
+
+
+async def _invoice_targets(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[str, str]]:
+    """Return the outbox's ``(channel, "to")`` rows linked to invoice_id, oldest first."""
+    cur = await conn.execute(
+        'SELECT channel, "to" FROM outbox WHERE invoice_id = %s ORDER BY id',
+        (invoice_id,),
+    )
+    return [(str(channel), str(to)) for channel, to in await cur.fetchall()]
 
 
 async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -532,7 +534,7 @@ async def test_estado_repeats_the_rule_and_its_last_question(
     """R-11.1: /estado on a BR-R03 invoice shows its state and the stored question."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R03")
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT)
     msg = _message(profile_id, f"/estado {invoice_id}")
     expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
     expected = f"{expected}\n{STATUS_RULE.format(rule_id='BR-R03', text=QUESTION_TEXT)}"
@@ -1135,7 +1137,7 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
         Button(id=f"{invoice_id}:pick:0", title="Trabajo"),
         Button(id=f"{invoice_id}:cancel", title=BUTTON_CANCEL),
     ]
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT, buttons)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT, buttons)
     await _backdate_questions(db_pool, invoice_id)
     msg = _message(profile_id, "/pendientes")
     line = PENDING_LINE.format(
@@ -1162,6 +1164,34 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     original, requeued = payloads
     assert original["buttons"] == requeued["buttons"]
     assert requeued["text"] == original["text"]
+
+
+@pytest.mark.parametrize(
+    ("parked_on", "command_on"),
+    [("console", "telegram"), ("whatsapp", "whatsapp")],
+)
+async def test_pendientes_requeues_on_the_command_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    parked_on: ChannelName,
+    command_on: ChannelName,
+) -> None:
+    """D188, R-3.7: the re-ask goes to the channel /pendientes came from, for the same profile."""
+    profile_id = _profile()
+    invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
+    await _question(db_pool, invoice_id, Addressee(parked_on, profile_id), "BR-R03", QUESTION_TEXT)
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/pendientes", channel=command_on),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        targets = await _invoice_targets(conn, invoice_id)
+
+    assert targets == [(parked_on, profile_id), (command_on, profile_id)]
 
 
 async def test_pendientes_names_the_fields_an_extract_failed_invoice_lacks(
@@ -1248,7 +1278,7 @@ async def test_pendientes_requeues_a_question_at_most_every_ten_minutes(
     """S4.8, D94: /pendientes re-sends a parked question once, but not again within 10 minutes."""
     profile_id = _profile()
     invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT)
     await _backdate_questions(db_pool, invoice_id)
 
     async with db_pool.connection() as conn:
