@@ -5,7 +5,13 @@ from __future__ import annotations
 import pytest
 
 from invoicebot.channels.base import ButtonPress
-from invoicebot.channels.buttons import ACTION_MAX_CHARS, button_id, parse_button_id
+from invoicebot.channels.buttons import (
+    ACTION_MAX_CHARS,
+    button_id,
+    command_button_id,
+    is_button_command,
+    parse_button_id,
+)
 
 
 def test_button_id_round_trips_through_parse() -> None:
@@ -83,3 +89,49 @@ def test_longest_button_id_fits_telegram_callback_data() -> None:
     """R-1.7: the longest id the codec can build fits Telegram's 64-byte callback_data limit."""
     longest = button_id(999_999_999, "a" * ACTION_MAX_CHARS, 9, 9999)
     assert len(longest.encode("utf-8")) <= 64
+
+
+@pytest.mark.parametrize(
+    ("command", "args", "expected"),
+    [
+        ("reprocesar", ("12",), "/reprocesar 12"),
+        ("pendientes", (), "/pendientes"),
+    ],
+)
+def test_command_button_id_builds_the_command_text(
+    command: str, args: tuple[str, ...], expected: str
+) -> None:
+    """D190: a command button's id is the command text, with its argument when given."""
+    assert command_button_id(command, *args) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "arg"),
+    [
+        ("cancelar", "12"),
+        ("reprocesar", "123456789"),
+        ("pendientes", ""),
+        ("estado", ""),
+        ("estado", "7"),
+    ],
+)
+def test_is_button_command_accepts_the_allowlist(command: str, arg: str) -> None:
+    """D190: only the allowlisted commands with a valid argument may arrive as a button."""
+    assert is_button_command(command, arg)
+
+
+@pytest.mark.parametrize(
+    ("command", "arg"),
+    [
+        ("cancelar", ""),
+        ("cancelar", "12a"),
+        ("reprocesar", "1234567890"),
+        ("pendientes", "x"),
+        ("ayuda", ""),
+        ("gap", "ignorar 3"),
+        ("portal", "https://x.pe"),
+    ],
+)
+def test_is_button_command_refuses_other_commands(command: str, arg: str) -> None:
+    """D190: a command outside the allowlist, or with a bad argument, is refused as a button."""
+    assert not is_button_command(command, arg)

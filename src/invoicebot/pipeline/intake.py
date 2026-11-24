@@ -7,16 +7,17 @@ The photo files a button press releases are deleted after that transaction (R-9.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.buttons import COMMAND_BUTTON_PREFIX, is_button_command
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.actions import PressResult, handle_press
 from invoicebot.pipeline.commands import (
-    COMMAND_BUTTON_PREFIX,
     CommandContext,
     PaymentFlow,
     handle_command,
@@ -50,6 +51,8 @@ from invoicebot.store.messages import (
     list_open_invoices,
     store_inbound,
 )
+
+logger = logging.getLogger(__name__)
 
 #: Rule that tells a sender their queue is full (BR-S01).
 RULE_BACK_PRESSURE = "BR-S01"
@@ -177,18 +180,17 @@ async def _handle_press(
     """Run one button press, or return None when a special prefix's press is already answered (D189).
 
     A command button, a payment proposal, a BR-S06 decision and a BR-F14 portal offer
-    change no invoice; every other button goes through :func:`handle_press`.
+    change no invoice; every other button goes through :func:`handle_press`. Only a
+    command in D190's allowlist runs; any other is logged and ignored.
     """
     if button_id.startswith(COMMAND_BUTTON_PREFIX):
         command = parse_command(button_id)
         if command is not None:
-            await handle_command(
-                conn,
-                msg,
-                command[0],
-                command[1],
-                context=_command_context(roles, timezone),
-            )
+            name, arg = command
+            if is_button_command(name, arg):
+                await handle_command(conn, msg, name, arg, context=_command_context(roles, timezone))
+            else:
+                logger.info("ignored command button", extra={"profile_id": msg.profile_id})
         return None
     if button_id.startswith(PAYMENT_BUTTON_PREFIX):
         await handle_payment_press(conn, msg)

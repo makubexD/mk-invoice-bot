@@ -17,6 +17,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.channels.buttons import command_button_id
 from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
@@ -107,8 +108,6 @@ PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 MAX_GAP_LINES = 20
 #: The ``/gap`` argument that ignores a gap (S8.9, D139).
 GAP_IGNORE_ARG = "ignorar"
-#: The prefix of a pick button's id, which carries the command it runs (S4.9, D189).
-COMMAND_BUTTON_PREFIX = "/"
 #: The states ``/reprocesar`` with no id lists and :func:`_requeue` acts on (S4.9, D96).
 REPROCESS_STATES: frozenset[str] = frozenset({FAILED, MANUAL_REQUIRED, BATCHED})
 
@@ -350,9 +349,7 @@ async def _list_choices(
     if not rows:
         await _reply(conn, msg, None, COMMAND_PICK_NONE.format(verb=command))
         return
-    buttons = [
-        Button(id=f"{COMMAND_BUTTON_PREFIX}{command} {row.id}", title=_pick_title(row)) for row in rows
-    ]
+    buttons = [Button(id=command_button_id(command, str(row.id)), title=_pick_title(row)) for row in rows]
     await _reply(conn, msg, None, COMMAND_PICK.format(verb=command), buttons=buttons)
 
 
