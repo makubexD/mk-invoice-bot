@@ -8,13 +8,13 @@ close the T1 review follow-ups and give the owner the tools the setup needs.
 In scope: the roadmap's T2 row and "T2 owner setup" steps 1–11; the two T1 review follow-ups (webhook-secret strength,
 BR-O03 fallback channel); the user-id helper and the `setWebhook`/`getWebhookInfo` subcommand T1 left to T2.
 
-Out of scope: `setMyCommands` (the command menu is optional and set by hand in BotFather, roadmap step 5); a polling
+Out of scope: a polling
 mode (D173); groups (D175); 9d2 `live-chat` (still waits for Meta).
 
 Needs from the owner: the bot and its token (steps 7–8), each sender pressing Start, the live run (steps 9–12). Code
 steps 1–6 need nothing from the owner.
 
-Decisions this plan proposes (step 1): D184–D186 below.
+Decisions this plan proposes (step 1): D184–D186 below; D187 added by the owner's plan edit on 2026-11-23.
 
 - **D184 webhook secret strength:** `telegram_webhook_secret` must match `[A-Za-z0-9_-]{32,256}` (Telegram's charset,
   at least 32 characters; `secrets.token_urlsafe(32)` gives 43). A configured Telegram channel with a shorter or
@@ -31,6 +31,12 @@ Decisions this plan proposes (step 1): D184–D186 below.
   (the Start messages sent for `ids` are not replayed as unknown commands); `--info` prints `getWebhookInfo`'s `url`,
   `pending_update_count`, `last_error_date` and `last_error_message`; `--delete` calls `deleteWebhook`. All three read
   the token from the age store, so it is never typed (R-9.9).
+
+- **D187 command menu:** the Telegram `/` menu (`setMyCommands`) is built from `pipeline/commands.COMMANDS`, so it
+  never drifts from `/ayuda`: each entry is the command name and its help line after the first `": "`. The default
+  scope lists the commands every sender may run; each admin profile with a `telegram_user_id` gets a chat scope that
+  also lists the admin-only ones. `invoicebot telegram commands` sets both. `/start` needs nothing: an unknown command
+  already answers the help (R-10.1).
 
 ## Step 1: D184–D186, roadmap row `[inline: decision and spec wording]`
 
@@ -198,10 +204,58 @@ Test: `podman exec "$APP" invoicebot telegram ids` prints the senders; the reloa
 
 Test: `--info` shows no error and `/ayuda` is answered on Telegram.
 
-## Step 10: Live rehearsal from Telegram `[inline: live run]`
+## Step 10: Command menu entries from the registry `[worker]`
+
+Files: `src/invoicebot/pipeline/commands.py`, `tests/unit/test_command_menu.py` (new).
+
+1. Add `def menu_entries(is_admin: bool) -> list[tuple[str, str]]` (docstring: "Return the chat menu's `(command,
+   description)` pairs the sender may run, in help order (D187)."). For each `name, command` in `COMMANDS` that
+   `help_text` would list for `is_admin`, the description is `command.help` after its first `": "`. Reuse the same
+   admin filter `help_text` uses (one home: extract a private `_visible(is_admin)` iterator both call).
+2. Tests, docstrings `D187` / `R-10.1`:
+   - `menu_entries(False)` names are `COMMANDS`' non-admin keys in order, without `gaps` and `gap`;
+   - `menu_entries(True)` names are all `COMMANDS` keys in order;
+   - the `estado` entry's description is `"cómo va el comprobante #12"`;
+   - every name matches `[a-z0-9_]{1,32}` and every description is 3–256 characters (Telegram's limits);
+   - `help_text(True)` is unchanged (equal to its value built by hand from `HELP_HEADER` and every help line).
+
+Test: `uv run pytest -q tests/unit/test_command_menu.py tests/integration/test_commands.py`
+
+## Step 11: `setMyCommands` call `[worker]`
+
+Files: `src/invoicebot/channels/telegram/setup.py`, `tests/unit/test_telegram_setup.py`.
+
+1. Add `async def set_commands(client, entries: Sequence[tuple[str, str]], chat_id: int | None = None) -> None`:
+   `call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in entries], "scope": scope})`
+   with `scope = {"type": "default"}` when `chat_id` is `None`, else `{"type": "chat", "chat_id": chat_id}` (D187).
+   No import from `pipeline`: the caller passes the entries.
+2. Tests with `httpx.MockTransport`, docstring `D187`: no `chat_id` → body has the two commands and the default scope;
+   `chat_id=100000001` → the chat scope with that id; an empty `entries` → `"commands": []`.
+
+Test: `uv run pytest -q tests/unit/test_telegram_setup.py && uv run lint-imports`
+
+## Step 12: `telegram commands` subcommand `[worker]`
+
+Files: `src/invoicebot/cli.py`, `tests/unit/test_cli_telegram.py`, `README.md`.
+
+1. A `commands` subcommand under `telegram` (no arguments). `_telegram` needs only `telegram_bot_token` for it. It
+   calls `set_commands(client, menu_entries(False))`, then for each profile in `cfg.profiles` that is `admin` and has
+   a `telegram_user_id`, `set_commands(client, menu_entries(True), chat_id=<that id>)`; it prints `menu set:
+   default` and one `menu set: <profile id>` line per admin (the profile id, never the user id).
+2. README's CLI table row for `telegram` reads `ids\|webhook\|commands` and mentions the menu.
+3. Tests in `tests/unit/test_cli_telegram.py`, docstring `D187`, over the example config with Telegram enabled and
+   one admin profile with id 100000001: exit 0; two `setMyCommands` requests, the first with the default scope and
+   no `gaps`, the second with the chat scope for 100000001 and `gaps`; stdout has `menu set: default` and the admin
+   profile's id; the output never contains 100000001.
+
+Test: `uv run pytest -q tests/unit/test_cli_telegram.py tests/unit/test_docs.py`
+
+## Step 13: Live rehearsal from Telegram `[inline: live run]`
 
 From the owner's Telegram, one at a time, checking each answer and the invoice state (`/estado`):
 
+0. Redeploy this branch's image, run `invoicebot telegram commands`, and check the `/` menu on the owner's phone
+   (admin entries included).
 1. Flow A: a receipt photo (sent as a photo) → read, routed, PDF-only path (D142).
 2. Flow B: a photo sent as a document (file) → read; the PDF and XML uploads as documents, quoting the bot's ask.
 3. `personal_dni`: a DNI boleta → Sheets row, BR-D18.
@@ -214,9 +268,9 @@ From the owner's Telegram, one at a time, checking each answer and the invoice s
 
 Test: each item answered as the specs say; any mismatch becomes a finding (fix on this branch, or a roadmap row).
 
-## Step 11: Record the live run `[inline: live results]`
+## Step 14: Record the live run `[inline: live results]`
 
-1. `specs/spikes/telegram.md` (new): date, image id, what each step-10 item did, the XML mime answer, anything that
+1. `specs/spikes/telegram.md` (new): date, image id, what each step-13 item did, the XML mime answer, anything that
    surprised.
 2. `docs/plan-telegram.md`: T2 row Plan cell "Done <date>, `docs/archive/plan-telegram-live.md`"; any new follow-up
    (e.g. octet-stream XML by file name) as a new row or note.
