@@ -203,3 +203,24 @@ def test_url_and_info_together_exit_two(
 
     assert exit_info.value.code == 2
     assert api.requests == []
+
+
+def test_commands_sets_default_and_admin_menus_without_printing_user_ids(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D187, R-9.16: commands sets the default menu and each admin's, naming profiles not ids."""
+    api = BotApi("setMyCommands", result=True)
+
+    assert _run(_settings(tmp_path), api, "commands") == 0
+
+    assert len(api.requests) == 2
+    default_menu, admin_menu = (json.loads(request.content) for request in api.requests)
+    assert default_menu["scope"] == {"type": "default"}
+    assert "gaps" not in [command["command"] for command in default_menu["commands"]]
+    assert admin_menu["scope"] == {"type": "chat", "chat_id": 100000001}
+    assert "gaps" in [command["command"] for command in admin_menu["commands"]]
+    captured = capsys.readouterr()
+    assert "menu set: default" in captured.out
+    assert "menu set: yo" in captured.out
+    assert "100000001" not in captured.out + captured.err

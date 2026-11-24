@@ -67,6 +67,7 @@ from invoicebot.channels.telegram.setup import (
     WebhookActive,
     delete_webhook,
     sender_ids,
+    set_commands,
     set_webhook,
     webhook_info,
 )
@@ -83,6 +84,7 @@ from invoicebot.config.models import (
 )
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
+from invoicebot.pipeline.commands import menu_entries
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.pipeline.pending_auth import GOOGLE, MICROSOFT
@@ -213,6 +215,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     telegram_sub = telegram.add_subparsers(dest="telegram_command", required=True)
     telegram_sub.add_parser("ids", help="list the private senders who pressed Start")
+    telegram_sub.add_parser("commands", help="publish the bot command menu")
     webhook = telegram_sub.add_parser("webhook", help="set, inspect or delete the bot's webhook")
     webhook_action = webhook.add_mutually_exclusive_group(required=True)
     webhook_action.add_argument("--url", help="the public https URL to register")
@@ -380,7 +383,7 @@ def _telegram(
     show: Callable[[str], None],
     transport: httpx.AsyncBaseTransport | None,
 ) -> int:
-    """Collect sender ids or manage the bot's webhook (D186, R-9.16).
+    """Collect sender ids, manage the bot's webhook or publish its menu (D186, D187, R-9.16).
 
     The token and the webhook secret come from the age store, so neither is typed
     or printed. A failure names the missing secret or Telegram's status, never a
@@ -399,7 +402,7 @@ def _telegram(
     if missing:
         parser.error(f"the secret store lacks {', '.join(sorted(missing))}")
     try:
-        return asyncio.run(_run_telegram(args, secrets, show, transport))
+        return asyncio.run(_run_telegram(args, secrets, cfg, show, transport))
     except ValueError as error:
         parser.error(str(error))
     except TelegramError as error:
@@ -410,6 +413,7 @@ def _telegram(
 async def _run_telegram(
     args: argparse.Namespace,
     secrets: Secrets,
+    cfg: Config,
     show: Callable[[str], None],
     transport: httpx.AsyncBaseTransport | None,
 ) -> int:
@@ -418,6 +422,9 @@ async def _run_telegram(
         client = TelegramClient(http, token=secrets.get("telegram_bot_token"))
         if args.telegram_command == "ids":
             return await _telegram_ids(client, show)
+        if args.telegram_command == "commands":
+            await _telegram_commands(client, cfg, show)
+            return 0
         await _telegram_webhook(client, secrets, args, show)
     return 0
 
@@ -434,6 +441,20 @@ async def _telegram_ids(client: TelegramClient, show: Callable[[str], None]) -> 
     for user_id, username in senders:
         show(f"{user_id} @{username}" if username else f"{user_id} -")
     return 0
+
+
+async def _telegram_commands(
+    client: TelegramClient,
+    cfg: Config,
+    show: Callable[[str], None],
+) -> None:
+    """Publish the default menu and each admin's own, naming profiles never ids (D187)."""
+    await set_commands(client, menu_entries(False))
+    show("menu set: default")
+    for profile_id, profile in cfg.profiles.items():
+        if profile.admin and profile.telegram_user_id is not None:
+            await set_commands(client, menu_entries(True), chat_id=profile.telegram_user_id)
+            show(f"menu set: {profile_id}")
 
 
 async def _telegram_webhook(
