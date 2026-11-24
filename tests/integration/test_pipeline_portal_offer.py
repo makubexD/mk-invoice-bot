@@ -180,7 +180,7 @@ async def test_ask_portal_with_sunat_document_url_asks_br_f02(
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
 
-    assert rows == [(_br_f02_text(), "BR-F02", [])]
+    assert rows == [(_br_f02_text(), "BR-F02", [{"id": f"u{invoice_id}:dk", "title": "No sé"}])]
 
 
 async def test_ask_portal_with_other_document_url_offers_it(
@@ -200,14 +200,14 @@ async def test_ask_portal_with_other_document_url_offers_it(
 async def test_ask_portal_with_no_url_asks_br_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F02: with no URL to offer the sender is asked for the portal."""
+    """D190, BR-F02: with no URL to offer the sender is asked for the portal with a [No sé] button."""
     reading = _reading()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
 
-    assert rows == [(_br_f02_text(), "BR-F02", [])]
+    assert rows == [(_br_f02_text(), "BR-F02", [{"id": f"u{invoice_id}:dk", "title": "No sé"}])]
 
 
 async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
@@ -249,7 +249,11 @@ async def test_no_asks_br_f02_for_the_invoice(
         rows = await _outbox(conn, SENDER)
 
     assert link is None
-    assert rows[-1] == (_br_f02_text(), "BR-F02", [])
+    assert rows[-1] == (
+        _br_f02_text(),
+        "BR-F02",
+        [{"id": f"u{invoice_id}:dk", "title": "No sé"}],
+    )
 
 
 async def test_dont_know_answers_br_f02_dont_know(
@@ -267,6 +271,45 @@ async def test_dont_know_answers_br_f02_dont_know(
 
     assert link is None
     assert rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+
+
+async def test_dont_know_after_br_f02_answers_br_f02_dont_know(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-F02: [No sé] on BR-F02's question answers BR-F02_dont_know and teaches no link."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:dk"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        rows = await _outbox(conn, SENDER)
+
+    assert link is None
+    assert rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+
+
+async def test_yes_after_br_f02_is_stale_and_teaches_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-F02: a forged [Sí] on BR-F02's question answers BR-S02 and teaches no link."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        before = await _outbox(conn, SENDER)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        after = await _outbox(conn, SENDER)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        owner_rows = await _outbox(conn, ADMIN)
+        state = await _state(conn, invoice_id)
+
+    stale = MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(state))
+    assert after == [*before, (stale, "BR-S02", [])]
+    assert link is None
+    assert owner_rows == []
 
 
 async def test_press_from_another_profile_changes_nothing(
