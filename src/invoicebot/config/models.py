@@ -68,6 +68,14 @@ class Profile(BaseModel):
     flows: list[str]
     admin: bool = False
 
+    def sender_id(self, channel: str) -> str | None:
+        """D174: this profile's id on a chat channel as text, or ``None`` when it has none."""
+        if channel == "whatsapp":
+            return self.whatsapp
+        if channel == "telegram":
+            return None if self.telegram_user_id is None else str(self.telegram_user_id)
+        return None
+
 
 class ChannelTemplates(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -137,9 +145,7 @@ def _preferred_channel_is_reachable(profile_id: str, profile: Profile, enabled: 
         return
     if channel not in enabled:
         raise ValueError(f"profile '{profile_id}' prefers disabled channel '{channel}' (D174)")
-    sender_ids = {"whatsapp": profile.whatsapp, "telegram": profile.telegram_user_id}
-    sender_id = sender_ids[channel]
-    if sender_id is None:
+    if profile.sender_id(channel) is None:
         raise ValueError(f"profile '{profile_id}' prefers channel '{channel}' without an id for it (D174)")
 
 

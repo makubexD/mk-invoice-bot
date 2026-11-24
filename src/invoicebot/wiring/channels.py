@@ -81,8 +81,7 @@ def _fallback_channel(profile: Profile, rejected: str, fallbacks: set[str]) -> s
     """Return the sorted first enabled channel other than ``rejected`` the profile has an id for (D185)."""
     if not profile.admin or profile.preferred_channel != rejected:
         return None
-    sender_ids = {"whatsapp": profile.whatsapp, "telegram": profile.telegram_user_id}
-    return next((name for name in sorted(fallbacks) if sender_ids.get(name) is not None), None)
+    return next((name for name in sorted(fallbacks) if profile.sender_id(name) is not None), None)
 
 
 async def alert_channel_token(pool: Pool, cfg: Config, channel: str) -> None:
