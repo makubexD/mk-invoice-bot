@@ -64,7 +64,8 @@ _ROW_RE = re.compile(r"^\|\s*(BR-[A-Z]\d{2})\s*\|")
 _STATE_REF_RE = re.compile(r"\b(?:Same as|continues as)\s+(BR-)?([A-Z]\d{2})\b")
 _CODE_SPAN_RE = re.compile(r"`([^`]*)`")
 _ANNOTATION_RE = re.compile(r"\*\([^)]*\)\*")
-_BUTTON_RE = re.compile(r"\[[^\]]*\]")
+# A button is a [..] outside a code span; a text may name a button inside its span (BR-F02, D190).
+_BUTTON_RE = re.compile(r"(`[^`]*`)|\[[^\]]*\]")
 _ROLE_RE = re.compile(r"\b(User|Admin|Owner|Sender):")
 
 _ROLE_PRIORITY = {None: 0, "user": 0, "sender": 0, "owner": 1, "admin": 2}
@@ -112,7 +113,7 @@ def _state_for(
 
 def _messages_for(rule_id: str, message_cell: str) -> dict[str, str]:
     cell = _ANNOTATION_RE.sub("", message_cell)
-    cell = _BUTTON_RE.sub("", cell)
+    cell = _BUTTON_RE.sub(lambda match: match.group(1) or "", cell)
 
     parts = _ROLE_RE.split(cell)
     segments: list[tuple[str | None, str]] = [(None, parts[0])]

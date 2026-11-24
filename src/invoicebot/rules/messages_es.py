@@ -73,9 +73,12 @@ MESSAGES: dict[str, str] = {
     "BR-F02": (
         "No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). "
         'Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. '
-        'Si no, responde "no sé".'
+        "Si no, toca [No sé]."
     ),
-    "BR-F02_dont_know": "Gracias. Ya avisé al administrador para agregar este portal.",
+    "BR-F02_dont_know": "Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.",
+    "BR-F02_dont_know_manual": (
+        "Entendido. Ya avisé al administrador para agregar este portal. Si consigues el PDF, envíamelo aquí."
+    ),
     "BR-F03": "• Portal {portal}: con fallas, ya avisé para arreglarlo",
     "BR-F04": "• Portal {portal}: captcha que no puedo resolver",
     "BR-F05": "Se venció el tiempo del captcha; sigo con otras opciones.",
@@ -93,7 +96,7 @@ MESSAGES: dict[str, str] = {
         "Si lo tienes, me ayudas:"
     ),
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
-    "BR-F13_wait": "Listo. Sigo buscando el correo y te aviso cuando llegue.",
+    "BR-F13_wait": "Listo. Sigo revisando tu correo y te aviso cuando llegue el PDF.",
     "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
@@ -168,12 +171,20 @@ MESSAGES: dict[str, str] = {
     "BR-S03_admin": "⚙️ Falló el trabajo {step} del comprobante #{id}: {error_code}.",
     "BR-S04": "📨 Falta la plantilla aprobada «{template}» en WhatsApp; hay mensajes en espera.",
     "BR-S05": "🔐 {client} pide {action_desc} del comprobante #{id}. ¿Lo apruebo?",
-    "BR-S06": "Gracias. Lo revisará el administrador antes de usarlo.",
+    "BR-S06": "Gracias. El administrador lo revisará y te aviso lo que decida.",
     "BR-S06_owner": (
         "🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?"
     ),
     "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.",
     "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
+    "BR-S06_sender_approved": (
+        "✅ El administrador aprobó el portal que enviaste para RUC {ruc_emisor}. "
+        "Cuando quede configurado, retomo tus comprobantes y te aviso."
+    ),
+    "BR-S06_sender_rejected": (
+        "El administrador no aprobó el portal que enviaste para RUC {ruc_emisor}. "
+        "Si tienes el PDF, envíamelo aquí."
+    ),
     "BR-S07": "No encontré el comprobante #{id}.",
     "BR-S08": (
         "Dejé el comprobante #{id} en pendientes porque no tuve respuesta. "
@@ -481,6 +492,10 @@ BUTTON_DONT_KNOW = "No sé"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
 BUTTON_REJECT = "Rechazar"
+#: Command buttons that carry a typed command as their id (D190).
+BUTTON_RETRY = "🔄 Reintentar"
+BUTTON_PENDING = "📋 Pendientes"
+BUTTON_MY_INVOICES = "📋 Mis comprobantes"
 #: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
 LIST_BUTTON = "Elegir"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
