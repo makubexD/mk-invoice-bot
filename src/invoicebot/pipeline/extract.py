@@ -366,13 +366,17 @@ async def _finish(
 
     The write only lands while the invoice is still in ``expected``: an invoice moved on
     by ``/cancelar`` or an edit wins, ``set_state`` raises :class:`StateMoved` and the
-    transaction rolls back, so no message and no BR-E06 gap is stored (D95). A BR-E01
-    reading that still carries the issuer's RUC counts one PARSER_MISS sighting there.
+    transaction rolls back, so no message and no BR-E06 gap is stored (D95). A partial
+    reading is saved, so an edit that types only the missing fields builds on it (D188).
+    A BR-E01 reading that still carries the issuer's RUC counts one PARSER_MISS sighting
+    there.
     """
     rule_id = failure.rule_id
     text, buttons = _failure_reply(rule_id, invoice_id, failure.reading)
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
+        if failure.reading is not None:
+            await save_reading(conn, invoice_id, failure.reading)
         await queue_message(
             conn,
             Addressee(invoice.origin_channel, invoice.profile_id),

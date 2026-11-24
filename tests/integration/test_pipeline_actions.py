@@ -842,6 +842,51 @@ async def test_edit_on_an_extract_failed_invoice_lists_the_missing_fields(
     ]
 
 
+async def test_edit_on_a_bad_ruc_invoice_missing_fields_lists_them(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E01: [Editar] on a failed invoice still missing fields re-asks them, whatever its rule."""
+    profile_id = _profile()
+    reading = _partial_reading()
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id="BR-E02")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "edit", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        texts = await _texts(conn, profile_id)
+
+    assert texts == [(RULE_UNREADABLE, unreadable_text(invoice_id, reading))]
+
+
+async def test_status_press_keeps_a_pending_edit(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, D90: a [Ver #{id}] press only answers, so the invoice stays the sender's edit target."""
+    profile_id = _profile()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, _partial_reading())
+
+    async with db_pool.connection() as conn:
+        for action in ("edit", "status"):
+            await handle_inbound(
+                conn,
+                _press(invoice_id, action, profile_id),
+                max_queued_per_sender=MAX_QUEUED,
+                media_max_bytes=MEDIA_MAX_BYTES,
+                timezone=TIMEZONE,
+            )
+        flow_data = await load_flow_data(conn, invoice_id)
+
+    assert flow_data["editing"] is True
+
+
 async def test_cancel_on_an_extract_failed_invoice_cancels_it(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

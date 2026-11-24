@@ -272,3 +272,23 @@ def test_parse_edits_does_not_split_an_unknown_first_key() -> None:
 def test_parse_edits_does_not_split_a_free_text_value() -> None:
     """D188, R-3.5: a motivo line keeps ``total=`` inside its text, so no total edit comes out."""
     assert parse_edits("motivo=pagado total=30.90").fields == {}
+
+
+def test_parse_edits_an_over_long_line_is_one_error() -> None:
+    """D188: a line too long to hold ten capped pairs is one error and sets no field."""
+    line = "total=1" + " " * 4000 + "x" * 4000
+
+    edits = parse_edits(line)
+
+    assert edits.fields == {}
+    assert len(edits.errors) == 1
+    assert edits.errors[0].field is None
+
+
+def test_parse_edits_finds_pairs_after_any_whitespace_run() -> None:
+    """D188: a second pair after several spaces is still its own pair."""
+    edits = parse_edits("serie=F001     numero=123")
+
+    assert edits.fields["serie"] == "F001"
+    assert edits.fields["numero"] == "123"
+    assert edits.errors == ()

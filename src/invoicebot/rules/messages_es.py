@@ -304,6 +304,11 @@ SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
 SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
+#: ``{issuer}`` when the padrón or the reading named the issuer, and when it did not (D188).
+ISSUER_NAMED = "{name} (RUC {ruc})"
+ISSUER_RUC = "RUC {ruc}"
+#: How BR-E01 shows a total it read (D188).
+AMOUNT_SHOWN = "S/ {total}"
 
 #: ``{tipo_desc}`` in the summary, per SUNAT document type.
 TIPO_DESC: dict[str, str] = {

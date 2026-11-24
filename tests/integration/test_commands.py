@@ -1249,6 +1249,46 @@ async def test_pendientes_lists_every_required_field_when_no_reading_is_stored(
     assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
 
 
+async def test_pendientes_keeps_the_issuer_cell_for_a_failed_row_missing_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E02: a failed invoice whose reading has every required field keeps its issuer cell."""
+    profile_id = _profile()
+    reading = Reading(
+        fields={
+            "ruc_emisor": Field(value="20000000001", source="ocr", confidence=1.0),
+            "tipo": Field(value="01", source="ocr", confidence=1.0),
+            "serie": Field(value="F001", source="ocr", confidence=1.0),
+            "numero": Field(value="123", source="ocr", confidence=1.0),
+            "fecha_emision": Field(value="2026-11-20", source="ocr", confidence=1.0),
+            "total": Field(value="50.00", source="ocr", confidence=1.0),
+        },
+        document_url=None,
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id="BR-E02")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="50.00",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/pendientes"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
 async def test_pendientes_keeps_the_no_issuer_cell_for_a_manual_required_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

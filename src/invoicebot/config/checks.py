@@ -35,6 +35,9 @@ _URL_TEMPLATE_MARKER = "{"
 #: The strictest channel cap on a button title (WhatsApp; Telegram allows more), so a
 #: label fits every channel (BR-R03, BR-R09).
 BUTTON_TITLE_MAX = 20
+#: The longest issuer name a reply shows, so a long name from an XML cannot push a
+#: message with buttons past WhatsApp's 1024-character body (D188).
+ISSUER_NAME_MAX = 80
 
 #: The names a flow B template may read (BR-D02); ``profile`` stands for ``profile.attr``.
 _FLOW_TEMPLATE_NAMES = frozenset(

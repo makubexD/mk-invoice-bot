@@ -69,7 +69,9 @@ _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
 #: At most 10 integer digits, since ``invoices.total`` is ``NUMERIC(12,2)`` (R-3.5).
 _TOTAL_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
 #: Where a further ``key=value`` pair starts after whitespace in one edit line (D188).
-_PAIR_START_PATTERN = re.compile(r"\s+(\S+?)=")
+_PAIR_START_PATTERN = re.compile(r"(?<!\S)([^\s=]+)=")
+#: The longest edit line read; a longer one is one error, before any pattern runs on it.
+_MAX_LINE_CHARS = MAX_EDIT_LINES * (MAX_OVERRIDE_CHARS + 32)
 
 _Validator = Callable[[str], tuple[str | None, str | None]]
 
@@ -99,7 +101,8 @@ def parse_edits(text: str) -> Edits:
     ``strip``; ``motivo`` and ``descripcion`` are skipped. A line whose first key is
     known may carry several pairs, each starting at a known key after whitespace, and
     each pair counts as one assignment (D188). Assignments past :data:`MAX_EDIT_LINES`
-    and values longer than :data:`MAX_OVERRIDE_CHARS` are errors. A serie without a
+    and values longer than :data:`MAX_OVERRIDE_CHARS` are errors, and so is a line longer
+    than ``_MAX_LINE_CHARS`` as a whole. A serie without a
     well-formed ``tipo`` gets one from its first letter.
     """
     fields: dict[str, str] = {}
@@ -107,6 +110,10 @@ def parse_edits(text: str) -> Edits:
     assignments = 0
     for raw in text.splitlines():
         if "=" not in raw:
+            continue
+        if len(raw) > _MAX_LINE_CHARS:
+            assignments += 1
+            errors.append(EditError(None, raw[:MAX_OVERRIDE_CHARS], None, raw))
             continue
         for line in _split_pairs(raw.strip()):
             assignments += 1
@@ -138,7 +145,7 @@ def _split_pairs(line: str) -> list[str]:
         return [line]
     starts = [0]
     for match in _PAIR_START_PATTERN.finditer(line):
-        if _canonical_key(match.group(1)) is not None:
+        if match.start() > 0 and _canonical_key(match.group(1)) is not None:
             starts.append(match.start())
     pairs: list[str] = []
     for index, start in enumerate(starts):

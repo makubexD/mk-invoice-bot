@@ -359,12 +359,15 @@ async def _missing_text(conn: AsyncConnection[Any], row: PendingRow) -> str | No
     """Return ``PENDING_MISSING`` for an EXTRACT_FAILED row, or None (D188).
 
     A row is failed when its state or its parked ``waiting_state`` is ``EXTRACT_FAILED``.
-    A row with no stored reading lacks every required field.
+    A row with no stored reading lacks every required field; a failed row that lacks none
+    (a bad RUC, BR-E02) keeps its issuer cell.
     """
     if EXTRACT_FAILED not in (row.state, row.waiting_state):
         return None
     reading = await load_reading(conn, row.id)
     missing = REQUIRED if reading is None else reading.missing_required()
+    if not missing:
+        return None
     return PENDING_MISSING.format(fields_desc=fields_desc(missing))
 
 

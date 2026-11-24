@@ -7,9 +7,10 @@ from datetime import date
 from decimal import Decimal
 from typing import get_args
 
+from invoicebot.config.checks import ISSUER_NAME_MAX
 from invoicebot.config.models import Extraction, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Flag, Reading, Source
-from invoicebot.pipeline.summary import summary_text
+from invoicebot.pipeline.summary import issuer_desc, summary_text
 from invoicebot.rules.messages_es import SOURCE_DESC
 
 # From tests/synthetic_rucs.txt; no real RUC may appear here.
@@ -144,3 +145,16 @@ def test_inferred_and_review_lines_still_follow_the_flow_line() -> None:
     assert lines[4] == FLOW_LINE
     assert lines[5] == "ℹ️ Deducido del comprobante: tipo de comprobante"
     assert lines[6] == "⚠️ Revisa: total"
+
+
+def test_issuer_desc_cuts_a_long_name() -> None:
+    """D188: an issuer name longer than ISSUER_NAME_MAX is cut with an ellipsis, keeping the RUC."""
+    reading = Reading(
+        fields={
+            "ruc_emisor": Field("20100000001", "xml", FULL_CONFIDENCE),
+            "razon_social": Field("A" * 300, "xml", FULL_CONFIDENCE),
+        },
+        document_url=None,
+    )
+
+    assert issuer_desc(reading) == "A" * (ISSUER_NAME_MAX - 1) + "… (RUC 20100000001)"

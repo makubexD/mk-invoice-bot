@@ -8,8 +8,10 @@ from typing import Final
 
 from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.rules.messages_es import (
+    AMOUNT_SHOWN,
     FIELD_DESC,
     MESSAGES,
+    SUMMARY_DATE_FORMAT,
     TIPO_DESC,
     UNREADABLE_PARTIAL,
     fields_desc,
@@ -51,7 +53,7 @@ def unreadable_text(invoice_id: int, reading: Reading | None) -> str:
     read = tuple(name for name in REQUIRED if reading.value(name) is not None)
     if not read:
         return MESSAGES[RULE_UNREADABLE]
-    missing = tuple(name for name in REQUIRED if reading.value(name) is None)
+    missing = reading.missing_required()
     return UNREADABLE_PARTIAL.format(
         id=invoice_id,
         read_desc="; ".join(f"{FIELD_DESC[name]} {_shown(reading, name)}" for name in read),
@@ -64,7 +66,7 @@ def _shown(reading: Reading, name: str) -> str:
     """Return a required field the reading kept as BR-E01 shows it (D188)."""
     value = reading.value(name) or ""
     if name == "total":
-        return f"S/ {value}"
+        return AMOUNT_SHOWN.format(total=value)
     if name == "tipo":
         return TIPO_DESC.get(value, value)
     if name == "fecha_emision":
@@ -75,6 +77,6 @@ def _shown(reading: Reading, name: str) -> str:
 def _fecha_shown(value: str) -> str:
     """Return an ISO date as ``dd/mm/aaaa``, or ``value`` when it is not one (D188)."""
     try:
-        return date.fromisoformat(value).strftime("%d/%m/%Y")
+        return date.fromisoformat(value).strftime(SUMMARY_DATE_FORMAT)
     except ValueError:
         return value

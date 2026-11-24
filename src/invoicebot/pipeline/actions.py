@@ -183,8 +183,10 @@ async def handle_press(
     resolved = await resolve_reply(conn, msg, VALID_STATES, ASKED_RULES)
     if resolved is None:
         return PressResult(invoice_id=None)
-    # Any press ends a pending [Editar] on its invoice; [Editar] itself pins it again (D90).
-    await clear_editing(conn, resolved.invoice_id)
+    # Any press but a read-only one ends a pending [Editar] on its invoice; [Editar]
+    # itself pins it again (D90, D188).
+    if resolved.action not in READ_ONLY_ACTIONS:
+        await clear_editing(conn, resolved.invoice_id)
     photo_paths = await ACTIONS[resolved.action](conn, resolved.invoice_id, msg, resolved, laptop_flows)
     return PressResult(invoice_id=resolved.invoice_id, photo_paths=photo_paths)
 
@@ -354,13 +356,15 @@ async def _edit(
 ) -> tuple[Path, ...]:
     """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90).
 
-    An invoice still waiting on BR-E01 gets BR-E01's text again, listing the fields it
-    read and the ones still missing, with the same buttons (BR-E01, D188).
+    A failed invoice still missing required fields gets BR-E01's text again, listing the
+    fields it read and the ones still missing, with the same buttons (BR-E01, D188),
+    whichever failure rule it is on.
     """
     await mark_editing(conn, msg.profile_id, invoice_id)
-    state, rule_id = await _invoice_state(conn, invoice_id)
-    if state == EXTRACT_FAILED and rule_id == RULE_UNREADABLE:
-        text = unreadable_text(invoice_id, await load_reading(conn, invoice_id))
+    state, _ = await _invoice_state(conn, invoice_id)
+    reading = await load_reading(conn, invoice_id) if state == EXTRACT_FAILED else None
+    if state == EXTRACT_FAILED and (reading is None or reading.missing_required()):
+        text = unreadable_text(invoice_id, reading)
         await _reply(
             conn,
             msg,
@@ -624,3 +628,5 @@ ACTIONS: Mapping[str, Action] = {
     VIA_LAPTOP_ACTION: _via_laptop,
     SELF_SEND_ACTION: _self_send,
 }
+#: Actions that only answer and change nothing, so a press keeps a pending [Editar] (D188).
+READ_ONLY_ACTIONS = frozenset({STATUS_ACTION})

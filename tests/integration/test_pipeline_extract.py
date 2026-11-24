@@ -51,6 +51,7 @@ from invoicebot.pipeline.extract import (
 )
 from invoicebot.pipeline.gaps import RULE_GAP_ADMIN, GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
+from invoicebot.pipeline.unreadable import unreadable_text
 from invoicebot.queue.jobs import Job
 from invoicebot.rules.messages_es import BUTTON_CANCEL, BUTTON_EDIT
 from invoicebot.store.invoices import FileRecord, add_file, create_invoice, load_reading
@@ -747,6 +748,25 @@ async def test_partial_reading_sends_br_e01_naming_the_fields(
             {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
         ]
     ]
+
+
+async def test_partial_reading_is_stored_for_the_answers(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D188, BR-E01: the partial reading is saved, so [Editar] and an answer build on what was read."""
+    invoice_id, profile_id = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"stored{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _partial_ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        stored = await load_reading(conn, invoice_id)
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+
+    assert stored is not None
+    assert stored.missing_required() == ("fecha_emision", "total")
+    assert messages == [unreadable_text(invoice_id, stored)]
 
 
 async def test_two_unreadable_photos_raise_parser_miss_on_the_second(

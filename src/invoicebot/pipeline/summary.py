@@ -8,11 +8,14 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
+from invoicebot.config.checks import ISSUER_NAME_MAX
 from invoicebot.config.models import Extraction, Flow
 from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
+    ISSUER_NAMED,
+    ISSUER_RUC,
     MESSAGES,
     SOURCE_DESC,
     SUMMARY,
@@ -63,10 +66,17 @@ def summary_text(
 
 
 def issuer_desc(reading: Reading) -> str:
-    """Return the summary's ``{issuer}``: the padrón's name and the RUC, or just the RUC (D188)."""
+    """Return the summary's ``{issuer}``: the padrón's name and the RUC, or just the RUC (D188).
+
+    A name longer than :data:`ISSUER_NAME_MAX` is cut with ``…``.
+    """
     ruc = reading.value("ruc_emisor") or ""
     name = reading.value("razon_social")
-    return f"RUC {ruc}" if name is None else f"{name} (RUC {ruc})"
+    if name is None:
+        return ISSUER_RUC.format(ruc=ruc)
+    if len(name) > ISSUER_NAME_MAX:
+        name = name[: ISSUER_NAME_MAX - 1] + "…"
+    return ISSUER_NAMED.format(name=name, ruc=ruc)
 
 
 def sources_desc(reading: Reading) -> str:
