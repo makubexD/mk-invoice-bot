@@ -28,6 +28,8 @@ from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
+    ESTADO_HINT,
+    ESTADO_NONE,
     GAP_IGNORED,
     GAP_UNKNOWN,
     GAPS_EMPTY,
@@ -70,6 +72,7 @@ from invoicebot.store.invoices import (
     PendingRow,
     fetch_round_started_within,
     list_pending,
+    list_recent,
     load_invoice_head,
 )
 
@@ -83,6 +86,8 @@ RUC_DIGITS = 11
 PREPARED_REMIND_DAYS = 2
 #: The most lines ``/pendientes`` lists before it counts the rest (S11.4).
 MAX_PENDING_LINES = 20
+#: How many invoices ``/estado`` with no id lists, newest first (D188).
+ESTADO_RECENT = 5
 #: How many parked questions ``/pendientes`` sends again in one answer (S4.8).
 PENDING_REQUEUES = 3
 #: The least time between two sends of the same parked question (S4.8, D94).
@@ -236,13 +241,27 @@ async def _estado(
 ) -> None:
     """Answer with the invoice's :func:`status_text` (S4.9).
 
+    With no id, list the sender's newest invoices in ``/pendientes`` line form (D188).
     A target the sender cannot see is refused by :func:`resolve_target` (R-10.1).
     """
+    if not arg:
+        await _list_recent(conn, msg)
+        return
     target = await resolve_target(conn, msg, "estado", arg, context.admins)
     if target is None:
         return
     invoice_id, _head = target
     await _reply(conn, msg, None, await status_text(conn, invoice_id))
+
+
+async def _list_recent(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
+    """List the sender's newest invoices, one line each, then how to see one (D188)."""
+    rows = await list_recent(conn, msg.profile_id, ESTADO_RECENT)
+    if not rows:
+        await _reply(conn, msg, None, ESTADO_NONE)
+        return
+    lines = [*(_pending_line(row) for row in rows), ESTADO_HINT]
+    await _reply(conn, msg, None, "\n".join(lines))
 
 
 async def _cancelar(
@@ -329,7 +348,7 @@ async def _pendientes(
 def _pending_line(row: PendingRow) -> str:
     """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
     issuer = row.razon_social or PENDING_NO_ISSUER
-    if row.state == BATCHED:
+    if row.state == BATCHED and row.batch_prepared_at is not None:
         return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
     total = "—" if row.total is None else f"{row.total:.2f}"
     state = row.waiting_state if row.state == PENDING_USER and row.waiting_state else row.state

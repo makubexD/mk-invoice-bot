@@ -547,6 +547,12 @@ PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepa
 #: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_MORE = "…y {count} más."
+#: The line after the newest invoices when ``/estado`` has no id (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+ESTADO_HINT = "Para ver uno: /estado 12"
+#: ``/estado`` with no id when the sender has no invoices (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+ESTADO_NONE = "Aún no tengo comprobantes tuyos."
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."

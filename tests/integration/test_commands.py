@@ -43,6 +43,8 @@ from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
+    ESTADO_HINT,
+    ESTADO_NONE,
     GAP_IGNORED,
     GAPS_EMPTY,
     GAPS_HEADER,
@@ -582,6 +584,108 @@ async def test_estado_on_another_profiles_invoice_answers_br_s07(
         replies = await _replies(conn, sender_profile)
 
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
+
+
+async def test_estado_without_an_id_lists_the_five_newest_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone lists the sender's five newest invoices, newest first, and the hint."""
+    profile_id = _profile()
+    invoice_ids = [await _invoice(db_pool, profile_id) for _ in range(7)]
+    lines = [
+        PENDING_LINE.format(
+            id=invoice_id,
+            issuer=PENDING_NO_ISSUER,
+            total="—",
+            state_desc=state_desc("RECEIVED"),
+        )
+        for invoice_id in invoice_ids[::-1][:5]
+    ]
+    expected = "\n".join([*lines, ESTADO_HINT])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
+
+
+async def test_estado_without_an_id_and_no_invoices_answers_estado_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone on a profile with no invoices answers ESTADO_NONE."""
+    profile_id = _profile()
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(ESTADO_NONE, None)]
+
+
+async def test_estado_without_an_id_skips_another_profiles_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone lists only the sender's invoices, never another profile's."""
+    other_profile = _profile()
+    for _ in range(3):
+        await _invoice(db_pool, other_profile)
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id)
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("RECEIVED"),
+    )
+    expected = f"{line}\n{ESTADO_HINT}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
+
+
+async def test_cancelar_without_an_id_still_asks_for_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /cancelar without an id still answers COMMAND_NEEDS_ID."""
+    profile_id = _profile()
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/cancelar"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(COMMAND_NEEDS_ID.format(command="cancelar"), None)]
 
 
 async def test_cancelar_cancels_a_confirming_invoice(

@@ -443,6 +443,48 @@ async def list_pending(
     return rows, (int(raw[0][7]) if raw else 0)
 
 
+async def list_recent(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    limit: int,
+) -> list[PendingRow]:
+    """Return the profile's newest invoices by ``created_at``, newest first (D188).
+
+    The columns match :func:`list_pending`, so ``/estado`` can reuse its line; an invoice
+    is not a prepared batch here, so ``batch_prepared_at`` is None. ``limit`` caps the
+    rows returned. The database clock stamps ``created_at``; ``id`` breaks a tie. Does not
+    commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT i.id,
+               i.state,
+               i.waiting_state,
+               i.waiting_rule_id,
+               i.razon_social,
+               i.total
+        FROM invoices AS i
+        WHERE i.profile_id = %s
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT %s
+        """,
+        (profile_id, limit),
+    )
+    raw = await cur.fetchall()
+    return [
+        PendingRow(
+            id=int(row[0]),
+            state=str(row[1]),
+            waiting_state=None if row[2] is None else str(row[2]),
+            waiting_rule_id=None if row[3] is None else str(row[3]),
+            razon_social=None if row[4] is None else str(row[4]),
+            total=cast(Decimal | None, row[5]),
+            batch_prepared_at=None,
+        )
+        for row in raw
+    ]
+
+
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:
     """Count the profile's jobs that are not parked at infinity (BR-S01)."""
     cur = await conn.execute(
