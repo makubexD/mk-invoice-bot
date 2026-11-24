@@ -5,7 +5,7 @@
 never replaced, an invalid one repeats BR-F02, and a second proposal while one
 is waiting thanks the sender without asking the owner again. :func:`answer`
 routes a free-text reply to BR-F02 (one ``https`` URL or "no sé") into
-:func:`teach` or the ``BR-F02_dont_know`` answer (R-11.4). :func:`handle_press`
+:func:`teach` or :func:`dont_know_reply` (R-11.4). :func:`handle_press`
 applies the owner's [Aprobar] or [Rechazar] decision and puts an approved link
 on the gap's issue (D118).
 """
@@ -25,6 +25,7 @@ from invoicebot.config.models import Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import TaughtUrlError, check_taught_url, is_dont_know, looks_like_url
+from invoicebot.pipeline.failed import RULE_DEAD
 from invoicebot.pipeline.outgoing import (
     RULE_STALE_BUTTON,
     Addressee,
@@ -34,9 +35,11 @@ from invoicebot.pipeline.outgoing import (
 from invoicebot.pipeline.questions import RULE_DOCS_NEEDED
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES, UNKNOWN_ISSUER
+from invoicebot.states import FETCHING_DOCS
 from invoicebot.store import taught_links
 from invoicebot.store.gaps import get_gap, set_hint
-from invoicebot.store.invoices import load_reading
+from invoicebot.store.invoices import load_invoice_head, load_reading
+from invoicebot.store.taught_links import TaughtLink
 
 logger = logging.getLogger(__name__)
 
@@ -44,16 +47,25 @@ logger = logging.getLogger(__name__)
 RULE_TEACH = "BR-S06"
 #: The question an invalid link repeats (BR-F02, R-11.4).
 RULE_ASK_PORTAL = "BR-F02"
-#: The answer when the sender does not know the issuer's portal (BR-F02, R-11.4).
+#: The answer when the sender does not know the issuer's portal, while the invoice still
+#: fetches its documents; also the rule of both answers (BR-F02, R-11.4, D190).
 RULE_DONT_KNOW = "BR-F02_dont_know"
+#: The answer when someone must add the issuer's portal by hand (BR-F02, D190).
+MESSAGE_DONT_KNOW_MANUAL = "BR-F02_dont_know_manual"
 #: Rules whose messages are never the question a typed answer or a BR-F14 press waits
 #: on: BR-S02 answers a stale press, and BR-F13's buttons are gated by the invoice's
 #: state, so a BR-F13 sent for another invoice must not hide a pending BR-F02 (D189).
-NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED})
+#: BR-F02's "no sé" answer and BR-S03's notice ask nothing either, so a URL typed after
+#: them still answers the pending BR-F02 (D190).
+NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED, RULE_DONT_KNOW, RULE_DEAD})
 #: The admin's answer after [Aprobar] (BR-S06, D118).
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
 RULE_REJECTED = "BR-S06_rejected"
+#: The proposer's notice when the owner approves their link (BR-S06, D190).
+RULE_SENDER_APPROVED = "BR-S06_sender_approved"
+#: The proposer's notice when the owner rejects their link (BR-S06, D190).
+RULE_SENDER_REJECTED = "BR-S06_sender_rejected"
 #: An approved link is used as it is and is never replaced (BR-S06).
 STATE_APPROVED = "approved"
 #: BR-S06's button ids: ``t<ruc>v<version>:ok`` and ``t<ruc>v<version>:no`` (D118, D137).
@@ -146,12 +158,7 @@ async def answer(
     if question is None or question[0] != RULE_ASK_PORTAL:
         return False
     if is_dont_know(msg.text):
-        await queue_message(
-            conn,
-            Addressee(msg.channel, msg.profile_id),
-            MESSAGES[RULE_DONT_KNOW],
-            rule_id=RULE_DONT_KNOW,
-        )
+        await dont_know_reply(conn, Addressee(msg.channel, msg.profile_id), question[1])
         return True
     if not looks_like_url(msg.text):
         return False
@@ -175,6 +182,28 @@ async def answer(
     return True
 
 
+async def dont_know_reply(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+) -> None:
+    """Answer [No sé] with the text that is true for the invoice's state (BR-F02, D190).
+
+    An invoice still fetching its documents answers ``BR-F02_dont_know``; in any other
+    state someone must add the issuer's portal, so it answers ``BR-F02_dont_know_manual``.
+    The caller owns the transaction.
+    """
+    head = await load_invoice_head(conn, invoice_id)
+    key = RULE_DONT_KNOW if head is not None and head.state == FETCHING_DOCS else MESSAGE_DONT_KNOW_MANUAL
+    await queue_message(
+        conn,
+        addressee,
+        MESSAGES[key],
+        invoice_id=invoice_id,
+        rule_id=RULE_DONT_KNOW,
+    )
+
+
 async def handle_press(
     conn: AsyncConnection[Any],
     msg: InboundMessage,
@@ -187,8 +216,9 @@ async def handle_press(
     press, changes nothing either. Approval stores the link as the PORTAL_MISSING gap's
     hint and puts it on the gap's issue, as a comment when the issue exists and in the
     pending ``create_issue`` row's fields when it does not. Every decision answers the
-    pressing admin with BR-S06_approved or BR-S06_rejected. The caller owns the
-    transaction.
+    pressing admin with BR-S06_approved or BR-S06_rejected, and tells the proposer
+    when someone else pressed and the proposer has a preferred channel. The caller
+    owns the transaction.
     """
     match = None if msg.button_id is None else re.fullmatch(_PRESS_PATTERN, msg.button_id)
     profile = setup.profiles.get(msg.profile_id)
@@ -209,6 +239,36 @@ async def handle_press(
         Addressee(msg.channel, msg.profile_id),
         MESSAGES[rule_id].format(ruc_emisor=ruc_emisor),
         rule_id=rule_id,
+    )
+    await _notify_proposer(conn, setup, link, msg.profile_id, ruc_emisor, approved)
+
+
+async def _notify_proposer(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    link: TaughtLink,
+    pressing_profile_id: str,
+    ruc_emisor: int,
+    approved: bool,
+) -> None:
+    """Tell a proposer someone else decided their link, if it has a preferred channel (BR-S06, D190).
+
+    A proposer who pressed the button already got the decision, an unknown profile
+    has no channel, and a profile without ``preferred_channel`` is unreachable, so
+    each of those queues nothing. The caller owns the transaction.
+    """
+    if link.profile_id == pressing_profile_id:
+        return
+    proposer = setup.profiles.get(link.profile_id)
+    channel = None if proposer is None else proposer.preferred_channel
+    if channel is None:
+        return
+    sender_rule_id = RULE_SENDER_APPROVED if approved else RULE_SENDER_REJECTED
+    await queue_message(
+        conn,
+        Addressee(channel, link.profile_id),
+        MESSAGES[sender_rule_id].format(ruc_emisor=ruc_emisor),
+        rule_id=sender_rule_id,
     )
 
 

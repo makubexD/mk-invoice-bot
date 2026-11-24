@@ -55,6 +55,12 @@ WORK_RUC = "51900000000"
 WORK_FLOW = "work_microsoft"
 DNI_BUYER = "40382716"
 FULL_PROFILE = "yo"
+
+
+async def _ignore_dead(conn: AsyncConnection[Any], invoice_id: int, step: str, error: str) -> None:
+    """An ``on_dead`` that does nothing: no job here dies."""
+
+
 #: One unique numero per reading, so no test claims another's natural key (D93).
 _NEXT_NUMERO = itertools.count(40000)
 #: One unique issuer RUC per taught-link test, so no test sees another's taught_links row.
@@ -502,7 +508,7 @@ async def test_five_photos_are_claimed_in_arrival_order(
         ]
         claimed: list[Job] = []
         for _ in range(5):
-            job = await claim(conn, "worker-intake", LEASE_S)
+            job = await claim(conn, "worker-intake", LEASE_S, on_dead=_ignore_dead)
             assert job is not None
             claimed.append(job)
 
@@ -1516,7 +1522,7 @@ async def test_br_f02_url_teaches_the_portal(
 async def test_br_f02_dont_know_answers_and_stores_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    """R-11.4, D190: "no sé" after BR-F02 on a MANUAL_REQUIRED invoice answers the manual text."""
     profile_id = _profile()
     issuer = _issuer()
     invoice_id = await _invoice_in(
@@ -1544,7 +1550,7 @@ async def test_br_f02_dont_know_answers_and_stores_nothing(
 
     assert result.status == "stored"
     assert link is None
-    assert replies[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know")
+    assert replies[-1] == (MESSAGES["BR-F02_dont_know_manual"], "BR-F02_dont_know")
 
 
 async def test_br_f02_url_after_a_newer_question_is_not_taken(

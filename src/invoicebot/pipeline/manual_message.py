@@ -9,7 +9,8 @@ the comercio's name) come from the store directory; the flow decides whether SUN
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 from urllib.parse import urlsplit
 
 from invoicebot.config.checks import MANUAL_PORTAL
@@ -23,12 +24,14 @@ from invoicebot.rules.messages_es import (
     FETCH_NOT_FOUND_LINE,
     FETCH_PORTAL_TODO_LINE,
     FETCH_TECHNICAL_LINE,
+    MAILBOX_DESC,
     MESSAGES,
     SEARCHED_HEADER,
     STORE_FALLBACK,
     STORE_FALLBACK_OF,
     docs_desc,
     fetcher_desc,
+    when_desc,
 )
 from invoicebot.sunat_origins import SUNAT_SOL
 
@@ -77,18 +80,33 @@ def manual_message(
     )
 
 
+@dataclass(frozen=True)
+class LookTimes:
+    """The last inbox look in the owner's timezone, and the owner's date (D190)."""
+
+    last_at: datetime
+    today: date
+
+
 def docs_needed_text(
     invoice_id: int,
     reading: Reading,
     flow: Flow,
     attempts: Sequence[Attempt],
     directory: StoreDirectory,
-    next_at: datetime,
+    looks: LookTimes,
 ) -> str:
-    """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D189).
+    """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D190).
 
-    ``next_at`` is when the bot looks again; its time is shown as ``%H:%M``.
+    ``looks`` gives the last inbox look, which ``when_desc`` words against the owner's date.
+
+    Raises:
+        ValueError: when the flow has no ``email_inbox``, since only the mailbox fetcher
+            sends BR-F13.
     """
+    inbox = flow.email_inbox
+    if inbox is None:
+        raise ValueError("BR-F13 needs a flow with an email_inbox")
     store = _store_for(reading, directory)
     portal = portal_for(reading.value("ruc_emisor") or "", directory)
     bullets = fetcher_lines(attempts, store, portal, portal_broken=False)
@@ -97,7 +115,8 @@ def docs_needed_text(
         id=invoice_id,
         docs_desc=docs_desc(flow.required_docs),
         searched_lines=searched_lines,
-        next_at=next_at,
+        mailbox_desc=MAILBOX_DESC[inbox.provider],
+        last_desc=when_desc(looks.last_at, looks.today),
     )
     return text if searched_lines else text.replace("\n\n", "\n")
 

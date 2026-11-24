@@ -79,9 +79,11 @@ from invoicebot.states import EXTRACT_FAILED, StateMoved
 from invoicebot.store import taught_links
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
-from invoicebot.store.gaps import mark_reported, upsert_gap
+from invoicebot.store.gaps import get_gap, mark_reported, upsert_gap
 from invoicebot.store.invoices import (
+    FileRecord,
     InvoiceHead,
+    add_file,
     create_invoice,
     load_invoice_head,
     save_reading,
@@ -843,6 +845,29 @@ async def test_cancelar_button_of_another_profiles_invoice_answers_br_s07(
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
 
 
+async def test_cancelar_unknown_invoice_carries_the_my_invoices_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S07: typed /cancelar for an unknown invoice answers with the [📋 Mis comprobantes] button."""
+    profile_id = _profile()
+    msg = _message(profile_id, f"/cancelar {UNKNOWN_INVOICE_ID}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert result.status == "stored"
+    assert rows == [
+        (
+            MESSAGES["BR-S07"].format(id=UNKNOWN_INVOICE_ID),
+            "BR-S07",
+            [{"id": "/estado", "title": "📋 Mis comprobantes"}],
+        )
+    ]
+
+
 async def test_cancelar_cancels_a_confirming_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -950,6 +975,62 @@ async def test_reprocesar_without_an_id_lists_requeueable_invoices_as_buttons(
     assert head.state == "FETCHING_DOCS"
     assert jobs == ["fetch"]
     assert replies[-1] == (REPROCESS_STARTED.format(id=invoice_id), None)
+
+
+async def test_gap_command_button_outside_the_allowlist_runs_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190: a command button outside the allowlist runs nothing."""
+    profile_id = _profile()
+    fingerprint = f"portal_missing:{uuid4().hex}"
+    async with db_pool.connection() as conn, conn.transaction():
+        await upsert_gap(conn, PORTAL_MISSING, fingerprint, GAP_SUBJECT, None)
+    roles = IntakeRoles(reprocess_min_interval_s=0, admins=frozenset({profile_id}))
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(profile_id, f"/gap ignorar {fingerprint}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=roles,
+        )
+        rows = await _outbox_rows(conn, profile_id)
+        gap = await get_gap(conn, fingerprint)
+
+    assert result.status == "stored"
+    assert rows == []
+    assert gap is not None
+    assert gap.state == "open"
+
+
+async def test_estado_command_button_runs_like_the_typed_command(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190: an allowed command button runs like the typed command."""
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id)
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("RECEIVED"),
+    )
+    expected = f"{line}\n{ESTADO_HINT.format(id=invoice_id)}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
 
 
 async def test_reprocesar_on_failed_with_a_flow_refetches(
@@ -1222,14 +1303,17 @@ async def test_reprocesar_on_done_is_not_allowed(
     assert replies == [(expected, None)]
 
 
-async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+@pytest.mark.parametrize(("stored_file", "step"), [(False, "download_media"), (True, "extract")])
+async def test_reprocesar_on_failed_without_a_flow_reads_it_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], stored_file: bool, step: str
 ) -> None:
-    """D96: a FAILED invoice with no flow cannot restart its fetch."""
+    """BR-S03, D190: a FAILED invoice that never got a flow goes back to RECEIVED and is read again."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03")
+    if stored_file:
+        async with db_pool.connection() as conn:
+            await add_file(conn, invoice_id, FileRecord("photo", "data/photo.jpg", "media-1", "0" * 64, 1))
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
-    expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("FAILED"))
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -1241,9 +1325,9 @@ async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
 
     assert result.status == "stored"
     assert head is not None
-    assert head.state == "FAILED"
-    assert jobs == []
-    assert replies == [(expected, None)]
+    assert head.state == "RECEIVED"
+    assert jobs == [step]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
 
 
 async def test_resume_delivery_sends_a_manual_invoice_back_to_deliver(

@@ -13,7 +13,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
-from invoicebot.channels.buttons import button_id
+from invoicebot.channels.buttons import button_id, command_button_id
 from invoicebot.config.models import Flow, Store
 from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.routing.router import RULE_ASK
@@ -22,12 +22,13 @@ from invoicebot.rules.messages_es import (
     BUTTON_CHANGE,
     BUTTON_CONFIRM,
     BUTTON_CONTINUE,
+    BUTTON_DONT_KNOW,
     BUTTON_EDIT,
     BUTTON_FIX,
+    BUTTON_RETRY,
     BUTTON_SEND_PDF,
     BUTTON_TEACH_PORTAL,
     BUTTON_VOID,
-    BUTTON_WAIT_MAIL,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -47,7 +48,8 @@ STATUS_ACTION = "status"
 INVALID_OK_ACTION = "invalid_ok"
 #: D126's [Confirmar]: the sender accepts the routed summary before validation.
 CONFIRM_ACTION = "confirm"
-#: BR-F13's three actions: send the PDF, teach the portal, or keep waiting (D189).
+#: BR-F13's offered actions: send the PDF or teach the portal (D189). A [⏳] press answers
+#: ``WAIT_MAIL_ACTION`` only from a message sent before D190.
 SEND_PDF_ACTION = "send_pdf"
 TEACH_PORTAL_ACTION = "teach_portal"
 WAIT_MAIL_ACTION = "wait_mail"
@@ -62,6 +64,11 @@ RULE_CONFIRM = "BR-S10"
 #: The sources whose field was read from the printed document (D189): a required field
 #: from one of these makes the summary doubtful and worth its buttons.
 PRINTED_SOURCES = frozenset({"ocr", "llm"})
+#: BR-F14 and BR-F02's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` and
+#: ``u<invoice_id>:dk`` (D189, D190). ``u`` starts no other id: invoice ids start with a
+#: digit, payments with ``p`` and BR-S06 with ``t``.
+OFFER_BUTTON_PREFIX = "u"
+BUTTON_DONT_KNOW_SUFFIX = "dk"
 
 #: An action applied to its invoice in the caller's transaction; the resolved press carries
 #: the choice and its menu. It returns the photo files whose rows it cleared, for the
@@ -176,12 +183,22 @@ def confirm_buttons(invoice_id: int) -> list[Button]:
 
 
 def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
-    """Return BR-F13's [📎], [🔗] and [⏳] buttons, the portal one only when offered (D189)."""
-    buttons = [Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF)]
+    """Return BR-F13's [🔗] first when offered, then [📎] (D190)."""
+    buttons: list[Button] = []
     if offer_portal:
         buttons.append(Button(id=button_id(invoice_id, TEACH_PORTAL_ACTION), title=BUTTON_TEACH_PORTAL))
-    buttons.append(Button(id=button_id(invoice_id, WAIT_MAIL_ACTION), title=BUTTON_WAIT_MAIL))
+    buttons.append(Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF))
     return buttons
+
+
+def offer_press_id(invoice_id: int, suffix: str) -> str:
+    """Return a BR-F14 or BR-F02 press id: ``u<invoice_id>:<suffix>`` (D189, D190)."""
+    return f"{OFFER_BUTTON_PREFIX}{invoice_id}:{suffix}"
+
+
+def dont_know_button(invoice_id: int) -> Button:
+    """Return the [No sé] button BR-F14's offer and BR-F02's question carry (D190)."""
+    return Button(id=offer_press_id(invoice_id, BUTTON_DONT_KNOW_SUFFIX), title=BUTTON_DONT_KNOW)
 
 
 def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:
@@ -190,3 +207,8 @@ def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Bu
         Button(id=button_id(invoice_id, EDIT_ACTION), title=edit_title),
         Button(id=button_id(invoice_id, CANCEL_ACTION), title=cancel_title),
     ]
+
+
+def retry_button(invoice_id: int) -> Button:
+    """Return [🔄 Reintentar], which runs ``/reprocesar <invoice_id>`` (BR-F07, BR-D03, BR-S03, D190)."""
+    return Button(id=command_button_id("reprocesar", str(invoice_id)), title=BUTTON_RETRY)

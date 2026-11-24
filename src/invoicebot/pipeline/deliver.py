@@ -72,12 +72,19 @@ from invoicebot.pipeline.pending_auth import (
 from invoicebot.pipeline.pending_auth import (
     RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
 )
+from invoicebot.pipeline.questions import retry_button
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, KIND_SUBJECT, MESSAGES, modes_desc
+from invoicebot.rules.messages_es import (
+    BUTTON_NOT_ARRIVED,
+    BUTTON_SENT,
+    KIND_SUBJECT,
+    MESSAGES,
+    modes_desc,
+)
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
@@ -772,7 +779,7 @@ async def _crashed_send(
         delivery.invoice_id,
         RULE_SEND_FAILED,
         _send_failed_text(prepared, delivery.invoice_id),
-        [],
+        [retry_button(delivery.invoice_id)],
     )
     await queue_admin_alert(
         conn,
@@ -795,7 +802,14 @@ async def _send_failed(
         await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
-        await _notify(conn, delivery.head, delivery.invoice_id, RULE_SEND_FAILED, text, [])
+        await _notify(
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            RULE_SEND_FAILED,
+            text,
+            [retry_button(delivery.invoice_id)],
+        )
         await queue_admin_alert(
             conn,
             context.cfg.profiles,

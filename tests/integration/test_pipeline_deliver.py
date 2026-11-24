@@ -20,7 +20,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.buttons import button_id
+from invoicebot.channels.buttons import button_id, command_button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import (
     Brand,
@@ -41,7 +41,7 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.steps import RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_VIA_LAPTOP, MESSAGES
+from invoicebot.rules.messages_es import BUTTON_RETRY, BUTTON_VIA_LAPTOP, MESSAGES
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
 from invoicebot.sinks.mailer import DryRun, LaptopOutlook
@@ -519,6 +519,11 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
 
 
+def _retry_buttons(invoice_id: int) -> list[dict[str, str]]:
+    """Return BR-D03's [Reintentar] button payload, which runs ``/reprocesar <id>`` (D190)."""
+    return [{"id": command_button_id("reprocesar", str(invoice_id)), "title": BUTTON_RETRY}]
+
+
 async def _clear_gaps(conn: AsyncConnection[Any]) -> None:
     """Delete every gap and invoice link so one test's raise cannot leak into another."""
     await conn.execute("DELETE FROM invoice_gaps")
@@ -928,7 +933,7 @@ async def test_a_sending_batch_is_not_resent_and_fails_with_br_d03(
         (
             MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
             "BR-D03",
-            [],
+            _retry_buttons(invoice_id),
         )
     ]
 
@@ -954,7 +959,13 @@ async def test_send_failure_alerts_every_admin(
         admins = [await _outbox(conn, admin_id) for admin_id in admin_ids]
     assert invoice == ("BATCHED", "BR-D03")
     assert batch_state == "failed"
-    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert sender == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            _retry_buttons(invoice_id),
+        )
+    ]
     assert admins == [[(admin_text, "BR-D03_admin", [])] for _ in admin_ids]
 
 
@@ -981,7 +992,13 @@ async def test_crashed_send_alerts_every_admin(
     assert mode.calls == []
     assert invoice == ("BATCHED", "BR-D03")
     assert batch_state == "failed"
-    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert sender == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            _retry_buttons(invoice_id),
+        )
+    ]
     assert admins == [[(admin_text, "BR-D03_admin", [])] for _ in admin_ids]
 
 
@@ -1009,7 +1026,13 @@ async def test_admin_without_channel_is_skipped_on_send_failure(
         sender = await _outbox(conn, profile_id)
         skipped = await _outbox(conn, unreachable)
         other_admin = await _outbox(conn, reachable)
-    assert sender == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert sender == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            _retry_buttons(invoice_id),
+        )
+    ]
     assert skipped == []
     assert other_admin == [(admin_text, "BR-D03_admin", [])]
 
@@ -1139,7 +1162,13 @@ async def test_graph_error_fails_the_batch_and_keeps_the_invoice_batched(
         outbox = await _outbox(conn, profile_id)
     assert invoice == ("BATCHED", "BR-D03")
     assert batch_state == "failed"
-    assert outbox == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert outbox == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            _retry_buttons(invoice_id),
+        )
+    ]
 
 
 async def test_graph_transient_propagates_and_leaves_the_batch_sending(
@@ -1543,7 +1572,13 @@ async def test_a_graph_error_on_the_job_upload_fails_the_batch_with_br_d03(
     assert invoice == ("BATCHED", "BR-D03")
     assert batch_state == "failed"
     assert jobs == []
-    assert outbox == [(MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id), "BR-D03", [])]
+    assert outbox == [
+        (
+            MESSAGES["BR-D03"].format(serie=SERIE, numero=NUMERO, id=invoice_id),
+            "BR-D03",
+            _retry_buttons(invoice_id),
+        )
+    ]
 
 
 async def test_resend_eml_on_a_prepared_batch_offers_ya_lo_envie(

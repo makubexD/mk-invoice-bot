@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button
+from invoicebot.channels.buttons import command_button_id
 from invoicebot.channels.media_limits import DIRECTORY_MODE
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -60,17 +61,24 @@ from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
     RULE_EXHAUSTED,
+    LookTimes,
     docs_needed_text,
     manual_message,
     portal_for,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
-from invoicebot.pipeline.questions import RULE_DOCS_NEEDED, docs_needed_buttons
+from invoicebot.pipeline.questions import (
+    RULE_DOCS_NEEDED,
+    docs_needed_buttons,
+    dont_know_button,
+    retry_button,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_VOID,
     FETCH_WAITING,
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
@@ -79,6 +87,7 @@ from invoicebot.rules.messages_es import (
 )
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import taught_links
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
 from invoicebot.store.gaps import GapRow, get_gap
@@ -120,6 +129,8 @@ class _Inputs:
     directory: StoreDirectory
     #: Fetchers that get no D167 retry because their portal has an open broken gap (D170).
     no_retry: frozenset[str]
+    #: Each fetcher's retry schedule, keyed by fetcher name (D65, D98).
+    schedules: Mapping[str, Schedule]
 
 
 @dataclass(frozen=True)
@@ -198,6 +209,7 @@ def make_fetch_handler(
             attempts=_attempts(rows),
             directory=directory,
             no_retry=no_retry,
+            schedules=retry_schedules,
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
         decision = decide(
@@ -416,13 +428,18 @@ async def _wait_notice(
     if fetcher != EMAIL_INBOX_FETCHER:
         await _notify(conn, inputs.head, invoice_id, None, FETCH_WAITING.format(id=invoice_id))
         return
+    owner_timezone = ZoneInfo(inputs.cfg.owner.timezone)
+    inbox_schedule = _schedule_entries(EMAIL_INBOX_FETCHER, inputs.flow, inputs.invoice, inputs.schedules)
+    last_at = next_at + sum(inbox_schedule[1:], timedelta())
+    today = await owner_today(conn, inputs.cfg.owner.timezone)
+    looks = LookTimes(last_at.astimezone(owner_timezone), today)
     text = docs_needed_text(
         invoice_id,
         reading,
         inputs.flow,
         inputs.attempts,
         inputs.directory,
-        next_at.astimezone(ZoneInfo(inputs.cfg.owner.timezone)),
+        looks,
     )
     offer_portal = await _offer_portal(conn, inputs, reading)
     await _notify(
@@ -474,7 +491,17 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_EXHAUSTED, expected=FETCHING_DOCS
         )
-        await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
+        await _notify(
+            conn,
+            inputs.head,
+            inputs.job.invoice_id,
+            RULE_EXHAUSTED,
+            text,
+            [
+                retry_button(inputs.job.invoice_id),
+                Button(id=command_button_id("cancelar", str(inputs.job.invoice_id)), title=BUTTON_VOID),
+            ],
+        )
         await _ask_for_portal(conn, inputs, gap, reading)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 
@@ -508,7 +535,7 @@ def _gap_line(gap: GapRow | None) -> str:
 async def _ask_for_portal(
     conn: AsyncConnection[Any], inputs: _Inputs, gap: GapRow | None, reading: Reading
 ) -> None:
-    """Ask the sender for the issuer's portal once, when BR-F02 is due (BR-F02)."""
+    """Ask the sender for the issuer's portal once, when BR-F02 is due (BR-F02, D190)."""
     if gap is None or not gap.raised_now or not inputs.cfg.gaps.teach_via_chat:
         return
     ruc_emisor = reading.value("ruc_emisor")
@@ -516,7 +543,14 @@ async def _ask_for_portal(
         return
     razon_social = reading.value("razon_social") or UNKNOWN_ISSUER
     text = MESSAGES[RULE_ASK_PORTAL].format(razon_social=razon_social, ruc_emisor=ruc_emisor)
-    await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_ASK_PORTAL, text)
+    await _notify(
+        conn,
+        inputs.head,
+        inputs.job.invoice_id,
+        RULE_ASK_PORTAL,
+        text,
+        (dont_know_button(inputs.job.invoice_id),),
+    )
 
 
 def _saw_no_portal(attempts: Sequence[Attempt]) -> bool:

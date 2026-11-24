@@ -8,10 +8,11 @@ from psycopg import AsyncConnection
 
 from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE
 from invoicebot.pipeline.fetch import FETCH_STEP
+from invoicebot.pipeline.steps import DOWNLOAD_STEP, EXTRACT_STEP
 from invoicebot.queue.jobs import enqueue
-from invoicebot.states import BATCHED, DELIVERING, FAILED, FETCHING_DOCS, MANUAL_REQUIRED
+from invoicebot.states import BATCHED, DELIVERING, FAILED, FETCHING_DOCS, MANUAL_REQUIRED, RECEIVED
 from invoicebot.store.flow_b import get_batch_state
-from invoicebot.store.invoices import load_flow, set_state, start_fetch_round
+from invoicebot.store.invoices import has_file, load_flow, set_state, start_fetch_round
 
 
 async def retry_documents(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
@@ -25,6 +26,13 @@ async def retry_documents(conn: AsyncConnection[Any], invoice_id: int, state: st
     await start_fetch_round(conn, invoice_id)
     await enqueue(conn, invoice_id, FETCH_STEP)
     return True
+
+
+async def retry_reading(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Send a failed invoice that never got a flow back to its download or extract step (BR-S03, D190)."""
+    await set_state(conn, invoice_id, RECEIVED, expected=FAILED)
+    step = EXTRACT_STEP if await has_file(conn, invoice_id) else DOWNLOAD_STEP
+    await enqueue(conn, invoice_id, step)
 
 
 async def retry_delivery(conn: AsyncConnection[Any], invoice_id: int) -> bool:

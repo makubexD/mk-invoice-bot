@@ -29,13 +29,14 @@ from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import invalid_question, summary_buttons
 from invoicebot.pipeline.steps import FETCH_STEP, SUNAT_RECHECK_STEP
-from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
+from invoicebot.pipeline.summary import flow_line, summary_text
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING, SUMMARY_MOVING_QUIET
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
     CpStatus,
@@ -155,7 +156,7 @@ async def _read(conn: AsyncConnection[Any], invoice_id: int, cfg: Config) -> _In
         reading=reading,
         rule_id=rule_id,
         flow_line=flow_line(flow, rule_id),
-        today=await summary_today(conn, cfg.owner.timezone),
+        today=await owner_today(conn, cfg.owner.timezone),
         padron=await lookup(conn, reading.value("ruc_emisor") or ""),
     )
 

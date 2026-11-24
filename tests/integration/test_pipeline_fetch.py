@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -36,7 +36,6 @@ from invoicebot.pipeline.questions import (
     RULE_DOCS_NEEDED,
     SEND_PDF_ACTION,
     TEACH_PORTAL_ACTION,
-    WAIT_MAIL_ACTION,
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
@@ -48,6 +47,7 @@ from invoicebot.rules.messages_es import (
     GAP_LINE_PORTAL,
     MESSAGES,
     fetcher_desc,
+    when_desc,
 )
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
@@ -403,6 +403,20 @@ async def _outbox_buttons(conn: AsyncConnection[Any], profile_id: str) -> list[l
         (profile_id,),
     )
     return [[str(button["id"]) for button in buttons] for (buttons,) in await cur.fetchall()]
+
+
+async def _outbox_button_dicts(conn: AsyncConnection[Any], profile_id: str) -> list[list[dict[str, str]]]:
+    """Return each outbox row's buttons as their wire dicts, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [cast(list[dict[str, str]], buttons) for (buttons,) in await cur.fetchall()]
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -845,6 +859,28 @@ async def test_not_found_yet_past_the_last_retry_ends_manual_required(
     assert "Puedes enviarme el PDF y el XML aquí" in text
 
 
+async def test_chain_end_manual_required_carries_retry_and_cancel_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D190, BR-F07: the chain's last message carries [🔄 Reintentar] and [✖️ Anular] for its invoice."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "not_found_yet", 3)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND_YET), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_button_dicts(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+    assert buttons == [
+        [
+            {"id": f"/reprocesar {invoice_id}", "title": "🔄 Reintentar"},
+            {"id": f"/cancelar {invoice_id}", "title": "✖️ Anular"},
+        ]
+    ]
+
+
 async def test_xml_mismatch_ends_manual_required_with_its_line(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -1160,7 +1196,7 @@ async def _run_portal_then_inbox(
 async def test_inbox_first_wait_offers_the_docs_needed_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D189 (BR-F13): an unknown issuer's first inbox wait offers [📎] [🔗] [⏳] and the no-portal bullet."""
+    """D189, D190 (BR-F13): an unknown issuer's first inbox wait offers [🔗] [📎] and the no-portal bullet."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
 
@@ -1170,29 +1206,61 @@ async def test_inbox_first_wait_offers_the_docs_needed_buttons(
         outbox = await _outbox(conn, profile_id)
         buttons = await _outbox_buttons(conn, profile_id)
         cur = await conn.execute(
-            "SELECT max(run_after) FROM jobs WHERE invoice_id = %s AND step = %s",
-            (invoice_id, FETCH_STEP),
+            "SELECT max(run_after), (now() AT TIME ZONE %s)::date FROM jobs"
+            " WHERE invoice_id = %s AND step = %s",
+            (cfg.owner.timezone, invoice_id, FETCH_STEP),
         )
         row = await cur.fetchone()
     assert row is not None
-    next_at = row[0].astimezone(ZoneInfo(cfg.owner.timezone))
+    next_at, today = row
+    # The schedule's 5m first look, then the 1h, 6h and 24h waits after it.
+    wait_start = next_at - timedelta(minutes=5)
+    last_at = wait_start + timedelta(hours=31, minutes=5)
+    last_desc = when_desc(last_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
     assert [rule_id for _text, rule_id in outbox] == [RULE_DOCS_NEEDED]
     text = outbox[0][0]
     assert FETCH_NO_PORTAL_LINE in text
-    assert f"Vuelvo a mirar el correo a las {next_at:%H:%M}." in text
+    assert f"Mientras tanto, reviso tu Outlook hasta {last_desc} por si el comercio te lo envió" in text
     assert buttons == [
         [
-            f"{invoice_id}:{SEND_PDF_ACTION}",
             f"{invoice_id}:{TEACH_PORTAL_ACTION}",
-            f"{invoice_id}:{WAIT_MAIL_ACTION}",
+            f"{invoice_id}:{SEND_PDF_ACTION}",
         ]
     ]
+
+
+async def test_inbox_first_wait_names_the_last_look_after_the_whole_schedule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D190, BR-F13: the first inbox wait names its last look, 31 h 5 m after the wait started."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+
+    cfg, _portal, _inbox = await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        cur = await conn.execute(
+            "SELECT max(run_after), (now() AT TIME ZONE %s)::date FROM jobs"
+            " WHERE invoice_id = %s AND step = %s",
+            (cfg.owner.timezone, invoice_id, FETCH_STEP),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    next_at, today = row
+    # The schedule's 5m first look, then the 1h, 6h and 24h waits after it.
+    wait_start = next_at - timedelta(minutes=5)
+    last_at = wait_start + timedelta(hours=31, minutes=5)
+    last_desc = when_desc(last_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
+    assert (
+        f"Mientras tanto, reviso tu Outlook hasta {last_desc} por si el comercio te lo envió" in outbox[0][0]
+    )
 
 
 async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D189 (BR-F13): an issuer with a taught link gets [📎] and [⏳] only."""
+    """D189, D190 (BR-F13): an issuer with a taught link gets [📎] only."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
     async with db_pool.connection() as conn, conn.transaction():
@@ -1208,7 +1276,7 @@ async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
 
     async with db_pool.connection() as conn:
         buttons = await _outbox_buttons(conn, profile_id)
-    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}", f"{invoice_id}:{WAIT_MAIL_ACTION}"]]
+    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}"]]
 
 
 async def test_inbox_second_wait_sends_no_new_message(
@@ -1338,7 +1406,7 @@ async def test_reading_document_url_reaches_the_fetcher(
 async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """BR-F02: the first exhausted invoice of an unknown issuer gets BR-F07 then the portal question."""
+    """D190, BR-F02: an unknown issuer's first exhausted invoice gets BR-F07, then BR-F02 with [No sé]."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
@@ -1347,9 +1415,11 @@ async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_button_dicts(conn, profile_id)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07", "BR-F02"]
     ask_text, _rule_id = outbox[1]
     assert ask_text == MESSAGES["BR-F02"].format(razon_social="este emisor", ruc_emisor=STORE_RUC)
+    assert buttons[1] == [{"id": f"u{invoice_id}:dk", "title": "No sé"}]
 
 
 async def test_teach_second_no_portal_exhaustion_of_the_issuer_queues_f07_only(

@@ -7,16 +7,17 @@ The photo files a button press releases are deleted after that transaction (R-9.
 """
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, Literal
 
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.buttons import COMMAND_BUTTON_PREFIX, is_button_command
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.actions import PressResult, handle_press
 from invoicebot.pipeline.commands import (
-    COMMAND_BUTTON_PREFIX,
     CommandContext,
     PaymentFlow,
     handle_command,
@@ -30,6 +31,7 @@ from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_p
 from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX
 from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.steps import DOWNLOAD_STEP as DOWNLOAD_STEP
 from invoicebot.pipeline.teach import (
     BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
 )
@@ -51,6 +53,8 @@ from invoicebot.store.messages import (
     store_inbound,
 )
 
+logger = logging.getLogger(__name__)
+
 #: Rule that tells a sender their queue is full (BR-S01).
 RULE_BACK_PRESSURE = "BR-S01"
 #: Rule that acknowledges a queued invoice (BR-S09).
@@ -59,8 +63,6 @@ RULE_ACK = "BR-S09"
 RULE_AMBIGUOUS_UPLOAD = "BR-D14"
 #: Most invoices BR-D14 lists before ending the list with ``, …`` (BR-D14, D140).
 BR_D14_MAX_ITEMS = 10
-#: Job step that downloads a photo before extraction (R-1.4).
-DOWNLOAD_STEP = "download_media"
 #: Advisory-lock namespace that serialises one profile's intake (R-1.6, PT-2).
 LOCK_PREFIX = "intake:"
 #: Attachment kind that starts an invoice (R-1.1).
@@ -177,18 +179,17 @@ async def _handle_press(
     """Run one button press, or return None when a special prefix's press is already answered (D189).
 
     A command button, a payment proposal, a BR-S06 decision and a BR-F14 portal offer
-    change no invoice; every other button goes through :func:`handle_press`.
+    change no invoice; every other button goes through :func:`handle_press`. Only a
+    command in D190's allowlist runs; any other is logged and ignored.
     """
     if button_id.startswith(COMMAND_BUTTON_PREFIX):
         command = parse_command(button_id)
         if command is not None:
-            await handle_command(
-                conn,
-                msg,
-                command[0],
-                command[1],
-                context=_command_context(roles, timezone),
-            )
+            name, arg = command
+            if is_button_command(name, arg):
+                await handle_command(conn, msg, name, arg, context=_command_context(roles, timezone))
+            else:
+                logger.info("ignored command button", extra={"profile_id": msg.profile_id})
         return None
     if button_id.startswith(PAYMENT_BUTTON_PREFIX):
         await handle_payment_press(conn, msg)

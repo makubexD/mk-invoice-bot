@@ -280,6 +280,14 @@ def _setup(*, github_repo: str | None = None) -> TeachSetup:
     return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver, github_repo=github_repo)
 
 
+def _setup_with_sender_channel() -> TeachSetup:
+    """Return a setup whose non-admin sender has a preferred channel (D190)."""
+    setup = _setup()
+    sender = setup.profiles[SENDER].model_copy(update={"preferred_channel": "whatsapp"})
+    profiles = {**setup.profiles, SENDER: sender}
+    return TeachSetup(profiles=profiles, resolver=setup.resolver, github_repo=setup.github_repo)
+
+
 def _button_press(profile_id: str, button_id: str) -> InboundMessage:
     """Build a canonical button press from ``profile_id``."""
     return InboundMessage(
@@ -356,10 +364,45 @@ async def test_answer_url_still_answers_br_f02_after_another_invoices_br_f13(
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
 
 
+async def test_answer_url_after_dont_know_still_proposes_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D190: a URL typed after the "no sé" answer still answers BR-F02."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        assert await answer(conn, setup, _message(SENDER, "no sé")) is True
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is True
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+
+
+async def test_answer_url_still_answers_br_f02_after_another_invoices_br_s03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D190: a BR-S03 notice for another invoice sent after BR-F02 does not hide BR-F02."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        other_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        await queue_message(
+            conn, Addressee("whatsapp", SENDER), "BR-S03 dead", invoice_id=other_id, rule_id="BR-S03"
+        )
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert handled is True
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+
+
 async def test_answer_dont_know_stores_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know_manual."""
     setup = _setup()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
@@ -370,7 +413,7 @@ async def test_answer_dont_know_stores_nothing(
 
     assert handled is True
     assert link is None
-    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know_manual"], "BR-F02_dont_know", [])
 
 
 async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(
@@ -710,6 +753,51 @@ async def test_press_reject_sets_rejected_and_a_later_teach_proposes_again(
     assert rejected == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
     assert admin_rows == [(expected, "BR-S06_rejected", [])]
     assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+
+
+async def test_press_approve_notifies_the_other_proposer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Aprobar] tells the assistant who proposed the link."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await handle_press(conn, _press(ADMIN, approved=True), _setup_with_sender_channel())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_sender_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert sender_rows == [(expected, "BR-S06_sender_approved", [])]
+
+
+async def test_press_reject_notifies_the_other_proposer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Rechazar] tells the assistant who proposed the link."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await handle_press(conn, _press(ADMIN, approved=False), _setup_with_sender_channel())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_sender_rejected"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
+    assert sender_rows == [(expected, "BR-S06_sender_rejected", [])]
+
+
+async def test_press_approve_of_the_owners_own_link_notifies_no_sender(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Aprobar] on their own proposal answers only BR-S06_approved."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, ADMIN) is not None
+        await handle_press(conn, _press(ADMIN, approved=True), _setup_with_sender_channel())
+        admin_rows = await _outbox(conn, ADMIN)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert admin_rows == [(expected, "BR-S06_approved", [])]
+    assert sender_rows == []
 
 
 async def test_press_current_proposal_version_approves_it(

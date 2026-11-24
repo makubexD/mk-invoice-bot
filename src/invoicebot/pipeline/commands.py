@@ -17,17 +17,19 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.channels.buttons import command_button_id
 from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
-from invoicebot.pipeline.resume import retry_delivery, retry_documents
+from invoicebot.pipeline.resume import retry_delivery, retry_documents, retry_reading
 from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
+    BUTTON_MY_INVOICES,
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
     COMMAND_PICK,
@@ -83,6 +85,7 @@ from invoicebot.store.invoices import (
     list_pending,
     list_recent,
     list_recent_in,
+    load_flow,
     load_invoice_head,
     load_reading,
 )
@@ -107,8 +110,6 @@ PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 MAX_GAP_LINES = 20
 #: The ``/gap`` argument that ignores a gap (S8.9, D139).
 GAP_IGNORE_ARG = "ignorar"
-#: The prefix of a pick button's id, which carries the command it runs (S4.9, D189).
-COMMAND_BUTTON_PREFIX = "/"
 #: The states ``/reprocesar`` with no id lists and :func:`_requeue` acts on (S4.9, D96).
 REPROCESS_STATES: frozenset[str] = frozenset({FAILED, MANUAL_REQUIRED, BATCHED})
 
@@ -205,7 +206,13 @@ async def resolve_target(
         return None
     head = await load_invoice_head(conn, invoice_id)
     if head is None or (head.profile_id != msg.profile_id and msg.profile_id not in admins):
-        await _reply(conn, msg, RULE_NOT_FOUND, MESSAGES[RULE_NOT_FOUND].format(id=invoice_id))
+        await _reply(
+            conn,
+            msg,
+            RULE_NOT_FOUND,
+            MESSAGES[RULE_NOT_FOUND].format(id=invoice_id),
+            buttons=[Button(id=command_button_id("estado"), title=BUTTON_MY_INVOICES)],
+        )
         return None
     return invoice_id, head
 
@@ -350,9 +357,7 @@ async def _list_choices(
     if not rows:
         await _reply(conn, msg, None, COMMAND_PICK_NONE.format(verb=command))
         return
-    buttons = [
-        Button(id=f"{COMMAND_BUTTON_PREFIX}{command} {row.id}", title=_pick_title(row)) for row in rows
-    ]
+    buttons = [Button(id=command_button_id(command, str(row.id)), title=_pick_title(row)) for row in rows]
     await _reply(conn, msg, None, COMMAND_PICK.format(verb=command), buttons=buttons)
 
 
@@ -367,9 +372,15 @@ def _pick_title(row: PendingRow) -> str:
 
 
 async def _requeue(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
-    """Queue the step the invoice's state needs, returning whether there is one (S4.9, D96)."""
+    """Queue the step the invoice's state needs, returning whether there is one (S4.9, D96).
+
+    A failed invoice that never got a flow is read again (BR-S03, D190).
+    """
     if state == BATCHED:
         return await retry_delivery(conn, invoice_id)
+    if state == FAILED and await load_flow(conn, invoice_id) is None:
+        await retry_reading(conn, invoice_id)
+        return True
     if state in REPROCESS_STATES:
         return await retry_documents(conn, invoice_id, state)
     return False

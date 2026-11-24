@@ -12,17 +12,22 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
+from invoicebot.pipeline.questions import (
+    BUTTON_DONT_KNOW_SUFFIX,
+    dont_know_button,
+    offer_press_id,
+)
+from invoicebot.pipeline.questions import OFFER_BUTTON_PREFIX as OFFER_BUTTON_PREFIX
 from invoicebot.pipeline.teach import (
     NOT_QUESTIONS,
     RULE_ASK_PORTAL,
-    RULE_DONT_KNOW,
     TeachContext,
     TeachSetup,
+    dont_know_reply,
     teach,
 )
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
-    BUTTON_DONT_KNOW,
     BUTTON_NO,
     BUTTON_YES,
     MESSAGES,
@@ -33,14 +38,10 @@ from invoicebot.sunat_origins import is_sunat_host
 
 logger = logging.getLogger(__name__)
 
-#: BR-F14's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` and ``u<invoice_id>:dk`` (D189).
-#: ``u`` starts no other id: invoice ids start with a digit, payments with ``p`` and BR-S06 with ``t``.
-OFFER_BUTTON_PREFIX = "u"
 #: The rule that owns BR-F14's offer (D189).
 RULE_PORTAL_OFFER = "BR-F14"
 BUTTON_YES_SUFFIX = "yes"
 BUTTON_NO_SUFFIX = "no"
-BUTTON_DONT_KNOW_SUFFIX = "dk"
 #: The whole id of a BR-F14 press: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` or ``u<invoice_id>:dk``.
 _PRESS_PATTERN = (
     rf"{OFFER_BUTTON_PREFIX}([0-9]{{1,9}})"
@@ -94,14 +95,14 @@ async def handle_press(
     msg: InboundMessage,
     setup: TeachSetup,
 ) -> None:
-    """Answer BR-F14's [Sí], [No] or [No sé] for the sender's newest question (BR-F14, D189).
+    """Answer BR-F14's [Sí], [No] or [No sé] for the sender's newest question (BR-F14, BR-F02, D189, D190).
 
     Only a press for the sender's own invoice whose newest question is that invoice's
-    BR-F14 counts. A press on the sender's own invoice whose BR-F14 is no longer the
-    newest question is stale and answered BR-S02; anything else is logged and changes
-    nothing. [Sí] teaches the
-    offered URL through BR-S06, [No] asks BR-F02, and [No sé] answers
-    ``BR-F02_dont_know``. The caller owns the transaction.
+    BR-F14 counts; [No sé] also counts when the newest question is that invoice's BR-F02.
+    A press on the sender's own invoice whose question no longer applies is stale and
+    answered BR-S02; anything else is logged and changes nothing. [Sí] teaches the
+    offered URL through BR-S06, [No] asks BR-F02, and [No sé] answers the text its
+    state calls for. The caller owns the transaction.
     """
     match = None if msg.button_id is None else re.fullmatch(_PRESS_PATTERN, msg.button_id)
     if match is None:
@@ -114,20 +115,23 @@ async def handle_press(
         return
     addressee = Addressee(msg.channel, msg.profile_id)
     question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
-    if question != (RULE_PORTAL_OFFER, invoice_id):
+    action = match.group(2)
+    answered = (
+        (RULE_PORTAL_OFFER, RULE_ASK_PORTAL) if action == BUTTON_DONT_KNOW_SUFFIX else (RULE_PORTAL_OFFER,)
+    )
+    if question is None or question[0] not in answered or question[1] != invoice_id:
         await queue_stale(conn, addressee, invoice_id, head.state)
         return
     reading = await load_reading(conn, invoice_id)
     if reading is None:
         _log_ignored(msg)
         return
-    action = match.group(2)
     if action == BUTTON_YES_SUFFIX:
         await _teach_offer(conn, setup, addressee, reading)
     elif action == BUTTON_NO_SUFFIX:
         await _ask_br_f02(conn, addressee, invoice_id, reading)
     else:
-        await queue_message(conn, addressee, MESSAGES[RULE_DONT_KNOW], rule_id=RULE_DONT_KNOW)
+        await dont_know_reply(conn, addressee, invoice_id)
 
 
 async def _teach_offer(
@@ -159,7 +163,7 @@ async def _ask_br_f02(
     invoice_id: int,
     reading: Reading,
 ) -> None:
-    """Ask BR-F02 for the invoice's issuer, or queue nothing without a RUC (BR-F02, D189)."""
+    """Ask BR-F02 for the issuer with a [No sé] button, or queue nothing without a RUC (BR-F02, D190)."""
     ruc_emisor = reading.value("ruc_emisor")
     if ruc_emisor is None:
         logger.info("ignored BR-F02 question without an issuer", extra={"profile_id": addressee.profile_id})
@@ -168,16 +172,22 @@ async def _ask_br_f02(
         razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
         ruc_emisor=ruc_emisor,
     )
-    await queue_message(conn, addressee, text, invoice_id=invoice_id, rule_id=RULE_ASK_PORTAL)
+    await queue_message(
+        conn,
+        addressee,
+        text,
+        invoice_id=invoice_id,
+        rule_id=RULE_ASK_PORTAL,
+        buttons=(dont_know_button(invoice_id),),
+    )
 
 
 def _offer_buttons(invoice_id: int) -> tuple[Button, Button, Button]:
     """Return BR-F14's [Sí], [No] and [No sé] buttons for one invoice (D189)."""
-    base = f"{OFFER_BUTTON_PREFIX}{invoice_id}"
     return (
-        Button(id=f"{base}:{BUTTON_YES_SUFFIX}", title=BUTTON_YES),
-        Button(id=f"{base}:{BUTTON_NO_SUFFIX}", title=BUTTON_NO),
-        Button(id=f"{base}:{BUTTON_DONT_KNOW_SUFFIX}", title=BUTTON_DONT_KNOW),
+        Button(id=offer_press_id(invoice_id, BUTTON_YES_SUFFIX), title=BUTTON_YES),
+        Button(id=offer_press_id(invoice_id, BUTTON_NO_SUFFIX), title=BUTTON_NO),
+        dont_know_button(invoice_id),
     )
 
 

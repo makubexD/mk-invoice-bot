@@ -4,6 +4,10 @@ The fetch handler enqueues the deliver step, but the deliver handler reaches the
 module through the button actions; naming both steps here keeps the import graph acyclic.
 """
 
+#: Job step that downloads a photo before extraction (R-1.4).
+DOWNLOAD_STEP = "download_media"
+#: Job step that reads the downloaded photo or PDF (S3.11).
+EXTRACT_STEP = "extract"
 FETCH_STEP = "fetch"
 DELIVER_STEP = "deliver"
 #: Job step that asks SUNAT again after a BR-V01/BR-V04 answer (BR-V01, D125).

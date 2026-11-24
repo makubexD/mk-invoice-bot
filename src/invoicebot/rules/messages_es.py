@@ -15,6 +15,7 @@ the placeholders spec 06 §1 describes in prose.
 """
 
 from collections.abc import Sequence
+from datetime import date, datetime, timedelta
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
@@ -73,9 +74,12 @@ MESSAGES: dict[str, str] = {
     "BR-F02": (
         "No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). "
         'Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. '
-        'Si no, responde "no sé".'
+        "Si no, toca [No sé]."
     ),
-    "BR-F02_dont_know": "Gracias. Ya avisé al administrador para agregar este portal.",
+    "BR-F02_dont_know": "Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.",
+    "BR-F02_dont_know_manual": (
+        "Entendido. Ya avisé al administrador para agregar este portal. Si consigues el PDF, envíamelo aquí."
+    ),
     "BR-F03": "• Portal {portal}: con fallas, ya avisé para arreglarlo",
     "BR-F04": "• Portal {portal}: captcha que no puedo resolver",
     "BR-F05": "Se venció el tiempo del captcha; sigo con otras opciones.",
@@ -87,13 +91,14 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F13": (
-        "⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
+        "⏳ Comprobante #{id}: no pude descargar {docs_desc}.\n"
         "{searched_lines}\n"
-        "Vuelvo a mirar el correo a las {next_at:%H:%M}.\n"
-        "Si lo tienes, me ayudas:"
+        "Mientras tanto, reviso {mailbox_desc} hasta {last_desc} por si el comercio te lo envió; "
+        "si llega, lo archivo solo y te aviso.\n"
+        "¿Cómo seguimos?"
     ),
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
-    "BR-F13_wait": "Listo. Sigo buscando el correo y te aviso cuando llegue.",
+    "BR-F13_wait": "Listo. Sigo revisando tu correo y te aviso cuando llegue el PDF.",
     "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
@@ -168,12 +173,20 @@ MESSAGES: dict[str, str] = {
     "BR-S03_admin": "⚙️ Falló el trabajo {step} del comprobante #{id}: {error_code}.",
     "BR-S04": "📨 Falta la plantilla aprobada «{template}» en WhatsApp; hay mensajes en espera.",
     "BR-S05": "🔐 {client} pide {action_desc} del comprobante #{id}. ¿Lo apruebo?",
-    "BR-S06": "Gracias. Lo revisará el administrador antes de usarlo.",
+    "BR-S06": "Gracias. El administrador lo revisará y te aviso lo que decida.",
     "BR-S06_owner": (
         "🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?"
     ),
     "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.",
     "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
+    "BR-S06_sender_approved": (
+        "✅ El administrador aprobó el portal que enviaste para RUC {ruc_emisor}. "
+        "Cuando quede configurado, retomo tus comprobantes y te aviso."
+    ),
+    "BR-S06_sender_rejected": (
+        "El administrador no aprobó el portal que enviaste para RUC {ruc_emisor}. "
+        "Si tienes el PDF, envíamelo aquí."
+    ),
     "BR-S07": "No encontré el comprobante #{id}.",
     "BR-S08": (
         "Dejé el comprobante #{id} en pendientes porque no tuve respuesta. "
@@ -282,6 +295,24 @@ def state_desc(state: str) -> str:
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
 
 
+#: How ``when_desc`` writes a look time later today (D190).
+WHEN_TODAY = "hoy a las {time}"
+#: How ``when_desc`` writes a look time tomorrow (D190).
+WHEN_TOMORROW = "mañana a las {time}"
+#: How ``when_desc`` writes a look time on any other day (D190).
+WHEN_OTHER = "el {day} a las {time}"
+
+
+def when_desc(at: datetime, today: date) -> str:
+    """Return a look time for a message, in the owner's timezone (D190)."""
+    clock = at.strftime("%H:%M")
+    if at.date() == today:
+        return WHEN_TODAY.format(time=clock)
+    if at.date() == today + timedelta(days=1):
+        return WHEN_TOMORROW.format(time=clock)
+    return WHEN_OTHER.format(day=at.strftime("%d/%m"), time=clock)
+
+
 #: The routed-invoice summary (spec 06 §1 "Summary message"). ``{issuer}`` is the padrón's
 #: name and the RUC, or just the RUC; ``{sources_line}`` names where the fields came from;
 #: ``{flow_line}`` is the matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
@@ -310,9 +341,10 @@ SUMMARY_INFERRED = "ℹ️ Deducido del comprobante: {fields_desc}"
 SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
 #: The last line of a summary whose invoice goes on without waiting, so its buttons read
 #: as corrections, not as a question (D188).
-SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
+#: Sent before the fetchers run, so it does not claim filing (D190).
+SUMMARY_MOVING = "⏳ Busco sus archivos para archivarlo. Toca un botón solo si algo está mal."
 #: The last line of a summary that carries no buttons: nothing is being asked (D189).
-SUMMARY_MOVING_QUIET = "⏳ Lo estoy archivando."
+SUMMARY_MOVING_QUIET = "⏳ Busco sus archivos para archivarlo."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
 #: ``{issuer}`` when the padrón or the reading named the issuer, and when it did not (D188).
@@ -422,6 +454,8 @@ FETCHER_DESC: dict[str, str] = {
 }
 #: es-PE names of the required document kinds, used in BR-F07's ``{manual_docs_desc}``.
 DOC_DESC: dict[str, str] = {"pdf": "el PDF", "xml": "el XML"}
+#: BR-F13's ``{mailbox_desc}`` per inbox provider (BR-F13, D190).
+MAILBOX_DESC: dict[str, str] = {"gmail": "tu Gmail", "graph": "tu Outlook"}
 #: Reply to an uploaded XML that is unsafe or invalid (BR-F09, D101).
 UPLOAD_XML_INVALID = "El XML que enviaste no es válido; no lo guardé."
 #: Reply to an uploaded XML that is not the invoice it was sent for (BR-F06, D101).
@@ -473,14 +507,17 @@ BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
 BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
-#: BR-F13's three offered actions and BR-F14's [No sé] answer (D189).
+#: BR-F13's two offered actions and BR-F14's [No sé] answer (D189).
 BUTTON_SEND_PDF = "📎 Te envío el PDF"
 BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"
-BUTTON_WAIT_MAIL = "⏳ Espero el correo"
 BUTTON_DONT_KNOW = "No sé"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
 BUTTON_REJECT = "Rechazar"
+#: Command buttons that carry a typed command as their id (D190).
+BUTTON_RETRY = "🔄 Reintentar"
+BUTTON_PENDING = "📋 Pendientes"
+BUTTON_MY_INVOICES = "📋 Mis comprobantes"
 #: The list message's button label when more than three choices need buttons (BR-R03, BR-R09).
 LIST_BUTTON = "Elegir"
 #: Reply after the sender cancels the BR-D06 invoice with [Cancelar] (R-7.13).
