@@ -8,7 +8,7 @@ from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -403,6 +403,20 @@ async def _outbox_buttons(conn: AsyncConnection[Any], profile_id: str) -> list[l
         (profile_id,),
     )
     return [[str(button["id"]) for button in buttons] for (buttons,) in await cur.fetchall()]
+
+
+async def _outbox_button_dicts(conn: AsyncConnection[Any], profile_id: str) -> list[list[dict[str, str]]]:
+    """Return each outbox row's buttons as their wire dicts, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT payload_json->'buttons'
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [cast(list[dict[str, str]], buttons) for (buttons,) in await cur.fetchall()]
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -843,6 +857,28 @@ async def test_not_found_yet_past_the_last_retry_ends_manual_required(
     assert text.startswith(f"❗ No pude obtener el XML/PDF de {SERIE}-{NUMERO}.")
     assert "• Portal del comercio: no encontré el comprobante" in text
     assert "Puedes enviarme el PDF y el XML aquí" in text
+
+
+async def test_chain_end_manual_required_carries_retry_and_cancel_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D190, BR-F07: the chain's last message carries [🔄 Reintentar] and [✖️ Anular] for its invoice."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "not_found_yet", 3)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND_YET), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_button_dicts(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+    assert buttons == [
+        [
+            {"id": f"/reprocesar {invoice_id}", "title": "🔄 Reintentar"},
+            {"id": f"/cancelar {invoice_id}", "title": "✖️ Anular"},
+        ]
+    ]
 
 
 async def test_xml_mismatch_ends_manual_required_with_its_line(

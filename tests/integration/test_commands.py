@@ -843,6 +843,29 @@ async def test_cancelar_button_of_another_profiles_invoice_answers_br_s07(
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
 
 
+async def test_cancelar_unknown_invoice_carries_the_my_invoices_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S07: typed /cancelar for an unknown invoice answers with the [📋 Mis comprobantes] button."""
+    profile_id = _profile()
+    msg = _message(profile_id, f"/cancelar {UNKNOWN_INVOICE_ID}")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert result.status == "stored"
+    assert rows == [
+        (
+            MESSAGES["BR-S07"].format(id=UNKNOWN_INVOICE_ID),
+            "BR-S07",
+            [{"id": "/estado", "title": "📋 Mis comprobantes"}],
+        )
+    ]
+
+
 async def test_cancelar_cancels_a_confirming_invoice(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
