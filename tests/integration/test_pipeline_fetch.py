@@ -48,6 +48,7 @@ from invoicebot.rules.messages_es import (
     GAP_LINE_PORTAL,
     MESSAGES,
     fetcher_desc,
+    when_desc,
 )
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
@@ -1206,16 +1207,18 @@ async def test_inbox_first_wait_offers_the_docs_needed_buttons(
         outbox = await _outbox(conn, profile_id)
         buttons = await _outbox_buttons(conn, profile_id)
         cur = await conn.execute(
-            "SELECT max(run_after) FROM jobs WHERE invoice_id = %s AND step = %s",
-            (invoice_id, FETCH_STEP),
+            "SELECT max(run_after), (now() AT TIME ZONE %s)::date FROM jobs"
+            " WHERE invoice_id = %s AND step = %s",
+            (cfg.owner.timezone, invoice_id, FETCH_STEP),
         )
         row = await cur.fetchone()
     assert row is not None
-    next_at = row[0].astimezone(ZoneInfo(cfg.owner.timezone))
+    next_at, today = row
+    next_desc = when_desc(next_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
     assert [rule_id for _text, rule_id in outbox] == [RULE_DOCS_NEEDED]
     text = outbox[0][0]
     assert FETCH_NO_PORTAL_LINE in text
-    assert f"Vuelvo a mirar el correo a las {next_at:%H:%M}." in text
+    assert f"Próxima revisión: {next_desc}." in text
     assert buttons == [
         [
             f"{invoice_id}:{SEND_PDF_ACTION}",
@@ -1223,6 +1226,32 @@ async def test_inbox_first_wait_offers_the_docs_needed_buttons(
             f"{invoice_id}:{WAIT_MAIL_ACTION}",
         ]
     ]
+
+
+async def test_inbox_first_wait_names_the_last_look_after_the_whole_schedule(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D190, BR-F13: the first inbox wait names its last look, 31 h 5 m after the wait started."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+
+    cfg, _portal, _inbox = await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        cur = await conn.execute(
+            "SELECT max(run_after), (now() AT TIME ZONE %s)::date FROM jobs"
+            " WHERE invoice_id = %s AND step = %s",
+            (cfg.owner.timezone, invoice_id, FETCH_STEP),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    next_at, today = row
+    # The schedule's 5m first look, then the 1h, 6h and 24h waits after it.
+    wait_start = next_at - timedelta(minutes=5)
+    last_at = wait_start + timedelta(hours=31, minutes=5)
+    last_desc = when_desc(last_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
+    assert f"Si no llega hasta {last_desc}, te aviso para que me lo envíes." in outbox[0][0]
 
 
 async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(

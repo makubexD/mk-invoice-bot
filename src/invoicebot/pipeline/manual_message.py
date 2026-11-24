@@ -109,7 +109,6 @@ def docs_needed_text(
         id=invoice_id,
         docs_desc=docs_desc(flow.required_docs),
         searched_lines=searched_lines,
-        next_at=looks.next_at,
         next_desc=when_desc(looks.next_at, looks.today),
         last_desc=when_desc(looks.last_at, looks.today),
     )

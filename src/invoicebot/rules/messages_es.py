@@ -93,7 +93,8 @@ MESSAGES: dict[str, str] = {
     "BR-F13": (
         "⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
         "{searched_lines}\n"
-        "Vuelvo a mirar el correo a las {next_at:%H:%M}.\n"
+        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
+        "Próxima revisión: {next_desc}. Si no llega hasta {last_desc}, te aviso para que me lo envíes.\n"
         "Si lo tienes, me ayudas:"
     ),
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",

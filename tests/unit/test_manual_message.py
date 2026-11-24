@@ -206,7 +206,9 @@ def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
         "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
         "Ya busqué:\n"
         "• Portal del comercio: no lo conozco\n"
-        "Vuelvo a mirar el correo a las 14:05.\n"
+        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
+        "Próxima revisión: hoy a las 14:05. Si no llega hasta mañana a las 14:05, "
+        "te aviso para que me lo envíes.\n"
         "Si lo tienes, me ayudas:"
     )
 
@@ -228,9 +230,48 @@ def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
     assert "\n\n" not in text
     assert text == (
         "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
-        "Vuelvo a mirar el correo a las 14:05.\n"
+        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
+        "Próxima revisión: hoy a las 14:05. Si no llega hasta mañana a las 14:05, "
+        "te aviso para que me lo envíes.\n"
         "Si lo tienes, me ayudas:"
     )
+
+
+def test_docs_needed_text_words_the_next_and_last_look() -> None:
+    """D190, BR-F13: the text words the next and the last look against the owner's date."""
+    text = docs_needed_text(
+        7,
+        _reading(),
+        _flow(),
+        [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
+        _with_store(),
+        LookTimes(
+            datetime(2026, 11, 24, 5, 15, tzinfo=UTC),
+            datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
+            date(2026, 11, 24),
+        ),
+    )
+
+    assert "Próxima revisión: hoy a las 05:15." in text
+    assert "Si no llega hasta mañana a las 12:20" in text
+
+
+def test_docs_needed_text_says_manana_for_a_next_look_tomorrow() -> None:
+    """D190, BR-F13: a next look on the day after today reads "mañana"."""
+    text = docs_needed_text(
+        7,
+        _reading(),
+        _flow(),
+        [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
+        _with_store(),
+        LookTimes(
+            datetime(2026, 11, 25, 9, 0, tzinfo=UTC),
+            datetime(2026, 11, 26, 9, 0, tzinfo=UTC),
+            date(2026, 11, 24),
+        ),
+    )
+
+    assert "Próxima revisión: mañana a las " in text
 
 
 def test_br_f11_uses_a_generic_comercio_without_a_store() -> None:
