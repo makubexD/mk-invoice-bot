@@ -56,9 +56,12 @@ Test: `grep -n "D188" specs/05-open-questions.md specs/06-business-rules.md docs
 
 Files: `src/invoicebot/pipeline/edits.py`, `tests/unit/test_edits_parse.py`.
 
-1. In `parse_edits`, split each line into pairs before validating: a pair starts at the line start or after
-   whitespace, at a word that `_canonical_key` knows followed by `=`. The value runs to the next pair's start, stripped.
-   Text with no known `key=` stays as today. One line with one pair behaves exactly as today.
+1. In `parse_edits`, split each line into pairs before validating, but only when the line's own first key (before
+   its first `=`) is one `_canonical_key` knows: then a further pair starts after whitespace, at a word that
+   `_canonical_key` knows followed by `=`, and each value runs to the next pair's start, stripped. A line whose first
+   key is unknown stays one pair, exactly as today (one error, nothing split out). Each pair counts as one
+   assignment toward `MAX_EDIT_LINES`. One line with one pair behaves exactly as today. A small helper
+   (`_split_pairs(line) -> list[str]`) keeps `parse_edits` under the complexity cap.
 2. Tests, docstring `D188` (and `R-3.5`):
    - `ruc=20100070970 serie=F001 numero=123 fecha=05/11/2026 total=30.90` → five fields, no errors;
    - `fecha=05/11/2026 total=30.90` → two fields;
