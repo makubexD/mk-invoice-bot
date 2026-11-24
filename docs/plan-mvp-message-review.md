@@ -293,50 +293,62 @@ Test: `uv run pytest -q tests/unit/test_docs.py`
 
 ## Step 16: The owner's live-run wording in the specs and the roadmap `[inline: user-facing copy the owner reviews]`
 
-The owner's notes in `specs/spikes/message-review.md`. Files: `specs/06-business-rules.md`,
-`specs/05-open-questions.md`, `src/invoicebot/rules/messages_es.py`, `docs/plan-mvp.md`.
+The owner's notes in `specs/spikes/message-review.md` and their follow-up (2026-11-24): the main path is the store's
+web page; the mailbox is a fallback (the store may mail the PDF to the flow's inbox), never the plan. Files:
+`specs/06-business-rules.md`, `specs/05-open-questions.md`, `src/invoicebot/rules/messages_es.py`, `docs/plan-mvp.md`.
 
 - Spec 06, summary item 8: `⏳ Busco sus archivos para archivarlo. Toca un botón solo si algo está mal.` with buttons,
   else `⏳ Busco sus archivos para archivarlo.` The summary goes out before the fetchers run, so it must not claim
   filing; the words match `/estado`'s `buscando sus archivos`.
-- Spec 06, BR-F13 row: the text becomes `⏳ Comprobante #{id}: falta {docs_desc} para archivarlo.` +
-  `{searched_lines}` + `Lo busco en tu correo hasta {last_desc}; si llega, lo archivo solo y te aviso. Si no llega,
-te pido que me lo envíes.` + `También puedes:` [📎 Te envío el PDF] [🔗 Enseñar el portal]. No next look and no
-  [⏳ Espero el correo]: waiting is what the bot does anyway. A [⏳] press on a message already sent still answers
-  `BR-F13_wait`.
-- Spec 05, D190: one bullet `Live-run amendment (2026-11-24)` naming the two changes above.
+- Spec 06, BR-F13 row: the text says what failed first, then the fallback, then the options:
+  `⏳ Comprobante #{id}: no pude descargar {docs_desc}.` + `{searched_lines}` + `Mientras tanto, reviso
+{mailbox_desc} hasta {last_desc} por si el comercio te lo envió; si llega, lo archivo solo y te aviso.` +
+  `¿Cómo seguimos?` [🔗 Enseñar el portal] (when offered) [📎 Te envío el PDF]. `{mailbox_desc}` is `tu Gmail` for a
+  `gmail` inbox and `tu Outlook` for `graph`. No next look and no [⏳ Espero el correo]: waiting is what the bot does
+  anyway. A [⏳] press on a message already sent still answers `BR-F13_wait`.
+- Spec 05, D190: one bullet `Live-run amendment (2026-11-24)` naming the changes above.
 - `messages_es.py`: `SUMMARY_MOVING` and `SUMMARY_MOVING_QUIET` take the new texts (the tests read the constants).
 - `docs/plan-mvp.md`, the 9v `portal-guess` row (notes 3 and 4): BR-F02 and BR-F14 take answers by button
   ([Sí, es este] [✏️ Corregir] [No sé]); typed text only after [✏️ Corregir]; the bot echoes the URL it understood for
   a [Sí] [Corregir] confirmation; text it cannot read as a URL gets a clear retry, never another path. The PEBSA
   ticket of the spike is 9v's live case.
+- `docs/plan-mvp.md`, a new row `9x inbox-match` after 9w: the mailbox fetcher finds a store's mail it misses today
+  (a PDF-only mail; attachment names without the serie-número; a download link instead of an attachment; a misread
+  serie or número; a common serie past the 25 newest mails) by searching wider (the issuer's RUC or name around the
+  invoice date) and proving strictly (the XML, or the PDF's text, carries the same RUC, serie, número and total); a
+  candidate it cannot prove is offered to the sender as `¿Es este?` with the mail's date and file name, [Sí] [No],
+  never filed on a guess. Leading zeros are already handled (`{serie}-0*{numero}`).
 
 Test: `uv run pytest -q tests/unit/test_docs.py tests/integration/test_pipeline_route.py`
 
-## Step 17: BR-F13 names only the last look `[worker]`
+## Step 17: BR-F13's new text `[worker]`
 
 Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/manual_message.py`,
 `tests/unit/test_manual_message.py`, `tests/integration/test_pipeline_fetch.py`.
 
 - `MESSAGES["BR-F13"]` takes step 16's spec 06 text, lines joined with `\n`, placeholders `{id}`, `{docs_desc}`,
-  `{searched_lines}`, `{last_desc}`.
-- `docs_needed_text` stops passing `next_desc`; everything else stays (`LookTimes.next_at` goes in step 19).
-- `test_manual_message.py`: each BR-F13 case expects the new text: no `Próxima revisión`, the line
-  `Lo busco en tu correo hasta {last_desc}; …` with `hoy a las HH:MM` / `mañana a las HH:MM` / a date as before, and
-  `También puedes:` last.
+  `{searched_lines}`, `{mailbox_desc}`, `{last_desc}`.
+- `messages_es.py` gains `MAILBOX_DESC: dict[str, str] = {"gmail": "tu Gmail", "graph": "tu Outlook"}`.
+- `docs_needed_text` stops passing `next_desc` and passes `mailbox_desc=MAILBOX_DESC[flow.email_inbox.provider]`
+  (BR-F13 is only sent by the mailbox fetcher, so the flow has an inbox; raise `ValueError` when it has none).
+  `LookTimes.next_at` goes in step 19.
+- `test_manual_message.py`: each BR-F13 case expects the new text: first line `no pude descargar …`, no
+  `Próxima revisión`, the `Mientras tanto, reviso tu Gmail hasta …` line with `hoy a las HH:MM` / `mañana a las
+HH:MM` / a date as before, and `¿Cómo seguimos?` last; one case with a `graph` inbox expects `tu Outlook`; a flow
+  without an inbox raises `ValueError`.
 - `test_pipeline_fetch.py`: the BR-F13 text assertions stop expecting `next_desc` and expect the last look instead.
 
 Test: `uv run pytest -q tests/unit/test_manual_message.py tests/integration/test_pipeline_fetch.py`
 
-## Step 18: BR-F13 drops [⏳ Espero el correo] `[worker]`
+## Step 18: BR-F13's buttons: [🔗] first, no [⏳] `[worker]`
 
 Files: `src/invoicebot/pipeline/questions.py`, `src/invoicebot/rules/messages_es.py`,
 `tests/integration/test_pipeline_fetch.py`.
 
-- `docs_needed_buttons` returns [📎] and, when offered, [🔗]; its docstring says so. `BUTTON_WAIT_MAIL` is removed
-  (no other user). `WAIT_MAIL_ACTION` and its handler stay, so a [⏳] on a message already sent still answers
-  `BR-F13_wait`.
-- `test_pipeline_fetch.py`: the BR-F13 button rows expect `[[…:SEND_PDF_ACTION, …:TEACH_PORTAL_ACTION]]` or
+- `docs_needed_buttons` returns [🔗 Enseñar el portal] first when offered, then [📎 Te envío el PDF]; its docstring
+  says so. `BUTTON_WAIT_MAIL` is removed (no other user). `WAIT_MAIL_ACTION` and its handler stay, so a [⏳] on a
+  message already sent still answers `BR-F13_wait`.
+- `test_pipeline_fetch.py`: the BR-F13 button rows expect `[[…:TEACH_PORTAL_ACTION, …:SEND_PDF_ACTION]]` or
   `[[…:SEND_PDF_ACTION]]`, with no `WAIT_MAIL_ACTION`.
 
 Test cases: the button rows above; `tests/integration/test_pipeline_docs_help.py`'s existing [⏳] press tests pass
@@ -359,7 +371,7 @@ Test: `uv run pytest -q tests/unit/test_manual_message.py tests/integration/test
 ## Step 20: Live re-check on Telegram `[inline: needs the owner's chat]`
 
 Deploy the branch image to the live stack and, with the owner, send the PEBSA ticket: the summary ends
-`⏳ Busco sus archivos para archivarlo.`; BR-F13 names only the last look and shows [📎] [🔗]. Add the results to
+`⏳ Busco sus archivos para archivarlo.`; BR-F13 starts `no pude descargar el PDF`, names `tu Gmail` and the last look, and shows [🔗] [📎]. Add the results to
 `specs/spikes/message-review.md` under `## Re-check after the wording fix`.
 
 Test: `uv run pytest -q tests/unit/test_docs.py`
