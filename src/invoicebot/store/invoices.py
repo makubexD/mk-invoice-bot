@@ -4,7 +4,7 @@ Every function takes the caller's connection and never commits: the caller
 owns the transaction (R-1.1, R-1.4, R-1.10).
 """
 
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
@@ -448,6 +448,32 @@ async def list_pending(
     return rows, (int(raw[0][7]) if raw else 0)
 
 
+#: The columns and joins a list row carries; :func:`list_recent` and its filters share them.
+_LIST_SELECT = """
+    SELECT i.id,
+           i.state,
+           i.waiting_state,
+           i.waiting_rule_id,
+           COALESCE(i.razon_social, p.razon_social),
+           i.total
+    FROM invoices AS i
+    LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
+"""
+
+
+def _pending_row(row: Sequence[Any]) -> PendingRow:
+    """Map a ``_LIST_SELECT`` row to a :class:`PendingRow`; a listed invoice is not a batch (D188)."""
+    return PendingRow(
+        id=int(row[0]),
+        state=str(row[1]),
+        waiting_state=None if row[2] is None else str(row[2]),
+        waiting_rule_id=None if row[3] is None else str(row[3]),
+        razon_social=None if row[4] is None else str(row[4]),
+        total=cast(Decimal | None, row[5]),
+        batch_prepared_at=None,
+    )
+
+
 async def list_recent(
     conn: AsyncConnection[Any],
     profile_id: str,
@@ -461,34 +487,41 @@ async def list_recent(
     commit.
     """
     cur = await conn.execute(
-        """
-        SELECT i.id,
-               i.state,
-               i.waiting_state,
-               i.waiting_rule_id,
-               COALESCE(i.razon_social, p.razon_social),
-               i.total
-        FROM invoices AS i
-        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
+        _LIST_SELECT
+        + """
         WHERE i.profile_id = %s
         ORDER BY i.created_at DESC, i.id DESC
         LIMIT %s
         """,
         (profile_id, limit),
     )
-    raw = await cur.fetchall()
-    return [
-        PendingRow(
-            id=int(row[0]),
-            state=str(row[1]),
-            waiting_state=None if row[2] is None else str(row[2]),
-            waiting_rule_id=None if row[3] is None else str(row[3]),
-            razon_social=None if row[4] is None else str(row[4]),
-            total=cast(Decimal | None, row[5]),
-            batch_prepared_at=None,
-        )
-        for row in raw
-    ]
+    return [_pending_row(row) for row in await cur.fetchall()]
+
+
+async def list_recent_in(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    states: Collection[str],
+    limit: int,
+) -> list[PendingRow]:
+    """Return the profile's newest invoices in ``states``, newest first (D189, S4.9).
+
+    Same columns, order and ``limit`` as :func:`list_recent`, but only the invoices whose
+    state is in ``states``; an empty ``states`` returns nothing. Does not commit.
+    """
+    if not states:
+        return []
+    cur = await conn.execute(
+        _LIST_SELECT
+        + """
+        WHERE i.profile_id = %s
+          AND i.state = ANY(%s)
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT %s
+        """,
+        (profile_id, list(states), limit),
+    )
+    return [_pending_row(row) for row in await cur.fetchall()]
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:

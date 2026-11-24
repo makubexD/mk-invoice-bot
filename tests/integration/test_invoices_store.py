@@ -36,6 +36,7 @@ from invoicebot.store.invoices import (
     has_file,
     list_pending,
     list_recent,
+    list_recent_in,
     list_unattached_uploads,
     load_flow,
     load_invoice_head,
@@ -980,3 +981,114 @@ async def test_list_rows_name_the_issuer_from_the_padron(
     expected = {from_padron: "EMISOR DEL PADRON S.A.", own_name: "NOMBRE PROPIO"}
     assert {row.id: row.razon_social for row in recent} == expected
     assert {row.id: row.razon_social for row in pending} == expected
+
+
+async def test_list_recent_in_keeps_only_the_requested_states_newest_first(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: only invoices in states come back, newest first."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        oldest = await create_invoice(conn, profile_id, CHANNEL)
+        newest = await create_invoice(conn, profile_id, CHANNEL)
+        untouched = await create_invoice(conn, profile_id, CHANNEL)
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-20 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (FAILED, oldest),
+        )
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-21 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (CANCELLED, newest),
+        )
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-22 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (MANUAL_REQUIRED, untouched),
+        )
+        rows = await list_recent_in(conn, profile_id, (FAILED, CANCELLED), 10)
+
+    assert [row.id for row in rows] == [newest, oldest]
+    assert {row.state for row in rows} == {FAILED, CANCELLED}
+
+
+async def test_list_recent_in_limit_caps_the_newest_rows(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: limit caps the rows, keeping the newest."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        oldest = await create_invoice(conn, profile_id, CHANNEL)
+        middle = await create_invoice(conn, profile_id, CHANNEL)
+        newest = await create_invoice(conn, profile_id, CHANNEL)
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-20 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (FAILED, oldest),
+        )
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-21 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (FAILED, middle),
+        )
+        await conn.execute(
+            """
+            UPDATE invoices
+            SET created_at = TIMESTAMPTZ '2026-11-22 10:00:00+00', state = %s
+            WHERE id = %s
+            """,
+            (FAILED, newest),
+        )
+        rows = await list_recent_in(conn, profile_id, (FAILED,), 2)
+
+    assert [row.id for row in rows] == [newest, middle]
+
+
+async def test_list_recent_in_never_returns_another_profiles_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: another profile's invoices never appear."""
+    profile_id = f"profile-{uuid4().hex}"
+    other_profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        own = await create_invoice(conn, profile_id, CHANNEL)
+        foreign = await create_invoice(conn, other_profile_id, CHANNEL)
+        await conn.execute(
+            "UPDATE invoices SET state = %s WHERE id = ANY(%s)",
+            (FAILED, [own, foreign]),
+        )
+        rows = await list_recent_in(conn, profile_id, (FAILED,), 10)
+
+    assert [row.id for row in rows] == [own]
+
+
+async def test_list_recent_in_returns_nothing_for_an_empty_states(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: an empty states collection returns []."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        await create_invoice(conn, profile_id, CHANNEL)
+        rows = await list_recent_in(conn, profile_id, (), 10)
+
+    assert rows == []
