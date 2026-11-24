@@ -12,6 +12,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_mes
 from invoicebot.pipeline.questions import retry_button
 from invoicebot.queue.jobs import CRASH_LOOP_ERROR
 from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.states import SETTLED
 from invoicebot.store.invoices import load_invoice_head
 
 #: Rule that tells the sender the job died (BR-S03).
@@ -34,19 +35,21 @@ async def notify_dead(
     """Tell the sender and the admins that invoice_id's ``step`` job died (BR-S03, D190).
 
     Queues the sender's notice with [Reintentar] and the admins' alert in the
-    caller's transaction; an unknown invoice queues nothing.
+    caller's transaction; an unknown invoice queues nothing. An invoice already DONE
+    or CANCELLED is settled for the sender, so only the admins hear of it.
     """
     head = await load_invoice_head(conn, invoice_id)
     if head is None:
         return
-    await queue_message(
-        conn,
-        Addressee(head.origin_channel, head.profile_id),
-        MESSAGES[RULE_DEAD].format(id=invoice_id),
-        invoice_id=invoice_id,
-        rule_id=RULE_DEAD,
-        buttons=[retry_button(invoice_id)],
-    )
+    if head.state not in SETTLED:
+        await queue_message(
+            conn,
+            Addressee(head.origin_channel, head.profile_id),
+            MESSAGES[RULE_DEAD].format(id=invoice_id),
+            invoice_id=invoice_id,
+            rule_id=RULE_DEAD,
+            buttons=[retry_button(invoice_id)],
+        )
     await queue_admin_alert(
         conn,
         profiles,

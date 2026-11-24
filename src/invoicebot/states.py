@@ -50,6 +50,8 @@ ALL_STATES: Final[frozenset[str]] = frozenset(
 )
 #: No further job moves an invoice out of these states.
 TERMINAL: Final[frozenset[str]] = frozenset({DONE, CANCELLED, FAILED})
+#: Terminal states a dead job leaves as they are: the invoice is filed or voided (BR-S03, D190).
+SETTLED: Final[frozenset[str]] = frozenset({DONE, CANCELLED})
 
 #: The states where the bot waits for the user's next message (D94).
 WAITING_FOR_USER: Final[frozenset[str]] = frozenset({CONFIRMING, EXTRACT_FAILED, CONFIRM_INVALID})

@@ -16,6 +16,7 @@ from invoicebot.channels.base import Attachment, AttachmentKind, InboundMessage,
 from invoicebot.channels.media_limits import MediaRejected, RejectionReason
 from invoicebot.config.models import MediaLimits
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.steps import EXTRACT_STEP as EXTRACT_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, REJECTION_DESC
@@ -23,8 +24,6 @@ from invoicebot.states import CANCELLED
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import FileRecord, add_file, has_file, set_state
 
-#: Job step that reads the downloaded photo or PDF (S3.11).
-EXTRACT_STEP = "extract"
 #: Rule that cancels media over a cap or of an unsupported type (BR-E07).
 RULE_MEDIA_REJECTED = "BR-E07"
 #: Bytes in a megabyte, for BR-E07's photo and PDF caps.

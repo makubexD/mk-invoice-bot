@@ -31,6 +31,7 @@
 ```
 
 **Pattern map:**
+
 - **Hexagonal (ports and adapters):** channels, fetchers and sinks.
 - **Chain of Responsibility:** fetchers.
 - **State machine:** invoice lifecycle.
@@ -42,39 +43,43 @@
 - **Published contract (P10):** REST, MCP and events are the only way other systems (Jarvis, n8n) reach the bot. The bot never calls into them except to deliver events.
 
 ## 2. Tech stack (chosen for a 2 GB RAM host, D42)
-| Concern | Choice | Why |
-|---|---|---|
-| Language | Python 3.12, `uv` | Best OCR, QR, openpyxl and Playwright ecosystem |
-| HTTP server | FastAPI (on Starlette) + uvicorn (1 worker, `--loop uvloop`) | Async; OpenAPI for the REST contract (R-12.1) at little extra cost |
-| MCP server | Official `mcp` Python SDK, streamable HTTP, mounted in the same app | R-12.2; no extra process |
-| Models / config | pydantic v2 + `pydantic-settings`, YAML | Validation of config and extracted data |
-| HTTP client | `httpx` (one shared AsyncClient, HTTP/2 off, pooled) | Thin REST to Meta, Google, Graph and SUNAT; avoids the heavy `google-api-python-client` |
-| DB / queue / cache | **Postgres 16** via `psycopg` 3 (async, small pool); Alembic with plain-SQL migrations | D40: safe concurrent writes, remote querying for the API, queue via `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` to wake the worker |
-| QR | `zxing-cpp`, `opencv-contrib-python-headless` (wechat_qrcode), `pyzbar` | Cascade |
-| OCR | Tesseract 5 + `spa` (apt), invoked as a subprocess | Memory is freed when it exits |
-| Images | OpenCV headless; downscale long side to ≤ 2000 px; `cv2.IMREAD_REDUCED_*` when huge | Bounded memory |
-| Browser | Playwright + `chromium-headless-shell`, launched per fetch batch, closed after 60 s idle | Never resident |
-| Excel | The mapped cells are patched inside the `.xlsx` package (stdlib `zipfile` + `lxml` on the sheet XML); every other part is copied unchanged; template SHA-256 pinned in config. `openpyxl` only reads (for tests and the config check) | A test on the owner's real template (2026-11-12) showed an openpyxl load-and-save drops its 3 drawn shapes, its custom metadata and the cached value of the total; Graph's Excel API is unsupported on personal OneDrive; R-7.4, R-7.10 |
-| XML | `lxml` with UBL 2.1 XPaths (ported from Greenter), parser with `resolve_entities=False`, `no_network=True`, `load_dtd=False`; `DOCTYPE` rejected; 2 MB cap. No signature checks in the MVP (D57) | Fast, small; R-2.12 |
-| Auth | Google OAuth refresh token (manual HTTP), `msal` token cache for Graph | |
-| Padrón RUC | Postgres table `padron(ruc bigint PRIMARY KEY, razon_social, estado, condicion)`, refreshed weekly by streaming the ZIP into `COPY` on a staging table, then swapping. SUNAT updates the ZIP daily; it is ~395 MB, so a weekly refresh costs ~1.6 GB/month of bandwidth and needs ~0.4 GB of free disk while it streams (see §8) | Indexed lookup, ~0 app RAM |
-| LLM fallback | Optional adapter behind an `LLMExtractor` port; thin `httpx` call to an OpenAI-compatible endpoint. Default **DeepSeek `deepseek-flash`** (accepts images, ~1,024 tokens per image), **per-flow opt-in, never flow B** (D43). Usage recorded in `llm_usage` | D24, D43, R-2.11 |
-| Secrets | One file encrypted with `age` (or `systemd-creds`), decrypted into memory at start; `.env` for non-secret settings only. The live database password is a file outside the repo, read through `passfile` (D148) | R-9.9 |
-| Deploy | Docker Compose: `app` (mem_limit 900m) + `postgres` (mem_limit 300m, `shared_buffers=64MB`) + `cloudflared` on the VPS; on the local MVP host (D141) a separate Compose project `invoicebot-live` (D148) behind Tailscale Funnel (D146); 1–2 GB swapfile on host. **One path (D46):** green CI on `main` builds the image and deploys code and config (§15). Local dev uses the same Compose file (D31) | |
-| n8n | **Optional** event subscriber (R-12.4) | See below |
+
+| Concern            | Choice                                                                                                                                                                                                                                                                                                                                                                                                  | Why                                                                                                                                                                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Language           | Python 3.12, `uv`                                                                                                                                                                                                                                                                                                                                                                                       | Best OCR, QR, openpyxl and Playwright ecosystem                                                                                                                                                                                         |
+| HTTP server        | FastAPI (on Starlette) + uvicorn (1 worker, `--loop uvloop`)                                                                                                                                                                                                                                                                                                                                            | Async; OpenAPI for the REST contract (R-12.1) at little extra cost                                                                                                                                                                      |
+| MCP server         | Official `mcp` Python SDK, streamable HTTP, mounted in the same app                                                                                                                                                                                                                                                                                                                                     | R-12.2; no extra process                                                                                                                                                                                                                |
+| Models / config    | pydantic v2 + `pydantic-settings`, YAML                                                                                                                                                                                                                                                                                                                                                                 | Validation of config and extracted data                                                                                                                                                                                                 |
+| HTTP client        | `httpx` (one shared AsyncClient, HTTP/2 off, pooled)                                                                                                                                                                                                                                                                                                                                                    | Thin REST to Meta, Google, Graph and SUNAT; avoids the heavy `google-api-python-client`                                                                                                                                                 |
+| DB / queue / cache | **Postgres 16** via `psycopg` 3 (async, small pool); Alembic with plain-SQL migrations                                                                                                                                                                                                                                                                                                                  | D40: safe concurrent writes, remote querying for the API, queue via `FOR UPDATE SKIP LOCKED`, `LISTEN/NOTIFY` to wake the worker                                                                                                        |
+| QR                 | `zxing-cpp`, `opencv-contrib-python-headless` (wechat_qrcode), `pyzbar`                                                                                                                                                                                                                                                                                                                                 | Cascade                                                                                                                                                                                                                                 |
+| OCR                | Tesseract 5 + `spa` (apt), invoked as a subprocess                                                                                                                                                                                                                                                                                                                                                      | Memory is freed when it exits                                                                                                                                                                                                           |
+| Images             | OpenCV headless; downscale long side to ≤ 2000 px; `cv2.IMREAD_REDUCED_*` when huge                                                                                                                                                                                                                                                                                                                     | Bounded memory                                                                                                                                                                                                                          |
+| Browser            | Playwright + `chromium-headless-shell`, launched per fetch batch, closed after 60 s idle                                                                                                                                                                                                                                                                                                                | Never resident                                                                                                                                                                                                                          |
+| Excel              | The mapped cells are patched inside the `.xlsx` package (stdlib `zipfile` + `lxml` on the sheet XML); every other part is copied unchanged; template SHA-256 pinned in config. `openpyxl` only reads (for tests and the config check)                                                                                                                                                                   | A test on the owner's real template (2026-11-12) showed an openpyxl load-and-save drops its 3 drawn shapes, its custom metadata and the cached value of the total; Graph's Excel API is unsupported on personal OneDrive; R-7.4, R-7.10 |
+| XML                | `lxml` with UBL 2.1 XPaths (ported from Greenter), parser with `resolve_entities=False`, `no_network=True`, `load_dtd=False`; `DOCTYPE` rejected; 2 MB cap. No signature checks in the MVP (D57)                                                                                                                                                                                                        | Fast, small; R-2.12                                                                                                                                                                                                                     |
+| Auth               | Google OAuth refresh token (manual HTTP), `msal` token cache for Graph                                                                                                                                                                                                                                                                                                                                  |                                                                                                                                                                                                                                         |
+| Padrón RUC         | Postgres table `padron(ruc bigint PRIMARY KEY, razon_social, estado, condicion)`, refreshed weekly by streaming the ZIP into `COPY` on a staging table, then swapping. SUNAT updates the ZIP daily; it is ~395 MB, so a weekly refresh costs ~1.6 GB/month of bandwidth and needs ~0.4 GB of free disk while it streams (see §8)                                                                        | Indexed lookup, ~0 app RAM                                                                                                                                                                                                              |
+| LLM fallback       | Optional adapter behind an `LLMExtractor` port; thin `httpx` call to an OpenAI-compatible endpoint. Default **DeepSeek `deepseek-flash`** (accepts images, ~1,024 tokens per image), **per-flow opt-in, never flow B** (D43). Usage recorded in `llm_usage`                                                                                                                                             | D24, D43, R-2.11                                                                                                                                                                                                                        |
+| Secrets            | One file encrypted with `age` (or `systemd-creds`), decrypted into memory at start; `.env` for non-secret settings only. The live database password is a file outside the repo, read through `passfile` (D148)                                                                                                                                                                                          | R-9.9                                                                                                                                                                                                                                   |
+| Deploy             | Docker Compose: `app` (mem_limit 900m) + `postgres` (mem_limit 300m, `shared_buffers=64MB`) + `cloudflared` on the VPS; on the local MVP host (D141) a separate Compose project `invoicebot-live` (D148) behind Tailscale Funnel (D146); 1–2 GB swapfile on host. **One path (D46):** green CI on `main` builds the image and deploys code and config (§15). Local dev uses the same Compose file (D31) |                                                                                                                                                                                                                                         |
+| n8n                | **Optional** event subscriber (R-12.4)                                                                                                                                                                                                                                                                                                                                                                  | See below                                                                                                                                                                                                                               |
 
 ### Note on n8n (open question Q1)
+
 You chose "code + n8n". On a small host, n8n (250–450 MB resident) **plus** a Chromium fetch (≈300 MB) plus OCR can exceed the budget.
 
 **Design decision:** the Python core implements every adapter natively, through thin REST calls. n8n, like Jarvis, is an **optional event subscriber** (R-12.4): it receives the signed `invoice.delivered` event with the invoice JSON and file URLs, and can call back through the REST API.
 
 2 GB is now the baseline host (D42), and that is still tight for n8n beside a Chromium fetch. Enable it when:
+
 - a. n8n runs on another machine, or
 - b. `memprofile.py` shows enough headroom on the bot's host during a browser job.
 
 You keep visual customization when you want it, and the core never depends on it.
 
 ## 3. Data model (Postgres)
+
 ```
 messages(channel TEXT, external_id TEXT, profile_id, kind, received_at, payload_json,
          invoice_id NULL /*the invoice this message belongs to; resolves a quoted message (R-1.5)*/,
@@ -120,6 +125,7 @@ events(id PK, type, version, invoice_id NULL, payload_json, created_at)         
 channel_windows(channel, recipient /*profile id*/, last_inbound_at,
                 PRIMARY KEY (channel, recipient))   -- WhatsApp 24 h service window (R-1.10)
 ```
+
 Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confirmed.
 
 `flow_data_json`, the `prepared` batch state and the `eml` and `manifest` file kinds arrive in a new expand-only migration in the `file-b` phase; `ops_state`, `gaps.raised_at` and `jobs.created_at` (for retention) arrive with `widen-b-gaps-ops`; `payment_id`, `payments`, `payment_proposals` and `mail_jobs` arrive with `widen-b-deliver` (S11.11, S11.15), their first callers, and `outbox.channel_message_id` with the quote match of D102. Merged revisions are not edited.
@@ -128,56 +134,60 @@ Natural key: `"{ruc_emisor}-{tipo}-{serie}-{int(numero)}"`. It is set once confi
 - **Retention (R-9.12):** `messages.payload_json` is nulled after 30 days; `outbox`, `events` and `jobs` rows are deleted after 90 days; `invoices` are kept. A nightly housekeeping job enforces it.
 
 ## 4. Invoice state machine
+
 Main path:
+
 ```
 RECEIVED ─► EXTRACTING ─► ROUTING ─► VALIDATING ─► FETCHING_DOCS ─► DELIVERING ─► DONE                    (flow A)
             qr → ocr →                                 ▲   │            └─► BATCHED ─(batch sent)─► DONE   (flow B)
             llm if the flow opts in                    │   ▼
                                                     WAITING_CAPTCHA
 ```
+
 Side states and exits (each row names the rule that causes it):
 
-| From | Trigger | To |
-|---|---|---|
-| EXTRACTING | QR, XML and OCR miss required fields, and the LLM is off for the flow, fails, or hit its cap (BR-E01, BR-E08) | EXTRACT_FAILED |
-| EXTRACTING | Unsupported or oversized media (BR-E07) | CANCELLED |
-| EXTRACT_FAILED | The user sends a better photo, or the data as `campo=valor` | EXTRACTING / ROUTING |
-| ROUTING | BR-R03, BR-R04, BR-E03, any `source=llm` field, or `confirm_mode: always` (BR-S10, D126) | CONFIRMING |
-| ROUTING | The flow is decided and nothing needs asking (D124) | VALIDATING (a `validate` job sends the routed summary) |
-| ROUTING | `unmatched: reject` (BR-R07), or the flow isn't allowed for the profile (BR-R05) | CANCELLED |
-| CONFIRMING | The user answers: confirms, picks, edits (D92) | ROUTING (the answer is stored and the route step runs again; it then moves to VALIDATING) |
-| VALIDATING | `estadoCp` 2 or 4 (BR-V02, BR-V06) | CONFIRM_INVALID |
-| VALIDATING | Any other answer, an outage (BR-V04) or validation off (D124, D125) | FETCHING_DOCS |
-| CONFIRM_INVALID | The user continues / cancels | FETCHING_DOCS / CANCELLED |
-| EXTRACT_FAILED, CONFIRMING, CONFIRM_INVALID | No answer within `question_timeout` (BR-S08) | PENDING_USER (the waiting state is stored in `waiting_state`) |
-| PENDING_USER | The user answers the pending question, directly or from `/pendientes` | the stored waiting state |
-| WAITING_CAPTCHA | The user answers / times out (BR-F05) | FETCHING_DOCS (same fetcher / next fetcher) |
-| FETCHING_DOCS | A portal says the invoice doesn't exist yet (D65) | stays FETCHING_DOCS ("esperando al portal"); retried on the portal's schedule, then the next fetcher |
-| FETCHING_DOCS | The chain ends in `manual` (BR-F07) | MANUAL_REQUIRED |
-| MANUAL_REQUIRED | The user sends the files (R-1.5) / a linked gap is fixed (R-11.9) | DELIVERING / FETCHING_DOCS |
-| DELIVERING | A token expired or was revoked (BR-D01) | PENDING_AUTH, then DELIVERING after re-auth |
-| DELIVERING | The Excel template is missing, invalid or its hash doesn't match (BR-D02) | MANUAL_REQUIRED |
-| ROUTING (flow B) | Total above `reimbursement_cap` (BR-D06) | CONFIRMING |
-| DELIVERING (flow B) | Every sink done; added to its batch (a batch of one with `per_invoice`, R-7.5) | BATCHED |
-| BATCHED | The batch is `sent` (R-7.8): Graph accepted the email, the laptop wrote its receipt, or the sender tapped [Ya lo envié] | DONE (files purged, `invoice.delivered`) |
-| BATCHED | The email can't be prepared or sent after retries (BR-D03) | stays BATCHED; the batch goes `failed` |
-| BATCHED (batch `failed`) | `/reprocesar <id>` (S4.9, D96) | DELIVERING (the delivery runs again and re-adds the invoice to a batch) |
-| any non-terminal | `/cancelar`, BR-E05 | CANCELLED |
-| any | A transient error 5 times, or the worker dies twice on the same job (BR-S03) | FAILED |
-| FAILED | `/reprocesar <id>` | FETCHING_DOCS |
+| From                                        | Trigger                                                                                                                 | To                                                                                                   |
+| ------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| EXTRACTING                                  | QR, XML and OCR miss required fields, and the LLM is off for the flow, fails, or hit its cap (BR-E01, BR-E08)           | EXTRACT_FAILED                                                                                       |
+| EXTRACTING                                  | Unsupported or oversized media (BR-E07)                                                                                 | CANCELLED                                                                                            |
+| EXTRACT_FAILED                              | The user sends a better photo, or the data as `campo=valor`                                                             | EXTRACTING / ROUTING                                                                                 |
+| ROUTING                                     | BR-R03, BR-R04, BR-E03, any `source=llm` field, or `confirm_mode: always` (BR-S10, D126)                                | CONFIRMING                                                                                           |
+| ROUTING                                     | The flow is decided and nothing needs asking (D124)                                                                     | VALIDATING (a `validate` job sends the routed summary)                                               |
+| ROUTING                                     | `unmatched: reject` (BR-R07), or the flow isn't allowed for the profile (BR-R05)                                        | CANCELLED                                                                                            |
+| CONFIRMING                                  | The user answers: confirms, picks, edits (D92)                                                                          | ROUTING (the answer is stored and the route step runs again; it then moves to VALIDATING)            |
+| VALIDATING                                  | `estadoCp` 2 or 4 (BR-V02, BR-V06)                                                                                      | CONFIRM_INVALID                                                                                      |
+| VALIDATING                                  | Any other answer, an outage (BR-V04) or validation off (D124, D125)                                                     | FETCHING_DOCS                                                                                        |
+| CONFIRM_INVALID                             | The user continues / cancels                                                                                            | FETCHING_DOCS / CANCELLED                                                                            |
+| EXTRACT_FAILED, CONFIRMING, CONFIRM_INVALID | No answer within `question_timeout` (BR-S08)                                                                            | PENDING_USER (the waiting state is stored in `waiting_state`)                                        |
+| PENDING_USER                                | The user answers the pending question, directly or from `/pendientes`                                                   | the stored waiting state                                                                             |
+| WAITING_CAPTCHA                             | The user answers / times out (BR-F05)                                                                                   | FETCHING_DOCS (same fetcher / next fetcher)                                                          |
+| FETCHING_DOCS                               | A portal says the invoice doesn't exist yet (D65)                                                                       | stays FETCHING_DOCS ("esperando al portal"); retried on the portal's schedule, then the next fetcher |
+| FETCHING_DOCS                               | The chain ends in `manual` (BR-F07)                                                                                     | MANUAL_REQUIRED                                                                                      |
+| MANUAL_REQUIRED                             | The user sends the files (R-1.5) / a linked gap is fixed (R-11.9)                                                       | DELIVERING / FETCHING_DOCS                                                                           |
+| DELIVERING                                  | A token expired or was revoked (BR-D01)                                                                                 | PENDING_AUTH, then DELIVERING after re-auth                                                          |
+| DELIVERING                                  | The Excel template is missing, invalid or its hash doesn't match (BR-D02)                                               | MANUAL_REQUIRED                                                                                      |
+| ROUTING (flow B)                            | Total above `reimbursement_cap` (BR-D06)                                                                                | CONFIRMING                                                                                           |
+| DELIVERING (flow B)                         | Every sink done; added to its batch (a batch of one with `per_invoice`, R-7.5)                                          | BATCHED                                                                                              |
+| BATCHED                                     | The batch is `sent` (R-7.8): Graph accepted the email, the laptop wrote its receipt, or the sender tapped [Ya lo envié] | DONE (files purged, `invoice.delivered`)                                                             |
+| BATCHED                                     | The email can't be prepared or sent after retries (BR-D03)                                                              | stays BATCHED; the batch goes `failed`                                                               |
+| BATCHED (batch `failed`)                    | `/reprocesar <id>` (S4.9, D96)                                                                                          | DELIVERING (the delivery runs again and re-adds the invoice to a batch)                              |
+| any non-terminal                            | `/cancelar`, BR-E05                                                                                                     | CANCELLED                                                                                            |
+| any                                         | A transient error 5 times, or the worker dies twice on the same job (BR-S03)                                            | FAILED                                                                                               |
+| FAILED                                      | `/reprocesar <id>`                                                                                                      | FETCHING_DOCS; RECEIVED (download or extract again) when it never got a flow (D190)                  |
 
 Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
 
-- Each transition is a single Postgres transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain *why* an invoice is where it is.
+- Each transition is a single Postgres transaction (state update + next job insert + outbox message), and it records the **rule ID** that caused it (`invoices.rule_id`). `/estado` can therefore always explain _why_ an invoice is where it is.
 - **Payment** is not an invoice state. A `DONE` flow B invoice gets `payment_id` from `/pagado` (R-7.12), and the folder rename and move run as jobs (R-7.11).
 - With `confirm_mode: auto`, the "Editar" and "Cancelar" buttons from the summary are accepted in any state before `DELIVERING`. An edit re-enters `ROUTING`. A button pressed later gets BR-S02.
 
 ## 5. Extraction pipeline detail
+
 1. **Load:**
    - Check the byte cap for the media type, and read the image header: more than 40 megapixels is rejected **before decoding** (R-1.11, BR-E07).
    - Decode with `cv2.imdecode`, downscale to ≤ 2000 px on the long side.
    - Keep a grayscale copy and drop the color image as soon as possible.
-The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 5 merges their readings (D81).
+     The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 5 merges their readings (D81).
 
 2. **QR cascade** (stop at the first payload that parses as SUNAT):
    1. zxing-cpp `read_barcodes(gray, formats=QRCode|PDF417)`. Older CPEs used PDF417.
@@ -221,7 +231,9 @@ The QR cascade (steps 2–3) and OCR (step 4) both run on every photo, and step 
    - Any `source=llm` field forces `CONFIRMING`.
 
 ## 6. Fetcher chain
+
 Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, files[], reason)`. `reason` is an enum code, never response text. The `FetchContext` gives access to:
+
 - the browser, which runs in a helper process per fetch (D82),
 - `ask_user(image, prompt, timeout)` for captchas,
 - the HTTP client, wrapped by the request guard (R-5.10),
@@ -230,33 +242,41 @@ Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, 
 Default order for flow A: `qr_url → portal_registry → sunat_sol → email_inbox → manual`. When a fetcher fails for good, the chain moves to the **next** fetcher (R-5.1).
 
 **Store directory** (D47, R-5.8): two folders of small files in the repo, `config/stores/` and `config/portals/`. The examples below use a synthetic RUC.
+
 ```yaml
 # stores/20000000001.yaml: one file per issuer RUC
 ruc: "20000000001"
 razon_social: "EJEMPLO RESTAURANTES S.A.C."
 tipo: restaurante
-brands:                                 # one RUC can run several brands
-  - comercio: LaLena                    # short name used in folder names
-    serie_prefix: [F014, F011]          # picks the brand; no match and several brands -> one-tap question
-portal: nubefact                        # key of a file in portals/
+brands: # one RUC can run several brands
+  - comercio: LaLena # short name used in folder names
+    serie_prefix: [F014, F011] # picks the brand; no match and several brands -> one-tap question
+portal: nubefact # key of a file in portals/
 notes: ""
 ```
+
 ```yaml
 # portals/nubefact.yaml: one file per portal site, shared by all its stores
-adapter: generic_form                   # or python: invoicebot.fetchers.portals.nubefact:Adapter (only this package is allowed)
+adapter: generic_form # or python: invoicebot.fetchers.portals.nubefact:Adapter (only this package is allowed)
 url: "https://.../buscar"
-fields:                                 # CSS selector -> expression
+fields: # CSS selector -> expression
   "#ruc": "{ruc_emisor}"
   "#tipo": { select: "{tipo}" }
   "#serie": "{serie}"
   "#numero": "{numero}"
   "#fecha": "{fecha:%d/%m/%Y}"
   "#total": "{total:.2f}"
-captcha: { kind: image, image: "#captchaImg", input: "#captcha", solver: [tesseract, user] }   # none | image | recaptcha
+captcha: {
+    kind: image,
+    image: "#captchaImg",
+    input: "#captcha",
+    solver: [tesseract, user],
+  } # none | image | recaptcha
 submit: "#btnBuscar"
 downloads: { xml: "a:has-text('XML')", pdf: "a:has-text('PDF')" }
-status: active                          # active | todo | broken
+status: active # active | todo | broken
 ```
+
 - **Seeding the directory:** the owner supplies each store's page, fields and captcha; RUC, legal name and short name are pre-filled from the owner's past invoices (S0.6). New issuers default to the next fetcher. A link taught in chat is used only after the owner approves it (R-10.2).
 - **`sunat_sol` (flow A):**
   - Playwright login with the secondary SOL user, navigate to "Consulta de comprobantes de pago", query by issuer, serie and número, download the XML.
@@ -278,53 +298,76 @@ status: active                          # active | todo | broken
 - **`manual`:** marks the state and composes the message listing the failed fetchers and reasons.
 
 ## 7. Sinks and flows (declarative)
+
 `config/example.yaml` shows the full shape. Key ideas:
+
 - **Flows are config (D53).** A flow lists `accepted_tipos`, `fetchers` (ordered), `required_docs`, and `sinks` (ordered); routing rules pick it by buyer and type. A new flow, sink or mail mode is a new config entry or a new module behind an existing port, registered in one mapping; no `if flow == …` in the pipeline. Some sinks are `batch_aware`.
 - A sink receives a `DeliveryContext` (invoice, files, previous sink outputs such as Drive links) and returns refs that later sinks or the final message can use. Flow A's refs are flat values (D131): the Drive sink returns `link_folder`, `link_photo`, `link_pdf`, `link_xml`, the Sheets sink `link_row`.
 - **Flow A (D129–D133):** `DELIVER_STEP` dispatches by the flow's first sink kind (D132). `invoicebot google-setup --flow <name>` creates the flow's Drive root folder, only when the flow has a Drive sink, and its Sheet with the header, so `drive.file` is enough (D129). A flow whose sheets sink sets `existing: true` uses the owner's own sheet instead: `google-setup` adds the missing tab with the header, or checks row 1 and exits 1 when it differs, and never edits another tab (D145). Files go to `{root}/{YYYY}/{MM}/`, reused by name on a retry. The Sheet's column A, `Clave`, holds the natural key; a known key updates its row, a new one appends (D130). `DONE` sends BR-D16, or BR-D17 when the PDF is missing (D133).
 - Template expressions use a tiny safe formatter (`str.format_map` with a restricted namespace plus formatting filters), not full Jinja, to save memory. Jinja is used only for email bodies, and imported lazily.
 - **Formula injection (R-6.6, R-7.10):** Sheets writes use `valueInputOption=RAW`; Excel text cells are written as strings; any text starting with `= + - @`, tab or carriage return gets a leading `'`. The Excel template's SHA-256 is pinned in config.
 - **Flow B (D48, D49, D61–D71):** `DELIVERING` builds the invoice's folder, patches the Excel and stores the PDF and XML on each storage target, then prepares the email through the first configured mail mode. Each invoice is a batch of one. The batch is `prepared` until R-7.8 says it is `sent`; then the invoice is `DONE` and a job renames the folder `_Sent`. `/pagado` later renames it `_PAID_…` and moves it into the year folder. The target config (placeholders; `config/example.yaml` moves to this shape in the `file-b` phase):
+
 ```yaml
 work_microsoft:
   label: "Trabajo (Microsoft)"
-  accepted_tipos: ["01"]                 # facturas only (BR-R08)
+  accepted_tipos: ["01"] # facturas only (BR-R08)
   fetchers: [qr_url, portal_registry, email_inbox, manual]
   required_docs: [pdf, xml]
-  manual_uploads: [pdf, xml]             # what the sender may send for a stuck invoice (R-1.5)
+  manual_uploads: [pdf, xml] # what the sender may send for a stuck invoice (R-1.5)
   llm_allowed: false
-  reimbursement: { cap: 50.00, track_payments: true }   # BR-D06, /pagado
+  reimbursement: { cap: 50.00, track_payments: true } # BR-D06, /pagado
   sinks:
     - kind: onedrive_folder
-      targets: [onedrive_personal]       # later: onedrive_work
+      targets: [onedrive_personal] # later: onedrive_work
       root: "/Reembolsos"
       folder: "{fecha:%Y}-{fecha:%m}-Support_{seq}_{comercio}"
-      files: { pdf: "{profile.legal_name}.pdf", xml: "{profile.legal_name}.xml" }
+      files:
+        { pdf: "{profile.legal_name}.pdf", xml: "{profile.legal_name}.xml" }
       on_sent: { suffix: "_Sent" }
-      on_paid: { suffix: "_PAID_{paid:%d_%m}___{payment_total}", move_to: "{fecha:%Y}" }
+      on_paid:
+        {
+          suffix: "_PAID_{paid:%d_%m}___{payment_total}",
+          move_to: "{fecha:%Y}",
+        }
     - kind: excel_template
-      template: "/data/templates/reembolsos.xlsx"   # a local file on the host, never in git (D86)
+      template: "/data/templates/reembolsos.xlsx" # a local file on the host, never in git (D86)
       template_sha256: "<pinned>"
       output: "Formato de reembolsos.xlsx"
       sheet: "Template"
-      cells: { C13: "{motivo}", B16: "{fecha:%d/%m/%Y}", C16: "{descripcion}", E16: "{serie}-{numero}",
-               F16: "{base}", G16: "{igv}", H16: "{service_charge}", I16: "{total}" }
+      cells:
+        {
+          C13: "{motivo}",
+          B16: "{fecha:%d/%m/%Y}",
+          C16: "{descripcion}",
+          E16: "{serie}-{numero}",
+          F16: "{base}",
+          G16: "{igv}",
+          H16: "{service_charge}",
+          I16: "{total}",
+        }
       defaults: { motivo: "Support release", descripcion: "Cena en {comercio}" }
     - kind: mailer
       trigger: per_invoice
-      modes: [graph]                     # MVP. Later, by config: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
-      account: personal                  # personal | bot | work (one token cache each)
-      to: ["me@example.com"]             # MVP: the owner's test inbox; HR's address only in the host's private config
+      modes: [graph] # MVP. Later, by config: [inbox_rule, laptop_outlook, forward_to_self, eml_draft]
+      account: personal # personal | bot | work (one token cache each)
+      to: ["me@example.com"] # MVP: the owner's test inbox; HR's address only in the host's private config
       subject: "Support release {fecha:%d/%m/%Y}"
       body: "Hola,\nAdjunto los documentos solicitados para el reembolso."
       attach: [excel_template, pdf, xml]
 # top level, next to `flows:`
-env: development                         # production is required for mail.send_enabled: true (R-7.7, D89)
-mail: { send_enabled: false, owner_work_address: null, confirm_timeout: 24h, agent_stale_after: 4h }   # D108, D109
-microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
+env: development # production is required for mail.send_enabled: true (R-7.7, D89)
+mail: {
+    send_enabled: false,
+    owner_work_address: null,
+    confirm_timeout: 24h,
+    agent_stale_after: 4h,
+  } # D108, D109
+microsoft: { client_id: "<entra app id>", timeout_s: 30 } # D84
 ```
 
 ## 8. Resource budget and efficiency tactics
+
 - **One uvicorn worker.** CPU work (OpenCV) runs in `asyncio.to_thread`, guarded by `HEAVY = asyncio.Semaphore(1)`. Tesseract and Chromium run as subprocesses, so their memory is returned to the OS when they exit.
 - **Browser lifecycle (D82):** no `BrowserPool`. Each fetch starts `python -m invoicebot.fetchers.browser`, which launches Chromium's headless shell with one context and exits with it, so Chromium is never resident while idle (S0.9: 224 MB peak, about 4 s cold start).
   - Launch flags: `--disable-dev-shm-usage --no-zygote` (only with Chromium's sandbox off, D168) `--renderer-process-limit=1 --disable-gpu --blink-settings=imagesEnabled=false` (images are re-enabled only for captcha pages).
@@ -337,6 +380,7 @@ microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 - **Measure, don't guess:** a `scripts/memprofile.py` runs the golden set and records peak RSS per step (`psutil`). CI fails if the peak is over 800 MB (R-9.1).
 
 ## 9. Security
+
 - Webhook: HMAC SHA-256 check with the app secret. Verify-token handshake on GET.
 - Allowlist: `profiles:` in config. Each profile is one person with one WhatsApp number and/or one Telegram user id, allowed flows, permissions such as `can_send_batch`, and `admin`. Non-allowlisted senders are logged with a hashed id (R-9.12).
 - **Secrets (R-9.9):** one secrets file encrypted with `age` (or `systemd-creds`), decrypted into memory at start and never written back in plain text. `.env` holds only non-secret settings. The token caches (`msal`, Google refresh token) are stored encrypted with the same key; the `kv` table is UNLOGGED and excluded from plain dumps.
@@ -353,6 +397,7 @@ microsoft: { client_id: "<entra app id>", timeout_s: 30 }   # D84
 - The scraper honors per-domain rate limits (≥ 10 s between requests to the same portal), uses a realistic UA, and makes no parallel requests.
 
 ## 10. Repository layout (planned)
+
 ```
 mk-invoice-bot/
   specs/                 # this spec set
@@ -389,6 +434,7 @@ mk-invoice-bot/
 ```
 
 ## 11. Testing strategy
+
 - **Unit tests:**
   - QR payload parser (variants), RUC check digit, regex rules (table-driven), UBL parser, state machine transitions, cell-mapping formatter, batch strategies.
 - **Golden set (D54):** two sets with the same `expected.json` format, one file per image: the required fields (R-2.13), the buyer, `base`, `igv`, `service_charge`, `icbper`, `discounts`, `has_qr`, and `razon_social`. The format is D127: `{"has_qr": bool, "fields": {name: value}}`, one `<name>.json` beside each `<name>.<jpg|png|pdf>`. The **committed** set (`tests/golden/`, ≥ 10) is drawn by a generator script with synthetic RUCs (S3.9) and runs in CI as a regression check. The **private** set (the owner's photos, each with its official XML as the source of `expected.json`, ≥ 30) stays outside git and is measured locally against R-2.9; the result goes to `specs/spikes/accuracy.md`.
@@ -399,6 +445,7 @@ mk-invoice-bot/
 - **Resource test:** `memprofile.py` (R-9.1) and a latency report (R-9.2).
 
 ## 12. Routing (replaces the flow menu)
+
 ```python
 @dataclass(frozen=True, slots=True)
 class Rule:            # compiled once at config load
@@ -407,6 +454,7 @@ class Rule:            # compiled once at config load
     flow: str
 def route(inv, sender) -> RouteResult:   # first match wins; O(rules) ≈ O(1) for a handful of rules
 ```
+
 - Rules come from the `routing:` section of the config. `{owner.ruc}` and `{work.ruc}` are resolved at load time.
 - Unmatched → `RouteResult(flow=None, rule="BR-R03", candidates=[...flows allowed for the sender's profile])` with `unmatched: ask`, or `RouteResult(flow=None, rule="BR-R07")` with `unmatched: reject`.
 - BR-R03 uses WhatsApp's maximum of 3 reply buttons (two flows plus Cancelar). A third candidate flow needs list-message support (up to 10 rows) first.
@@ -414,6 +462,7 @@ def route(inv, sender) -> RouteResult:   # first match wins; O(rules) ≈ O(1) f
 - Adding a flow C (for example, a second company) means a new `flows:` entry plus one routing rule. The code stays the same, apart from the list-message support above.
 
 ## 13. Gap service and GitHub alerts (D44, D45)
+
 ```
 pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.upsert()  (same DB tx as the transition)
                                                            │ new or re-alert due?
@@ -422,6 +471,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
                                                            ▼ (worker, retries with backoff, daily budget ≤ 20 GitHub writes)
                                             GitHub REST via the shared httpx client (no extra dependency)
 ```
+
 - **Where:** issues go only to the **private ops repo** (`gaps.github.repo`, placeholder `owner/mk-invoice-bot-ops`). The main repo gets no bot writes in the MVP.
 - **Idempotency:**
   - The fingerprint is the gaps PK.
@@ -436,6 +486,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **End of development (S16.2, D52):** once the main repo is private, a `PORTAL_MISSING` gap also opens a PR that adds `config/stores/<ruc>.yaml` and `config/portals/<key>.yaml` from templates with `status: todo`, so CI stays red until the owner completes it. The App gets Contents and Pull requests on the main repo for this only; YAML is written with a serializer plus a parse-back equality check, and nothing is pushed to the default branch. **Post-MVP (D44, E16):** the `gap-watch` workflow and bot-made `status: broken` flips.
 
 ## 14. Integration contract (D39, P10, R-12)
+
 ```
                 ┌──────────── mk-invoice-bot ────────────┐
  Jarvis / n8n ──┤ REST /api/v1  (read, write scopes)      │
@@ -443,6 +494,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
                 │ events ──HMAC POST──► subscribers ──────┼──► Jarvis / n8n
                 └─────────────────────────────────────────┘
 ```
+
 - **Dependency direction:** consumers depend on the bot's published contract. The bot depends on no consumer. An unreachable subscriber only delays its own events (outbox retries).
 - **Same rules everywhere:** a write through REST or MCP (`reprocess_invoice`, `cancel_invoice`, `attach_document`) creates a `pending_actions` row and asks the owner in chat (BR-S05). Only after approval does it go through the same state machine and business rules as the chat command; it is recorded with the client token name.
 - **Event envelope:** `{id, type, version, occurred_at, invoice: {id, natural_key, flow_id, state, totals…}, untrusted: {issuer_name: {value, trust: "untrusted", source}, printed_urls: […]}, links: {api, files}}`. Typed data and untrusted text are separate; untrusted values are capped at 120 characters with control characters and markdown stripped; raw OCR or LLM text is never included (R-12.8). File links point to the sinks (Drive or OneDrive), never to bot-local paths.
@@ -453,6 +505,7 @@ pipeline ──raise_gap(kind, subject, invoice_id, hint)──► GapService.up
 - **What Jarvis adds (outside this repo):** natural-language questions over invoices (MCP read tools), reminders from `invoice.manual_required` and `gap.raised`, and fetching documents through the owner's workstation. None of it is needed for the bot to work.
 
 ## 15. Deploy and operations (D46, R-9.11 to R-9.15)
+
 - **One deploy path (D46):** a green CI run on `main` triggers `deploy.yml`:
   1. build and push the image;
   2. `pg_dump` the database (encrypted, R-9.11) before migrating;
@@ -482,19 +535,20 @@ The work tenant may never approve the bot's app. Everything signed in to the wor
 ```
 
 - **Accounts:** the owner's personal Microsoft account (OneDrive only), a dedicated Outlook.com mailbox for the bot (sends and reads only its own mail), and the work account only if consent ever comes (`graph_work`, `onedrive_work`). One MSAL token cache each, in the encrypted store.
-- **`inbox_rule`** is always on and needs no laptop. Its rule is documented in the runbook: *from* the bot mailbox, *subject starts with* `Support release` → *forward to* HR. The forward can't be observed (auto-forwards don't appear in Sent Items, and Microsoft 365 usually blocks auto-forwarding to outside addresses, so a copy back to the bot is not relied on): the rule is trusted, and the sender has a [No llegó] button (D67).
+- **`inbox_rule`** is always on and needs no laptop. Its rule is documented in the runbook: _from_ the bot mailbox, _subject starts with_ `Support release` → _forward to_ HR. The forward can't be observed (auto-forwards don't appear in Sent Items, and Microsoft 365 usually blocks auto-forwarding to outside addresses, so a copy back to the bot is not relied on): the rule is trusted, and the sender has a [No llegó] button (D67).
 - **`laptop_outlook`** sends a clean email (no `RV:`), but only while the laptop is on. The agent rejects a job whose HMAC doesn't verify or whose attachments leave the folder (R-7.14). The files, as built (`sinks/laptop_job.py`, `scripts/laptop_agent.ps1`):
   - **Job** `_outbox/<job_id>.json`: `{"job_id", "invoice_id", "folder", "to": [...], "subject", "body", "attachments": [file names inside that folder], "hmac"}`. `job_id` is 32 lowercase hex characters (`uuid4().hex`); `folder` is relative to the personal OneDrive root (D111). The file is canonical JSON (sorted keys, no spaces, ASCII escapes), and `hmac` is the hex HMAC-SHA256 of the canonical JSON of every other field, keyed with the age-store secret `laptop_agent_key` (D108).
   - **Receipt** `_outbox/receipts/<job_id>.json`, under 4 KiB, with exactly `{"job_id", "sent_at", "hmac"}` (ISO 8601 with a timezone) or `{"job_id", "error", "hmac"}` (at most 500 characters). `hmac` is signed like the job's, over the receipt's other fields with the same key. The agent writes it atomically, then deletes the job file; `parse_receipt` rejects any other key set or an `hmac` that doesn't verify. The bot (`pipeline/laptop.py`) applies each receipt in its own transaction and deletes the file once applied; one it can't apply stays on the drive and is logged.
   - **Agent log** `agent.log` beside the script (`-LogFile` overrides it), on the laptop only: a refused job is logged with its id and the reason, never its content.
 - **Mail modes and how each completes** (D108; the sink lists them in order, `config/example.yaml`). Delivery picks its path from a mapping keyed by `completion`:
 
-  | Mode | Sends through | `completion` | Batch becomes `sent` when | Done rule |
-  |---|---|---|---|---|
-  | `graph` | Graph, account `personal` | `accepted` | Graph accepts the message | BR-D10 |
-  | `inbox_rule` | Graph, account `bot`, to `mail.owner_work_address` only | `accepted` | Graph accepts the mail; the rule is trusted (D67) | BR-D13 |
-  | `laptop_outlook` | job file → laptop agent → Outlook classic | `receipt` | the agent's sent receipt arrives | BR-D10 |
-  | `dry_run` | an `.eml` the owner sends | `tap` | the sender taps [Ya lo envié] | BR-D08 |
+  | Mode             | Sends through                                           | `completion` | Batch becomes `sent` when                         | Done rule |
+  | ---------------- | ------------------------------------------------------- | ------------ | ------------------------------------------------- | --------- |
+  | `graph`          | Graph, account `personal`                               | `accepted`   | Graph accepts the message                         | BR-D10    |
+  | `inbox_rule`     | Graph, account `bot`, to `mail.owner_work_address` only | `accepted`   | Graph accepts the mail; the rule is trusted (D67) | BR-D13    |
+  | `laptop_outlook` | job file → laptop agent → Outlook classic               | `receipt`    | the agent's sent receipt arrives                  | BR-D10    |
+  | `dry_run`        | an `.eml` the owner sends                               | `tap`        | the sender taps [Ya lo envié]                     | BR-D08    |
+
 - **No double sending:** one automatic mode sends; another mode is used only when the sender asks (BR-D11).
 - **Why not a mobile app:** Android never lets one app use another app's sign-in, and Intune's app protection treats a custom app like WhatsApp when it hands files to Outlook or OneDrive. A native app would need the same tenant consent to send as the owner. The laptop is the one place where "already signed in" can be used (the OneDrive sync folder and Outlook classic's COM interface).
 - **To verify (S0.11):** the rule's forward to an internal address works; mail from the bot's Outlook.com mailbox with three attachments reaches the work inbox and not Junk; Outlook classic sends through COM without a security prompt and the script is allowed to run; the work OneDrive client uploads files a script writes; a work folder shared with the personal account can (or can't) be listed through Graph with the personal sign-in (expected: can't, so the laptop agent stays the route); WhatsApp → Outlook/OneDrive sharing on the managed phone (expected: blocked).

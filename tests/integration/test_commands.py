@@ -81,7 +81,9 @@ from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
 from invoicebot.store.gaps import get_gap, mark_reported, upsert_gap
 from invoicebot.store.invoices import (
+    FileRecord,
     InvoiceHead,
+    add_file,
     create_invoice,
     load_invoice_head,
     save_reading,
@@ -1301,14 +1303,17 @@ async def test_reprocesar_on_done_is_not_allowed(
     assert replies == [(expected, None)]
 
 
-async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+@pytest.mark.parametrize(("stored_file", "step"), [(False, "download_media"), (True, "extract")])
+async def test_reprocesar_on_failed_without_a_flow_reads_it_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], stored_file: bool, step: str
 ) -> None:
-    """D96: a FAILED invoice with no flow cannot restart its fetch."""
+    """BR-S03, D190: a FAILED invoice that never got a flow goes back to RECEIVED and is read again."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "FAILED", rule_id="BR-S03")
+    if stored_file:
+        async with db_pool.connection() as conn:
+            await add_file(conn, invoice_id, FileRecord("photo", "data/photo.jpg", "media-1", "0" * 64, 1))
     msg = _message(profile_id, f"/reprocesar {invoice_id}")
-    expected = REPROCESS_NOT_ALLOWED.format(id=invoice_id, state_desc=state_desc("FAILED"))
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -1320,9 +1325,9 @@ async def test_reprocesar_on_failed_without_a_flow_is_not_allowed(
 
     assert result.status == "stored"
     assert head is not None
-    assert head.state == "FAILED"
-    assert jobs == []
-    assert replies == [(expected, None)]
+    assert head.state == "RECEIVED"
+    assert jobs == [step]
+    assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
 
 
 async def test_resume_delivery_sends_a_manual_invoice_back_to_deliver(

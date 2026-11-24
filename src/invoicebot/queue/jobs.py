@@ -20,6 +20,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.queue.retry import backoff_minutes
+from invoicebot.states import SETTLED
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +47,11 @@ class Job:
 
 
 async def _fail_invoice(conn: AsyncConnection[Any], invoice_id: int, reason: str) -> None:
-    """Move an invoice to FAILED with rule BR-S03 because its job is dead."""
+    """Move an invoice to FAILED with rule BR-S03 because its job is dead.
+
+    A DONE or CANCELLED invoice keeps its state: a job that runs after filing, such
+    as a folder rename, does not undo the filing (BR-S03, D190).
+    """
     await conn.execute(
         """
         UPDATE invoices
@@ -55,8 +60,9 @@ async def _fail_invoice(conn: AsyncConnection[Any], invoice_id: int, reason: str
             error = %(reason)s,
             updated_at = now()
         WHERE id = %(invoice_id)s
+          AND NOT (state = ANY(%(settled)s))
         """,
-        {"invoice_id": invoice_id, "reason": reason},
+        {"invoice_id": invoice_id, "reason": reason, "settled": sorted(SETTLED)},
     )
 
 

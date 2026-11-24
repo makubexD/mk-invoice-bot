@@ -31,6 +31,7 @@ from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_p
 from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX
 from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.steps import DOWNLOAD_STEP as DOWNLOAD_STEP
 from invoicebot.pipeline.teach import (
     BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
 )
@@ -62,8 +63,6 @@ RULE_ACK = "BR-S09"
 RULE_AMBIGUOUS_UPLOAD = "BR-D14"
 #: Most invoices BR-D14 lists before ending the list with ``, …`` (BR-D14, D140).
 BR_D14_MAX_ITEMS = 10
-#: Job step that downloads a photo before extraction (R-1.4).
-DOWNLOAD_STEP = "download_media"
 #: Advisory-lock namespace that serialises one profile's intake (R-1.6, PT-2).
 LOCK_PREFIX = "intake:"
 #: Attachment kind that starts an invoice (R-1.1).

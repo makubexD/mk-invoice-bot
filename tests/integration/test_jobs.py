@@ -523,3 +523,26 @@ async def test_a_failing_on_dead_in_claim_still_parks_the_job(
     assert claimed.id == next_id
     assert parked == (True,)
     assert invoice == ("FAILED", "BR-S03")
+
+
+async def test_a_dead_job_leaves_a_done_invoice_done(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S03, D190: the last failure of a job on a DONE invoice parks the job and keeps the invoice DONE."""
+    deaths = _Deaths()
+    async with db_pool.connection() as conn:
+        await _clear_jobs(conn)
+        invoice_id = await _insert_invoice(conn)
+        await conn.execute("UPDATE invoices SET state = 'DONE' WHERE id = %s", (invoice_id,))
+        job_id = await _enqueue(conn, invoice_id, "folder_status")
+        await conn.execute("UPDATE jobs SET attempts = %s WHERE id = %s", (MAX_ATTEMPTS - 1, job_id))
+
+    job = await _claim(db_pool, "worker-a")
+    assert job is not None
+    async with db_pool.connection() as conn:
+        assert await fail(conn, job, "boom", on_dead=deaths) is True
+        cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+        invoice = await cur.fetchone()
+
+    assert invoice == ("DONE", None)
+    assert deaths.calls == [(invoice_id, "folder_status", "boom")]

@@ -120,3 +120,20 @@ async def test_admin_alert_names_the_exception_without_its_colon(
     async with db_pool.connection() as conn:
         admins = await _outbox(conn, ADMIN)
     assert admins[0][0] == MESSAGES["BR-S03_admin"].format(step=STEP, id=invoice_id, error_code=error_code)
+
+
+async def test_dead_job_on_a_settled_invoice_alerts_only_the_admins(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S03, D190: a job that dies after filing leaves the sender alone; the admins still hear of it."""
+    cfg = load_config(EXAMPLE)
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, SENDER, "whatsapp")
+        await conn.execute("UPDATE invoices SET state = 'DONE' WHERE id = %s", (invoice_id,))
+        await notify_dead(conn, invoice_id, "folder_status", ERROR, cfg.profiles)
+
+    async with db_pool.connection() as conn:
+        sender = await _outbox(conn, SENDER)
+        admins = await _outbox(conn, ADMIN)
+    assert sender == []
+    assert [rule_id for _, rule_id, _ in admins] == ["BR-S03_admin"]

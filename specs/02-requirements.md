@@ -1,44 +1,48 @@
 # 02 · Requirements
 
-Acceptance criteria use **EARS** syntax: *WHEN* (trigger), *IF* (unwanted condition), *WHILE* (state), and *THE SYSTEM SHALL* (response).
+Acceptance criteria use **EARS** syntax: _WHEN_ (trigger), _IF_ (unwanted condition), _WHILE_ (state), and _THE SYSTEM SHALL_ (response).
 Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later).
-**v1 = the MVP = milestones M1–M7** (spec 04). Requirements marked **v1.1** (R-1.7 and all of R-12, milestone M8) and stories marked *post-MVP* ship after it, whatever their letter.
+**v1 = the MVP = milestones M1–M7** (spec 04). Requirements marked **v1.1** (R-1.7 and all of R-12, milestone M8) and stories marked _post-MVP_ ship after it, whatever their letter.
 
 ## Glossary (Peru and SUNAT)
-| Term | Meaning |
-|---|---|
-| **SUNAT** | Peru's tax authority. It defines electronic invoices and keeps the RUC registry |
-| **RUC** | 11-digit taxpayer number with a mod-11 check digit. **20…** = a company (*persona jurídica*); **10…** = a person with a business (*persona natural*); a RUC 10 contains that person's 8-digit DNI. **15/17** exist but are rare |
-| **DNI** | 8-digit national ID of a person |
-| **CPE** | *Comprobante de pago electrónico*, an electronic invoice of any kind |
-| **`tipo`** (document type) | `01` **factura** (buyer must have a RUC; deductible; what an employer reimburses), `03` **boleta** (buyer is a person with a DNI or nobody), `07` credit note, `08` debit note |
-| **Serie-número** | Document id, e.g. `F014-10158`. The serie's first letter usually tells the type: **F** factura, **B** boleta, **E** issued from SUNAT's own portal; some issuers use 4 digits |
-| **Issuer / `ruc_emisor`** | The store that issues the invoice (always a RUC, 10 or 20) |
-| **Buyer / `tipo_doc_adq`, `num_doc_adq`** | Who the invoice is made out to. `tipo_doc_adq` is `6` = RUC, `1` = DNI, `0` or `-` = none. **Routing uses the buyer** (R-3.1) |
-| **IGV** | Peru's VAT: 18%, or a reduced 10% / 10.5% for small restaurants and hotels under Ley 31556 (the reduced rate changes by year) |
-| **Base / OP. GRAVADA** | The taxable amount before IGV |
-| ***Recargo al consumo*** | Restaurant service charge, outside the IGV base; in the XML an `AllowanceCharge` (codes 46/50) |
-| **ICBPER** | Small fixed tax per plastic bag |
-| **Padrón RUC** | SUNAT's public list of every RUC with its name, status (`ACTIVO`…) and address condition (`HABIDO`…) |
-| **SOL / Clave SOL** | SUNAT's online portal and its login |
-| **OSE / PSE** | Companies that issue and validate CPEs for stores; many store "portals" are really one PSE's site shared by many stores |
-| **UBL 2.1** | The XML format of a CPE; signed with **XMLDSig** |
-| **Comercio** | The short store name the owner uses in folder names (`LaLena`), from the store directory (R-5.8) |
+
+| Term                                      | Meaning                                                                                                                                                                                                                         |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **SUNAT**                                 | Peru's tax authority. It defines electronic invoices and keeps the RUC registry                                                                                                                                                 |
+| **RUC**                                   | 11-digit taxpayer number with a mod-11 check digit. **20…** = a company (_persona jurídica_); **10…** = a person with a business (_persona natural_); a RUC 10 contains that person's 8-digit DNI. **15/17** exist but are rare |
+| **DNI**                                   | 8-digit national ID of a person                                                                                                                                                                                                 |
+| **CPE**                                   | _Comprobante de pago electrónico_, an electronic invoice of any kind                                                                                                                                                            |
+| **`tipo`** (document type)                | `01` **factura** (buyer must have a RUC; deductible; what an employer reimburses), `03` **boleta** (buyer is a person with a DNI or nobody), `07` credit note, `08` debit note                                                  |
+| **Serie-número**                          | Document id, e.g. `F014-10158`. The serie's first letter usually tells the type: **F** factura, **B** boleta, **E** issued from SUNAT's own portal; some issuers use 4 digits                                                   |
+| **Issuer / `ruc_emisor`**                 | The store that issues the invoice (always a RUC, 10 or 20)                                                                                                                                                                      |
+| **Buyer / `tipo_doc_adq`, `num_doc_adq`** | Who the invoice is made out to. `tipo_doc_adq` is `6` = RUC, `1` = DNI, `0` or `-` = none. **Routing uses the buyer** (R-3.1)                                                                                                   |
+| **IGV**                                   | Peru's VAT: 18%, or a reduced 10% / 10.5% for small restaurants and hotels under Ley 31556 (the reduced rate changes by year)                                                                                                   |
+| **Base / OP. GRAVADA**                    | The taxable amount before IGV                                                                                                                                                                                                   |
+| _**Recargo al consumo**_                  | Restaurant service charge, outside the IGV base; in the XML an `AllowanceCharge` (codes 46/50)                                                                                                                                  |
+| **ICBPER**                                | Small fixed tax per plastic bag                                                                                                                                                                                                 |
+| **Padrón RUC**                            | SUNAT's public list of every RUC with its name, status (`ACTIVO`…) and address condition (`HABIDO`…)                                                                                                                            |
+| **SOL / Clave SOL**                       | SUNAT's online portal and its login                                                                                                                                                                                             |
+| **OSE / PSE**                             | Companies that issue and validate CPEs for stores; many store "portals" are really one PSE's site shared by many stores                                                                                                         |
+| **UBL 2.1**                               | The XML format of a CPE; signed with **XMLDSig**                                                                                                                                                                                |
+| **Comercio**                              | The short store name the owner uses in folder names (`LaLena`), from the store directory (R-5.8)                                                                                                                                |
 
 ## Actors
+
 - **Owner:** you. Configures everything and has a RUC (20…) with Clave SOL.
 - **Sender:** an allowlisted person (sender profile) with one WhatsApp number and/or one Telegram user id (≤ ~10 people, < 200 invoices per month in total).
 - **Issuer:** the store or restaurant that issued the CPE.
 
 ## Flows (initial)
-| Flow id | Buyer RUC on the invoice | Delivery | SUNAT fallback available |
-|---|---|---|---|
-| `personal_google` (A) | Owner's company RUC | Google Drive + Google Sheets | **Yes** (owner's SOL) |
-| `work_microsoft` (B) | Employer's RUC | OneDrive + Excel template + email | **No** (status validation only) |
+
+| Flow id               | Buyer RUC on the invoice | Delivery                          | SUNAT fallback available        |
+| --------------------- | ------------------------ | --------------------------------- | ------------------------------- |
+| `personal_google` (A) | Owner's company RUC      | Google Drive + Google Sheets      | **Yes** (owner's SOL)           |
+| `work_microsoft` (B)  | Employer's RUC           | OneDrive + Excel template + email | **No** (status validation only) |
 
 ---
 
 ## R-1 · Intake (channel)
+
 - **R-1.1 (M)** WHEN an allowlisted sender sends an image (photo or image document) or a PDF of the invoice (D58), THE SYSTEM SHALL acknowledge with a single message within 5 s and enqueue a job.
 - **R-1.2 (M)** IF the sender isn't allowlisted, THE SYSTEM SHALL ignore the message and log it with the number or user id hashed (R-9.12), without replying.
 - **R-1.3 (M)** THE SYSTEM SHALL verify `X-Hub-Signature-256` on every webhook call and reject invalid ones with 401.
@@ -52,6 +56,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-1.11 (M)** THE SYSTEM SHALL enforce media limits before processing: reject images whose header declares more than 40 megapixels **before decoding**; apply byte caps per media type (`limits.media` in config, never above the channel's own limit, e.g. Telegram `getFile` 20 MB); cap zip entry count and compression ratio. A rejected file gets BR-E07. IF the worker dies twice on the same job, THE SYSTEM SHALL move the invoice to `FAILED` (crash-loop guard, BR-S03).
 
 ## R-2 · Extraction (deterministic first)
+
 - **R-2.1 (M)** THE SYSTEM SHALL try QR decoding on every photo, alongside OCR (R-2.3, D81), with a cascade of zxing-cpp → WeChat QR → pyzbar on preprocessed variants (original, grayscale, upscaled, sharpened, rotated 90°/180°/270°), stopping at the first valid SUNAT payload.
 - **R-2.2 (M)** WHEN a SUNAT QR is decoded, THE SYSTEM SHALL extract: `ruc_emisor`, `tipo` (01/03/07/08), `serie`, `numero`, `igv`, `total`, `fecha_emision`, `tipo_doc_adq`, `num_doc_adq`. A payload with a wrong or empty document-type or buyer-type part is repaired, not rejected (D79).
 - **R-2.3 (M)** THE SYSTEM SHALL run OCR (OpenCV preprocessing + Tesseract `spa`) on every photo, whether or not a QR decodes, and a regex/keyword parser that extracts the same fields plus `razon_social` (header text). The OCR and QR readings are merged (D81):
@@ -62,7 +67,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   - the RUC check digit (mod 11);
   - the serie pattern (`[FBE][A-Z0-9]{3}` or 4 digits);
   - the date (not in the future, not older than the configured limit);
-  - `total ≈ base + IGV + other charges − discounts` (tolerance S/ 0.05) when base and IGV are present. Other charges are the restaurant service charge (*recargo al consumo*) and ICBPER: 26 of the owner's 35 work invoices in 2026 carry a service charge, so a check without it would flag them wrongly;
+  - `total ≈ base + IGV + other charges − discounts` (tolerance S/ 0.05) when base and IGV are present. Other charges are the restaurant service charge (_recargo al consumo_) and ICBPER: 26 of the owner's 35 work invoices in 2026 carry a service charge, so a check without it would flag them wrongly;
   - `IGV ≈ base × rate` (tolerance S/ 0.05) for a rate in the configured list `extraction.igv_rates` (today 0.18, plus the reduced restaurant rates 0.10 and 0.105 under Ley 31556, which change by year; all three appear in the 2026 invoices). A miss marks `igv` as `needs_review`; it never rejects the invoice.
   - Outcomes: a bad RUC check digit → BR-E02; a date out of bounds → BR-E03; a `tipo` outside `extraction.supported_tipos` → BR-E05; any other failed check, or a required field below `review_threshold` → `CONFIRMING` with BR-E09.
 - **R-2.5 (M)** THE SYSTEM SHALL resolve `razon_social` and `estado/condición` of the issuer from the local padrón RUC. OCR text is the fallback.
@@ -74,12 +79,13 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-2.11 (C)** IF QR, XML and OCR all fail to give the required fields, AND `llm_fallback` is enabled **for the invoice's flow** (per-flow opt-in, off by default, **never flow B by default**; D24, D43), THE SYSTEM SHALL send the downscaled image to the configured vision LLM through a provider-neutral port. Every returned field SHALL pass the R-2.4 validators, be tagged `source=llm` with confidence ≤ 0.5, and **always** require user confirmation (overrides `confirm_mode: auto`). Raw LLM text is never shown or stored outside the validated fields. Each call is logged in `llm_usage` with tokens and cost and counts against a monthly cap; at the cap the step is skipped with BR-E08.
   - Note: the flow is only known after routing. When the buyer can't be read, the LLM runs only if every flow the sender's profile may use has opted in.
 - **R-2.13 (M)** The **required fields** are `ruc_emisor`, `tipo`, `serie`, `numero`, `fecha_emision` and `total`. Without all of them, extraction ends in BR-E01. The buyer is not required here: a missing buyer is handled by routing (BR-R03).
-- **R-2.14 (M)** WHEN present, THE SYSTEM SHALL also extract `base`, `service_charge` (*recargo al consumo*), `icbper` and `discounts`, from the XML or by OCR, because R-2.4 and the flow B Excel need them.
+- **R-2.14 (M)** WHEN present, THE SYSTEM SHALL also extract `base`, `service_charge` (_recargo al consumo_), `icbper` and `discounts`, from the XML or by OCR, because R-2.4 and the flow B Excel need them.
 - **R-2.15 (M)** WHEN the input is a PDF, THE SYSTEM SHALL read its text layer and any QR first; IF it has no usable text, it SHALL render page 1 to an image and continue as for a photo. A PDF over the byte cap or with more than 5 pages is rejected with BR-E07 (D58).
 - **R-2.12 (M)** THE SYSTEM SHALL parse XML with entity resolution, DTD loading and network access disabled, reject any document with a `DOCTYPE`, and cap XML size at 2 MB (BR-F09). Signature checks (XMLDSig) are post-MVP (D57): until then an XML is trusted only through the R-5.6 match.
 
 ## R-3 · Routing and confirmation (no flow menu)
-- **R-3.1 (M)** THE SYSTEM SHALL pick the flow **automatically** with ordered routing rules (first match wins). The default rules are buyer RUC = owner RUC → A (BR-R01) and buyer RUC = work RUC → B (BR-R02). Rules can match on `num_doc_adq`, `tipo_doc_adq`, `ruc_emisor`, `tipo` and the sender profile, so adding a flow C later is a config change, not new code. Each flow also declares `accepted_tipos` (for example flow B: `["01"]`, facturas only); an invoice routed to a flow that doesn't accept its type stops with BR-R08. Everything that differs between flows (routing, accepted types, fetchers, required docs, storage, mail, templates, cap) is config; adding or changing a flow never touches the pipeline or another flow (D53). *Note:* a flow C also needs the R-3.2 question to use a list message (see there).
+
+- **R-3.1 (M)** THE SYSTEM SHALL pick the flow **automatically** with ordered routing rules (first match wins). The default rules are buyer RUC = owner RUC → A (BR-R01) and buyer RUC = work RUC → B (BR-R02). Rules can match on `num_doc_adq`, `tipo_doc_adq`, `ruc_emisor`, `tipo` and the sender profile, so adding a flow C later is a config change, not new code. Each flow also declares `accepted_tipos` (for example flow B: `["01"]`, facturas only); an invoice routed to a flow that doesn't accept its type stops with BR-R08. Everything that differs between flows (routing, accepted types, fetchers, required docs, storage, mail, templates, cap) is config; adding or changing a flow never touches the pipeline or another flow (D53). _Note:_ a flow C also needs the R-3.2 question to use a list message (see there).
 - **R-3.2 (M)** IF no rule matches (unknown RUC, DNI or no buyer) and `routing.unmatched: ask`, THE SYSTEM SHALL ask with **one** message with reply buttons for the candidate flows plus Cancel (BR-R03). This is the **only** situation with a flow menu. IF `routing.unmatched: reject`, THE SYSTEM SHALL cancel with BR-R07.
   - Note: WhatsApp allows at most 3 reply buttons (titles ≤ 20 characters), so BR-R03 (two flows plus Cancelar) is at the limit. A third flow needs list-message support first (up to 10 rows). Telegram inline keyboards have no such limit.
 - **R-3.3 (M)** IF the buyer field came from OCR with confidence below `review_threshold`, THE SYSTEM SHALL ask for confirmation with the detected flow pre-selected (BR-R04).
@@ -90,6 +96,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-3.8 (M)** THE SYSTEM SHALL check the sender profile's permissions **after** routing, and reject with BR-R05 when needed.
 
 ## R-4 · Validation with SUNAT
+
 - **R-4.1 (S)** WHEN SUNAT API credentials are configured, THE SYSTEM SHALL call `validarcomprobante` for every confirmed invoice, regardless of flow, and store `estadoCp`, `estadoRuc` and `condDomiRuc`.
 - **R-4.2 (S)** THE SYSTEM SHALL act on `estadoCp` as spec 06 defines:
   - `1` (accepted) → continue;
@@ -100,14 +107,15 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-4.3 (M)** THE SYSTEM SHALL cache the OAuth token until 60 s before it expires.
 
 ## R-5 · Document retrieval (PDF/XML)
+
 - **R-5.1 (M)** THE SYSTEM SHALL try fetchers in the **order configured per flow**, stopping when every document in the flow's `required_docs` has been found (flow B: PDF and XML; flow A: XML, with the PDF desired). WHEN a fetcher fails for good (including the last of its scheduled retries), THE SYSTEM SHALL pass to the **next fetcher** in the order, never straight to `MANUAL_REQUIRED`. Retries are scheduled jobs, so a waiting fetcher never holds the worker. WHEN a portal answers that the invoice doesn't exist yet, THE SYSTEM SHALL retry it on the portal's `retry_schedule` (default +1 h, +6 h, +24 h, +72 h; stores often publish hours or days later) and show the invoice as "esperando al portal"; only after the last retry does the chain move on (D65).
 - **R-5.2 (M)** Fetchers available:
   1. **`qr_url`:** follow the URL printed in the QR or on the receipt.
   2. **`portal_registry`:** look up the issuer RUC → portal definition (generic YAML form adapter or custom adapter).
-  3. **`sunat_sol`:** *(only when the buyer is the RUC of the SOL account; today flow A)* log into SOL with the owner's secondary user, query received CPE, and download the XML.
+  3. **`sunat_sol`:** _(only when the buyer is the RUC of the SOL account; today flow A)_ log into SOL with the owner's secondary user, query received CPE, and download the XML.
   4. **`email_inbox`:** search the configured mailbox (Gmail or Outlook) for `serie-numero` / issuer RUC and download the XML/PDF attachments.
   - The list order is only the default for flow A (`qr_url, portal_registry, email_inbox, manual`; `sunat_sol` joins after S0.4, D153); each flow sets its own order.
-  5. **`paid_api`:** *(optional, off by default)* Factiliza, json.pe or similar.
+  5. **`paid_api`:** _(optional, off by default)_ Factiliza, json.pe or similar.
   6. **`manual`:** always the last step.
 - **R-5.3 (M)** WHEN a portal shows an image captcha, THE SYSTEM SHALL first try local OCR (≤ 2 attempts). It SHALL then send the captcha image to the user and wait up to 5 min for a text reply.
 - **R-5.4 (S)** WHEN a portal shows reCAPTCHA/hCaptcha, THE SYSTEM SHALL skip to the next fetcher, unless a paid solver is enabled.
@@ -127,6 +135,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-5.9 (C)** IF the flow allows it, THE SYSTEM MAY continue delivery without the PDF/XML, marking the row "documents pending", and attach them later when they arrive.
 
 ## R-6 · Flow A: Google Drive + Sheets
+
 - **R-6.1 (M)** THE SYSTEM SHALL upload the photo, PDF and XML to the Drive folder `{root}/{YYYY}/{MM}/` with names `{fecha}_{ruc}_{serie}-{numero}.{ext}`. The path template is configurable.
 - **R-6.2 (M)** THE SYSTEM SHALL append one row to the configured Sheet and tab. The column mapping is configurable and includes Drive links.
 - **R-6.3 (M)** IF the row for the natural key already exists, THE SYSTEM SHALL update it, not duplicate it.
@@ -135,7 +144,9 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-6.6 (M)** Sheets writes SHALL use `valueInputOption=RAW`, and any text value starting with `=`, `+`, `-`, `@`, tab or carriage return SHALL be escaped with a leading `'`, so no cell is ever evaluated as a formula.
 
 ## R-7 · Flow B: OneDrive + Excel template + email
+
 Flow B mirrors the owner's existing manual process for work meal reimbursements (D48). The values below are the owner's defaults; every one of them is config.
+
 - **R-7.1 (M)** THE SYSTEM SHALL create **one folder per invoice**, named from a configurable template (default `{fecha:%Y}-{fecha:%m}-Support_{seq}_{comercio}`) followed by a status suffix (R-7.11). `seq` is the next free number among the flow's folders for the invoice's month; folders are never renumbered. The count includes every folder already there for that month, whether the bot or the owner made it, in both the `2026-7` and `2026-07` styles, on the bot's main storage target; folders the owner makes by hand only in the work OneDrive are invisible to it, so manual folders stop once the bot is live. `comercio` comes from the store directory (R-5.8). IF the issuer has no store file, `comercio` is a CamelCase slug of the first two words of its `razon_social`, and the missing store is raised as a `PORTAL_MISSING` gap. IF the store has several brands and no serie prefix matches, the sender picks one (BR-R09).
 - **R-7.2 (M)** The folder SHALL hold exactly the filled Excel, the PDF and the XML, named by configurable templates (default `Formato de reembolsos.xlsx`, `{profile.legal_name}.pdf`, `{profile.legal_name}.xml`), plus a small `.invoicebot.json` manifest with the invoice id, and the `.eml` draft when `eml_draft` is on. The photo never goes in the folder, and the bot deletes it once the batch is sent (R-9.7, D58).
 - **R-7.3 (M)** Storage targets SHALL be used in the configured order (D49):
@@ -166,11 +177,12 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
   2. for each job file in `_outbox/` that carries a valid HMAC (a key shared by the bot and the agent, so a stranger who can write to the OneDrive folder can't make the laptop send mail), send the email through Outlook classic (COM) from the work account, but only to recipients on its own local allowlist (the configured HR address), only with attachments inside that invoice's folder, and only once per job id;
   3. write `_outbox/receipts/<job id>.json` (sent time, or the error), then delete the job file;
   4. log locally without message bodies, and support `-DryRun`.
-  IF a job file is older than `agent_stale_after` (default 4 h, the laptop is probably off), THE SYSTEM SHALL tell the sender once (BR-D12). The new Outlook for Windows has no COM automation, so `laptop_outlook` needs Outlook classic (S0.11).
+     IF a job file is older than `agent_stale_after` (default 4 h, the laptop is probably off), THE SYSTEM SHALL tell the sender once (BR-D12). The new Outlook for Windows has no COM automation, so `laptop_outlook` needs Outlook classic (S0.11).
 - **R-7.15 (M)** **Interface** (D62): chat (WhatsApp, later Telegram) is the only v1 interface, for capture, questions and notifications. There is no native mobile app: on a company-managed phone it could neither use Outlook's or OneDrive's sign-in nor pass files to them any more than WhatsApp can. After v1, a small mobile web page ("mis reembolsos": pending, sent, paid, pick a payment) is served by the bot behind a login, on the v1.1 API (E17).
 - **R-7.16 (M)** **Go-live import** (D72, D110): a one-time script (`scripts/import_claims.py --profile <id> [--dry-run] <folder>…`) reads reimbursement folders the owner points it to (their XML and folder names) and registers each claim that is sent but not yet paid as a `DONE` flow B invoice with its month number, so `seq` and `/pagado` are right from the first day. It writes nothing to those folders, skips a claim already registered, and with `--dry-run` only prints what it would register.
 
 ## R-8 · Completion message
+
 - **R-8.1 (M)** WHEN a flow completes (flow A: `DONE`; flow B: `BATCHED` with its email ready, BR-D07), THE SYSTEM SHALL send one chat message, on the invoice's origin channel, containing:
   - the status (✅ / ⚠️ docs pending / ❌);
   - the key fields;
@@ -179,6 +191,7 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
 - **R-8.2 (M)** IF any step fails irrecoverably, THE SYSTEM SHALL say which step failed and what the user can do.
 
 ## R-9 · Non-functional
+
 - **R-9.1 (M)** Memory: steady state ≤ 350 MB RSS, peak ≤ 800 MB for the `app` container (Postgres excluded, ≤ 300 MB on its own), verified by a load test of 10 queued invoices.
 - **R-9.2 (M)** Latency: acknowledgement in < 5 s. Summary in < 60 s, on 1 vCPU. There is one budget, because every photo runs OCR (D81).
 - **R-9.3 (M)** WhatsApp messages per invoice: ≤ 3 in the happy path (acknowledgement, summary, completion; for flow B the completion is BR-D07, plus the one-line reply to the [Ya lo envié] tap), thanks to auto-routing; ≤ 5 with a gap question. All of them are service messages inside the 24 h window, which are free up to 1,000 per month per number. Templates (R-1.10) are charged per message, so they are used only outside the window.
@@ -198,24 +211,26 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
 - **R-9.17 (M)** CI security: gitleaks, pip-audit and bandit run on every push and PR (PT-8); no `pull_request_target`; no self-hosted runners; fork PR runs need approval; YAML is loaded only with `yaml.safe_load`. While the repo is public (D27), CI SHALL reject committed images that carry EXIF data and any valid RUC that isn't on the allowlist of synthetic RUCs. The one exception is a store directory file's own RUC (R-5.8, D47).
 
 ## R-10 · Commands (chat)
-| Command | Purpose | Priority |
-|---|---|---|
-| `/ayuda` | List the commands | M |
-| `/estado <id>` | Show an invoice's status; without an id, the five newest invoices (D188) | S |
-| `/pendientes` | List invoices waiting for user input or in MANUAL_REQUIRED | S |
-| `/lote` | Show the open flow B batch (count, total) *(post-MVP, with `on_command`)* | C |
-| `/enviar` | Send the open batch now *(post-MVP, with `on_command`)* | C |
-| `/pagado dd/mm monto` | Record a flow B reimbursement and mark its folders PAID (R-7.12); `#id` list form also accepted | M |
-| `/reprocesar <id>` | Re-run fetch and delivery; without an id, the sender's invoices it can act on, as buttons (D189) | S |
-| `/cancelar <id>` | Cancel an invoice; without an id, the sender's cancellable invoices, as buttons (D189) | S |
-| `/portal <ruc> <url>` | Teach the portal link for an issuer. Same effect as answering the BR-F02 question | S |
-| `/gaps` | *(admin)* List open gaps with their issue links | S |
-| `/gap ignorar <id>` | *(admin)* Stop alerting for one gap fingerprint | S |
+
+| Command               | Purpose                                                                                                                                                             | Priority |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| `/ayuda`              | List the commands                                                                                                                                                   | M        |
+| `/estado <id>`        | Show an invoice's status; without an id, the five newest invoices (D188)                                                                                            | S        |
+| `/pendientes`         | List invoices waiting for user input or in MANUAL_REQUIRED                                                                                                          | S        |
+| `/lote`               | Show the open flow B batch (count, total) _(post-MVP, with `on_command`)_                                                                                           | C        |
+| `/enviar`             | Send the open batch now _(post-MVP, with `on_command`)_                                                                                                             | C        |
+| `/pagado dd/mm monto` | Record a flow B reimbursement and mark its folders PAID (R-7.12); `#id` list form also accepted                                                                     | M        |
+| `/reprocesar <id>`    | Re-run fetch and delivery, or the reading of a `FAILED` invoice that never got a flow (D190); without an id, the sender's invoices it can act on, as buttons (D189) | S        |
+| `/cancelar <id>`      | Cancel an invoice; without an id, the sender's cancellable invoices, as buttons (D189)                                                                              | S        |
+| `/portal <ruc> <url>` | Teach the portal link for an issuer. Same effect as answering the BR-F02 question                                                                                   | S        |
+| `/gaps`               | _(admin)_ List open gaps with their issue links                                                                                                                     | S        |
+| `/gap ignorar <id>`   | _(admin)_ Stop alerting for one gap fingerprint                                                                                                                     | S        |
 
 - **R-10.1 (M)** Commands SHALL act only on the sender profile's own invoices, unless the sender is an admin. An id that doesn't exist or belongs to another profile SHALL get the same answer (BR-S07), so ids can't be probed.
 - **R-10.2 (M)** A portal link taught with `/portal` or as an answer to BR-F02 SHALL be used only after the **owner approves it** in chat (BR-S06).
 
 ## R-11 · Business rules, gaps and alerts
+
 - **R-11.1 (M)** Every stop, warning or reroute SHALL reference a rule ID from `specs/06-business-rules.md`, and SHALL use that rule's message from the catalog. A test SHALL fail if any rule in the spec has no catalog entry, or the other way round.
 - **R-11.2 (M)** WHEN a rule marked as a gap fires, THE SYSTEM SHALL upsert a `gaps` row by fingerprint (count, last_seen, linked invoice IDs). Detecting a gap SHALL **never** block the fetcher chain.
 - **R-11.3 (M)** The chat layer SHALL tell the user, in plain words, what is missing and whether the bot will retry by itself (`{gap_line}`).
@@ -231,7 +246,9 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
 - **R-11.12 (M)** Gap issue text SHALL be built **only from typed fields**: the 11-digit issuer RUC (and, for `UNROUTED_BUYER` only, the 11-digit buyer RUC, D120), the business name from the padrón only, CPE type, fetcher reason codes, and a URL reduced to `https://host/path` whose characters match `[A-Za-z0-9._~/-]`, placed in a code fence. `@` is stripped everywhere. No raw OCR text and no free text from senders. Any YAML the bot writes in the future SHALL use a serializer and a parse-back equality check.
 
 ## R-12 · Integration contract (D39, constitution P10) · v1.1
+
 Consumers (Jarvis, n8n, future apps) integrate only through this surface. The bot works fully without any consumer. **All of R-12 ships in v1.1 (M8)**, except R-12.7, which holds from the MVP on.
+
 - **R-12.1 (S, v1.1)** THE SYSTEM SHALL expose a versioned REST API (`/api/v1`, OpenAPI published) to list and get invoices, filtered by date, flow, issuer and state, and to read spend summaries by period, flow and issuer.
 - **R-12.2 (S, v1.1)** THE SYSTEM SHALL expose an **MCP server** (streamable HTTP) with read tools (`list_invoices`, `get_invoice`, `spend_summary`, `pending_manual`, `list_gaps`) and write tools (`reprocess_invoice`, `cancel_invoice`, `attach_document`). Write tools go through the same state machine and business rules as chat commands, after the owner confirms them (R-12.8).
 - **R-12.3 (S, v1.1)** Every API and MCP client SHALL authenticate with a **scoped token** (`read`, `write`), stored hashed and revocable. A missing or invalid token gets 401; the read scope is the default.
