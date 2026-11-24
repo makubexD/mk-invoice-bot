@@ -22,6 +22,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_CHANGE,
     BUTTON_CONFIRM,
     BUTTON_CONTINUE,
+    BUTTON_DONT_KNOW,
     BUTTON_EDIT,
     BUTTON_FIX,
     BUTTON_SEND_PDF,
@@ -62,6 +63,11 @@ RULE_CONFIRM = "BR-S10"
 #: The sources whose field was read from the printed document (D189): a required field
 #: from one of these makes the summary doubtful and worth its buttons.
 PRINTED_SOURCES = frozenset({"ocr", "llm"})
+#: BR-F14 and BR-F02's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` and
+#: ``u<invoice_id>:dk`` (D189, D190). ``u`` starts no other id: invoice ids start with a
+#: digit, payments with ``p`` and BR-S06 with ``t``.
+OFFER_BUTTON_PREFIX = "u"
+BUTTON_DONT_KNOW_SUFFIX = "dk"
 
 #: An action applied to its invoice in the caller's transaction; the resolved press carries
 #: the choice and its menu. It returns the photo files whose rows it cleared, for the
@@ -182,6 +188,16 @@ def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
         buttons.append(Button(id=button_id(invoice_id, TEACH_PORTAL_ACTION), title=BUTTON_TEACH_PORTAL))
     buttons.append(Button(id=button_id(invoice_id, WAIT_MAIL_ACTION), title=BUTTON_WAIT_MAIL))
     return buttons
+
+
+def offer_press_id(invoice_id: int, suffix: str) -> str:
+    """Return a BR-F14 or BR-F02 press id: ``u<invoice_id>:<suffix>`` (D189, D190)."""
+    return f"{OFFER_BUTTON_PREFIX}{invoice_id}:{suffix}"
+
+
+def dont_know_button(invoice_id: int) -> Button:
+    """Return the [No sé] button BR-F14's offer and BR-F02's question carry (D190)."""
+    return Button(id=offer_press_id(invoice_id, BUTTON_DONT_KNOW_SUFFIX), title=BUTTON_DONT_KNOW)
 
 
 def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:

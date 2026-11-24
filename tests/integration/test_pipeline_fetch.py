@@ -1403,7 +1403,7 @@ async def test_reading_document_url_reaches_the_fetcher(
 async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """BR-F02: the first exhausted invoice of an unknown issuer gets BR-F07 then the portal question."""
+    """D190, BR-F02: an unknown issuer's first exhausted invoice gets BR-F07, then BR-F02 with [No sé]."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
@@ -1412,9 +1412,11 @@ async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
 
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_button_dicts(conn, profile_id)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07", "BR-F02"]
     ask_text, _rule_id = outbox[1]
     assert ask_text == MESSAGES["BR-F02"].format(razon_social="este emisor", ruc_emisor=STORE_RUC)
+    assert buttons[1] == [{"id": f"u{invoice_id}:dk", "title": "No sé"}]
 
 
 async def test_teach_second_no_portal_exhaustion_of_the_issuer_queues_f07_only(

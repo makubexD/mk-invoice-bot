@@ -67,7 +67,7 @@ from invoicebot.pipeline.manual_message import (
     portal_for,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
-from invoicebot.pipeline.questions import RULE_DOCS_NEEDED, docs_needed_buttons
+from invoicebot.pipeline.questions import RULE_DOCS_NEEDED, docs_needed_buttons, dont_know_button
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
@@ -533,7 +533,7 @@ def _gap_line(gap: GapRow | None) -> str:
 async def _ask_for_portal(
     conn: AsyncConnection[Any], inputs: _Inputs, gap: GapRow | None, reading: Reading
 ) -> None:
-    """Ask the sender for the issuer's portal once, when BR-F02 is due (BR-F02)."""
+    """Ask the sender for the issuer's portal once, when BR-F02 is due (BR-F02, D190)."""
     if gap is None or not gap.raised_now or not inputs.cfg.gaps.teach_via_chat:
         return
     ruc_emisor = reading.value("ruc_emisor")
@@ -541,7 +541,14 @@ async def _ask_for_portal(
         return
     razon_social = reading.value("razon_social") or UNKNOWN_ISSUER
     text = MESSAGES[RULE_ASK_PORTAL].format(razon_social=razon_social, ruc_emisor=ruc_emisor)
-    await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_ASK_PORTAL, text)
+    await _notify(
+        conn,
+        inputs.head,
+        inputs.job.invoice_id,
+        RULE_ASK_PORTAL,
+        text,
+        (dont_know_button(inputs.job.invoice_id),),
+    )
 
 
 def _saw_no_portal(attempts: Sequence[Attempt]) -> bool:

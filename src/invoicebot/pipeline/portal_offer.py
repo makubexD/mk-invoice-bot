@@ -12,6 +12,12 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
+from invoicebot.pipeline.questions import (
+    BUTTON_DONT_KNOW_SUFFIX,
+    dont_know_button,
+    offer_press_id,
+)
+from invoicebot.pipeline.questions import OFFER_BUTTON_PREFIX as OFFER_BUTTON_PREFIX
 from invoicebot.pipeline.teach import (
     NOT_QUESTIONS,
     RULE_ASK_PORTAL,
@@ -22,7 +28,6 @@ from invoicebot.pipeline.teach import (
 )
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
-    BUTTON_DONT_KNOW,
     BUTTON_NO,
     BUTTON_YES,
     MESSAGES,
@@ -33,15 +38,10 @@ from invoicebot.sunat_origins import is_sunat_host
 
 logger = logging.getLogger(__name__)
 
-#: BR-F14 and BR-F02's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` and
-#: ``u<invoice_id>:dk`` (D189, D190). ``u`` starts no other id: invoice ids start with a
-#: digit, payments with ``p`` and BR-S06 with ``t``.
-OFFER_BUTTON_PREFIX = "u"
 #: The rule that owns BR-F14's offer (D189).
 RULE_PORTAL_OFFER = "BR-F14"
 BUTTON_YES_SUFFIX = "yes"
 BUTTON_NO_SUFFIX = "no"
-BUTTON_DONT_KNOW_SUFFIX = "dk"
 #: The whole id of a BR-F14 press: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` or ``u<invoice_id>:dk``.
 _PRESS_PATTERN = (
     rf"{OFFER_BUTTON_PREFIX}([0-9]{{1,9}})"
@@ -178,26 +178,16 @@ async def _ask_br_f02(
         text,
         invoice_id=invoice_id,
         rule_id=RULE_ASK_PORTAL,
-        buttons=(_dont_know_button(invoice_id),),
+        buttons=(dont_know_button(invoice_id),),
     )
-
-
-def _press_id(invoice_id: int, suffix: str) -> str:
-    """Return a BR-F14 or BR-F02 press id: ``u<invoice_id>:<suffix>`` (D189, D190)."""
-    return f"{OFFER_BUTTON_PREFIX}{invoice_id}:{suffix}"
-
-
-def _dont_know_button(invoice_id: int) -> Button:
-    """Return the [No sé] button BR-F14's offer and BR-F02's question carry (D190)."""
-    return Button(id=_press_id(invoice_id, BUTTON_DONT_KNOW_SUFFIX), title=BUTTON_DONT_KNOW)
 
 
 def _offer_buttons(invoice_id: int) -> tuple[Button, Button, Button]:
     """Return BR-F14's [Sí], [No] and [No sé] buttons for one invoice (D189)."""
     return (
-        Button(id=_press_id(invoice_id, BUTTON_YES_SUFFIX), title=BUTTON_YES),
-        Button(id=_press_id(invoice_id, BUTTON_NO_SUFFIX), title=BUTTON_NO),
-        _dont_know_button(invoice_id),
+        Button(id=offer_press_id(invoice_id, BUTTON_YES_SUFFIX), title=BUTTON_YES),
+        Button(id=offer_press_id(invoice_id, BUTTON_NO_SUFFIX), title=BUTTON_NO),
+        dont_know_button(invoice_id),
     )
 
 
