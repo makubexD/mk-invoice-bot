@@ -22,10 +22,9 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.models import Profile
-from invoicebot.gaps.kinds import fingerprint
+from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import TaughtUrlError, check_taught_url, is_dont_know, looks_like_url
-from invoicebot.pipeline.fetch import PORTAL_MISSING
 from invoicebot.pipeline.outgoing import (
     RULE_STALE_BUTTON,
     Addressee,
@@ -226,7 +225,7 @@ async def _record_hint(
     both on separate connections, where Postgres sees no deadlock. Once the wait ends,
     the gap read sees the issue URL the callback committed.
     """
-    gap_fingerprint = fingerprint(PORTAL_MISSING, str(ruc_emisor))
+    gap_fingerprint = fingerprint(GAP_KINDS["PORTAL_MISSING"].kind, str(ruc_emisor))
     hint_in_pending_issue = await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0
     await set_hint(conn, gap_fingerprint, url)
     gap = await get_gap(conn, gap_fingerprint)

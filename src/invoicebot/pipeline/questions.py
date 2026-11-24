@@ -6,9 +6,13 @@ carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R
 
 from __future__ import annotations
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from pathlib import Path
+from typing import Any
 
-from invoicebot.channels.base import Button
+from psycopg import AsyncConnection
+
+from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Flow, Store
 from invoicebot.extract.fields import REQUIRED, Reading
@@ -58,6 +62,14 @@ RULE_CONFIRM = "BR-S10"
 #: The sources whose field was read from the printed document (D189): a required field
 #: from one of these makes the summary doubtful and worth its buttons.
 PRINTED_SOURCES = frozenset({"ocr", "llm"})
+
+#: An action applied to its invoice in the caller's transaction; the resolved press carries
+#: the choice and its menu. It returns the photo files whose rows it cleared, for the
+#: caller to delete after commit (R-9.7).
+type Action = Callable[
+    [AsyncConnection[Any], int, InboundMessage, ButtonPress, frozenset[str]],
+    Awaitable[tuple[Path, ...]],
+]
 
 
 def candidate_flows(

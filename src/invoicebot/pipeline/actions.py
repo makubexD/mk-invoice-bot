@@ -21,7 +21,7 @@ releases are returned, not deleted: the caller removes them after committing (R-
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -31,6 +31,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
+from invoicebot.pipeline.docs_help import send_pdf, teach_portal, wait_mail
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
@@ -46,8 +47,13 @@ from invoicebot.pipeline.questions import (
     RULE_BUYER,
     RULE_CAP,
     RULE_CONFIRM,
+    RULE_DOCS_NEEDED,
+    SEND_PDF_ACTION,
     STATUS_ACTION,
+    TEACH_PORTAL_ACTION,
+    WAIT_MAIL_ACTION,
     YES_ACTION,
+    Action,
     unreadable_buttons,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
@@ -135,6 +141,10 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     ARRIVED_ACTION: frozenset({DONE, BATCHED}),
     VIA_LAPTOP_ACTION: frozenset({DONE, BATCHED}),
     SELF_SEND_ACTION: frozenset({DONE, BATCHED}),
+    # BR-F13's three buttons answer only while the first wait is still looking (D189).
+    SEND_PDF_ACTION: frozenset({FETCHING_DOCS}),
+    WAIT_MAIL_ACTION: frozenset({FETCHING_DOCS}),
+    TEACH_PORTAL_ACTION: frozenset({FETCHING_DOCS}),
     # [Ver #{id}] asks for the invoice's status, so every state answers it (D188).
     STATUS_ACTION: ALL_STATES,
 }
@@ -151,15 +161,11 @@ ASKED_RULES: Mapping[str, frozenset[str]] = {
     # BR-E03 date check's and the confirmation's (D126).
     EDIT_ACTION: frozenset({RULE_UNREADABLE, RULE_BAD_DATE, RULE_CONFIRM}),
     INVALID_OK_ACTION: frozenset({RULE_ANNULLED, RULE_NOT_AUTHORIZED}),
+    # BR-F13's three buttons answer that question while its wait is still open (D189).
+    SEND_PDF_ACTION: frozenset({RULE_DOCS_NEEDED}),
+    WAIT_MAIL_ACTION: frozenset({RULE_DOCS_NEEDED}),
+    TEACH_PORTAL_ACTION: frozenset({RULE_DOCS_NEEDED}),
 }
-
-#: An action applied to its invoice in the caller's transaction; the resolved press carries
-#: the choice and its menu. It returns the photo files whose rows it cleared, for the
-#: caller to delete after commit (R-9.7).
-type Action = Callable[
-    [AsyncConnection[Any], int, InboundMessage, ButtonPress, frozenset[str]],
-    Awaitable[tuple[Path, ...]],
-]
 
 
 @dataclass(frozen=True)
@@ -627,6 +633,9 @@ ACTIONS: Mapping[str, Action] = {
     ARRIVED_ACTION: _arrived,
     VIA_LAPTOP_ACTION: _via_laptop,
     SELF_SEND_ACTION: _self_send,
+    SEND_PDF_ACTION: send_pdf,
+    WAIT_MAIL_ACTION: wait_mail,
+    TEACH_PORTAL_ACTION: teach_portal,
 }
-#: Actions that only answer and change nothing, so a press keeps a pending [Editar] (D188).
-READ_ONLY_ACTIONS = frozenset({STATUS_ACTION})
+#: Actions that only answer and change nothing, so a press keeps a pending [Editar] (D188, D189).
+READ_ONLY_ACTIONS = frozenset({STATUS_ACTION, WAIT_MAIL_ACTION, TEACH_PORTAL_ACTION})
