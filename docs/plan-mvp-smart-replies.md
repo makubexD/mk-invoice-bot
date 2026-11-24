@@ -146,15 +146,17 @@ Test: `uv run pytest -q <the summary test file> tests/integration/test_pipeline_
 
 ## Step 7: A status button `[worker]`
 
-Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/pipeline/commands.py`,
+Files: `src/invoicebot/pipeline/actions.py`, `src/invoicebot/rules/messages_es.py`,
 `tests/integration/test_pipeline_actions.py`.
 
-1. A `status` action in `ACTIONS` whose press answers exactly what `/estado {id}` answers (call the function `_estado`
-   uses, do not copy it), valid in every state and with no asked rule. The button label is `Ver #{id}`
+0. Done inline before the worker run: `commands` imports `actions`, so `_estado`'s text moved to
+   `pipeline/status.py` (`status_text(conn, invoice_id)`), which both call.
+1. A `status` action in `ACTIONS` whose press answers exactly what `/estado {id}` answers (call `status_text`, do not
+   copy it), valid in every state and with no asked rule. The button label is `Ver #{id}`
    (`BUTTON_STATUS` in `messages_es.py`, allowed as a fourth file).
 2. Tests, docstring `D188`: a press on `<12>:status` for the sender's own invoice → the same text as `/estado 12`; for
-   a `CANCELLED` and a `DONE` invoice → answered too; for another profile's invoice → the answer `/estado` gives a
-   stranger's id.
+   a `CANCELLED` and a `DONE` invoice → answered too; for another profile's invoice → nothing sent, as for every
+   press (`resolve_reply`, R-10.1).
 
 Test: `uv run pytest -q tests/integration/test_pipeline_actions.py`
 
