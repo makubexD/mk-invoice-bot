@@ -73,8 +73,8 @@ MESSAGES: dict[str, str] = {
     "BR-F01": "• SUNAT: no aplica (solo para facturas de tu empresa)",
     "BR-F02": (
         "No conozco el portal de descarga de {razon_social} (RUC {ruc_emisor}). "
-        'Si lo tienes (suele estar impreso: "Consulte su comprobante en…"), envíamelo. '
-        "Si no, toca [No sé]."
+        'Suele estar impreso en el ticket, debajo de "Consulte su comprobante en…". '
+        "Si lo tienes, toca [✏️ Lo escribo]; si no, toca [No sé]."
     ),
     "BR-F02_dont_know": "Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.",
     "BR-F02_dont_know_manual": (
@@ -100,6 +100,14 @@ MESSAGES: dict[str, str] = {
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
     "BR-F13_wait": "Listo. Sigo revisando tu correo y te aviso cuando llegue el PDF.",
     "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
+    "BR-F15": (
+        "Escríbeme la dirección del portal de {razon_social} tal como aparece en el ticket, "
+        "por ejemplo https://portal.ejemplo.pe/tienda"
+    ),
+    "BR-F15_retry": (
+        "No reconozco eso como la dirección de un portal. Escríbela completa, "
+        "por ejemplo https://portal.ejemplo.pe/tienda, o toca [No sé]."
+    ),
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
         "{fetcher_lines}\n"
@@ -511,6 +519,9 @@ BUTTON_CHANGE = "Cambiar"
 BUTTON_SEND_PDF = "📎 Te envío el PDF"
 BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"
 BUTTON_DONT_KNOW = "No sé"
+#: BR-F14's [Sí] on a guessed or echoed portal URL, and BR-F02's way to type one (D191).
+BUTTON_THIS_ONE = "✅ Sí, es este"
+BUTTON_WRITE_PORTAL = "✏️ Lo escribo"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
 BUTTON_REJECT = "Rechazar"
