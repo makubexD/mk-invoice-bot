@@ -45,9 +45,7 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-E02": "El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…",
     "BR-E03": "La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa",
-    "BR-E04": (
-        "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}."
-    ),
+    "BR-E04": "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}): {issuer}, S/ {total}.",
     "BR-E05": "Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.",
     "BR-E07": (
         "No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG, "

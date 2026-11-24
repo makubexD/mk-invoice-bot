@@ -106,6 +106,14 @@ def _reading(
     )
 
 
+def _reading_with_name(fecha: date, *, total: str = "49.90") -> Reading:
+    """Build a reading whose issuer name came from the padrón (D188)."""
+    reading = _reading(fecha, total=total)
+    fields = dict(reading.fields)
+    fields["razon_social"] = _field("ACME S.A.C.", source="padron")
+    return Reading(fields=fields, document_url=None)
+
+
 def _ocr_buyer_reading(fecha: date, *, buyer: str = WORK_RUC, buyer_type: str = "6") -> Reading:
     """Build a reading whose buyer was read by OCR at confidence 0.5 (BR-R04)."""
     reading = _reading(fecha, buyer=buyer, buyer_type=buyer_type)
@@ -998,7 +1006,7 @@ async def test_stale_comercio_is_dropped_and_reasked(
 async def test_second_invoice_with_a_done_key_is_cancelled(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-E04: a second invoice whose key a non-terminal invoice holds is cancelled."""
+    """BR-E04: a second invoice whose key a non-terminal invoice holds is cancelled (D188)."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
     reading = _reading(await _today(db_pool))
@@ -1012,15 +1020,45 @@ async def test_second_invoice_with_a_done_key_is_cancelled(
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, second)
-        texts = await _texts(conn, profile_id, "BR-E04")
+        outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, second)
         second_key = await _stored_key(conn, second)
     assert row == ("CANCELLED", "BR-E04", None)
     assert jobs == []
     assert second_key is None
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-E04"
+    assert f"(#{first})" in text
+    assert f"RUC {OWNER_RUC}, S/ 49.90" in text
+    assert buttons == [{"id": button_id(first, "status"), "title": f"Ver #{first}"}]
+
+
+async def test_duplicate_names_the_issuer_when_the_padron_gave_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E04: BR-E04 names the original's issuer and total and offers [Ver #{id}]."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading_with_name(await _today(db_pool), total="30.90")
+    first = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, first)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, first, "DONE")
+
+    second = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, second)
+
+    async with db_pool.connection() as conn:
+        texts = await _texts(conn, profile_id, "BR-E04")
+        outbox = await _outbox(conn, profile_id)
     assert len(texts) == 1
+    assert "ACME S.A.C. (RUC 20000000001)" in texts[0]
+    assert "S/ 30.90" in texts[0]
     assert f"(#{first})" in texts[0]
-    assert f"/estado {first}" in texts[0]
+    _text, rule_id, buttons = outbox[-1]
+    assert rule_id == "BR-E04"
+    assert buttons == [{"id": button_id(first, "status"), "title": f"Ver #{first}"}]
 
 
 async def test_same_reading_from_two_profiles_is_not_a_duplicate(

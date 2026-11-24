@@ -436,7 +436,9 @@ async def test_second_photo_of_the_same_invoice_sends_br_e04(
         assert await _state_rule(conn, second) == ("CANCELLED", "BR-E04")
     assert fake.rule_ids()[-1] == "BR-E04"
     assert f"(#{first})" in fake.texts()[-1]
-    assert f"/estado {first}" in fake.texts()[-1]
+    assert [(button.id, button.title) for button in fake.sent[-1].buttons] == [
+        (button_id(first, "status"), f"Ver #{first}")
+    ]
 
 
 async def test_total_edit_reroutes_and_shows_the_new_summary(
