@@ -68,6 +68,8 @@ STALE_ANSWERS: Mapping[str, frozenset[str]] = {
 _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
 #: At most 10 integer digits, since ``invoices.total`` is ``NUMERIC(12,2)`` (R-3.5).
 _TOTAL_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
+#: Where a further ``key=value`` pair starts after whitespace in one edit line (D188).
+_PAIR_START_PATTERN = re.compile(r"\s+(\S+?)=")
 
 _Validator = Callable[[str], tuple[str | None, str | None]]
 
@@ -91,10 +93,12 @@ class Edits:
 
 
 def parse_edits(text: str) -> Edits:
-    """Return the fields and errors of the ``campo=valor`` lines in ``text`` (R-3.5, D97).
+    """Return the fields and errors of the ``campo=valor`` lines in ``text`` (R-3.5, D97, D188).
 
     A line without ``=`` is ignored. Keys are case-insensitive and accent-free after
-    ``strip``; ``motivo`` and ``descripcion`` are skipped. Lines past :data:`MAX_EDIT_LINES`
+    ``strip``; ``motivo`` and ``descripcion`` are skipped. A line whose first key is
+    known may carry several pairs, each starting at a known key after whitespace, and
+    each pair counts as one assignment (D188). Assignments past :data:`MAX_EDIT_LINES`
     and values longer than :data:`MAX_OVERRIDE_CHARS` are errors. A serie without a
     well-formed ``tipo`` gets one from its first letter.
     """
@@ -104,21 +108,43 @@ def parse_edits(text: str) -> Edits:
     for raw in text.splitlines():
         if "=" not in raw:
             continue
-        assignments += 1
-        line = raw.strip()
-        key, _, raw_value = line.partition("=")
-        name = _canonical_key(key)
-        value = raw_value.strip()
-        if name in OVERRIDE_KEYS:
-            continue
-        if assignments > MAX_EDIT_LINES or len(value) > MAX_OVERRIDE_CHARS:
-            errors.append(EditError(None, line, name, value))
-        elif name is None:
-            errors.append(EditError(None, line, None, value))
-        else:
-            _apply(fields, errors, name, line, value)
+        for line in _split_pairs(raw.strip()):
+            assignments += 1
+            key, _, raw_value = line.partition("=")
+            name = _canonical_key(key)
+            value = raw_value.strip()
+            if name in OVERRIDE_KEYS:
+                continue
+            if assignments > MAX_EDIT_LINES or len(value) > MAX_OVERRIDE_CHARS:
+                errors.append(EditError(None, line, name, value))
+            elif name is None:
+                errors.append(EditError(None, line, None, value))
+            else:
+                _apply(fields, errors, name, line, value)
     _infer_tipo(fields)
     return Edits(MappingProxyType(fields), tuple(errors))
+
+
+def _split_pairs(line: str) -> list[str]:
+    """Return the ``key=value`` pair texts of one stripped edit line (D188).
+
+    A line whose first key is unknown is one pair, so it fails validation as a whole; a
+    free-text key (``motivo``, ``descripcion``) keeps the rest of the line as its value.
+    Otherwise a further pair starts after whitespace at a word :func:`_canonical_key`
+    knows followed by ``=``, and its value runs up to the next pair's start.
+    """
+    first_key = _canonical_key(line.partition("=")[0])
+    if first_key is None or first_key in OVERRIDE_KEYS:
+        return [line]
+    starts = [0]
+    for match in _PAIR_START_PATTERN.finditer(line):
+        if _canonical_key(match.group(1)) is not None:
+            starts.append(match.start())
+    pairs: list[str] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(line)
+        pairs.append(line[start:end].strip())
+    return pairs
 
 
 async def apply_edits(
