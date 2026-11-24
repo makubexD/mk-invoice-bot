@@ -5,12 +5,12 @@ Channel: the owner's Telegram. Ticket: the PEBSA ticket (QR), sent as #24.
 
 ## What each item showed
 
-| Item | Result |
-|---|---|
+| Item                                                   | Result                                                                                                                                                                                            |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | PEBSA ticket → BR-F13 names the next and the last look | As specified: `Próxima revisión: hoy a las 06:43. Si no llega hasta mañana a las 13:43, te aviso para que me lo envíes.`, with [📎 Te envío el PDF] [🔗 Enseñar el portal] [⏳ Espero el correo]. |
-| [🔗] → BR-F02 with [No sé] | As specified: `No conozco el portal de descarga de PEBSA COMBUSTIBLES S.A. (RUC …)`, one [No sé] button. BR-F14 was not offered: OCR still loses the printed URL (see guided-docs). |
-| [No sé] → the fetching text | As specified: `Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.` |
-| `/cancelar 999999` → BR-S07 with [📋 Mis comprobantes] | As specified: `No encontré el comprobante #999999.` with the button; the button listed #24–#20 with issuer, amount and state, then `Para ver uno: /estado 24`. |
+| [🔗] → BR-F02 with [No sé]                             | As specified: `No conozco el portal de descarga de PEBSA COMBUSTIBLES S.A. (RUC …)`, one [No sé] button. BR-F14 was not offered: OCR still loses the printed URL (see guided-docs).               |
+| [No sé] → the fetching text                            | As specified: `Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.`                                                                                                            |
+| `/cancelar 999999` → BR-S07 with [📋 Mis comprobantes] | As specified: `No encontré el comprobante #999999.` with the button; the button listed #24–#20 with issuer, amount and state, then `Para ver uno: /estado 24`.                                    |
 
 ## The owner's notes
 
@@ -27,3 +27,19 @@ Channel: the owner's Telegram. Ticket: the PEBSA ticket (QR), sent as #24.
    what is accepted. The owner wants guided answers: buttons for each guess, typed text only after [✏️ Corregir],
    the bot echoing what it understood for a [Sí] [Corregir] confirmation, and a clear retry on text it cannot read.
    This goes to 9v with BR-F14.
+
+## Re-check after the wording fix
+
+Date: 2026-11-24 (07:14, Lima). Host: `invoicebot-live`, image `203e56dc71da`. Channel: the owner's Telegram. Ticket:
+the PEBSA ticket (QR), sent as #25.
+
+| Check                                      | Result                                                                                                                                                                                                                                                                        |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The summary's last line                    | As specified: `⏳ Busco sus archivos para archivarlo.` (no buttons: every required field came from the QR).                                                                                                                                                                   |
+| BR-F13 leads with the failure              | As specified: `⏳ Comprobante #25: no pude descargar el PDF.`, `Ya busqué:` with `• Portal del comercio: no lo conozco`, `Mientras tanto, reviso tu Gmail hasta mañana a las 14:19 por si el comercio te lo envió; si llega, lo archivo solo y te aviso.`, `¿Cómo seguimos?`. |
+| BR-F13's buttons                           | As specified: [🔗 Enseñar el portal] then [📎 Te envío el PDF]; no [⏳].                                                                                                                                                                                                      |
+| [🔗] → BR-F02, [No sé] → the fetching text | As specified: `Entendido. Sigo buscando el PDF en tu correo y te aviso cuando llegue.`                                                                                                                                                                                        |
+
+The owner found the messages clearer. The owner asked again why the bot did not suggest the URL printed on the ticket:
+BR-F14 was not offered because OCR still loses the printed URL (note 3 above). That stays 9v `portal-guess`, with this
+ticket as its live case.
