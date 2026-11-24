@@ -44,6 +44,10 @@ from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
+    COMMAND_PICK,
+    COMMAND_PICK_NONE,
+    COMMAND_PICK_TITLE,
+    COMMAND_PICK_TITLE_SHORT,
     ESTADO_HINT,
     ESTADO_NONE,
     GAP_IGNORED,
@@ -133,6 +137,18 @@ def _message(profile_id: str, text: str, channel: ChannelName = "whatsapp") -> I
     )
 
 
+def _button_press(profile_id: str, button_id: str) -> InboundMessage:
+    """Build a canonical button press carrying an arbitrary button id."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        button_id=button_id,
+        received_at=datetime.now(UTC),
+    )
+
+
 async def _invoice(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str) -> int:
     """Create one RECEIVED invoice owned by profile_id and return its id."""
     async with pool.connection() as conn, conn.transaction():
@@ -154,6 +170,20 @@ async def _invoice_in(
             await set_flow(conn, invoice_id, FLOW)
         await set_state(conn, invoice_id, state, rule_id=rule_id)
     return invoice_id
+
+
+async def _number_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    invoice_id: int,
+    serie: str,
+    numero: str,
+) -> None:
+    """Store the serie and numero extraction normally fills for invoice_id."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE invoices SET serie = %s, numero = %s WHERE id = %s",
+            (serie, numero, invoice_id),
+        )
 
 
 async def _failed_batch_invoice(
@@ -636,6 +666,27 @@ async def test_estado_without_an_id_lists_the_five_newest_invoices(
     assert replies == [(expected, None)]
 
 
+async def test_estado_without_an_id_sends_no_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: /estado alone keeps its plain list answer and adds no buttons."""
+    profile_id = _profile()
+    await _invoice(db_pool, profile_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert len(rows) == 1
+    assert rows[0][2] == []
+
+
 async def test_estado_without_an_id_and_no_invoices_answers_estado_none(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -687,11 +738,17 @@ async def test_estado_without_an_id_skips_another_profiles_invoices(
     assert replies == [(expected, None)]
 
 
-async def test_cancelar_without_an_id_still_asks_for_it(
+async def test_cancelar_without_an_id_lists_cancellable_invoices_as_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D188: /cancelar without an id still answers COMMAND_NEEDS_ID."""
+    """D189, S4.9: /cancelar alone lists each cancellable invoice as a button, newest first."""
     profile_id = _profile()
+    first = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-D06")
+    second = await _invoice_in(db_pool, profile_id, "EXTRACT_FAILED", rule_id="BR-E01")
+    await _invoice_in(db_pool, profile_id, "DONE")
+    await _number_invoice(db_pool, first, "F001", "123")
+    await _number_invoice(db_pool, second, "F001", "1234567890")
+    title = COMMAND_PICK_TITLE.format(id=first, serie="F001", numero="123")
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -701,10 +758,89 @@ async def test_cancelar_without_an_id_still_asks_for_it(
             media_max_bytes=MEDIA_MAX_BYTES,
             timezone=TIMEZONE,
         )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert result.status == "stored"
+    assert rows == [
+        (
+            COMMAND_PICK.format(verb="cancelar"),
+            None,
+            [
+                {"id": f"/cancelar {second}", "title": COMMAND_PICK_TITLE_SHORT.format(id=second)},
+                {"id": f"/cancelar {first}", "title": title},
+            ],
+        )
+    ]
+
+
+async def test_cancelar_button_press_cancels_that_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: pressing a /cancelar pick button cancels the invoice it names."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-D06")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(profile_id, f"/cancelar {invoice_id}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        head = await load_invoice_head(conn, invoice_id)
         replies = await _replies(conn, profile_id)
 
     assert result.status == "stored"
-    assert replies == [(COMMAND_NEEDS_ID.format(command="cancelar"), None)]
+    assert head is not None
+    assert head.state == "CANCELLED"
+    assert replies == [(CANCELLED_BY_USER.format(id=invoice_id), None)]
+
+
+async def test_cancelar_without_an_id_with_nothing_cancellable_answers_pick_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: /cancelar alone with no cancellable invoice answers COMMAND_PICK_NONE."""
+    profile_id = _profile()
+    await _invoice_in(db_pool, profile_id, "DONE")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/cancelar"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert result.status == "stored"
+    assert rows == [(COMMAND_PICK_NONE.format(verb="cancelar"), None, [])]
+
+
+async def test_cancelar_button_of_another_profiles_invoice_answers_br_s07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, BR-S07: a pressed /cancelar {id} of another profile's invoice is refused like typing it."""
+    owner_profile = _profile()
+    invoice_id = await _invoice_in(db_pool, owner_profile, "CONFIRMING", rule_id="BR-D06")
+    sender_profile = _profile()
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(sender_profile, f"/cancelar {invoice_id}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        head = await load_invoice_head(conn, invoice_id)
+        replies = await _replies(conn, sender_profile)
+
+    assert result.status == "stored"
+    assert head is not None
+    assert head.state == "CONFIRMING"
+    assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
 
 
 async def test_cancelar_cancels_a_confirming_invoice(
@@ -771,6 +907,49 @@ async def test_cancelar_loses_to_a_move_after_resolve_target(
 
     assert head is not None
     assert head.state == "DELIVERING"
+
+
+async def test_reprocesar_without_an_id_lists_requeueable_invoices_as_buttons(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, S4.9: /reprocesar alone lists a requeueable invoice and its press requeues it."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", rule_id="BR-D02", flow=True)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/reprocesar"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        rows = await _outbox_rows(conn, profile_id)
+
+    assert rows == [
+        (
+            COMMAND_PICK.format(verb="reprocesar"),
+            None,
+            [{"id": f"/reprocesar {invoice_id}", "title": COMMAND_PICK_TITLE_SHORT.format(id=invoice_id)}],
+        )
+    ]
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _button_press(profile_id, f"/reprocesar {invoice_id}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert head is not None
+    assert head.state == "FETCHING_DOCS"
+    assert jobs == ["fetch"]
+    assert replies[-1] == (REPROCESS_STARTED.format(id=invoice_id), None)
 
 
 async def test_reprocesar_on_failed_with_a_flow_refetches(
@@ -1540,7 +1719,7 @@ async def _portal_run(
     await handle_command(conn, _portal_message(f"/{name} {arg}".strip()), name, arg, context=context)
 
 
-async def _portal_outbox(
+async def _outbox_rows(
     conn: AsyncConnection[Any],
     recipient: str,
 ) -> list[tuple[str, str | None, list[dict[str, str]]]]:
@@ -1575,7 +1754,7 @@ async def test_portal_proposes_the_link_and_asks_the_owner(
     async with db_pool.connection() as conn:
         await _portal_run(conn, "portal", f"{ISSUER_RUC_TEXT} {GOOD_URL}", _portal_context())
         link = await taught_links.get(conn, ISSUER_RUC)
-        sender_rows = await _portal_outbox(conn, SENDER)
+        sender_rows = await _outbox_rows(conn, SENDER)
 
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
     assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
@@ -1611,7 +1790,7 @@ async def test_portal_bad_ruc_answers_the_usage_line_and_stores_nothing(
     """R-11.4: a RUC that is not 11 digits answers HELP_PORTAL and stores nothing."""
     async with db_pool.connection() as conn:
         await _portal_run(conn, "portal", f"123 {GOOD_URL}", _portal_context())
-        sender_rows = await _portal_outbox(conn, SENDER)
+        sender_rows = await _outbox_rows(conn, SENDER)
         links = await _link_count(conn)
 
     assert sender_rows == [(HELP_PORTAL, None, [])]
@@ -1625,7 +1804,7 @@ async def test_portal_without_url_answers_the_usage_line(
     """R-11.4: /portal with a RUC but no URL answers HELP_PORTAL."""
     async with db_pool.connection() as conn:
         await _portal_run(conn, "portal", ISSUER_RUC_TEXT, _portal_context())
-        sender_rows = await _portal_outbox(conn, SENDER)
+        sender_rows = await _outbox_rows(conn, SENDER)
 
     assert sender_rows == [(HELP_PORTAL, None, [])]
 
@@ -1637,7 +1816,7 @@ async def test_ayuda_lists_the_portal_command(
     """R-10.1: /ayuda lists /portal next to the other commands."""
     async with db_pool.connection() as conn:
         await _portal_run(conn, "ayuda", "", _portal_context())
-        sender_rows = await _portal_outbox(conn, SENDER)
+        sender_rows = await _outbox_rows(conn, SENDER)
 
     assert sender_rows == [(help_text(False), None, [])]
     assert HELP_PORTAL in sender_rows[0][0]
@@ -1650,7 +1829,7 @@ async def test_portal_with_teaching_off_answers_the_help_and_stores_nothing(
     """R-11.4: /portal with no TeachSetup answers the help and stores nothing."""
     async with db_pool.connection() as conn:
         await _portal_run(conn, "portal", f"{ISSUER_RUC_TEXT} {GOOD_URL}", _portal_context(teach=False))
-        sender_rows = await _portal_outbox(conn, SENDER)
+        sender_rows = await _outbox_rows(conn, SENDER)
         links = await _link_count(conn)
 
     assert sender_rows == [(help_text(False), None, [])]

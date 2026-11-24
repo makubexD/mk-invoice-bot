@@ -16,7 +16,8 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
@@ -29,6 +30,10 @@ from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
+    COMMAND_PICK,
+    COMMAND_PICK_NONE,
+    COMMAND_PICK_TITLE,
+    COMMAND_PICK_TITLE_SHORT,
     ESTADO_HINT,
     ESTADO_NONE,
     GAP_IGNORED,
@@ -77,6 +82,7 @@ from invoicebot.store.invoices import (
     fetch_round_started_within,
     list_pending,
     list_recent,
+    list_recent_in,
     load_invoice_head,
     load_reading,
 )
@@ -101,6 +107,10 @@ PENDING_REQUEUE_INTERVAL = timedelta(minutes=10)
 MAX_GAP_LINES = 20
 #: The ``/gap`` argument that ignores a gap (S8.9, D139).
 GAP_IGNORE_ARG = "ignorar"
+#: The prefix of a pick button's id, which carries the command it runs (S4.9, D189).
+COMMAND_BUTTON_PREFIX = "/"
+#: The states ``/reprocesar`` with no id lists and :func:`_requeue` acts on (S4.9, D96).
+REPROCESS_STATES: frozenset[str] = frozenset({FAILED, MANUAL_REQUIRED, BATCHED})
 
 
 @dataclass(frozen=True)
@@ -275,7 +285,13 @@ async def _cancelar(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Cancel the named invoice when its state is CANCELLABLE, or explain why not (S4.9, D96)."""
+    """Cancel the named invoice when its state is CANCELLABLE, or explain why not (S4.9, D96).
+
+    With no id, list the sender's cancellable invoices as buttons (D189).
+    """
+    if not arg:
+        await _list_choices(conn, msg, "cancelar", CANCELLABLE)
+        return
     target = await resolve_target(conn, msg, "cancelar", arg, context.admins)
     if target is None:
         return
@@ -293,7 +309,13 @@ async def _reprocesar(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96, D171)."""
+    """Restart the named invoice's fetch or failed delivery, or explain why it cannot (S4.9, D96, D171).
+
+    With no id, list the invoices ``_requeue`` can act on as buttons (D189).
+    """
+    if not arg:
+        await _list_choices(conn, msg, "reprocesar", REPROCESS_STATES)
+        return
     target = await resolve_target(conn, msg, "reprocesar", arg, context.admins)
     if target is None:
         return
@@ -310,12 +332,43 @@ async def _reprocesar(
     await _reply(conn, msg, None, text)
 
 
+async def _list_choices(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    command: str,
+    states: frozenset[str],
+) -> None:
+    """List the sender's invoices in ``states`` as buttons, or answer COMMAND_PICK_NONE (D189).
+
+    At most :data:`ESTADO_RECENT` rows, newest first; a press of one runs the command
+    with that invoice's id as its argument.
+    """
+    rows = await list_recent_in(conn, msg.profile_id, states, ESTADO_RECENT)
+    if not rows:
+        await _reply(conn, msg, None, COMMAND_PICK_NONE.format(verb=command))
+        return
+    buttons = [
+        Button(id=f"{COMMAND_BUTTON_PREFIX}{command} {row.id}", title=_pick_title(row)) for row in rows
+    ]
+    await _reply(conn, msg, None, COMMAND_PICK.format(verb=command), buttons=buttons)
+
+
+def _pick_title(row: PendingRow) -> str:
+    """Return a pick button's title, short when the invoice lacks its number or it would not fit (D189)."""
+    if row.serie is None or row.numero is None:
+        return COMMAND_PICK_TITLE_SHORT.format(id=row.id)
+    title = COMMAND_PICK_TITLE.format(id=row.id, serie=row.serie, numero=row.numero)
+    if len(title) > BUTTON_TITLE_MAX:
+        return COMMAND_PICK_TITLE_SHORT.format(id=row.id)
+    return title
+
+
 async def _requeue(conn: AsyncConnection[Any], invoice_id: int, state: str) -> bool:
     """Queue the step the invoice's state needs, returning whether there is one (S4.9, D96)."""
-    if state in (FAILED, MANUAL_REQUIRED):
-        return await retry_documents(conn, invoice_id, state)
     if state == BATCHED:
         return await retry_delivery(conn, invoice_id)
+    if state in REPROCESS_STATES:
+        return await retry_documents(conn, invoice_id, state)
     return False
 
 
@@ -504,9 +557,11 @@ async def _reply(
     msg: InboundMessage,
     rule_id: str | None,
     text: str,
+    *,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue ``text`` for the command's sender in the caller's transaction."""
-    await queue_message(conn, Addressee(msg.channel, msg.profile_id), text, rule_id=rule_id)
+    await queue_message(conn, Addressee(msg.channel, msg.profile_id), text, rule_id=rule_id, buttons=buttons)
 
 
 #: The commands a text may name; the help lists them in this order.

@@ -593,6 +593,18 @@ STATUS_RULE = "Último aviso: {text}"
 #: The answer when a command that needs an invoice id is sent without one (R-10.1).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
+#: The line above the buttons a bare ``/cancelar`` or ``/reprocesar`` answers (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK = "¿Cuál quieres {verb}?"
+#: The answer when a bare ``/cancelar`` or ``/reprocesar`` has nothing to list (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_NONE = "No tienes comprobantes que pueda {verb}."
+#: A pick button's title when the invoice has its serie and numero (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_TITLE = "#{id} · {serie}-{numero}"
+#: A pick button's title when serie or numero is missing or the long title is too long (S4.9, D189).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+COMMAND_PICK_TITLE_SHORT = "#{id}"
 #: ``/cancelar``'s answer when the invoice is past CANCELLABLE (S4.9, D96).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 CANCEL_LATE = "El comprobante #{id} ya está {state_desc}; ya no se puede cancelar."
