@@ -127,6 +127,14 @@ def summary_buttons(invoice_id: int) -> list[Button]:
     ]
 
 
+def unreadable_buttons(invoice_id: int) -> list[Button]:
+    """Return BR-E01's [Editar] and [Cancelar] buttons (BR-E01, D188)."""
+    return [
+        Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
+    ]
+
+
 def confirm_buttons(invoice_id: int) -> list[Button]:
     """Return the confirmation's [Confirmar], [Editar] and [Cancelar] buttons (D126, R-3.4)."""
     return [

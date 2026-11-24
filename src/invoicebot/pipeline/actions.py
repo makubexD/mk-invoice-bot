@@ -21,7 +21,7 @@ releases are returned, not deleted: the caller removes them after committing (R-
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -31,7 +31,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
-from invoicebot.pipeline.extract import ROUTE_STEP
+from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
     BRAND_ACTION,
@@ -47,9 +47,11 @@ from invoicebot.pipeline.questions import (
     RULE_CAP,
     RULE_CONFIRM,
     YES_ACTION,
+    unreadable_buttons,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.pipeline.steps import FETCH_STEP, FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
+from invoicebot.pipeline.unreadable import unreadable_text
 from invoicebot.queue.jobs import enqueue
 from invoicebot.queue.outbox import last_rule
 from invoicebot.routing.router import RULE_ASK
@@ -69,7 +71,9 @@ from invoicebot.states import (
     CONFIRMING,
     DONE,
     EDITABLE,
+    EXTRACT_FAILED,
     FETCHING_DOCS,
+    PENDING_USER,
     ROUTING,
 )
 from invoicebot.store.flow_b import (
@@ -120,7 +124,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     CONTINUE_ACTION: frozenset({CONFIRMING}),
     CONFIRM_ACTION: frozenset({CONFIRMING}),
     CANCEL_ACTION: CANCELLABLE,
-    EDIT_ACTION: EDITABLE,
+    # A parked invoice resumes to the state it waited in instead of answering here (D94).
+    EDIT_ACTION: EDITABLE - frozenset({PENDING_USER}),
     INVALID_OK_ACTION: frozenset({CONFIRM_INVALID}),
     SENT_ACTION: frozenset({BATCHED}),
     NOT_ARRIVED_ACTION: frozenset({DONE, BATCHED}),
@@ -137,6 +142,9 @@ ASKED_RULES: Mapping[str, frozenset[str]] = {
     BRAND_ACTION: frozenset({RULE_BRAND}),
     CONTINUE_ACTION: frozenset({RULE_CAP}),
     CONFIRM_ACTION: frozenset({RULE_BAD_DATE, RULE_CONFIRM}),
+    # The questions whose message carries an [Editar] button: BR-E01's (D188), the
+    # BR-E03 date check's and the confirmation's (D126).
+    EDIT_ACTION: frozenset({RULE_UNREADABLE, RULE_BAD_DATE, RULE_CONFIRM}),
     INVALID_OK_ACTION: frozenset({RULE_ANNULLED, RULE_NOT_AUTHORIZED}),
 }
 
@@ -339,8 +347,24 @@ async def _edit(
     _press: ButtonPress,
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
-    """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90)."""
+    """Ask the sender for ``campo=valor`` edits and pin this invoice as their target (R-3.4, R-3.5, D90).
+
+    An invoice still waiting on BR-E01 gets BR-E01's text again, listing the fields it
+    read and the ones still missing, with the same buttons (BR-E01, D188).
+    """
     await mark_editing(conn, msg.profile_id, invoice_id)
+    state, rule_id = await _invoice_state(conn, invoice_id)
+    if state == EXTRACT_FAILED and rule_id == RULE_UNREADABLE:
+        text = unreadable_text(invoice_id, await load_reading(conn, invoice_id))
+        await _reply(
+            conn,
+            msg,
+            invoice_id,
+            RULE_UNREADABLE,
+            text,
+            buttons=unreadable_buttons(invoice_id),
+        )
+        return ()
     await _reply(conn, msg, invoice_id, None, EDIT_PROMPT)
     return ()
 
@@ -547,6 +571,8 @@ async def _reply(
     invoice_id: int,
     rule_id: str | None,
     text: str,
+    *,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue ``text`` for the press's sender in the caller's transaction."""
     await queue_message(
@@ -555,6 +581,7 @@ async def _reply(
         invoice_id=invoice_id,
         rule_id=rule_id,
         text=text,
+        buttons=buttons,
     )
 
 

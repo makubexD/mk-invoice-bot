@@ -19,8 +19,11 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import INVALID_OK_ACTION, send_not_confirmed
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
+from invoicebot.pipeline.unreadable import unreadable_text
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
+    BUTTON_CANCEL,
+    BUTTON_EDIT,
     BUTTON_SELF_SEND,
     BUTTON_VIA_LAPTOP,
     CANCELLED_BY_USER,
@@ -57,12 +60,14 @@ FLOW = "work_microsoft"
 LAPTOP_FLOW = "inbox_rule_laptop"
 CONFIRMING = "CONFIRMING"
 CONFIRM_INVALID = "CONFIRM_INVALID"
+EXTRACT_FAILED = "EXTRACT_FAILED"
 ROUTING = "ROUTING"
 PENDING_USER = "PENDING_USER"
 FETCHING_DOCS = "FETCHING_DOCS"
 DELIVERING = "DELIVERING"
 BATCHED = "BATCHED"
 DONE = "DONE"
+RULE_UNREADABLE = "BR-E01"
 RULE_ASK = "BR-R03"
 RULE_BUYER = "BR-R04"
 RULE_BRAND = "BR-R09"
@@ -88,6 +93,19 @@ def _field(value: str) -> Field:
 def _reading() -> Reading:
     """Build a synthetic reading with the serie and numero BR-D11 names."""
     return Reading(fields={"serie": _field(SERIE), "numero": _field(NUMERO)}, document_url=None)
+
+
+def _partial_reading() -> Reading:
+    """Build a BR-E01 reading missing ``fecha_emision`` and ``total`` (D188)."""
+    return Reading(
+        fields={
+            "ruc_emisor": _field("20100070970"),
+            "tipo": _field("01"),
+            "serie": _field("F001"),
+            "numero": _field("123"),
+        },
+        document_url=None,
+    )
 
 
 def _profile() -> str:
@@ -164,6 +182,19 @@ async def _park(
             "UPDATE invoices SET waiting_state = %s, waiting_rule_id = %s WHERE id = %s",
             (waiting_state, waiting_rule_id, invoice_id),
         )
+
+
+async def _extract_failed_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    reading: Reading,
+) -> int:
+    """Create an EXTRACT_FAILED invoice waiting on BR-E01 with its partial reading (D188)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id=RULE_UNREADABLE)
+    return invoice_id
 
 
 async def _invoice_in(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, state: str) -> int:
@@ -754,6 +785,102 @@ async def test_edit_in_done_is_stale(
     assert invoice == (DONE, None)
     assert jobs == []
     assert texts == [("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE)))]
+
+
+async def test_edit_on_an_extract_failed_invoice_lists_the_missing_fields(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E01: [Editar] pins the invoice and re-asks its missing fields."""
+    profile_id = _profile()
+    reading = _partial_reading()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, reading)
+    msg = _press(invoice_id, "edit", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        messages = await _messages(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (EXTRACT_FAILED, RULE_UNREADABLE)
+    assert flow_data["editing"] is True
+    assert jobs == []
+    assert messages == [
+        (
+            RULE_UNREADABLE,
+            unreadable_text(invoice_id, reading),
+            [
+                {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+                {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+            ],
+        )
+    ]
+
+
+async def test_cancel_on_an_extract_failed_invoice_cancels_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, R-3.4: [Cancelar] on the BR-E01 question moves the invoice to CANCELLED."""
+    profile_id = _profile()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, _partial_reading())
+    msg = _press(invoice_id, "cancel", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == ("CANCELLED", RULE_CAP)
+    assert jobs == []
+    assert texts == [(None, CANCELLED_BY_USER.format(id=invoice_id))]
+
+
+async def test_edit_on_a_parked_br_e01_invoice_resumes_and_lists_the_missing_fields(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, R-3.7: [Editar] on a parked BR-E01 invoice resumes EXTRACT_FAILED and re-asks."""
+    profile_id = _profile()
+    reading = _partial_reading()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, reading)
+    await _park(db_pool, invoice_id, EXTRACT_FAILED, RULE_UNREADABLE)
+    msg = _press(invoice_id, "edit", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        waiting = await _waiting_row(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        messages = await _messages(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (EXTRACT_FAILED, RULE_UNREADABLE)
+    assert waiting == (None, None)
+    assert flow_data["editing"] is True
+    assert jobs == []
+    assert messages == [
+        (
+            RULE_UNREADABLE,
+            unreadable_text(invoice_id, reading),
+            [
+                {"id": button_id(invoice_id, "edit"), "title": BUTTON_EDIT},
+                {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
+            ],
+        )
+    ]
 
 
 async def test_cancel_in_delivering_is_stale(
