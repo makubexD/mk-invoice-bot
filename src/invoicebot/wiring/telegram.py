@@ -8,7 +8,6 @@ views are complete (R-1.7, R-9.10, D174).
 from __future__ import annotations
 
 import logging
-import re
 from functools import partial
 
 import httpx
@@ -20,6 +19,7 @@ from invoicebot.channels.telegram.client import (
     TELEGRAM_ADAPTER,
     TelegramClient,
     telegram_secrets,
+    webhook_secret_is_strong,
 )
 from invoicebot.channels.telegram.media import TelegramMediaSource
 from invoicebot.channels.telegram.transport import make_transport
@@ -36,9 +36,6 @@ from invoicebot.wiring.channels import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: Telegram's webhook secret charset and length, at least 32 characters (D184).
-WEBHOOK_SECRET_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
 
 
 class TelegramBuilder:
@@ -61,6 +58,10 @@ class TelegramBuilder:
             # Fail closed: a configured channel without its secrets is not mounted.
             logger.error("telegram channel disabled: missing %s", sorted(secrets.missing | shared.missing))
             return None
+        if not webhook_secret_is_strong(secrets.get("telegram_webhook_secret")):
+            # Never log the value: a weak secret must fail startup closed, like a missing one (D184).
+            logger.error("telegram channel disabled: %s", "secrets:telegram_webhook_weak")
+            return None
         client = TelegramClient(http, token=secrets.get("telegram_bot_token"))
         return ChannelWiring(
             name=TELEGRAM_ADAPTER,
@@ -76,7 +77,7 @@ class TelegramBuilder:
         secrets = telegram_secrets(store)
         if not secrets.enabled:
             return "secrets:telegram"
-        if WEBHOOK_SECRET_PATTERN.fullmatch(secrets.get("telegram_webhook_secret")) is None:
+        if not webhook_secret_is_strong(secrets.get("telegram_webhook_secret")):
             return "secrets:telegram_webhook_weak"
         if not channel_secrets(store).enabled:
             return "secrets:channels"

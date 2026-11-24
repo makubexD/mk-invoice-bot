@@ -32,6 +32,13 @@ UNSAFE_PATH_SEGMENTS = frozenset({".", ".."})
 TELEGRAM_ADAPTER: ChannelName = "telegram"
 #: Secrets the Telegram channel declares (R-9.10).
 TELEGRAM_SECRETS = frozenset({"telegram_bot_token", "telegram_webhook_secret"})
+#: Telegram's webhook secret charset and length, at least 32 characters (D184).
+WEBHOOK_SECRET_PATTERN = re.compile(r"[A-Za-z0-9_-]{32,256}")
+
+
+def webhook_secret_is_strong(secret: str) -> bool:
+    """Return whether ``secret`` is a usable Telegram webhook secret (D184)."""
+    return WEBHOOK_SECRET_PATTERN.fullmatch(secret) is not None
 
 
 class TelegramError(Exception):

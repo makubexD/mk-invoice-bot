@@ -13,7 +13,7 @@ import pytest
 from fastapi import APIRouter
 
 from invoicebot.api.intake_route import IntakeDeps
-from invoicebot.channels.telegram.client import TELEGRAM_SECRETS
+from invoicebot.channels.telegram.client import TELEGRAM_SECRETS, webhook_secret_is_strong
 from invoicebot.channels.telegram.media import TelegramMediaSource
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, TelegramChannel
@@ -196,3 +196,34 @@ def test_weak_webhook_secret_problem_never_contains_the_value() -> None:
 def test_secret_problem_ignores_webhook_strength_when_telegram_is_disabled() -> None:
     """D184, D174: a disabled Telegram channel needs no strong webhook secret."""
     assert telegram_wiring.secret_problem(_config(), _store_with_webhook_secret("short")) is None
+
+
+async def test_builder_with_weak_webhook_secret_returns_none(
+    http: httpx.AsyncClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    """D184: a configured channel with a weak webhook secret fails startup closed without echoing it."""
+    cfg = _enabled_config()
+    secret = "short"  # noqa: S105  # a synthetic weak test value
+    store = _store_with_webhook_secret(secret)
+
+    with caplog.at_level(logging.ERROR):
+        wiring = telegram_wiring(cfg, store, http, _intake_deps(cfg))
+
+    assert wiring is None
+    assert "telegram channel disabled: secrets:telegram_webhook_weak" in caplog.messages
+    assert secret not in " ".join(caplog.messages)
+
+
+def test_webhook_secret_is_strong_accepts_a_32_character_secret() -> None:
+    """D184: the shortest allowed secret, 32 charset characters, is strong."""
+    assert webhook_secret_is_strong("a" * 32) is True
+
+
+@pytest.mark.parametrize(
+    "secret",
+    ["a" * 31, "a" * 31 + " "],
+    ids=["too-short", "off-charset"],
+)
+def test_webhook_secret_is_strong_rejects_a_weak_secret(secret: str) -> None:
+    """D184: a secret shorter than 32 characters or outside the charset is weak."""
+    assert webhook_secret_is_strong(secret) is False
