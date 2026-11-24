@@ -20,7 +20,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.config.models import JOB_LEASE_S
-from invoicebot.queue.jobs import Job, claim, complete, fail
+from invoicebot.queue.jobs import Job, OnDead, claim, complete, fail
 from invoicebot.queue.retry import describe_error
 from invoicebot.states import StateMoved
 from invoicebot.store.db import Pool
@@ -42,12 +42,14 @@ class Worker:
         pool: Pool,
         handlers: Mapping[str, Handler],
         *,
+        on_dead: OnDead,
         worker_id: str = "worker-1",
         lease_s: int = JOB_LEASE_S,
         idle_timeout_s: float = 60.0,
     ) -> None:
         self._pool = pool
         self._handlers = handlers
+        self._on_dead = on_dead
         self._worker_id = worker_id
         self._lease_s = lease_s
         self._idle_timeout_s = idle_timeout_s
@@ -82,7 +84,7 @@ class Worker:
         """Run claimable jobs one at a time until none is left (R-9.4)."""
         while True:
             async with self._pool.connection() as conn:
-                job = await claim(conn, self._worker_id, self._lease_s)
+                job = await claim(conn, self._worker_id, self._lease_s, on_dead=self._on_dead)
             if job is None:
                 return
             await self._run_job(job)
@@ -125,7 +127,7 @@ class Worker:
     async def _record_failure(self, job: Job, error: str) -> None:
         """Record a failed attempt; a lost lease is only logged (R-9.4)."""
         async with self._pool.connection() as conn:
-            if not await fail(conn, job, error):
+            if not await fail(conn, job, error, on_dead=self._on_dead):
                 logger.warning("worker %s: job %d failed after losing its lease", self._worker_id, job.id)
 
     async def _wait_for_notification(self, conn: AsyncConnection[Any]) -> None:

@@ -20,6 +20,10 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 Pool = AsyncConnectionPool[AsyncConnection[Any]]
 
 
+async def _ignore_dead(conn: AsyncConnection[Any], invoice_id: int, step: str, error: str) -> None:
+    """An ``on_dead`` that does nothing: these tests are about running jobs."""
+
+
 async def _reset(pool: Pool) -> int:
     """Delete leftover jobs and insert a fresh invoice owned by this test."""
     async with pool.connection() as conn:
@@ -96,7 +100,7 @@ async def test_job_enqueued_after_start_runs_within_one_second(
         ran.set()
 
     # A large idle timeout means only the NOTIFY can wake the worker.
-    worker = Worker(db_pool, {"fetch": handler}, idle_timeout_s=120.0)
+    worker = Worker(db_pool, {"fetch": handler}, on_dead=_ignore_dead, idle_timeout_s=120.0)
     task = asyncio.create_task(worker.run())
     try:
         await asyncio.sleep(0.5)  # let the worker LISTEN and go idle
@@ -120,7 +124,7 @@ async def test_unknown_step_fails_and_the_loop_keeps_serving(
 
     bad_id = await _enqueue(db_pool, invoice_id, "mystery")
     good_id = await _enqueue(db_pool, invoice_id, "fetch")
-    worker = Worker(db_pool, {"fetch": handler}, idle_timeout_s=120.0)
+    worker = Worker(db_pool, {"fetch": handler}, on_dead=_ignore_dead, idle_timeout_s=120.0)
     task = asyncio.create_task(worker.run())
     try:
         attempts, last_error = await _wait_for_failure(db_pool, bad_id)
@@ -148,7 +152,7 @@ async def test_handler_exception_fails_the_job_and_the_loop_survives(
 
     bad_id = await _enqueue(db_pool, invoice_id, "boom")
     good_id = await _enqueue(db_pool, invoice_id, "ok")
-    worker = Worker(db_pool, {"boom": boom, "ok": ok}, idle_timeout_s=120.0)
+    worker = Worker(db_pool, {"boom": boom, "ok": ok}, on_dead=_ignore_dead, idle_timeout_s=120.0)
     task = asyncio.create_task(worker.run())
     try:
         attempts, last_error = await _wait_for_failure(db_pool, bad_id)
@@ -181,8 +185,12 @@ async def test_two_heavy_handlers_never_overlap(db_pool: Pool) -> None:
 
     await _enqueue(db_pool, invoice_id, "heavy")
     await _enqueue(db_pool, invoice_id, "heavy")
-    first = Worker(db_pool, {"heavy": heavy}, worker_id="worker-a", idle_timeout_s=120.0)
-    second = Worker(db_pool, {"heavy": heavy}, worker_id="worker-b", idle_timeout_s=120.0)
+    first = Worker(
+        db_pool, {"heavy": heavy}, on_dead=_ignore_dead, worker_id="worker-a", idle_timeout_s=120.0
+    )
+    second = Worker(
+        db_pool, {"heavy": heavy}, on_dead=_ignore_dead, worker_id="worker-b", idle_timeout_s=120.0
+    )
     first_task = asyncio.create_task(first.run())
     second_task: asyncio.Task[None] | None = None
     try:
@@ -203,7 +211,7 @@ async def test_two_heavy_handlers_never_overlap(db_pool: Pool) -> None:
 async def test_cancelling_the_worker_finishes_quickly(db_pool: Pool) -> None:
     """R-9.4: cancelling run() releases its connections and raises within a second."""
     await _reset(db_pool)
-    worker = Worker(db_pool, {}, idle_timeout_s=120.0)
+    worker = Worker(db_pool, {}, on_dead=_ignore_dead, idle_timeout_s=120.0)
     task = asyncio.create_task(worker.run())
     try:
         await asyncio.sleep(0.5)
@@ -227,7 +235,7 @@ async def test_state_moved_completes_the_job_without_a_failure(
     async def moved(job: Job) -> None:
         raise StateMoved(job.invoice_id, "FETCHING_DOCS", "CANCELLED")
 
-    worker = Worker(db_pool, {"moved": moved}, idle_timeout_s=120.0)
+    worker = Worker(db_pool, {"moved": moved}, on_dead=_ignore_dead, idle_timeout_s=120.0)
     task = asyncio.create_task(worker.run())
     try:
         await _wait_for_count(db_pool, job_id, 0)

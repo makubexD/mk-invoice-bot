@@ -6,10 +6,13 @@ LOCKED`` so concurrent workers never take the same job (R-9.4). A lease is a
 the job is re-leased after that. Re-claiming an expired lease increments
 ``crashes``; at ``MAX_CRASHES`` the job is parked and its invoice fails with
 ``BR-S03`` (R-1.11). Failing a job retries it with exponential backoff and
-parks it after ``MAX_ATTEMPTS`` failures, also with ``BR-S03``.
+parks it after ``MAX_ATTEMPTS`` failures, also with ``BR-S03``. Either way the
+caller's ``on_dead`` runs in the same transaction, so the notice and the failed
+invoice commit together (D190).
 """
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -25,6 +28,9 @@ MAX_CRASHES = 2
 
 #: Reason recorded when the crash-loop guard parks a job (R-1.11, BR-S03).
 CRASH_LOOP_ERROR = "worker died twice on the same job"
+
+#: Called when a job dies, with the connection, invoice id, step and error (BR-S03, D190).
+OnDead = Callable[[AsyncConnection[Any], int, str, str], Awaitable[None]]
 
 
 @dataclass(frozen=True)
@@ -81,14 +87,21 @@ async def enqueue(
     return int(row[0])
 
 
-async def claim(conn: AsyncConnection[Any], worker_id: str, lease_s: int) -> Job | None:
+async def claim(
+    conn: AsyncConnection[Any],
+    worker_id: str,
+    lease_s: int,
+    *,
+    on_dead: OnDead,
+) -> Job | None:
     """Claim one runnable job and lease it for ``lease_s`` seconds (R-9.4).
 
     Runs in its own transaction. Candidates are selected with ``FOR UPDATE
     SKIP LOCKED`` in ``run_after, id`` order. A candidate whose lease expired
     is a worker death: its ``crashes`` counter is incremented and, once it
     reaches ``MAX_CRASHES``, the job is parked and its invoice failed with
-    ``BR-S03`` (R-1.11) before the loop moves to the next candidate.
+    ``BR-S03`` (R-1.11), and ``on_dead`` is called, before the loop moves to
+    the next candidate.
     """
     logger.info("worker %s: claiming a job", worker_id)
     async with conn.transaction():
@@ -132,6 +145,7 @@ async def claim(conn: AsyncConnection[Any], worker_id: str, lease_s: int) -> Job
                         {"job_id": job_id, "crashes": crashes, "reason": CRASH_LOOP_ERROR},
                     )
                     await _fail_invoice(conn, invoice_id, CRASH_LOOP_ERROR)
+                    await on_dead(conn, invoice_id, step, CRASH_LOOP_ERROR)
                     continue
                 logger.info(
                     "worker %s: re-leasing job %d after a worker death",
@@ -203,7 +217,7 @@ async def is_superseded(conn: AsyncConnection[Any], job: Job) -> bool:
     return row is not None and bool(row[0])
 
 
-async def fail(conn: AsyncConnection[Any], job: Job, error: str) -> bool:
+async def fail(conn: AsyncConnection[Any], job: Job, error: str, *, on_dead: OnDead) -> bool:
     """Record a failed attempt for ``job`` (R-9.4).
 
     Succeeds only while the caller still holds the lease (``WHERE id = job.id
@@ -211,7 +225,8 @@ async def fail(conn: AsyncConnection[Any], job: Job, error: str) -> bool:
     changes and ``False`` is returned. A failure increments ``attempts``,
     stores ``last_error`` and clears the lease. The retry is scheduled
     ``backoff_minutes(attempts)`` minutes ahead, or the job is parked at
-    infinity once ``attempts`` reaches ``MAX_ATTEMPTS`` (BR-S03).
+    infinity once ``attempts`` reaches ``MAX_ATTEMPTS``, its invoice failed and
+    ``on_dead`` called (BR-S03).
     """
     new_attempts = job.attempts + 1
     dead = new_attempts >= MAX_ATTEMPTS
@@ -252,7 +267,9 @@ async def fail(conn: AsyncConnection[Any], job: Job, error: str) -> bool:
         if row is None:
             return False
         if dead:
-            await _fail_invoice(conn, int(row[0]), error)
+            invoice_id = int(row[0])
+            await _fail_invoice(conn, invoice_id, error)
+            await on_dead(conn, invoice_id, job.step, error)
         return True
 
 

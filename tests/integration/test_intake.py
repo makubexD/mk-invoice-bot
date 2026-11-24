@@ -55,6 +55,12 @@ WORK_RUC = "51900000000"
 WORK_FLOW = "work_microsoft"
 DNI_BUYER = "40382716"
 FULL_PROFILE = "yo"
+
+
+async def _ignore_dead(conn: AsyncConnection[Any], invoice_id: int, step: str, error: str) -> None:
+    """An ``on_dead`` that does nothing: no job here dies."""
+
+
 #: One unique numero per reading, so no test claims another's natural key (D93).
 _NEXT_NUMERO = itertools.count(40000)
 #: One unique issuer RUC per taught-link test, so no test sees another's taught_links row.
@@ -502,7 +508,7 @@ async def test_five_photos_are_claimed_in_arrival_order(
         ]
         claimed: list[Job] = []
         for _ in range(5):
-            job = await claim(conn, "worker-intake", LEASE_S)
+            job = await claim(conn, "worker-intake", LEASE_S, on_dead=_ignore_dead)
             assert job is not None
             claimed.append(job)
 

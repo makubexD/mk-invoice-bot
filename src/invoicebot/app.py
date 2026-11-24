@@ -78,6 +78,7 @@ from invoicebot.pipeline.deliver import (
 from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
 from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.failed import notify_dead
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
@@ -371,7 +372,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
         handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
-        worker = Worker(pool, handlers)
+        worker = Worker(pool, handlers, on_dead=partial(notify_dead, profiles=cfg.profiles))
         github_app = _github_app(cfg, store, http)
         transports: dict[str, Transport] = {
             **{wiring.name: wiring.transport for wiring in wirings},
