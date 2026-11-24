@@ -176,23 +176,23 @@ Files: `src/invoicebot/pipeline/portal_offer.py` (new), `src/invoicebot/pipeline
    (BR-F14, BR-F02, D189).":
    - `OFFER_BUTTON_PREFIX = "u"`; button ids `u<invoice_id>:yes`, `u<invoice_id>:no`, `u<invoice_id>:dk`, matched by a
      full-match pattern like `teach._PRESS_PATTERN`.
-   - `offer_url(reading, allowed_hosts) -> str | None`: `reading.printed_url`, else `reading.document_url` when its
-     host is not allowed for `qr_url` (reuse the host check `qr_url` uses today; import it, or move it to
-     `net/` if importing the fetcher would break the import contracts), else None.
-   - `async def ask_portal(conn, addressee, invoice_id, reading, allowed_hosts) -> None`: with an offer URL, queue
+   - `offer_url(reading) -> str | None`: `reading.printed_url`, else `reading.document_url` when its host is not
+     SUNAT's (reuse `SUNAT_DOMAIN` from `fetchers/qr_url.py`), else None. No allowed-hosts check: [🔗] is only shown
+     when the issuer has no portal entry, so a QR link to a known portal does not reach here in practice.
+   - `async def ask_portal(conn, addressee, invoice_id, reading) -> None`: with an offer URL, queue
      BR-F14 (rule `BR-F14`, the three buttons, `{razon_social}` = the reading's or `UNKNOWN_ISSUER`); without one,
      queue BR-F02's question (rule `BR-F02`, so a typed answer goes through `teach.answer`).
    - `async def handle_press(conn, msg, setup: TeachSetup) -> None`: parse the id; the invoice must belong to the
      sender and the sender's newest question must be that invoice's BR-F14 (`outbox.last_question`, as
      `teach.answer` does), else log and do nothing. `yes` → `teach.teach(...)` with the offered URL recomputed from
      the stored reading; `no` → queue BR-F02's question for that invoice; `dk` → queue `BR-F02_dont_know`.
-     Pass `allowed_hosts` in from the caller; nothing module-level.
 2. `intake.py`: a press whose id starts with `OFFER_BUTTON_PREFIX` and `roles.teach is not None` goes to
    `portal_offer.handle_press`, next to the teach prefix branch. Check the prefix cannot match an invoice button id
    (those start with a digit), a payment one or a teach one.
 3. Tests (real Postgres), docstring `D189` (and `BR-F14`):
    - `ask_portal` with a printed URL → one outbox row, rule `BR-F14`, the URL in the text, three buttons;
-   - `ask_portal` with no printed URL and a `document_url` on an allowed host → BR-F02's question;
+   - `ask_portal` with no printed URL and a `document_url` on a SUNAT host → BR-F02's question;
+   - `ask_portal` with no printed URL and a `document_url` on another host → BR-F14 offering it;
    - `ask_portal` with no URL at all → BR-F02's question;
    - [Sí] → a `proposed` taught link with the offered URL and BR-S06's owner alert;
    - [No] → BR-F02's question queued, no taught link;
@@ -234,8 +234,7 @@ Files: `src/invoicebot/pipeline/docs_help.py` (new), `src/invoicebot/pipeline/ac
      `BR-F13_upload`;
    - `wait_mail`: reply `BR-F13_wait`, no state change;
    - `teach_portal`: load the reading and call `portal_offer.ask_portal`, addressed to the sender's channel and
-     profile. `allowed_hosts` must reach it: if the `Action` signature cannot carry it, pass it the way
-     `laptop_flows` arrives (a field on the value intake already passes), and say so in the summary.
+     profile.
 2. `actions.py`: register the three actions in `ACTIONS`; `VALID_STATES`: all three `{FETCHING_DOCS}`;
    `ASKED_RULES`: all three `{RULE_DOCS_NEEDED}`; `wait_mail` and `teach_portal` join `READ_ONLY_ACTIONS` (they must
    not clear a pending edit).
