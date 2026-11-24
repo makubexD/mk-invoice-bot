@@ -22,6 +22,7 @@ from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
 from invoicebot.pipeline.resume import retry_delivery, retry_documents
+from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
@@ -54,9 +55,6 @@ from invoicebot.rules.messages_es import (
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     REPROCESS_TOO_SOON,
-    STATUS,
-    STATUS_RULE,
-    STATUS_RULE_ONLY,
     state_desc,
 )
 from invoicebot.states import (
@@ -71,7 +69,6 @@ from invoicebot.store.invoices import (
     InvoiceHead,
     PendingRow,
     fetch_round_started_within,
-    get_state_rule,
     list_pending,
     load_invoice_head,
 )
@@ -237,30 +234,15 @@ async def _estado(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Answer with the invoice's state and, when it waits on a rule, that rule's last text.
+    """Answer with the invoice's :func:`status_text` (S4.9).
 
-    A target the sender cannot see is refused by :func:`resolve_target` (R-10.1). The
-    second line names the rule and repeats its newest stored question, or just the rule
-    when the invoice has no stored text (S4.9, R-11.1).
+    A target the sender cannot see is refused by :func:`resolve_target` (R-10.1).
     """
     target = await resolve_target(conn, msg, "estado", arg, context.admins)
     if target is None:
         return
     invoice_id, _head = target
-    current = await get_state_rule(conn, invoice_id)
-    if current is None:
-        raise RuntimeError(f"invoice {invoice_id} does not exist")
-    state, rule_id = current
-    text = STATUS.format(id=invoice_id, state_desc=state_desc(state))
-    if rule_id is not None:
-        last = await outbox.last_text(conn, invoice_id, rule_id)
-        line = (
-            STATUS_RULE.format(rule_id=rule_id, text=last)
-            if last is not None
-            else STATUS_RULE_ONLY.format(rule_id=rule_id)
-        )
-        text = f"{text}\n{line}"
-    await _reply(conn, msg, None, text)
+    await _reply(conn, msg, None, await status_text(conn, invoice_id))
 
 
 async def _cancelar(
