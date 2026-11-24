@@ -121,7 +121,8 @@ Use this when a portal's site changed and every fetch fails.
    `github_app_private_key` (steps 1–3). Delete the old key in GitHub only after the next daily GitHub App check
    passes (it runs at `gaps.digest_at`).
 5. For a channel token (WhatsApp or Telegram), first rotate it with the provider, then update the store and reload.
-   Telegram also needs §11 step 7.
+   Telegram also needs §11 step 7, and so does a new `telegram_webhook_secret`: until `setWebhook` runs again,
+   every update is refused with 401 and lost.
 
 ## 6. Handle a gap issue
 
@@ -228,15 +229,18 @@ roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each st
    `/setcommands`.
 5. **Every sender presses Start.** Each sender opens `t.me/<username>` and presses **Start**. A bot cannot write
    first: until a sender has pressed Start, a send to them fails for good (403).
-6. **Collect the sender ids** before any webhook is set (Telegram keeps the messages until then):
+6. **Collect the sender ids** before any webhook is set (Telegram keeps the messages until then). The command reads
+   the live config, so first set the `telegram` channel to `enabled: true` there and **reload**; no profile needs a
+   `telegram_user_id` yet. Then:
 
    ```sh
    podman exec "$APP" invoicebot telegram ids
    ```
 
-   It prints `<id> @<username>` per sender. Put each id in its profile as `telegram_user_id` in the live config, set
-   the `telegram` channel to `enabled: true`, then **reload**. `a webhook is set` means step 7 already ran: run
+   It prints `<id> @<username>` per sender. Put each id in its profile as `telegram_user_id` in the live config,
+   then **reload**. `a webhook is set` means step 7 already ran: run
    `telegram webhook --delete`, send a message to the bot, and try again.
+
 7. **Register the webhook.** The Funnel must serve `/webhook/telegram` (`deploy/README.md` § 5). Then:
 
    ```sh
@@ -245,6 +249,7 @@ roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each st
    ```
 
    `--info` should show the URL, `pending: 0` and `last_error_message: -`. Send `/ayuda` to the bot to confirm.
+
 8. **Rotate the token.** In BotFather: `/revoke`. Store the new token (§5), **reload**, and run step 7 again.
 9. **Lost owning account.** Create a new bot (steps 2–7) and tell every sender the new username. The old bot is no
    longer reachable.
