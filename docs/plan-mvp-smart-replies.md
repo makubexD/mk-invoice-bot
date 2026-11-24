@@ -161,7 +161,11 @@ Test: `uv run pytest -q tests/integration/test_pipeline_actions.py`
 ## Step 8: BR-E04 names the original `[worker]`
 
 Files: `src/invoicebot/pipeline/route.py`, `src/invoicebot/rules/messages_es.py`,
-`tests/integration/test_pipeline_route.py`.
+`tests/integration/test_pipeline_route.py`, `specs/06-business-rules.md`.
+
+0. `specs/06-business-rules.md`, BR-E04 row message cell:
+   `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}): {issuer}, S/ {total}.` [Ver #{id}] (D188). The
+   cell and `MESSAGES["BR-E04"]` change together, so `tests/unit/test_rules_parity.py` stays green; run it too.
 
 1. `MESSAGES["BR-E04"]` as in step 1; `_cancel_duplicate` fills `{issuer}` (`razon_social`, else `RUC {ruc_emisor}`)
    and `{total}` from the new invoice's reading (same natural key) and attaches a `status` button for the original id.
