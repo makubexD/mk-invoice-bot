@@ -61,6 +61,7 @@ from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
     RULE_EXHAUSTED,
+    LookTimes,
     docs_needed_text,
     manual_message,
     portal_for,
@@ -123,6 +124,8 @@ class _Inputs:
     directory: StoreDirectory
     #: Fetchers that get no D167 retry because their portal has an open broken gap (D170).
     no_retry: frozenset[str]
+    #: Each fetcher's retry schedule, keyed by fetcher name (D65, D98).
+    schedules: Mapping[str, Schedule]
 
 
 @dataclass(frozen=True)
@@ -201,6 +204,7 @@ def make_fetch_handler(
             attempts=_attempts(rows),
             directory=directory,
             no_retry=no_retry,
+            schedules=retry_schedules,
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
         decision = decide(
@@ -419,13 +423,21 @@ async def _wait_notice(
     if fetcher != EMAIL_INBOX_FETCHER:
         await _notify(conn, inputs.head, invoice_id, None, FETCH_WAITING.format(id=invoice_id))
         return
+    owner_timezone = ZoneInfo(inputs.cfg.owner.timezone)
+    inbox_schedule = _schedule_entries(EMAIL_INBOX_FETCHER, inputs.flow, inputs.invoice, inputs.schedules)
+    last_at = next_at + sum(inbox_schedule[1:], timedelta())
+    cur = await conn.execute("SELECT (now() AT TIME ZONE %s)::date", (inputs.cfg.owner.timezone,))
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("SELECT now() AT TIME ZONE yielded no row")
+    looks = LookTimes(next_at.astimezone(owner_timezone), last_at.astimezone(owner_timezone), row[0])
     text = docs_needed_text(
         invoice_id,
         reading,
         inputs.flow,
         inputs.attempts,
         inputs.directory,
-        next_at.astimezone(ZoneInfo(inputs.cfg.owner.timezone)),
+        looks,
     )
     offer_portal = await _offer_portal(conn, inputs, reading)
     await _notify(

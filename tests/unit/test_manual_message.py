@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -11,7 +11,7 @@ from invoicebot.config.models import Brand, Flow, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.chain import Attempt
-from invoicebot.pipeline.manual_message import docs_needed_text, manual_message
+from invoicebot.pipeline.manual_message import LookTimes, docs_needed_text, manual_message
 from invoicebot.rules.messages_es import (
     FETCH_AUTH_LINE,
     FETCH_NO_PORTAL_LINE,
@@ -192,7 +192,14 @@ def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
     ]
 
     text = docs_needed_text(
-        7, _reading(), _flow(), attempts, _with_store(), datetime(2026, 1, 1, 14, 5, tzinfo=UTC)
+        7,
+        _reading(),
+        _flow(),
+        attempts,
+        _with_store(),
+        LookTimes(
+            datetime(2026, 1, 1, 14, 5, tzinfo=UTC), datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)
+        ),
     )
 
     assert text == (
@@ -212,7 +219,9 @@ def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
         _flow(),
         [Attempt("qr_url", FetchReason.NO_URL)],
         _with_store(),
-        datetime(2026, 1, 1, 14, 5, tzinfo=UTC),
+        LookTimes(
+            datetime(2026, 1, 1, 14, 5, tzinfo=UTC), datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)
+        ),
     )
 
     assert "Ya busqué:" not in text
