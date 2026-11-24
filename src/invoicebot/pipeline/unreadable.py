@@ -1,0 +1,78 @@
+"""BR-E01's text for an unreadable or partly read invoice, and the keys a sender types (BR-E01, D188)."""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from datetime import date
+
+from invoicebot.extract.fields import REQUIRED, Reading
+from invoicebot.pipeline.extract import RULE_UNREADABLE
+from invoicebot.rules.messages_es import (
+    FIELD_DESC,
+    MESSAGES,
+    TIPO_DESC,
+    UNREADABLE_PARTIAL,
+    fields_desc,
+)
+
+#: Short names a sender may use for a field (R-3.5, D97).
+ALIASES: Mapping[str, str] = {
+    "ruc": "ruc_emisor",
+    "fecha": "fecha_emision",
+    "cliente": "num_doc_adq",
+}
+#: The example value BR-E01's ``{missing_lines}`` shows for a missing field (D188).
+_MISSING_EXAMPLES: Mapping[str, str] = {"fecha_emision": "dd/mm/aaaa"}
+
+
+def edit_key(field: str) -> str:
+    """Return the key a sender types for ``field`` (D188).
+
+    The key is the field's alias in :data:`ALIASES`, so it round-trips through
+    :func:`_canonical_key`; a field with no alias is typed by its own name.
+    """
+    for alias, name in ALIASES.items():
+        if name == field:
+            return alias
+    return field
+
+
+def unreadable_text(invoice_id: int, reading: Reading | None) -> str:
+    """Return BR-E01's text for an invoice whose reading lacks required fields (BR-E01, D188).
+
+    An invoice with no stored reading, or one that read none of the required fields, gets
+    the generic text. Otherwise the text lists the required fields that were read, with
+    their values, and one ``key=value`` line to type for each one still missing.
+    """
+    if reading is None:
+        return MESSAGES[RULE_UNREADABLE]
+    read = tuple(name for name in REQUIRED if reading.value(name) is not None)
+    if not read:
+        return MESSAGES[RULE_UNREADABLE]
+    missing = tuple(name for name in REQUIRED if reading.value(name) is None)
+    return UNREADABLE_PARTIAL.format(
+        id=invoice_id,
+        read_desc="; ".join(f"{FIELD_DESC[name]} {_shown(reading, name)}" for name in read),
+        missing_desc=fields_desc(missing),
+        missing_lines="\n".join(f"{edit_key(name)}={_MISSING_EXAMPLES.get(name, '…')}" for name in missing),
+    )
+
+
+def _shown(reading: Reading, name: str) -> str:
+    """Return a required field the reading kept as BR-E01 shows it (D188)."""
+    value = reading.value(name) or ""
+    if name == "total":
+        return f"S/ {value}"
+    if name == "tipo":
+        return TIPO_DESC.get(value, value)
+    if name == "fecha_emision":
+        return _fecha_shown(value)
+    return value
+
+
+def _fecha_shown(value: str) -> str:
+    """Return an ISO date as ``dd/mm/aaaa``, or ``value`` when it is not one (D188)."""
+    try:
+        return date.fromisoformat(value).strftime("%d/%m/%Y")
+    except ValueError:
+        return value

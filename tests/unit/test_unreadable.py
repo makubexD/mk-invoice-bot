@@ -3,7 +3,8 @@
 import pytest
 
 from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading
-from invoicebot.pipeline.edits import _canonical_key, edit_key, unreadable_text
+from invoicebot.pipeline.edits import _canonical_key
+from invoicebot.pipeline.unreadable import edit_key, unreadable_text
 
 SYNTHETIC_RUC = "20000000001"
 
