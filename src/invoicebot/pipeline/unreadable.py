@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import date
+from typing import Final
 
 from invoicebot.extract.fields import REQUIRED, Reading
-from invoicebot.pipeline.extract import RULE_UNREADABLE
 from invoicebot.rules.messages_es import (
     FIELD_DESC,
     MESSAGES,
@@ -15,6 +15,8 @@ from invoicebot.rules.messages_es import (
     fields_desc,
 )
 
+#: No QR, an unreadable photo or a required field missing (BR-E01).
+RULE_UNREADABLE: Final = "BR-E01"
 #: Short names a sender may use for a field (R-3.5, D97).
 ALIASES: Mapping[str, str] = {
     "ruc": "ruc_emisor",

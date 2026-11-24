@@ -24,7 +24,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import InboundMessage
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
-from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import (
     MAX_OVERRIDE_CHARS,
@@ -32,7 +32,7 @@ from invoicebot.pipeline.overrides import (
     edit_target,
     without_accents,
 )
-from invoicebot.pipeline.unreadable import ALIASES
+from invoicebot.pipeline.unreadable import ALIASES, RULE_UNREADABLE
 from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     EDIT_INVALID,

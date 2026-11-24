@@ -31,7 +31,7 @@ from psycopg import AsyncConnection
 from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
-from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
     BRAND_ACTION,
@@ -51,7 +51,7 @@ from invoicebot.pipeline.questions import (
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
 from invoicebot.pipeline.steps import FETCH_STEP, FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
-from invoicebot.pipeline.unreadable import unreadable_text
+from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
 from invoicebot.queue.outbox import last_rule
 from invoicebot.routing.router import RULE_ASK

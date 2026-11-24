@@ -42,6 +42,7 @@ from invoicebot.pipeline.handlers import (
     reject_media,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.unreadable import RULE_UNREADABLE
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import KIND_SUBJECT, MESSAGES, tipo_phrase
@@ -66,8 +67,6 @@ READABLE_KINDS: tuple[AttachmentKind, ...] = ("photo", "pdf")
 TOO_MANY_PAGES: Final = "too_many_pages"
 #: States in which the handler acts; any other state is left untouched (R-9.4).
 ACTIVE_STATES = frozenset({RECEIVED, EXTRACTING})
-#: No QR, an unreadable photo or a required field missing (BR-E01).
-RULE_UNREADABLE: RuleId = "BR-E01"
 #: The gap a repeating unreadable invoice from one issuer raises (BR-E06).
 PARSER_MISS = "PARSER_MISS"
 #: A RUC is the 11-digit document number (R-11.12).
