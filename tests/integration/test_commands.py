@@ -69,7 +69,6 @@ from invoicebot.rules.messages_es import (
     REPROCESS_TOO_SOON,
     STATUS,
     STATUS_RULE,
-    STATUS_RULE_ONLY,
     state_desc,
 )
 from invoicebot.states import EXTRACT_FAILED, StateMoved
@@ -531,13 +530,13 @@ async def test_parse_command_splits_name_and_argument() -> None:
 async def test_estado_repeats_the_rule_and_its_last_question(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.1: /estado on a BR-R03 invoice shows its state and the stored question."""
+    """D189, S4.9: /estado shows the stored question as ``Último aviso`` and never a rule id."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R03")
     await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT)
     msg = _message(profile_id, f"/estado {invoice_id}")
     expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
-    expected = f"{expected}\n{STATUS_RULE.format(rule_id='BR-R03', text=QUESTION_TEXT)}"
+    expected = f"{expected}\n{STATUS_RULE.format(text=QUESTION_TEXT)}"
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -547,6 +546,7 @@ async def test_estado_repeats_the_rule_and_its_last_question(
 
     assert result.status == "stored"
     assert replies[-1] == (expected, None)
+    assert "BR-" not in replies[-1][0]
 
 
 async def test_estado_without_a_rule_shows_only_the_state(
@@ -567,15 +567,14 @@ async def test_estado_without_a_rule_shows_only_the_state(
     assert replies == [(expected, None)]
 
 
-async def test_estado_with_a_rule_but_no_stored_text_shows_the_reason(
+async def test_estado_with_a_rule_but_no_stored_text_shows_only_the_state(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.1: a rule with no stored text gets STATUS_RULE_ONLY instead of the question."""
+    """D189, S4.9: a rule with no stored text leaves out the notice line and never a rule id."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R04")
     msg = _message(profile_id, f"/estado {invoice_id}")
     expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
-    expected = f"{expected}\n{STATUS_RULE_ONLY.format(rule_id='BR-R04')}"
 
     async with db_pool.connection() as conn:
         await handle_inbound(
@@ -584,6 +583,8 @@ async def test_estado_with_a_rule_but_no_stored_text_shows_the_reason(
         replies = await _replies(conn, profile_id)
 
     assert replies == [(expected, None)]
+    assert "Último aviso" not in replies[0][0]
+    assert "BR-" not in replies[0][0]
 
 
 async def test_estado_on_another_profiles_invoice_answers_br_s07(
@@ -607,7 +608,7 @@ async def test_estado_on_another_profiles_invoice_answers_br_s07(
 async def test_estado_without_an_id_lists_the_five_newest_invoices(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D188: /estado alone lists the sender's five newest invoices, newest first, and the hint."""
+    """D189, D188: /estado alone lists the five newest invoices and hints at the newest id."""
     profile_id = _profile()
     invoice_ids = [await _invoice(db_pool, profile_id) for _ in range(7)]
     lines = [
@@ -619,7 +620,7 @@ async def test_estado_without_an_id_lists_the_five_newest_invoices(
         )
         for invoice_id in invoice_ids[::-1][:5]
     ]
-    expected = "\n".join([*lines, ESTADO_HINT])
+    expected = "\n".join([*lines, ESTADO_HINT.format(id=invoice_ids[-1])])
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -658,7 +659,7 @@ async def test_estado_without_an_id_and_no_invoices_answers_estado_none(
 async def test_estado_without_an_id_skips_another_profiles_invoices(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D188: /estado alone lists only the sender's invoices, never another profile's."""
+    """D189, D188: /estado alone lists only the sender's invoices and hints at its newest id."""
     other_profile = _profile()
     for _ in range(3):
         await _invoice(db_pool, other_profile)
@@ -670,7 +671,7 @@ async def test_estado_without_an_id_skips_another_profiles_invoices(
         total="—",
         state_desc=state_desc("RECEIVED"),
     )
-    expected = f"{line}\n{ESTADO_HINT}"
+    expected = f"{line}\n{ESTADO_HINT.format(id=invoice_id)}"
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(

@@ -30,7 +30,6 @@ from invoicebot.rules.messages_es import (
     EDIT_PROMPT,
     MESSAGES,
     STATUS,
-    STATUS_RULE_ONLY,
     state_desc,
 )
 from invoicebot.store.flow_b import (
@@ -1532,11 +1531,7 @@ async def test_status_press_answers_like_the_estado_command(
     """D188: a [Ver #{id}] press answers the same text as /estado {id}."""
     profile_id = _profile()
     invoice_id = await _waiting_invoice(db_pool, profile_id)
-    expected = (
-        STATUS.format(id=invoice_id, state_desc=state_desc(CONFIRMING))
-        + "\n"
-        + STATUS_RULE_ONLY.format(rule_id=RULE_CAP)
-    )
+    expected = STATUS.format(id=invoice_id, state_desc=state_desc(CONFIRMING))
 
     async with db_pool.connection() as conn:
         result = await handle_inbound(
@@ -1588,14 +1583,7 @@ async def test_status_press_answers_a_terminal_invoice(
     assert result.invoice_id == invoice_id
     assert invoice == (state, RULE_CAP)
     assert jobs == []
-    assert texts == [
-        (
-            None,
-            STATUS.format(id=invoice_id, state_desc=state_desc(state))
-            + "\n"
-            + STATUS_RULE_ONLY.format(rule_id=RULE_CAP),
-        )
-    ]
+    assert texts == [(None, STATUS.format(id=invoice_id, state_desc=state_desc(state)))]
 
 
 async def test_status_press_from_another_profile_sends_nothing(

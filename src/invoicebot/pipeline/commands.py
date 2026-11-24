@@ -265,7 +265,7 @@ async def _list_recent(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
     if not rows:
         await _reply(conn, msg, None, ESTADO_NONE)
         return
-    lines = [*await _pending_lines(conn, rows), ESTADO_HINT]
+    lines = [*await _pending_lines(conn, rows), ESTADO_HINT.format(id=rows[0].id)]
     await _reply(conn, msg, None, "\n".join(lines))
 
 

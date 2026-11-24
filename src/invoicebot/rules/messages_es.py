@@ -573,21 +573,18 @@ PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepa
 #: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_MORE = "…y {count} más."
-#: The line after the newest invoices when ``/estado`` has no id (D188).
+#: The line after the newest invoices when ``/estado`` has no id (D188, D189).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-ESTADO_HINT = "Para ver uno: /estado 12"
+ESTADO_HINT = "Para ver uno: /estado {id}"
 #: ``/estado`` with no id when the sender has no invoices (D188).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 ESTADO_NONE = "Aún no tengo comprobantes tuyos."
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."
-#: The second line of ``/estado``'s answer, with the last stored question text (S4.9).
+#: The second line of ``/estado``'s answer, with the last stored question text (S4.9, D189).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-STATUS_RULE = "Último aviso ({rule_id}): {text}"
-#: The second line of ``/estado``'s answer when the rule left no stored text (S4.9).
-#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
-STATUS_RULE_ONLY = "Motivo: {rule_id}."
+STATUS_RULE = "Último aviso: {text}"
 #: The answer when a command that needs an invoice id is sent without one (R-10.1).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 COMMAND_NEEDS_ID = "Falta el número del comprobante. Por ejemplo: /{command} 12"
