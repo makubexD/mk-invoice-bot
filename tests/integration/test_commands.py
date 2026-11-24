@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import MediaMaxBytes
+from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.chain import Run, decide
 from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.net.guard import Resolver
@@ -71,7 +72,7 @@ from invoicebot.rules.messages_es import (
     STATUS_RULE_ONLY,
     state_desc,
 )
-from invoicebot.states import StateMoved
+from invoicebot.states import EXTRACT_FAILED, StateMoved
 from invoicebot.store import taught_links
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
@@ -80,6 +81,7 @@ from invoicebot.store.invoices import (
     InvoiceHead,
     create_invoice,
     load_invoice_head,
+    save_reading,
     set_flow,
     set_state,
 )
@@ -248,6 +250,20 @@ async def _parked_invoice(
             """,
             (waiting_state, rule_id, invoice_id),
         )
+    return invoice_id
+
+
+async def _extract_failed_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    reading: Reading | None = None,
+) -> int:
+    """Create an EXTRACT_FAILED invoice waiting on BR-E01, with reading when given (D188)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        if reading is not None:
+            await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id="BR-E01")
     return invoice_id
 
 
@@ -1146,6 +1162,84 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     original, requeued = payloads
     assert original["buttons"] == requeued["buttons"]
     assert requeued["text"] == original["text"]
+
+
+async def test_pendientes_names_the_fields_an_extract_failed_invoice_lacks(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: an EXTRACT_FAILED invoice shows the required fields its reading lacks."""
+    profile_id = _profile()
+    reading = Reading(
+        fields={
+            "ruc_emisor": Field(value="20000000001", source="ocr", confidence=1.0),
+            "tipo": Field(value="01", source="ocr", confidence=1.0),
+            "serie": Field(value="F001", source="ocr", confidence=1.0),
+            "numero": Field(value="123", source="ocr", confidence=1.0),
+        },
+        document_url=None,
+    )
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, reading)
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer="faltan: fecha, total",
+        total="—",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_lists_every_required_field_when_no_reading_is_stored(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: an EXTRACT_FAILED invoice with no stored reading shows every required field."""
+    profile_id = _profile()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id)
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer="faltan: RUC del emisor, tipo de comprobante, serie, número, fecha, total",
+        total="—",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_keeps_the_no_issuer_cell_for_a_manual_required_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: a MANUAL_REQUIRED row without a razón social still shows PENDING_NO_ISSUER."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", "BR-F07")
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("MANUAL_REQUIRED"),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
 
 
 async def test_pendientes_requeues_a_question_at_most_every_ten_minutes(

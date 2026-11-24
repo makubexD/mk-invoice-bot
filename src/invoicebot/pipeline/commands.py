@@ -8,7 +8,7 @@ cannot be probed (R-10.1). Everything here happens in the caller's transaction.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -17,6 +17,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -51,17 +52,20 @@ from invoicebot.rules.messages_es import (
     PENDING_BATCH_LINE,
     PENDING_HEADER,
     PENDING_LINE,
+    PENDING_MISSING,
     PENDING_MORE,
     PENDING_NO_ISSUER,
     PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     REPROCESS_TOO_SOON,
+    fields_desc,
     state_desc,
 )
 from invoicebot.states import (
     BATCHED,
     CANCELLABLE,
+    EXTRACT_FAILED,
     FAILED,
     MANUAL_REQUIRED,
     PENDING_USER,
@@ -74,6 +78,7 @@ from invoicebot.store.invoices import (
     list_pending,
     list_recent,
     load_invoice_head,
+    load_reading,
 )
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
@@ -260,7 +265,7 @@ async def _list_recent(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
     if not rows:
         await _reply(conn, msg, None, ESTADO_NONE)
         return
-    lines = [*(_pending_line(row) for row in rows), ESTADO_HINT]
+    lines = [*await _pending_lines(conn, rows), ESTADO_HINT]
     await _reply(conn, msg, None, "\n".join(lines))
 
 
@@ -338,16 +343,38 @@ async def _pendientes(
     if not rows:
         await _reply(conn, msg, None, PENDING_NONE)
         return
-    lines = [PENDING_HEADER, *(_pending_line(row) for row in rows)]
+    lines = [PENDING_HEADER, *await _pending_lines(conn, rows)]
     if total > len(rows):
         lines.append(PENDING_MORE.format(count=total - len(rows)))
     await _reply(conn, msg, None, "\n".join(lines))
     await _requeue_parked(conn, rows)
 
 
-def _pending_line(row: PendingRow) -> str:
-    """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
-    issuer = row.razon_social or PENDING_NO_ISSUER
+async def _pending_lines(conn: AsyncConnection[Any], rows: Sequence[PendingRow]) -> list[str]:
+    """Return the list line of each pending row, naming a failed extraction's gaps (D188)."""
+    return [_pending_line(row, missing=await _missing_text(conn, row)) for row in rows]
+
+
+async def _missing_text(conn: AsyncConnection[Any], row: PendingRow) -> str | None:
+    """Return ``PENDING_MISSING`` for an EXTRACT_FAILED row, or None (D188).
+
+    A row is failed when its state or its parked ``waiting_state`` is ``EXTRACT_FAILED``.
+    A row with no stored reading lacks every required field.
+    """
+    if EXTRACT_FAILED not in (row.state, row.waiting_state):
+        return None
+    reading = await load_reading(conn, row.id)
+    missing = REQUIRED if reading is None else reading.missing_required()
+    return PENDING_MISSING.format(fields_desc=fields_desc(missing))
+
+
+def _pending_line(row: PendingRow, *, missing: str | None = None) -> str:
+    """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4).
+
+    ``missing`` is the issuer cell of a failed extraction, loaded by the caller so this
+    stays pure (D188); every other row names its razón social or ``PENDING_NO_ISSUER``.
+    """
+    issuer = missing if missing is not None else row.razon_social or PENDING_NO_ISSUER
     if row.state == BATCHED and row.batch_prepared_at is not None:
         return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
     total = "—" if row.total is None else f"{row.total:.2f}"

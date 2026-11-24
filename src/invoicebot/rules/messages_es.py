@@ -541,6 +541,9 @@ PENDING_LINE = "#{id} · {issuer} · {total} · {state_desc}"
 #: ``{issuer}`` for an invoice whose razón social is not read yet (S4.8).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_NO_ISSUER = "emisor sin leer"
+#: ``{issuer}`` for an EXTRACT_FAILED invoice: the required fields it lacks (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_MISSING = "faltan: {fields_desc}"
 #: One prepared batch in ``/pendientes``'s list (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepared_at:%d/%m}; falta enviarlo"
