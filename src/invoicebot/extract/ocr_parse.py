@@ -39,6 +39,28 @@ NO_CONFIDENCE = 0.0
 MAX_OCR_TEXT_CHARS = 64 * 1024
 #: Most matches considered per parsing rule, so a pathological text cannot exhaust it (R-9.2).
 MAX_MATCHES_PER_RULE = 50
+#: Most characters a printed URL may have; a longer one is not kept (D189).
+MAX_PRINTED_URL_CHARS = 200
+#: The host of SUNAT's generic query page, never an issuer's portal (D189).
+SUNAT_HOST = "sunat.gob.pe"
+#: The scheme every printed URL is normalized to (D189).
+HTTPS_SCHEME = "https://"
+#: Punctuation a sentence puts after a printed URL, never part of it (D189).
+TRAILING_URL_PUNCTUATION = ".,;:)"
+#: A host needs a dot, so at least two labels, and a 2-24 letter top level (D189).
+HOST_MIN_LABELS = 2
+TLD_MIN_CHARS = 2
+TLD_MAX_CHARS = 24
+#: A printed address: an optional scheme, a dotted host and an optional path (D189).
+#: One quantifier per part and a boundary that refuses a start inside a longer word, so the
+#: scan stays linear on untrusted OCR text (R-9.2).
+PRINTED_URL_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9.-])"
+    r"(?P<scheme>https?://)?"
+    r"(?P<host>[A-Za-z0-9.-]+)"
+    r"(?P<path>/[^\s]*)?",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True)
@@ -75,8 +97,37 @@ def parse_ocr(text: OcrText, rules: ParsingRules) -> OcrReading:
     if fecha is not None:
         fields["fecha_emision"] = fecha
     fields.update(_read_amounts(searched, spans, rules))
-    reading = Reading(fields=fields, document_url=None)
+    reading = Reading(fields=fields, document_url=None, printed_url=_read_printed_url(searched))
     return OcrReading(reading=reading)
+
+
+def _read_printed_url(searched: str) -> str | None:
+    """Return the first web address printed in ``searched``, normalized to https, or None (D189)."""
+    for match in PRINTED_URL_PATTERN.finditer(searched):
+        path = match.group("path") or ""
+        if not match.group("scheme") and not path:
+            continue
+        if match.start("host") > 0 and searched[match.start("host") - 1] == "@":
+            continue
+        host = match.group("host").lower().rstrip(".")
+        if not _is_printed_host(host):
+            continue
+        if host == SUNAT_HOST or host.endswith(f".{SUNAT_HOST}"):
+            continue
+        url = f"{HTTPS_SCHEME}{host}{path.rstrip(TRAILING_URL_PUNCTUATION)}"
+        if len(url) > MAX_PRINTED_URL_CHARS:
+            return None
+        return url
+    return None
+
+
+def _is_printed_host(host: str) -> bool:
+    """Return whether ``host`` is dotted labels whose top level is 2-24 letters (D189)."""
+    labels = host.split(".")
+    if len(labels) < HOST_MIN_LABELS or not all(labels):
+        return False
+    top_level = labels[-1]
+    return TLD_MIN_CHARS <= len(top_level) <= TLD_MAX_CHARS and top_level.isascii() and top_level.isalpha()
 
 
 def _matches(pattern: re.Pattern[str], searched: str) -> Iterator[re.Match[str]]:
