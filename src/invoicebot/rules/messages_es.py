@@ -86,6 +86,15 @@ MESSAGES: dict[str, str] = {
         "ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos."
     ),
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
+    "BR-F13": (
+        "⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
+        "{searched_lines}\n"
+        "Vuelvo a mirar el correo a las {next_at:%H:%M}.\n"
+        "Si lo tienes, me ayudas:"
+    ),
+    "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
+    "BR-F13_wait": "Listo. Sigo buscando el correo y te aviso cuando llegue.",
+    "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
         "{fetcher_lines}\n"

@@ -140,33 +140,32 @@ Files: `src/invoicebot/extract/ocr_parse.py`, `tests/unit/test_extract_ocr_parse
 
 Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py`
 
-## Step 6: BR-F13 and BR-F14 texts `[worker]`
+## Step 6: BR-F13's text and the new button titles `[worker]`
 
-Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/rules/catalog.py`,
-`src/invoicebot/pipeline/manual_message.py`, `tests/unit/test_manual_message.py`.
+Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/manual_message.py`,
+`tests/unit/test_manual_message.py`.
 
-1. `messages_es.py`, in `MESSAGES` next to BR-F12:
-   - `"BR-F13"`: `"⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\nYa busqué:\n{fetcher_lines}\nVuelvo
-a mirar el correo a las {next_at}.\nSi lo tienes, me ayudas:"`;
-   - `"BR-F13_upload"`: `"Envíame el PDF aquí, como archivo, y lo completo."`;
-   - `"BR-F13_wait"`: `"Listo. Sigo buscando el correo y te aviso cuando llegue."`;
-   - `"BR-F14"`: `"¿Es este el portal de {razon_social}?\n{url}"`.
-     Button titles next to the others: `BUTTON_SEND_PDF = "📎 Te envío el PDF"`, `BUTTON_TEACH_PORTAL = "🔗 Enseñar el
-portal"`, `BUTTON_WAIT_MAIL = "⏳ Espero el correo"`, `BUTTON_NO = "No"`, `BUTTON_DONT_KNOW = "No sé"` (reuse
-     `BUTTON_YES` for [Sí]; if a `No` title already exists, reuse it). Each title is at most 20 characters.
-     Delete `FETCH_WAITING_MAIL` only in step 8, not here.
-2. `catalog.py`: `BR-F13` and `BR-F14` entries in the same form as `BR-F02`.
-3. `manual_message.py`: rename `_fetcher_lines` to `fetcher_lines` (public, docstring says BR-F07 and BR-F13 use it)
-   and add `docs_needed_text(invoice_id: int, reading, flow, attempts, directory, next_at: str) -> str` that formats
-   BR-F13 with `docs_desc(flow's required docs)` (the same helper and argument BR-F07's `manual_docs_desc` uses) and
-   `fetcher_lines(...)` joined by newlines. With no bullet (only a `qr_url` with no link ran), the `Ya busqué:` line and
-   the bullets are left out.
-4. Tests, docstring `D189` (and `BR-F13`): attempts `qr_url: no_url`, `portal_registry: no_portal` → the text names
-   the docs, has `Ya busqué:` and `• Portal del comercio: no lo conozco`, and ends with the `next_at` line and
-   `Si lo tienes, me ayudas:`; attempts with only `qr_url: no_url` → no `Ya busqué:` line; every new `MESSAGES` key is
-   in the catalog (the existing parity test covers this; run it).
+Step 1 already added `BR-F13`, `BR-F13_upload`, `BR-F13_wait` and `BR-F14` to `MESSAGES` and the catalog (spec
+parity needs them with the spec rows). `BR-F13` is `"⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
+"{searched_lines}\nVuelvo a mirar el correo a las {next_at:%H:%M}.\nSi lo tienes, me ayudas:"`, where `next_at` is
+a `datetime`. Do not change those texts.
 
-Test: `uv run pytest -q tests/unit/test_manual_message.py tests/unit/test_docs.py`
+1. `messages_es.py`: button titles next to the others: `BUTTON_SEND_PDF = "📎 Te envío el PDF"`,
+   `BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"`, `BUTTON_WAIT_MAIL = "⏳ Espero el correo"`, `BUTTON_NO = "No"`,
+   `BUTTON_DONT_KNOW = "No sé"` (reuse `BUTTON_YES` for [Sí]; if a `No` title already exists, reuse it). Each title is
+   at most 20 characters. Add `SEARCHED_HEADER = "Ya busqué:"`. Delete `FETCH_WAITING_MAIL` only in step 8.
+2. `manual_message.py`: rename `_fetcher_lines` to `fetcher_lines` (public, docstring says BR-F07 and BR-F13 use it)
+   and add `docs_needed_text(invoice_id: int, reading, flow, attempts, directory, next_at: datetime) -> str` that
+   formats `MESSAGES["BR-F13"]` with `docs_desc(...)` of the flow's required docs (the same helper and argument BR-F07's
+   `manual_docs_desc` uses) and `searched_lines` = `SEARCHED_HEADER` and the `fetcher_lines(...)` joined by newlines.
+   With no bullet (only a `qr_url` with no link ran), `searched_lines` is empty and the empty line it leaves is
+   dropped from the result (no blank line in the text).
+3. Tests, docstring `D189` (and `BR-F13`): attempts `qr_url: no_url`, `portal_registry: no_portal` → the text names
+   the docs, has `Ya busqué:` and `• Portal del comercio: no lo conozco`, then `Vuelvo a mirar el correo a las 14:05.`
+   for `next_at` 14:05, and ends with `Si lo tienes, me ayudas:`; attempts with only `qr_url: no_url` → no
+   `Ya busqué:` line and no blank line; BR-F07's text is unchanged by the rename (an existing test covers it; run it).
+
+Test: `uv run pytest -q tests/unit/test_manual_message.py tests/unit/test_rules_parity.py`
 
 ## Step 7: The portal offer `[worker]`
 
@@ -212,8 +211,8 @@ Files: `src/invoicebot/pipeline/fetch.py`, `src/invoicebot/pipeline/questions.py
 bool) -> list[Button]` → [📎] [🔗 only when `offer_portal`] [⏳].
 2. `fetch.py`: in `_record_result`, the first wait of the email inbox fetcher (where `_waiting_text` returns
    `FETCH_WAITING_MAIL` today) queues `docs_needed_text(...)` with rule `BR-F13` and `docs_needed_buttons`; `next_at`
-   is the job's `run_after` shown as `%H:%M` in `cfg.timezone` (the owner's zone; reuse the helper other notices use,
-   if there is one). `offer_portal` is True when `gaps.teach_via_chat` is on, `portal_for(ruc_emisor, directory)` is
+   is the job's `run_after` as a `datetime` in `cfg.timezone` (the owner's zone; reuse the helper other notices use,
+   if there is one), formatted by the message's `{next_at:%H:%M}`. `offer_portal` is True when `gaps.teach_via_chat` is on, `portal_for(ruc_emisor, directory)` is
    None and `taught_links.exists(conn, ruc)` is False (False with no RUC). Every other fetcher keeps `FETCH_WAITING`.
    Remove `_WAITING_TEXTS` if it is left with no entry, and delete `FETCH_WAITING_MAIL` from `messages_es.py`.
 3. Tests, docstring `D189` (and `BR-F13`): the inbox's first `not_found_yet` with an unknown issuer → one BR-F13 row
