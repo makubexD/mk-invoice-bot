@@ -275,11 +275,28 @@ def state_desc(state: str) -> str:
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
 
 
-#: The routed-invoice summary (spec 06 §1 "Summary message"). ``{flow_line}`` is the
-#: matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
+#: The routed-invoice summary (spec 06 §1 "Summary message"). ``{issuer}`` is the padrón's
+#: name and the RUC, or just the RUC; ``{sources_line}`` names where the fields came from;
+#: ``{flow_line}`` is the matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
 SUMMARY = (
-    "🧾 {tipo_desc} {serie}-{numero} · {fecha}\nEmisor: RUC {ruc_emisor}\nTotal: S/ {total}\n{flow_line}"
+    "🧾 {tipo_desc} {serie}-{numero} · {fecha}\n"
+    "Emisor: {issuer}\n"
+    "Total: S/ {total}\n"
+    "{sources_line}\n"
+    "{flow_line}"
 )
+#: Summary line naming where the required fields came from (D188).
+SUMMARY_SOURCES = "🔎 Leído de: {sources_desc}"
+#: ``{sources_desc}`` names, per origin of a field (D188).
+SOURCE_DESC: dict[str, str] = {
+    "qr": "QR",
+    "xml": "XML",
+    "ocr": "texto",
+    "pdf": "PDF",
+    "padron": "padrón",
+    "llm": "IA",
+    "user": "tú",
+}
 #: Summary line naming the fields repaired from the QR payload (D79).
 SUMMARY_INFERRED = "ℹ️ Deducido del comprobante: {fields_desc}"
 #: Summary line naming the doubtful fields; the invoice still goes on in this phase (D80).
