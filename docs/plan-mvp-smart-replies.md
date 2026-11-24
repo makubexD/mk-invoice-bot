@@ -216,7 +216,26 @@ Files: `src/invoicebot/queue/outbox.py`, `src/invoicebot/pipeline/commands.py`, 
 
 Test: `uv run pytest -q tests/integration/test_commands.py`
 
-## Step 12: Live run `[inline: live run]`
+## Step 12: The summary says the invoice is moving `[inline: user-facing copy, owner 2026-11-23]`
+
+The first live summary (2026-11-23) read as a question: [Editar] [Cancelar] under it looked like the bot was waiting,
+though with `confirm_mode: auto` the invoice goes on by itself.
+
+Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/questions.py`,
+`src/invoicebot/pipeline/validate.py`, `specs/06-business-rules.md`, `specs/05-open-questions.md` and the tests whose
+summary buttons change.
+
+1. `SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."` is the summary's last line when the
+   invoice goes on without waiting (`validate._routed_off`, `validate._apply`); the `CONFIRMING` summary never has it.
+2. That summary's buttons read `✏️ Corregir` and `✖️ Anular` (`BUTTON_FIX`, `BUTTON_VOID`), same actions. BR-E01 and the
+   `CONFIRMING` question keep [Editar] [Cancelar], where the bot does wait.
+3. Spec 06 "Summary message" gets the line and the labels; D188 gets the addition.
+4. Tests, docstring `D188`: a summary that goes on ends with `SUMMARY_MOVING` and carries the two new labels; a
+   `CONFIRMING` summary has neither.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_validate.py tests/integration/test_conversation_fake.py tests/unit/test_rules_parity.py`
+
+## Step 13: Live run `[inline: live run]`
 
 Deploy this branch's image. From the owner's Telegram: a cropped or blurry photo → BR-E01 names the read and missing
 fields; [Editar] → the missing lines; answer one field, then the rest → routed summary with the issuer and the
@@ -225,7 +244,7 @@ owner cancels the console rehearsal invoices #1–#7 and #11 with `/cancelar`.
 
 Test: each answer as the spec texts of step 1 say; a mismatch becomes a finding.
 
-## Step 13: Record the live run `[inline: live results]`
+## Step 14: Record the live run `[inline: live results]`
 
 `specs/spikes/smart-replies.md` (new): date, image, what each step-12 item showed, the owner's notes on the texts.
 
