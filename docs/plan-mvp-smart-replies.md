@@ -63,7 +63,7 @@ Files: `src/invoicebot/pipeline/edits.py`, `tests/unit/test_edits_parse.py`.
    assignment toward `MAX_EDIT_LINES`. One line with one pair behaves exactly as today. A small helper
    (`_split_pairs(line) -> list[str]`) keeps `parse_edits` under the complexity cap.
 2. Tests, docstring `D188` (and `R-3.5`):
-   - `ruc=20100070970 serie=F001 numero=123 fecha=05/11/2026 total=30.90` → five fields, no errors;
+   - `ruc=20000000001 serie=F001 numero=123 fecha=05/11/2026 total=30.90` → five fields, no errors;
    - `fecha=05/11/2026 total=30.90` → two fields;
    - `total=30.90` alone → one field (unchanged);
    - two lines, one pair each → two fields (unchanged);
@@ -138,8 +138,8 @@ the existing summary test file; find it).
    `ocr` → `texto`, `llm` → `IA`, `user` → `tú`, `padron` → `padrón`). `sources_desc` groups the `REQUIRED` fields by
    source: the source holding most fields is named alone first; each other source follows as `{desc}: {fields_desc}`,
    `; ` separated. The line goes after the total line, before `{flow_line}`.
-3. Tests, docstring `D188`: all from QR with `razon_social` → `Emisor: ACME S.A.C. (RUC 20100070970)` and
-   `🔎 Leído de: QR`; no `razon_social` → `Emisor: RUC 20100070970`; QR plus `ocr` for `fecha_emision` and `total` →
+3. Tests, docstring `D188`: all from QR with `razon_social` → `Emisor: ACME S.A.C. (RUC 20000000001)` and
+   `🔎 Leído de: QR`; no `razon_social` → `Emisor: RUC 20000000001`; QR plus `ocr` for `fecha_emision` and `total` →
    `🔎 Leído de: QR; texto: fecha, total`; the existing inferred and review lines still come out (unchanged tests pass).
 
 Test: `uv run pytest -q <the summary test file> tests/integration/test_pipeline_route.py`

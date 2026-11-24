@@ -223,9 +223,9 @@ def test_edit_error_echoes_a_bad_ruc_or_date_safely(line: str, rule_id: str) -> 
 
 def test_parse_edits_reads_several_pairs_on_one_line() -> None:
     """D188, R-3.5: five pairs on one line parse as five fields, plus the inferred tipo, no errors."""
-    edits = parse_edits("ruc=20100070970 serie=F001 numero=123 fecha=05/11/2026 total=30.90")
+    edits = parse_edits("ruc=20000000001 serie=F001 numero=123 fecha=05/11/2026 total=30.90")
     assert edits.fields == {
-        "ruc_emisor": "20100070970",
+        "ruc_emisor": "20000000001",
         "serie": "F001",
         "tipo": "01",
         "numero": "123",

@@ -99,7 +99,7 @@ def _partial_reading() -> Reading:
     """Build a BR-E01 reading missing ``fecha_emision`` and ``total`` (D188)."""
     return Reading(
         fields={
-            "ruc_emisor": _field("20100070970"),
+            "ruc_emisor": _field("20000000001"),
             "tipo": _field("01"),
             "serie": _field("F001"),
             "numero": _field("123"),
