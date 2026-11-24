@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from datetime import UTC, date, datetime
+from typing import Literal
 
 import pytest
 
-from invoicebot.config.models import Brand, Flow, Portal, Store, StoreDirectory
+from invoicebot.config.models import Brand, Flow, FlowInbox, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.chain import Attempt
@@ -31,15 +32,20 @@ PORTAL_FETCHER = "portal_registry"
 ALL_FETCHERS = (PORTAL_FETCHER, "sunat_sol")
 
 
-def _flow(fetchers: Sequence[str] = ALL_FETCHERS) -> Flow:
+def _flow(fetchers: Sequence[str] = ALL_FETCHERS, *, inbox: FlowInbox | None = None) -> Flow:
     return Flow(
         label="Trabajo",
         accepted_tipos=["01"],
         fetchers=list(fetchers),
         required_docs=["pdf", "xml"],
         deliver_without_docs=False,
+        email_inbox=inbox,
         sinks=[],
     )
+
+
+def _inbox(provider: Literal["gmail", "graph"] = "gmail") -> FlowInbox:
+    return FlowInbox(provider=provider, account="bot", retry_schedule=["5m", "1h", "6h", "24h"])
 
 
 def _store(*, portal: str | None = PORTAL_KEY, comercio: str = COMERCIO) -> Store:
@@ -184,8 +190,8 @@ def test_portal_placeholder_falls_back_to_key_or_a_generic_name(
     ]
 
 
-def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
-    """D189 (BR-F13): the text names the missing docs, the bullets tried, the next look and the offer."""
+def test_docs_needed_text_names_the_docs_the_fetcher_bullets_and_the_mailbox() -> None:
+    """D190, BR-F13: the text names the missing docs, the bullets tried, the mailbox and the offer."""
     attempts = [
         Attempt("qr_url", FetchReason.NO_URL),
         Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL),
@@ -194,7 +200,7 @@ def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
     text = docs_needed_text(
         7,
         _reading(),
-        _flow(),
+        _flow(inbox=_inbox()),
         attempts,
         _with_store(),
         LookTimes(
@@ -203,22 +209,21 @@ def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
     )
 
     assert text == (
-        "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
+        "⏳ Comprobante #7: no pude descargar el PDF y el XML.\n"
         "Ya busqué:\n"
         "• Portal del comercio: no lo conozco\n"
-        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
-        "Próxima revisión: hoy a las 14:05. Si no llega hasta mañana a las 14:05, "
-        "te aviso para que me lo envíes.\n"
-        "Si lo tienes, me ayudas:"
+        "Mientras tanto, reviso tu Gmail hasta mañana a las 14:05 por si el comercio te lo envió; "
+        "si llega, lo archivo solo y te aviso.\n"
+        "¿Cómo seguimos?"
     )
 
 
 def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
-    """D189 (BR-F13): only a qr_url with no link leaves no "Ya busqué:" line and no blank line."""
+    """D190, BR-F13: only a qr_url with no link leaves no "Ya busqué:" line and no blank line."""
     text = docs_needed_text(
         7,
         _reading(),
-        _flow(),
+        _flow(inbox=_inbox()),
         [Attempt("qr_url", FetchReason.NO_URL)],
         _with_store(),
         LookTimes(
@@ -229,20 +234,46 @@ def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
     assert "Ya busqué:" not in text
     assert "\n\n" not in text
     assert text == (
-        "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
-        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
-        "Próxima revisión: hoy a las 14:05. Si no llega hasta mañana a las 14:05, "
-        "te aviso para que me lo envíes.\n"
-        "Si lo tienes, me ayudas:"
+        "⏳ Comprobante #7: no pude descargar el PDF y el XML.\n"
+        "Mientras tanto, reviso tu Gmail hasta mañana a las 14:05 por si el comercio te lo envió; "
+        "si llega, lo archivo solo y te aviso.\n"
+        "¿Cómo seguimos?"
     )
 
 
-def test_docs_needed_text_words_the_next_and_last_look() -> None:
-    """D190, BR-F13: the text words the next and the last look against the owner's date."""
+@pytest.mark.parametrize(
+    ("last_at", "today", "last_desc"),
+    [
+        (datetime(2026, 11, 24, 14, 5, tzinfo=UTC), date(2026, 11, 24), "hoy a las 14:05"),
+        (datetime(2026, 11, 25, 12, 20, tzinfo=UTC), date(2026, 11, 24), "mañana a las 12:20"),
+        (datetime(2026, 11, 26, 9, 0, tzinfo=UTC), date(2026, 11, 24), "el 26/11 a las 09:00"),
+    ],
+)
+def test_docs_needed_text_words_the_last_look_against_the_owner_date(
+    last_at: datetime, today: date, last_desc: str
+) -> None:
+    """D190, BR-F13: the last look reads hoy, mañana or a date, and the offer closes the text."""
     text = docs_needed_text(
         7,
         _reading(),
-        _flow(),
+        _flow(inbox=_inbox()),
+        [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
+        _with_store(),
+        LookTimes(datetime(2026, 11, 24, 5, 15, tzinfo=UTC), last_at, today),
+    )
+
+    assert text.startswith("⏳ Comprobante #7: no pude descargar el PDF y el XML.")
+    assert "Próxima revisión" not in text
+    assert f"Mientras tanto, reviso tu Gmail hasta {last_desc} por si el comercio te lo envió" in text
+    assert text.splitlines()[-1] == "¿Cómo seguimos?"
+
+
+def test_docs_needed_text_names_outlook_for_a_graph_inbox() -> None:
+    """D190, BR-F13: a graph inbox reads "tu Outlook"."""
+    text = docs_needed_text(
+        7,
+        _reading(),
+        _flow(inbox=_inbox("graph")),
         [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
         _with_store(),
         LookTimes(
@@ -252,26 +283,24 @@ def test_docs_needed_text_words_the_next_and_last_look() -> None:
         ),
     )
 
-    assert "Próxima revisión: hoy a las 05:15." in text
-    assert "Si no llega hasta mañana a las 12:20" in text
+    assert "Mientras tanto, reviso tu Outlook hasta mañana a las 12:20" in text
 
 
-def test_docs_needed_text_says_manana_for_a_next_look_tomorrow() -> None:
-    """D190, BR-F13: a next look on the day after today reads "mañana"."""
-    text = docs_needed_text(
-        7,
-        _reading(),
-        _flow(),
-        [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
-        _with_store(),
-        LookTimes(
-            datetime(2026, 11, 25, 9, 0, tzinfo=UTC),
-            datetime(2026, 11, 26, 9, 0, tzinfo=UTC),
-            date(2026, 11, 24),
-        ),
-    )
-
-    assert "Próxima revisión: mañana a las " in text
+def test_docs_needed_text_needs_a_flow_with_an_inbox() -> None:
+    """D190, BR-F13: a flow without email_inbox raises ValueError."""
+    with pytest.raises(ValueError, match="BR-F13 needs a flow with an email_inbox"):
+        docs_needed_text(
+            7,
+            _reading(),
+            _flow(),
+            [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
+            _with_store(),
+            LookTimes(
+                datetime(2026, 11, 24, 5, 15, tzinfo=UTC),
+                datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
+                date(2026, 11, 24),
+            ),
+        )
 
 
 def test_br_f11_uses_a_generic_comercio_without_a_store() -> None:

@@ -24,6 +24,7 @@ from invoicebot.rules.messages_es import (
     FETCH_NOT_FOUND_LINE,
     FETCH_PORTAL_TODO_LINE,
     FETCH_TECHNICAL_LINE,
+    MAILBOX_DESC,
     MESSAGES,
     SEARCHED_HEADER,
     STORE_FALLBACK,
@@ -96,11 +97,17 @@ def docs_needed_text(
     directory: StoreDirectory,
     looks: LookTimes,
 ) -> str:
-    """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D189).
+    """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D190).
 
-    ``looks`` gives the next and the last inbox look, which ``when_desc`` words against
-    the owner's date.
+    ``looks`` gives the last inbox look, which ``when_desc`` words against the owner's date.
+
+    Raises:
+        ValueError: when the flow has no ``email_inbox``, since only the mailbox fetcher
+            sends BR-F13.
     """
+    inbox = flow.email_inbox
+    if inbox is None:
+        raise ValueError("BR-F13 needs a flow with an email_inbox")
     store = _store_for(reading, directory)
     portal = portal_for(reading.value("ruc_emisor") or "", directory)
     bullets = fetcher_lines(attempts, store, portal, portal_broken=False)
@@ -109,7 +116,7 @@ def docs_needed_text(
         id=invoice_id,
         docs_desc=docs_desc(flow.required_docs),
         searched_lines=searched_lines,
-        next_desc=when_desc(looks.next_at, looks.today),
+        mailbox_desc=MAILBOX_DESC[inbox.provider],
         last_desc=when_desc(looks.last_at, looks.today),
     )
     return text if searched_lines else text.replace("\n\n", "\n")

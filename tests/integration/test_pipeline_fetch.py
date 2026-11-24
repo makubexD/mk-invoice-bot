@@ -1214,11 +1214,14 @@ async def test_inbox_first_wait_offers_the_docs_needed_buttons(
         row = await cur.fetchone()
     assert row is not None
     next_at, today = row
-    next_desc = when_desc(next_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
+    # The schedule's 5m first look, then the 1h, 6h and 24h waits after it.
+    wait_start = next_at - timedelta(minutes=5)
+    last_at = wait_start + timedelta(hours=31, minutes=5)
+    last_desc = when_desc(last_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
     assert [rule_id for _text, rule_id in outbox] == [RULE_DOCS_NEEDED]
     text = outbox[0][0]
     assert FETCH_NO_PORTAL_LINE in text
-    assert f"Próxima revisión: {next_desc}." in text
+    assert f"Mientras tanto, reviso tu Outlook hasta {last_desc} por si el comercio te lo envió" in text
     assert buttons == [
         [
             f"{invoice_id}:{SEND_PDF_ACTION}",
@@ -1251,7 +1254,9 @@ async def test_inbox_first_wait_names_the_last_look_after_the_whole_schedule(
     wait_start = next_at - timedelta(minutes=5)
     last_at = wait_start + timedelta(hours=31, minutes=5)
     last_desc = when_desc(last_at.astimezone(ZoneInfo(cfg.owner.timezone)), today)
-    assert f"Si no llega hasta {last_desc}, te aviso para que me lo envíes." in outbox[0][0]
+    assert (
+        f"Mientras tanto, reviso tu Outlook hasta {last_desc} por si el comercio te lo envió" in outbox[0][0]
+    )
 
 
 async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(

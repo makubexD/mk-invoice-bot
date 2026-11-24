@@ -91,11 +91,11 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F13": (
-        "⏳ Comprobante #{id}: me falta {docs_desc} para archivarlo.\n"
+        "⏳ Comprobante #{id}: no pude descargar {docs_desc}.\n"
         "{searched_lines}\n"
-        "Reviso tu correo por si el comercio te lo envía; si llega, lo archivo solo y te aviso.\n"
-        "Próxima revisión: {next_desc}. Si no llega hasta {last_desc}, te aviso para que me lo envíes.\n"
-        "Si lo tienes, me ayudas:"
+        "Mientras tanto, reviso {mailbox_desc} hasta {last_desc} por si el comercio te lo envió; "
+        "si llega, lo archivo solo y te aviso.\n"
+        "¿Cómo seguimos?"
     ),
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
     "BR-F13_wait": "Listo. Sigo revisando tu correo y te aviso cuando llegue el PDF.",
@@ -454,6 +454,8 @@ FETCHER_DESC: dict[str, str] = {
 }
 #: es-PE names of the required document kinds, used in BR-F07's ``{manual_docs_desc}``.
 DOC_DESC: dict[str, str] = {"pdf": "el PDF", "xml": "el XML"}
+#: BR-F13's ``{mailbox_desc}`` per inbox provider (BR-F13, D190).
+MAILBOX_DESC: dict[str, str] = {"gmail": "tu Gmail", "graph": "tu Outlook"}
 #: Reply to an uploaded XML that is unsafe or invalid (BR-F09, D101).
 UPLOAD_XML_INVALID = "El XML que enviaste no es válido; no lo guardé."
 #: Reply to an uploaded XML that is not the invoice it was sent for (BR-F06, D101).
