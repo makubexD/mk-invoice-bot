@@ -41,6 +41,9 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 5. the matched routing rule's own message, e.g. `➡️ {flow.label}` (BR-R01, BR-R02);
 6. only when a field was repaired from the QR (D79): `ℹ️ Deducido del comprobante: {fields_desc}`;
 7. only when a field is doubtful (low confidence, a failed R-2.4 check, or a date in the future or older than `max_invoice_age_days`): `⚠️ Revisa: {fields_desc}`. Until replies are handled (`widen-b`), the invoice goes on (D80).
+8. only when the invoice goes on without waiting (not `CONFIRMING`): `⏳ Lo estoy archivando. Toca un botón solo si algo está mal.` (D188).
+
+That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel actions as [Editar] [Cancelar], worded so nothing reads as pending; a question that waits (BR-E01, the `CONFIRMING` summary) keeps [Editar] [Cancelar] (D188).
 
 `{fields_desc}` names the fields in Spanish, comma separated: `fecha`, `tipo de comprobante`, `total`.
 

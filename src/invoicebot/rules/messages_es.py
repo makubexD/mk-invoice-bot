@@ -299,6 +299,9 @@ SOURCE_DESC: dict[str, str] = {
 SUMMARY_INFERRED = "ℹ️ Deducido del comprobante: {fields_desc}"
 #: Summary line naming the doubtful fields; the invoice still goes on in this phase (D80).
 SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
+#: The last line of a summary whose invoice goes on without waiting, so its buttons read
+#: as corrections, not as a question (D188).
+SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
 
@@ -441,8 +444,12 @@ BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
 #: BR-S10 and BR-E03: the sender confirms the routed summary (D126).
 BUTTON_CONFIRM = "Confirmar"
-#: The routed summary's [Editar] button (R-3.4).
+#: The [Editar] button of a question that waits: BR-E01 and the confirmation (R-3.4, D126).
 BUTTON_EDIT = "Editar"
+#: The summary's correction buttons while the invoice goes on: same actions as [Editar]
+#: and [Cancelar], worded so nothing reads as pending (D188).
+BUTTON_FIX = "✏️ Corregir"
+BUTTON_VOID = "✖️ Anular"
 #: The [Ver #{id}] button that answers like ``/estado {id}`` (D188).
 BUTTON_STATUS = "Ver #{id}"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).

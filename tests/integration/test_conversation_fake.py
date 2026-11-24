@@ -41,7 +41,7 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import compile_rules
-from invoicebot.rules.messages_es import FETCH_NOT_FOUND_LINE, MESSAGES, fetcher_desc
+from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID, FETCH_NOT_FOUND_LINE, MESSAGES, fetcher_desc
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -411,8 +411,8 @@ async def test_dni_buyer_picks_a_flow_and_gets_the_summary(
     assert "Total: S/ 49.90" in summary.text
     assert "➡️ Trabajo (Microsoft)" in summary.text
     assert [(button.id, button.title) for button in summary.buttons] == [
-        (button_id(invoice_id, "edit"), "Editar"),
-        (button_id(invoice_id, "cancel"), "Cancelar"),
+        (button_id(invoice_id, "edit"), BUTTON_FIX),
+        (button_id(invoice_id, "cancel"), BUTTON_VOID),
     ]
 
 

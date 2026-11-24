@@ -19,6 +19,8 @@ from invoicebot.rules.messages_es import (
     BUTTON_CONFIRM,
     BUTTON_CONTINUE,
     BUTTON_EDIT,
+    BUTTON_FIX,
+    BUTTON_VOID,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -122,24 +124,26 @@ def invalid_question(invoice_id: int, rule_id: str) -> tuple[str, list[Button]]:
 
 
 def summary_buttons(invoice_id: int) -> list[Button]:
-    """Return the routed summary's [Editar] and [Cancelar] buttons (R-3.4)."""
-    return [
-        Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
-        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
-    ]
+    """Return the moving summary's [✏️ Corregir] and [✖️ Anular] buttons (R-3.4, D188)."""
+    return _edit_cancel(invoice_id, BUTTON_FIX, BUTTON_VOID)
 
 
 def unreadable_buttons(invoice_id: int) -> list[Button]:
     """Return BR-E01's [Editar] and [Cancelar] buttons (BR-E01, D188)."""
-    return [
-        Button(id=button_id(invoice_id, EDIT_ACTION), title=BUTTON_EDIT),
-        Button(id=button_id(invoice_id, CANCEL_ACTION), title=BUTTON_CANCEL),
-    ]
+    return _edit_cancel(invoice_id, BUTTON_EDIT, BUTTON_CANCEL)
 
 
 def confirm_buttons(invoice_id: int) -> list[Button]:
     """Return the confirmation's [Confirmar], [Editar] and [Cancelar] buttons (D126, R-3.4)."""
     return [
         Button(id=button_id(invoice_id, CONFIRM_ACTION), title=BUTTON_CONFIRM),
-        *summary_buttons(invoice_id),
+        *_edit_cancel(invoice_id, BUTTON_EDIT, BUTTON_CANCEL),
+    ]
+
+
+def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:
+    """Return the edit and cancel buttons with the given titles; the actions never change."""
+    return [
+        Button(id=button_id(invoice_id, EDIT_ACTION), title=edit_title),
+        Button(id=button_id(invoice_id, CANCEL_ACTION), title=cancel_title),
     ]
