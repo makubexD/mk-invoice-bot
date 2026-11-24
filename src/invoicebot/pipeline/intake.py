@@ -21,6 +21,8 @@ from invoicebot.pipeline.handlers import MEGABYTE, RULE_MEDIA_REJECTED
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
+from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX
+from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.teach import (
     BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
@@ -128,8 +130,9 @@ async def handle_inbound(
 
     A redelivered message is a ``duplicate`` (R-1.8). Every other message
     refreshes its channel window (R-1.10); a button press runs its action and is
-    ``stored`` (R-3.5), except a payment proposal press (R-7.12) or a BR-S06 decision
-    press (D118), which are answered as stored without an invoice. A photo, and a PDF
+    ``stored`` (R-3.5), except a payment proposal press (R-7.12), a BR-S06 decision
+    press (D118) or a BR-F14 portal offer press (D189), which are answered as stored
+    without an invoice. A photo, and a PDF
     with no open invoice for the sender, becomes an invoice with its caption's overrides,
     a ``download_media`` job and a BR-S09 acknowledgement (R-1.1, D121), unless the
     sender already has ``max_queued_per_sender`` active jobs, in which case it is
@@ -153,6 +156,9 @@ async def handle_inbound(
                 return IntakeResult(status="stored", invoice_id=None)
             if msg.button_id.startswith(TEACH_BUTTON_PREFIX) and roles.teach is not None:
                 await handle_teach_press(conn, msg, roles.teach)
+                return IntakeResult(status="stored", invoice_id=None)
+            if msg.button_id.startswith(OFFER_BUTTON_PREFIX) and roles.teach is not None:
+                await handle_offer_press(conn, msg, roles.teach)
                 return IntakeResult(status="stored", invoice_id=None)
             pressed = await handle_press(conn, msg, roles.laptop_flows)
         else:
