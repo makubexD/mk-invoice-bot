@@ -82,27 +82,32 @@ photos in the private samples folder that print a `CONSULT… EN` line: run `tes
 (`eng` must be there; it comes with `tesseract-ocr`), then compare for the band under the anchor: crop from the
 binarized image vs the deskewed gray, upscale 3× vs 4× (`INTER_CUBIC`), `eng` vs `spa`, `--psm 7`. Record per setting
 how many characters differ from the printed URL (edit distance), not the URLs of other tickets. If a setting other
-than binarized, 3×, `eng`, `--psm 7`, band height 2.5× the anchor's height wins, edit step 5's constants in this plan
+than binarized, 3×, `eng`, `--psm 7`, band height 2.5× the anchor's height wins, edit step 6's constants in this plan
 and commit `docs: plan portal-guess edits`.
 
 Test: the spike file exists and names the chosen setting; `uv run pytest -q tests/unit/test_docs.py`.
 
-## Step 3: OCR words keep their boxes `[worker]`
+## Step 3: OCR words keep their boxes, and `deskew` is public `[worker]`
 
 Files: `src/invoicebot/extract/ocr.py`, `tests/unit/test_extract_ocr.py`.
 
-- Add `@dataclass(frozen=True) class OcrBox` with `left: int`, `top: int`, `width: int`, `height: int`, and a method
-  `union(self, other: OcrBox) -> OcrBox` (the smallest box holding both).
+- Add `@dataclass(frozen=True) class OcrBox` with `left: int`, `top: int`, `width: int`, `height: int`, and the
+  property `bottom -> int` (`top + height`).
 - `OcrWord` gains `box: OcrBox | None = None` (last field, so `extract/pdf.text_to_ocr` keeps working unchanged).
 - `parse_tsv` fills `box` from the TSV columns `left`, `top`, `width`, `height` (indexes 6–9, constants
   `TSV_LEFT`, `TSV_TOP`, `TSV_WIDTH`, `TSV_HEIGHT`); a row whose box columns are not integers is skipped, like a bad
   confidence.
+- Split `preprocess`: rename `_deskew` to public `deskew(gray)` and add `binarize(straight)` (CLAHE then the adaptive
+  threshold, the current body after the deskew). `preprocess(gray)` stays and returns `binarize(deskew(gray))`, so its
+  callers are unchanged. The spike (`specs/spikes/portal-guess.md`) found the strip reads best from the deskewed gray,
+  in the same coordinates as the boxes.
 
 Test cases (docstrings start with `D191`):
 
-- A TSV word row with `left=10 top=20 width=30 height=8` → its `OcrWord.box == OcrBox(10, 20, 30, 8)`.
+- A TSV word row with `left=10 top=20 width=30 height=8` → its `OcrWord.box == OcrBox(10, 20, 30, 8)` and
+  `box.bottom == 28`.
 - A row with `top=x` → skipped, the other words of the line kept.
-- `OcrBox(10, 20, 30, 8).union(OcrBox(50, 18, 20, 12))` → `OcrBox(10, 18, 60, 12)`.
+- `preprocess(gray)` equals `binarize(deskew(gray))` for the existing synthetic image (`np.array_equal`).
 - The existing real-Tesseract test still reads its words, and each has a box with `width > 0`.
 
 Test: `uv run pytest -q tests/unit/test_extract_ocr.py tests/unit/test_extract_pdf.py`
@@ -114,64 +119,26 @@ Files: `src/invoicebot/extract/parsing_rules.py`, `config/parsing_rules.yaml`, `
 - `ParsingRules` gains `printed_url_anchor: str`, compiled once at load (`re.IGNORECASE`) into a private attribute
   exposed as the property `anchor_pattern -> re.Pattern[str]`, the same way the amount patterns are compiled. A pattern
   that does not compile fails the load with `ValueError`.
-- `config/parsing_rules.yaml`: `printed_url_anchor: '\bconsult\w*\b.*\ben\s*:?\s*$'` with a comment: the line just
-  above a printed portal address (D191).
+- `config/parsing_rules.yaml`: `printed_url_anchor: '\bconsult\w*\b.*\ben\s*[:;.,]?\s*$'` with a comment: the line
+  just above a printed portal address; OCR may read the colon as `;` (D191, spike).
 
 Test cases (docstrings start with `D191`):
 
-- `anchor_pattern` matches `ESTE COMPROBANTE PODRÁ SER CONSULTADO EN:`, `Consulte su comprobante en`,
-  `CONSULTADO EN :`.
+- `anchor_pattern` matches `ESTE COMPROBANTE PODRÁ SER CONSULTADO EN:`, `ESTE COMPROSANTE PODRÁ SER CONSULTADO EN;`,
+  `Consulte su comprobante en`, `CONSULTADO EN :`.
 - It does not match `CONSULTADO EN https://portal.example.pe` (the URL is on the same line) nor `TOTAL EN SOLES`.
 - Loading rules whose `printed_url_anchor` is `(` raises `ValueError`.
 
 Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py`
 
-## Step 5: Re-read the strip under the anchor `[worker]`
-
-Files: `src/invoicebot/extract/url_strip.py` (new), `tests/unit/test_extract_url_strip.py` (new).
-
-Module docstring: re-read the line under a `CONSULT… EN` anchor as one line, for the portal guess (D191). It imports
-`cv2` and lives in the helper only (the `heavy-in-helper-only` contract already covers `invoicebot.extract`).
-
-- Constants: `STRIP_SCALE = 3`, `STRIP_HEIGHT_FACTOR = 2.5`, `STRIP_LANG = "eng"`, `STRIP_PSM = 7`,
-  `MAX_URL_STRIP_CHARS = 120`, `URL_STRIP_CHARS = re.compile(r"[^A-Za-z0-9.:/_~%-]+")`.
-- `find_anchor(text: OcrText, pattern: re.Pattern[str]) -> OcrBox | None`: the union box of the first line whose words,
-  joined by a space, match `pattern` with `search`; None when no line matches or a matching line has a word without a
-  box.
-- `strip_box(anchor: OcrBox, image_width: int, image_height: int) -> OcrBox | None`: `left = 0`, `width =
-image_width`, `top = anchor.top + anchor.height`, `height = round(anchor.height * STRIP_HEIGHT_FACTOR)`, clipped to
-  the image; None when the clipped height is under 1.
-- `clean_strip(raw: str) -> str | None`: replace each run of characters outside the URL set by one space, strip,
-  cut to `MAX_URL_STRIP_CHARS`; None when empty.
-- `read_url_strip(image: np.ndarray, text: OcrText, rules: ParsingRules, ocr_cfg: Ocr,
-command: Sequence[str] = (TESSERACT_COMMAND,)) -> str | None`: find the anchor and the band, crop `image`, upscale by
-  `STRIP_SCALE` with `cv2.INTER_CUBIC`, run `ocr.read_text` with `ocr_cfg.model_copy(update={"lang": STRIP_LANG,
-"psm": STRIP_PSM})`, join all words of all lines with spaces and return `clean_strip` of it. None at any missing
-  step, including `read_text` returning None.
-
-Test cases (docstrings start with `D191`):
-
-- `find_anchor`: lines `RUC 20000000001` (boxed), `CONSULTADO EN:` (two boxed words at (10,100,80,10) and
-  (95,100,20,10)) → `OcrBox(10, 100, 105, 10)`; no matching line → None; the matching line with one unboxed word →
-  None.
-- `strip_box(OcrBox(10, 100, 105, 10), 600, 1280)` → `OcrBox(0, 110, 600, 25)`; an anchor at `top=1270, height=10`
-  in a 1280-high image → None.
-- `clean_strip("hitps.//sy.example pe/tiemda ")` → `hitps.//sy.example pe/tiemda`; `"https://a.pe/x»…"` →
-  `https://a.pe/x`; `"«»"` → None; a 300-character input → 120 characters.
-- `read_url_strip` with a fake `command` (a script that prints a TSV with one word `hitps.//portal.example`), an image
-  of 600×200, and an `OcrText` whose anchor line is boxed → `hitps.//portal.example`; with no anchor → None and the
-  fake is never run.
-
-Test: `uv run pytest -q tests/unit/test_extract_url_strip.py && uv run lint-imports`
-
-## Step 6: `Reading.url_strip` `[worker]`
+## Step 5: `Reading.url_strip` `[worker]`
 
 Files: `src/invoicebot/extract/fields.py`, `src/invoicebot/extract/merge.py`, `tests/unit/test_extract_fields.py`,
 `tests/unit/test_extract_merge.py`.
 
-- `Reading` gains `url_strip: str | None = None` (last field). `MAX_URL_STRIP_CHARS = 120` moves here (one home;
-  step 5's module imports it), plus `is_url_strip(value: object) -> bool`: a `str` of 1 to `MAX_URL_STRIP_CHARS`
-  characters, all in `[A-Za-z0-9.:/_~% -]`.
+- `Reading` gains `url_strip: str | None = None` (last field). Add `MAX_URL_STRIP_CHARS = 120` and
+  `is_url_strip(value: object) -> bool`: a `str` of 1 to `MAX_URL_STRIP_CHARS` characters, all in
+  `[A-Za-z0-9.:/_~% -]`.
 - `reading_to_json` writes `url_strip`; `reading_from_json` accepts an optional `url_strip` key, refuses a value that
   is not None and fails `is_url_strip` with `ValueError("reading field 'url_strip' must be URL characters or null")`,
   and still reads a stored reading without the key.
@@ -186,14 +153,62 @@ Test cases (docstrings start with `D191`):
 
 Test: `uv run pytest -q tests/unit/test_extract_fields.py tests/unit/test_extract_merge.py`
 
+## Step 6: Re-read the strip under the anchor `[worker]`
+
+Files: `src/invoicebot/extract/url_strip.py` (new), `tests/unit/test_extract_url_strip.py` (new).
+
+Module docstring: re-read the line under a `CONSULT… EN` anchor as one line, for the portal guess (D191). It imports
+`cv2` and lives in the helper only (the `heavy-in-helper-only` contract already covers `invoicebot.extract`). The
+settings come from the spike in `specs/spikes/portal-guess.md`.
+
+- Constants: `STRIP_SCALE = 3`, `STRIP_OFFSETS = (0.0, 0.15, 0.3)` and `STRIP_HEIGHTS = (1.6, 1.8)` (both in anchor
+  word heights), `STRIP_LANG = "eng"`, `STRIP_PSM = 7`, `URL_STRIP_JUNK = re.compile(r"[^A-Za-z0-9.:/_~%-]+")`.
+  `MAX_URL_STRIP_CHARS` is imported from `extract/fields.py`.
+- `@dataclass(frozen=True) class Anchor` with `bottom: int` and `word_height: int`.
+- `find_anchor(text: OcrText, pattern: re.Pattern[str]) -> Anchor | None`: the first line whose words, joined by a
+  space, match `pattern` with `search`; `bottom` is the median of its words' `box.bottom` and `word_height` the median
+  of their `box.height` (`statistics.median_low`). None when no line matches, a matching line has a word without a box,
+  or `word_height < 1`.
+- `strip_boxes(anchor: Anchor, image_width: int, image_height: int) -> list[OcrBox]`: for each offset, then each
+  height: `top = anchor.bottom + round(offset * word_height)`, `height = round(factor * word_height)`, `left = 0`,
+  `width = image_width`, clipped to the image; a box whose clipped height is under 1 is left out.
+- `clean_strip(raw: str) -> str | None`: replace each run matched by `URL_STRIP_JUNK` by one space, strip, cut to
+  `MAX_URL_STRIP_CHARS`; None when empty.
+- `read_url_strip(straight: np.ndarray, text: OcrText, rules: ParsingRules, ocr_cfg: Ocr,
+command: Sequence[str] = (TESSERACT_COMMAND,)) -> str | None`: `straight` is the deskewed gray image the boxes refer
+  to. For each strip box: crop, upscale by `STRIP_SCALE` with `cv2.INTER_CUBIC`, run `ocr.read_text` with
+  `ocr_cfg.model_copy(update={"lang": STRIP_LANG, "psm": STRIP_PSM})`. Keep the read whose words have the highest mean
+  confidence (ties: the first; a read with no words or `None` is skipped), join its words with spaces and return
+  `clean_strip` of it. None when there is no anchor, no box or no read.
+
+Test cases (docstrings start with `D191`):
+
+- `find_anchor`: lines `RUC 20000000001` (boxed), `CONSULTADO EN;` (two boxed words, boxes (10,100,80,20) and
+  (95,104,20,22)) → `Anchor(bottom=120, word_height=20)`; no matching line → None; the matching line with one unboxed
+  word → None.
+- `strip_boxes(Anchor(120, 20), 600, 1280)` → six boxes, the first `OcrBox(0, 120, 600, 32)`, the last
+  `OcrBox(0, 126, 600, 36)`; `strip_boxes(Anchor(1275, 20), 600, 1280)` keeps only boxes with height ≥ 1, each ending
+  at 1280.
+- `clean_strip("hitps.//sy.example pe/tiemda ")` → `hitps.//sy.example pe/tiemda`; `"https://a.pe/x»…"` →
+  `https://a.pe/x`; `"«»"` → None; a 300-character input → 120 characters.
+- `read_url_strip` with a fake `command` (a script that prints a TSV with one word `hitps.//portal.example`, confidence
+  `50`), an image of 600×200 and an `OcrText` whose anchor line is boxed → `hitps.//portal.example`; with no anchor →
+  None and the fake is never run.
+- With a fake whose output depends on the crop height (for example it reads the PNG size from stdin with
+  `cv2.imdecode` in a tiny Python script and prints a higher confidence for the tallest crop), the tallest crop's
+  word wins.
+
+Test: `uv run pytest -q tests/unit/test_extract_url_strip.py && uv run lint-imports`
+
 ## Step 7: The photo helper re-reads the strip `[worker]`
 
 Files: `src/invoicebot/extract/__main__.py`, `tests/unit/test_helper.py`.
 
-In `_read_photo`, after `parse_ocr`: when the OCR reading exists and its `printed_url` is None, call
-`read_url_strip(processed, text, rules, ocr_cfg)` and, when it returns a string, replace the OCR reading with
-`dataclasses.replace(ocr_reading, url_strip=strip)` before `merge`. A `MemoryError` or `cv2.error` in the re-read
-keeps the reading without a strip. PDFs are not changed.
+In `_read_photo`: compute `straight = deskew(gray)` and `processed = binarize(straight)` in place of
+`preprocess(gray)` (one deskew, inside the existing `try`). After `parse_ocr`: when the OCR reading exists and its
+`printed_url` is None, call `read_url_strip(straight, text, rules, ocr_cfg)` and, when it returns a string, replace
+the OCR reading with `dataclasses.replace(ocr_reading, url_strip=strip)` before `merge`. A `MemoryError` or
+`cv2.error` in the re-read keeps the reading without a strip. PDFs are not changed.
 
 Test cases (docstrings start with `D191`), driving `_read_photo` with a synthetic image and a fake Tesseract the
 existing helper tests already use, or monkeypatching `read_url_strip`:
