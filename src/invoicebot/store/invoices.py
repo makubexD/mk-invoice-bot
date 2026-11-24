@@ -78,7 +78,11 @@ class InvoiceRef:
 
 @dataclass(frozen=True)
 class PendingRow:
-    """An invoice that waits on the sender, for ``/pendientes`` (S4.8, S11.4)."""
+    """An invoice that waits on the sender, for ``/pendientes`` (S4.8, S11.4).
+
+    ``razon_social`` is the invoice's own name, else the padrón's for its ``ruc_emisor``
+    (R-2.5): extraction keeps the padrón name in the reading, not in the column.
+    """
 
     id: int
     state: str
@@ -399,12 +403,13 @@ async def list_pending(
                i.state,
                i.waiting_state,
                i.waiting_rule_id,
-               i.razon_social,
+               COALESCE(i.razon_social, p.razon_social),
                i.total,
                (i.updated_at AT TIME ZONE %s)::date,
                count(*) OVER () AS total_count
         FROM invoices AS i
         LEFT JOIN batches AS b ON b.id = i.batch_id
+        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
         WHERE i.profile_id = %s
           AND (
                 i.state = ANY(%s)
@@ -441,6 +446,49 @@ async def list_pending(
         for row in raw
     ]
     return rows, (int(raw[0][7]) if raw else 0)
+
+
+async def list_recent(
+    conn: AsyncConnection[Any],
+    profile_id: str,
+    limit: int,
+) -> list[PendingRow]:
+    """Return the profile's newest invoices by ``created_at``, newest first (D188).
+
+    The columns match :func:`list_pending`, so ``/estado`` can reuse its line; an invoice
+    is not a prepared batch here, so ``batch_prepared_at`` is None. ``limit`` caps the
+    rows returned. The database clock stamps ``created_at``; ``id`` breaks a tie. Does not
+    commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT i.id,
+               i.state,
+               i.waiting_state,
+               i.waiting_rule_id,
+               COALESCE(i.razon_social, p.razon_social),
+               i.total
+        FROM invoices AS i
+        LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
+        WHERE i.profile_id = %s
+        ORDER BY i.created_at DESC, i.id DESC
+        LIMIT %s
+        """,
+        (profile_id, limit),
+    )
+    raw = await cur.fetchall()
+    return [
+        PendingRow(
+            id=int(row[0]),
+            state=str(row[1]),
+            waiting_state=None if row[2] is None else str(row[2]),
+            waiting_rule_id=None if row[3] is None else str(row[3]),
+            razon_social=None if row[4] is None else str(row[4]),
+            total=cast(Decimal | None, row[5]),
+            batch_prepared_at=None,
+        )
+        for row in raw
+    ]
 
 
 async def count_active_jobs(conn: AsyncConnection[Any], profile_id: str) -> int:

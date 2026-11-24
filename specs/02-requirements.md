@@ -86,7 +86,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-3.4 (M)** WHEN routing succeeds and every required field is `ok`, THE SYSTEM SHALL send the summary (fields plus the detected flow) and **continue without waiting** (`confirm_mode: auto`). The summary carries **Editar** and **Cancelar** buttons, which stay valid until delivery starts. `confirm_mode: always` restores the explicit confirmation step.
 - **R-3.5 (S)** WHEN the user picks "Editar", THE SYSTEM SHALL accept `field=value` lines (for example, `total=45.50`), re-validate, re-route if the buyer changed, and show the summary again. Short aliases are accepted: `ruc` = `ruc_emisor`, `fecha` = `fecha_emision`; `cliente` = `num_doc_adq` (D97); `tipo` is inferred from the serie's first letter (F → 01, B → 03) when not given.
 - **R-3.6 (M)** IF the natural key `(ruc_emisor, tipo, serie, numero)` already exists in a state other than `FAILED` or `CANCELLED`, THE SYSTEM SHALL cancel the new invoice with BR-E04. The first invoice can be re-run with `/reprocesar <id>` (D93, D96).
-- **R-3.7 (S)** IF a question to the user isn't answered within the configured timeout (default 24 h), from `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID`, THE SYSTEM SHALL park the invoice as `PENDING_USER` (BR-S08). WHEN the user answers the pending question, directly or from `/pendientes`, THE SYSTEM SHALL return the invoice to the state it was waiting in.
+- **R-3.7 (S)** IF a question to the user isn't answered within the configured timeout (default 24 h), from `CONFIRMING`, `EXTRACT_FAILED` or `CONFIRM_INVALID`, THE SYSTEM SHALL park the invoice as `PENDING_USER` (BR-S08). WHEN the user answers the pending question, directly or from `/pendientes` (which re-sends the parked question on the channel the `/pendientes` came from, D188), THE SYSTEM SHALL return the invoice to the state it was waiting in.
 - **R-3.8 (M)** THE SYSTEM SHALL check the sender profile's permissions **after** routing, and reject with BR-R05 when needed.
 
 ## R-4 · Validation with SUNAT
@@ -201,7 +201,7 @@ Flow B mirrors the owner's existing manual process for work meal reimbursements 
 | Command | Purpose | Priority |
 |---|---|---|
 | `/ayuda` | List the commands | M |
-| `/estado <id>` | Show an invoice's status | S |
+| `/estado <id>` | Show an invoice's status; without an id, the five newest invoices (D188) | S |
 | `/pendientes` | List invoices waiting for user input or in MANUAL_REQUIRED | S |
 | `/lote` | Show the open flow B batch (count, total) *(post-MVP, with `on_command`)* | C |
 | `/enviar` | Send the open batch now *(post-MVP, with `on_command`)* | C |

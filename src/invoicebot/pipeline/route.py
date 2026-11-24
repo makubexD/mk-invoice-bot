@@ -26,6 +26,7 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import MENU_MAX, Button
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Config, Flow, Profile, StoreDirectory
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, check_date
@@ -39,6 +40,7 @@ from invoicebot.pipeline.questions import (
     RULE_BUYER,
     RULE_CAP,
     RULE_CONFIRM,
+    STATUS_ACTION,
     brand_question,
     buyer_question,
     candidate_flows,
@@ -46,7 +48,7 @@ from invoicebot.pipeline.questions import (
     confirm_buttons,
     flow_question,
 )
-from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
+from invoicebot.pipeline.summary import flow_line, issuer_desc, summary_text, summary_today
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
@@ -60,6 +62,7 @@ from invoicebot.routing.router import (
     route,
 )
 from invoicebot.rules.messages_es import (
+    BUTTON_STATUS,
     KIND_SUBJECT,
     MESSAGES,
     SUMMARY_DATE_FORMAT,
@@ -171,7 +174,7 @@ def make_route_handler(
                 return
             duplicate = await _claim(conn, job.invoice_id, invoice.profile_id, reading)
             if duplicate is not None:
-                await _cancel_duplicate(conn, invoice, job.invoice_id, duplicate, cfg.owner.timezone)
+                await _cancel_duplicate(conn, invoice, job.invoice_id, duplicate, reading, cfg.owner.timezone)
                 rule_id = RULE_DUPLICATE
             else:
                 step = _decide(
@@ -405,15 +408,22 @@ async def _cancel_duplicate(
     invoice: InvoiceHead,
     invoice_id: int,
     duplicate: Duplicate,
+    reading: Reading,
     timezone: str,
 ) -> None:
-    """Cancel invoice_id with BR-E04, pointing at the invoice that holds its key (BR-E04)."""
+    """Cancel invoice_id with BR-E04, pointing at the invoice that holds its key (BR-E04, D188)."""
     text = MESSAGES[RULE_DUPLICATE].format(
         created_at=duplicate.created_at.astimezone(ZoneInfo(timezone)),
         id=duplicate.invoice_id,
+        issuer=issuer_desc(reading),
+        total=reading.value("total") or "",
+    )
+    status = Button(
+        id=button_id(duplicate.invoice_id, STATUS_ACTION),
+        title=BUTTON_STATUS.format(id=duplicate.invoice_id),
     )
     await set_state(conn, invoice_id, CANCELLED, rule_id=RULE_DUPLICATE, expected=ROUTING)
-    await _reply(conn, invoice, invoice_id, RULE_DUPLICATE, text)
+    await _reply(conn, invoice, invoice_id, RULE_DUPLICATE, text, [status])
 
 
 async def _write(

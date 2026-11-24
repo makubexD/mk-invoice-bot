@@ -8,7 +8,7 @@ cannot be probed (R-10.1). Everything here happens in the caller's transaction.
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Iterator, Mapping
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import timedelta
 from decimal import Decimal
@@ -17,16 +17,20 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
 from invoicebot.pipeline.resume import retry_delivery, retry_documents
+from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
+    ESTADO_HINT,
+    ESTADO_NONE,
     GAP_IGNORED,
     GAP_UNKNOWN,
     GAPS_EMPTY,
@@ -48,20 +52,20 @@ from invoicebot.rules.messages_es import (
     PENDING_BATCH_LINE,
     PENDING_HEADER,
     PENDING_LINE,
+    PENDING_MISSING,
     PENDING_MORE,
     PENDING_NO_ISSUER,
     PENDING_NONE,
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     REPROCESS_TOO_SOON,
-    STATUS,
-    STATUS_RULE,
-    STATUS_RULE_ONLY,
+    fields_desc,
     state_desc,
 )
 from invoicebot.states import (
     BATCHED,
     CANCELLABLE,
+    EXTRACT_FAILED,
     FAILED,
     MANUAL_REQUIRED,
     PENDING_USER,
@@ -71,9 +75,10 @@ from invoicebot.store.invoices import (
     InvoiceHead,
     PendingRow,
     fetch_round_started_within,
-    get_state_rule,
     list_pending,
+    list_recent,
     load_invoice_head,
+    load_reading,
 )
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
@@ -86,6 +91,8 @@ RUC_DIGITS = 11
 PREPARED_REMIND_DAYS = 2
 #: The most lines ``/pendientes`` lists before it counts the rest (S11.4).
 MAX_PENDING_LINES = 20
+#: How many invoices ``/estado`` with no id lists, newest first (D188).
+ESTADO_RECENT = 5
 #: How many parked questions ``/pendientes`` sends again in one answer (S4.8).
 PENDING_REQUEUES = 3
 #: The least time between two sends of the same parked question (S4.8, D94).
@@ -237,30 +244,29 @@ async def _estado(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Answer with the invoice's state and, when it waits on a rule, that rule's last text.
+    """Answer with the invoice's :func:`status_text` (S4.9).
 
-    A target the sender cannot see is refused by :func:`resolve_target` (R-10.1). The
-    second line names the rule and repeats its newest stored question, or just the rule
-    when the invoice has no stored text (S4.9, R-11.1).
+    With no id, list the sender's newest invoices in ``/pendientes`` line form (D188).
+    A target the sender cannot see is refused by :func:`resolve_target` (R-10.1).
     """
+    if not arg:
+        await _list_recent(conn, msg)
+        return
     target = await resolve_target(conn, msg, "estado", arg, context.admins)
     if target is None:
         return
     invoice_id, _head = target
-    current = await get_state_rule(conn, invoice_id)
-    if current is None:
-        raise RuntimeError(f"invoice {invoice_id} does not exist")
-    state, rule_id = current
-    text = STATUS.format(id=invoice_id, state_desc=state_desc(state))
-    if rule_id is not None:
-        last = await outbox.last_text(conn, invoice_id, rule_id)
-        line = (
-            STATUS_RULE.format(rule_id=rule_id, text=last)
-            if last is not None
-            else STATUS_RULE_ONLY.format(rule_id=rule_id)
-        )
-        text = f"{text}\n{line}"
-    await _reply(conn, msg, None, text)
+    await _reply(conn, msg, None, await status_text(conn, invoice_id))
+
+
+async def _list_recent(conn: AsyncConnection[Any], msg: InboundMessage) -> None:
+    """List the sender's newest invoices, one line each, then how to see one (D188)."""
+    rows = await list_recent(conn, msg.profile_id, ESTADO_RECENT)
+    if not rows:
+        await _reply(conn, msg, None, ESTADO_NONE)
+        return
+    lines = [*await _pending_lines(conn, rows), ESTADO_HINT]
+    await _reply(conn, msg, None, "\n".join(lines))
 
 
 async def _cancelar(
@@ -337,17 +343,42 @@ async def _pendientes(
     if not rows:
         await _reply(conn, msg, None, PENDING_NONE)
         return
-    lines = [PENDING_HEADER, *(_pending_line(row) for row in rows)]
+    lines = [PENDING_HEADER, *await _pending_lines(conn, rows)]
     if total > len(rows):
         lines.append(PENDING_MORE.format(count=total - len(rows)))
     await _reply(conn, msg, None, "\n".join(lines))
-    await _requeue_parked(conn, rows)
+    await _requeue_parked(conn, msg, rows)
 
 
-def _pending_line(row: PendingRow) -> str:
-    """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4)."""
-    issuer = row.razon_social or PENDING_NO_ISSUER
-    if row.state == BATCHED:
+async def _pending_lines(conn: AsyncConnection[Any], rows: Sequence[PendingRow]) -> list[str]:
+    """Return the list line of each pending row, naming a failed extraction's gaps (D188)."""
+    return [_pending_line(row, missing=await _missing_text(conn, row)) for row in rows]
+
+
+async def _missing_text(conn: AsyncConnection[Any], row: PendingRow) -> str | None:
+    """Return ``PENDING_MISSING`` for an EXTRACT_FAILED row, or None (D188).
+
+    A row is failed when its state or its parked ``waiting_state`` is ``EXTRACT_FAILED``.
+    A row with no stored reading lacks every required field; a failed row that lacks none
+    (a bad RUC, BR-E02) keeps its issuer cell.
+    """
+    if EXTRACT_FAILED not in (row.state, row.waiting_state):
+        return None
+    reading = await load_reading(conn, row.id)
+    missing = REQUIRED if reading is None else reading.missing_required()
+    if not missing:
+        return None
+    return PENDING_MISSING.format(fields_desc=fields_desc(missing))
+
+
+def _pending_line(row: PendingRow, *, missing: str | None = None) -> str:
+    """Return the line ``/pendientes`` lists for one invoice (S4.8, S11.4).
+
+    ``missing`` is the issuer cell of a failed extraction, loaded by the caller so this
+    stays pure (D188); every other row names its razón social or ``PENDING_NO_ISSUER``.
+    """
+    issuer = missing if missing is not None else row.razon_social or PENDING_NO_ISSUER
+    if row.state == BATCHED and row.batch_prepared_at is not None:
         return PENDING_BATCH_LINE.format(id=row.id, issuer=issuer, prepared_at=row.batch_prepared_at)
     total = "—" if row.total is None else f"{row.total:.2f}"
     state = row.waiting_state if row.state == PENDING_USER and row.waiting_state else row.state
@@ -359,15 +390,27 @@ def _pending_line(row: PendingRow) -> str:
     )
 
 
-async def _requeue_parked(conn: AsyncConnection[Any], rows: list[PendingRow]) -> None:
-    """Queue the stored question again for the first few parked invoices (S4.8, D94)."""
+async def _requeue_parked(conn: AsyncConnection[Any], msg: InboundMessage, rows: list[PendingRow]) -> None:
+    """Queue the stored question again for the first few parked invoices (S4.8, D94).
+
+    The re-ask goes to the channel the ``/pendientes`` came from and to its sender
+    (D188, R-3.7).
+    """
+    addressee = Addressee(msg.channel, msg.profile_id)
     requeued = 0
     for row in rows:
         if requeued == PENDING_REQUEUES:
             return
         if row.state != PENDING_USER or row.waiting_rule_id is None:
             continue
-        await outbox.requeue_last(conn, row.id, row.waiting_rule_id, PENDING_REQUEUE_INTERVAL)
+        await outbox.requeue_last(
+            conn,
+            row.id,
+            row.waiting_rule_id,
+            PENDING_REQUEUE_INTERVAL,
+            channel=addressee.channel,
+            to=addressee.profile_id,
+        )
         requeued += 1
 
 

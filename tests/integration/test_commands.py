@@ -17,9 +17,10 @@ import pytest_asyncio
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Button, InboundMessage
+from invoicebot.channels.base import Button, ChannelName, InboundMessage
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import MediaMaxBytes
+from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.chain import Run, decide
 from invoicebot.gaps.kinds import GAP_KINDS
 from invoicebot.net.guard import Resolver
@@ -43,6 +44,8 @@ from invoicebot.rules.messages_es import (
     CANCEL_LATE,
     CANCELLED_BY_USER,
     COMMAND_NEEDS_ID,
+    ESTADO_HINT,
+    ESTADO_NONE,
     GAP_IGNORED,
     GAPS_EMPTY,
     GAPS_HEADER,
@@ -69,7 +72,7 @@ from invoicebot.rules.messages_es import (
     STATUS_RULE_ONLY,
     state_desc,
 )
-from invoicebot.states import StateMoved
+from invoicebot.states import EXTRACT_FAILED, StateMoved
 from invoicebot.store import taught_links
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
@@ -78,6 +81,7 @@ from invoicebot.store.invoices import (
     InvoiceHead,
     create_invoice,
     load_invoice_head,
+    save_reading,
     set_flow,
     set_state,
 )
@@ -117,10 +121,10 @@ def _profile() -> str:
     return f"profile-{uuid4().hex}"
 
 
-def _message(profile_id: str, text: str) -> InboundMessage:
-    """Build a canonical text message for profile_id."""
+def _message(profile_id: str, text: str, channel: ChannelName = "whatsapp") -> InboundMessage:
+    """Build a canonical text message for profile_id, on ``channel`` by default."""
     return InboundMessage(
-        channel="whatsapp",
+        channel=channel,
         external_id=f"ext-{uuid4().hex}",
         profile_id=profile_id,
         sender_role="owner",
@@ -176,21 +180,14 @@ async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
 async def _question(
     pool: AsyncConnectionPool[AsyncConnection[Any]],
     invoice_id: int,
-    profile_id: str,
+    to: Addressee,
     rule_id: str,
     text: str,
     buttons: Sequence[Button] = (),
 ) -> None:
-    """Store a question outbox row linked to invoice_id and naming rule_id."""
+    """Store a question outbox row for invoice_id and rule_id, addressed to ``to``."""
     async with pool.connection() as conn, conn.transaction():
-        await queue_message(
-            conn,
-            Addressee("whatsapp", profile_id),
-            text,
-            invoice_id=invoice_id,
-            rule_id=rule_id,
-            buttons=buttons,
-        )
+        await queue_message(conn, to, text, invoice_id=invoice_id, rule_id=rule_id, buttons=buttons)
 
 
 async def _backdate_questions(
@@ -246,6 +243,20 @@ async def _parked_invoice(
             """,
             (waiting_state, rule_id, invoice_id),
         )
+    return invoice_id
+
+
+async def _extract_failed_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    reading: Reading | None = None,
+) -> int:
+    """Create an EXTRACT_FAILED invoice waiting on BR-E01, with reading when given (D188)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        if reading is not None:
+            await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id="BR-E01")
     return invoice_id
 
 
@@ -329,6 +340,15 @@ async def _invoice_payloads(conn: AsyncConnection[Any], invoice_id: int) -> list
         (invoice_id,),
     )
     return [cast(dict[str, Any], payload) for (payload,) in await cur.fetchall()]
+
+
+async def _invoice_targets(conn: AsyncConnection[Any], invoice_id: int) -> list[tuple[str, str]]:
+    """Return the outbox's ``(channel, "to")`` rows linked to invoice_id, oldest first."""
+    cur = await conn.execute(
+        'SELECT channel, "to" FROM outbox WHERE invoice_id = %s ORDER BY id',
+        (invoice_id,),
+    )
+    return [(str(channel), str(to)) for channel, to in await cur.fetchall()]
 
 
 async def _replies(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str, str | None]]:
@@ -514,7 +534,7 @@ async def test_estado_repeats_the_rule_and_its_last_question(
     """R-11.1: /estado on a BR-R03 invoice shows its state and the stored question."""
     profile_id = _profile()
     invoice_id = await _invoice_in(db_pool, profile_id, "CONFIRMING", rule_id="BR-R03")
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT)
     msg = _message(profile_id, f"/estado {invoice_id}")
     expected = STATUS.format(id=invoice_id, state_desc=state_desc("CONFIRMING"))
     expected = f"{expected}\n{STATUS_RULE.format(rule_id='BR-R03', text=QUESTION_TEXT)}"
@@ -582,6 +602,108 @@ async def test_estado_on_another_profiles_invoice_answers_br_s07(
         replies = await _replies(conn, sender_profile)
 
     assert replies == [(MESSAGES["BR-S07"].format(id=invoice_id), "BR-S07")]
+
+
+async def test_estado_without_an_id_lists_the_five_newest_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone lists the sender's five newest invoices, newest first, and the hint."""
+    profile_id = _profile()
+    invoice_ids = [await _invoice(db_pool, profile_id) for _ in range(7)]
+    lines = [
+        PENDING_LINE.format(
+            id=invoice_id,
+            issuer=PENDING_NO_ISSUER,
+            total="—",
+            state_desc=state_desc("RECEIVED"),
+        )
+        for invoice_id in invoice_ids[::-1][:5]
+    ]
+    expected = "\n".join([*lines, ESTADO_HINT])
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
+
+
+async def test_estado_without_an_id_and_no_invoices_answers_estado_none(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone on a profile with no invoices answers ESTADO_NONE."""
+    profile_id = _profile()
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(ESTADO_NONE, None)]
+
+
+async def test_estado_without_an_id_skips_another_profiles_invoices(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /estado alone lists only the sender's invoices, never another profile's."""
+    other_profile = _profile()
+    for _ in range(3):
+        await _invoice(db_pool, other_profile)
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id)
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("RECEIVED"),
+    )
+    expected = f"{line}\n{ESTADO_HINT}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
+
+
+async def test_cancelar_without_an_id_still_asks_for_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: /cancelar without an id still answers COMMAND_NEEDS_ID."""
+    profile_id = _profile()
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _message(profile_id, "/cancelar"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(COMMAND_NEEDS_ID.format(command="cancelar"), None)]
 
 
 async def test_cancelar_cancels_a_confirming_invoice(
@@ -1015,7 +1137,7 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
         Button(id=f"{invoice_id}:pick:0", title="Trabajo"),
         Button(id=f"{invoice_id}:cancel", title=BUTTON_CANCEL),
     ]
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT, buttons)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT, buttons)
     await _backdate_questions(db_pool, invoice_id)
     msg = _message(profile_id, "/pendientes")
     line = PENDING_LINE.format(
@@ -1044,13 +1166,159 @@ async def test_pendientes_lists_a_parked_invoice_and_requeues_its_question(
     assert requeued["text"] == original["text"]
 
 
+@pytest.mark.parametrize(
+    ("parked_on", "command_on"),
+    [("console", "telegram"), ("whatsapp", "whatsapp")],
+)
+async def test_pendientes_requeues_on_the_command_channel(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    parked_on: ChannelName,
+    command_on: ChannelName,
+) -> None:
+    """D188, R-3.7: the re-ask goes to the channel /pendientes came from, for the same profile."""
+    profile_id = _profile()
+    invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
+    await _question(db_pool, invoice_id, Addressee(parked_on, profile_id), "BR-R03", QUESTION_TEXT)
+    await _backdate_questions(db_pool, invoice_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/pendientes", channel=command_on),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        targets = await _invoice_targets(conn, invoice_id)
+
+    assert targets == [(parked_on, profile_id), (command_on, profile_id)]
+
+
+async def test_pendientes_names_the_fields_an_extract_failed_invoice_lacks(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: an EXTRACT_FAILED invoice shows the required fields its reading lacks."""
+    profile_id = _profile()
+    reading = Reading(
+        fields={
+            "ruc_emisor": Field(value="20000000001", source="ocr", confidence=1.0),
+            "tipo": Field(value="01", source="ocr", confidence=1.0),
+            "serie": Field(value="F001", source="ocr", confidence=1.0),
+            "numero": Field(value="123", source="ocr", confidence=1.0),
+        },
+        document_url=None,
+    )
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, reading)
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer="faltan: fecha, total",
+        total="—",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_lists_every_required_field_when_no_reading_is_stored(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: an EXTRACT_FAILED invoice with no stored reading shows every required field."""
+    profile_id = _profile()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id)
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer="faltan: RUC del emisor, tipo de comprobante, serie, número, fecha, total",
+        total="—",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_keeps_the_issuer_cell_for_a_failed_row_missing_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E02: a failed invoice whose reading has every required field keeps its issuer cell."""
+    profile_id = _profile()
+    reading = Reading(
+        fields={
+            "ruc_emisor": Field(value="20000000001", source="ocr", confidence=1.0),
+            "tipo": Field(value="01", source="ocr", confidence=1.0),
+            "serie": Field(value="F001", source="ocr", confidence=1.0),
+            "numero": Field(value="123", source="ocr", confidence=1.0),
+            "fecha_emision": Field(value="2026-11-20", source="ocr", confidence=1.0),
+            "total": Field(value="50.00", source="ocr", confidence=1.0),
+        },
+        document_url=None,
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, reading)
+        await set_state(conn, invoice_id, EXTRACT_FAILED, rule_id="BR-E02")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="50.00",
+        state_desc=state_desc(EXTRACT_FAILED),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, "/pendientes"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
+async def test_pendientes_keeps_the_no_issuer_cell_for_a_manual_required_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: a MANUAL_REQUIRED row without a razón social still shows PENDING_NO_ISSUER."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, "MANUAL_REQUIRED", "BR-F07")
+    msg = _message(profile_id, "/pendientes")
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("MANUAL_REQUIRED"),
+    )
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert replies == [(f"{PENDING_HEADER}\n{line}", None)]
+
+
 async def test_pendientes_requeues_a_question_at_most_every_ten_minutes(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """S4.8, D94: /pendientes re-sends a parked question once, but not again within 10 minutes."""
     profile_id = _profile()
     invoice_id = await _parked_invoice(db_pool, profile_id, "BR-R03")
-    await _question(db_pool, invoice_id, profile_id, "BR-R03", QUESTION_TEXT)
+    await _question(db_pool, invoice_id, Addressee("whatsapp", profile_id), "BR-R03", QUESTION_TEXT)
     await _backdate_questions(db_pool, invoice_id)
 
     async with db_pool.connection() as conn:

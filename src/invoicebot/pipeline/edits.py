@@ -13,7 +13,7 @@ a ``PENDING_USER`` invoice is unparked first (D94).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from types import MappingProxyType
@@ -21,10 +21,10 @@ from typing import Any
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
-from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
+from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import (
     MAX_OVERRIDE_CHARS,
@@ -32,8 +32,15 @@ from invoicebot.pipeline.overrides import (
     edit_target,
     without_accents,
 )
+from invoicebot.pipeline.questions import unreadable_buttons
+from invoicebot.pipeline.unreadable import ALIASES, RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
-from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
+from invoicebot.rules.messages_es import (
+    EDIT_INVALID,
+    EDIT_LATE,
+    MESSAGES,
+    state_desc,
+)
 from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import (
@@ -48,12 +55,6 @@ from invoicebot.text import replace_unsafe_chars
 
 #: The most edit lines one message may carry; later lines each get an error.
 MAX_EDIT_LINES = 10
-#: Short names a sender may use for a field (R-3.5, D97).
-ALIASES: Mapping[str, str] = {
-    "ruc": "ruc_emisor",
-    "fecha": "fecha_emision",
-    "cliente": "num_doc_adq",
-}
 #: The document type implied by a serie's first letter (R-3.5, D97).
 TIPO_BY_SERIE_PREFIX: Mapping[str, str] = {"F": "01", "B": "03"}
 #: The stored routing answers (D92) each edited field invalidates: the flow, the buyer
@@ -64,10 +65,13 @@ STALE_ANSWERS: Mapping[str, frozenset[str]] = {
     "serie": frozenset({"comercio"}),
     "total": frozenset({"cap_ok"}),
 }
-
 _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
 #: At most 10 integer digits, since ``invoices.total`` is ``NUMERIC(12,2)`` (R-3.5).
 _TOTAL_PATTERN = re.compile(r"[0-9]{1,10}(?:[.,][0-9]{1,2})?")
+#: Where a further ``key=value`` pair starts after whitespace in one edit line (D188).
+_PAIR_START_PATTERN = re.compile(r"(?<!\S)([^\s=]+)=")
+#: The longest edit line read; a longer one is one error, before any pattern runs on it.
+_MAX_LINE_CHARS = MAX_EDIT_LINES * (MAX_OVERRIDE_CHARS + 32)
 
 _Validator = Callable[[str], tuple[str | None, str | None]]
 
@@ -91,11 +95,14 @@ class Edits:
 
 
 def parse_edits(text: str) -> Edits:
-    """Return the fields and errors of the ``campo=valor`` lines in ``text`` (R-3.5, D97).
+    """Return the fields and errors of the ``campo=valor`` lines in ``text`` (R-3.5, D97, D188).
 
     A line without ``=`` is ignored. Keys are case-insensitive and accent-free after
-    ``strip``; ``motivo`` and ``descripcion`` are skipped. Lines past :data:`MAX_EDIT_LINES`
-    and values longer than :data:`MAX_OVERRIDE_CHARS` are errors. A serie without a
+    ``strip``; ``motivo`` and ``descripcion`` are skipped. A line whose first key is
+    known may carry several pairs, each starting at a known key after whitespace, and
+    each pair counts as one assignment (D188). Assignments past :data:`MAX_EDIT_LINES`
+    and values longer than :data:`MAX_OVERRIDE_CHARS` are errors, and so is a line longer
+    than ``_MAX_LINE_CHARS`` as a whole. A serie without a
     well-formed ``tipo`` gets one from its first letter.
     """
     fields: dict[str, str] = {}
@@ -104,21 +111,47 @@ def parse_edits(text: str) -> Edits:
     for raw in text.splitlines():
         if "=" not in raw:
             continue
-        assignments += 1
-        line = raw.strip()
-        key, _, raw_value = line.partition("=")
-        name = _canonical_key(key)
-        value = raw_value.strip()
-        if name in OVERRIDE_KEYS:
+        if len(raw) > _MAX_LINE_CHARS:
+            assignments += 1
+            errors.append(EditError(None, raw[:MAX_OVERRIDE_CHARS], None, raw))
             continue
-        if assignments > MAX_EDIT_LINES or len(value) > MAX_OVERRIDE_CHARS:
-            errors.append(EditError(None, line, name, value))
-        elif name is None:
-            errors.append(EditError(None, line, None, value))
-        else:
-            _apply(fields, errors, name, line, value)
+        for line in _split_pairs(raw.strip()):
+            assignments += 1
+            key, _, raw_value = line.partition("=")
+            name = _canonical_key(key)
+            value = raw_value.strip()
+            if name in OVERRIDE_KEYS:
+                continue
+            if assignments > MAX_EDIT_LINES or len(value) > MAX_OVERRIDE_CHARS:
+                errors.append(EditError(None, line, name, value))
+            elif name is None:
+                errors.append(EditError(None, line, None, value))
+            else:
+                _apply(fields, errors, name, line, value)
     _infer_tipo(fields)
     return Edits(MappingProxyType(fields), tuple(errors))
+
+
+def _split_pairs(line: str) -> list[str]:
+    """Return the ``key=value`` pair texts of one stripped edit line (D188).
+
+    A line whose first key is unknown is one pair, so it fails validation as a whole; a
+    free-text key (``motivo``, ``descripcion``) keeps the rest of the line as its value.
+    Otherwise a further pair starts after whitespace at a word :func:`_canonical_key`
+    knows followed by ``=``, and its value runs up to the next pair's start.
+    """
+    first_key = _canonical_key(line.partition("=")[0])
+    if first_key is None or first_key in OVERRIDE_KEYS:
+        return [line]
+    starts = [0]
+    for match in _PAIR_START_PATTERN.finditer(line):
+        if match.start() > 0 and _canonical_key(match.group(1)) is not None:
+            starts.append(match.start())
+    pairs: list[str] = []
+    for index, start in enumerate(starts):
+        end = starts[index + 1] if index + 1 < len(starts) else len(line)
+        pairs.append(line[start:end].strip())
+    return pairs
 
 
 async def apply_edits(
@@ -167,7 +200,14 @@ async def apply_edits(
     await _drop_stale_answers(conn, invoice_id, edits.fields)
     if state == EXTRACT_FAILED and reading.missing_required():
         # The pin stays: BR-E01 asks for more fields of this same invoice (D90).
-        await _reply(conn, msg, invoice_id, MESSAGES[RULE_UNREADABLE], rule_id=RULE_UNREADABLE)
+        await _reply(
+            conn,
+            msg,
+            invoice_id,
+            unreadable_text(invoice_id, reading),
+            rule_id=RULE_UNREADABLE,
+            buttons=unreadable_buttons(invoice_id),
+        )
         return invoice_id
     await clear_editing(conn, invoice_id)
     await set_state(conn, invoice_id, ROUTING, expected=state)
@@ -236,6 +276,7 @@ async def _reply(
     text: str,
     *,
     rule_id: str | None = None,
+    buttons: Sequence[Button] = (),
 ) -> None:
     """Queue one reply to the message's sender in the caller's transaction."""
     await queue_message(
@@ -244,6 +285,7 @@ async def _reply(
         text,
         invoice_id=invoice_id,
         rule_id=rule_id,
+        buttons=buttons,
     )
 
 

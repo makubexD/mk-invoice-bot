@@ -24,7 +24,7 @@ from typing import Any, Final, Literal
 from psycopg import AsyncConnection
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-from invoicebot.channels.base import AttachmentKind
+from invoicebot.channels.base import AttachmentKind, Button
 from invoicebot.channels.media_limits import max_bytes_for
 from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
@@ -42,6 +42,8 @@ from invoicebot.pipeline.handlers import (
     reject_media,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.questions import unreadable_buttons
+from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
 from invoicebot.rules.messages_es import KIND_SUBJECT, MESSAGES, tipo_phrase
@@ -66,8 +68,6 @@ READABLE_KINDS: tuple[AttachmentKind, ...] = ("photo", "pdf")
 TOO_MANY_PAGES: Final = "too_many_pages"
 #: States in which the handler acts; any other state is left untouched (R-9.4).
 ACTIVE_STATES = frozenset({RECEIVED, EXTRACTING})
-#: No QR, an unreadable photo or a required field missing (BR-E01).
-RULE_UNREADABLE: RuleId = "BR-E01"
 #: The gap a repeating unreadable invoice from one issuer raises (BR-E06).
 PARSER_MISS = "PARSER_MISS"
 #: A RUC is the 11-digit document number (R-11.12).
@@ -366,18 +366,24 @@ async def _finish(
 
     The write only lands while the invoice is still in ``expected``: an invoice moved on
     by ``/cancelar`` or an edit wins, ``set_state`` raises :class:`StateMoved` and the
-    transaction rolls back, so no message and no BR-E06 gap is stored (D95). A BR-E01
-    reading that still carries the issuer's RUC counts one PARSER_MISS sighting there.
+    transaction rolls back, so no message and no BR-E06 gap is stored (D95). A partial
+    reading is saved, so an edit that types only the missing fields builds on it (D188).
+    A BR-E01 reading that still carries the issuer's RUC counts one PARSER_MISS sighting
+    there.
     """
     rule_id = failure.rule_id
+    text, buttons = _failure_reply(rule_id, invoice_id, failure.reading)
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
+        if failure.reading is not None:
+            await save_reading(conn, invoice_id, failure.reading)
         await queue_message(
             conn,
             Addressee(invoice.origin_channel, invoice.profile_id),
             invoice_id=invoice_id,
             rule_id=rule_id,
-            text=_message(rule_id, failure.reading),
+            text=text,
+            buttons=buttons,
         )
         if (
             rule_id == RULE_UNREADABLE
@@ -413,6 +419,18 @@ def _parser_miss_sighting(invoice_id: int, reading: Reading | None) -> GapSighti
             hint_url=None,
         ),
     )
+
+
+def _failure_reply(rule_id: RuleId, invoice_id: int, reading: Reading | None) -> tuple[str, list[Button]]:
+    """Return the failure rule's text and buttons (spec 06).
+
+    BR-E01 names the required fields the reading kept and the ones still missing, and
+    carries [Editar] / [Cancelar] (BR-E01, D188); the other rules keep their text and no
+    buttons.
+    """
+    if rule_id == RULE_UNREADABLE:
+        return unreadable_text(invoice_id, reading), unreadable_buttons(invoice_id)
+    return _message(rule_id, reading), []
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:

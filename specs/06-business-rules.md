@@ -35,23 +35,29 @@ Rules are evaluated **in order; the first match wins** (R-3.1). The buyer is `nu
 **Summary message.** A routed invoice gets one summary (R-3.4). Its lines, in order:
 
 1. `🧾 {tipo_desc} {serie}-{numero} · {fecha}`, where `{tipo_desc}` is `Factura`, `Boleta`, `Nota de crédito` or `Nota de débito` and `{fecha}` is `dd/mm/aaaa`;
-2. `Emisor: RUC {ruc_emisor}`;
+2. `Emisor: {issuer}`, where `{issuer}` is `{razon_social} (RUC {ruc_emisor})` when the padrón gave a name, else `RUC {ruc_emisor}` (D188);
 3. `Total: S/ {total}`;
-4. the matched routing rule's own message, e.g. `➡️ {flow.label}` (BR-R01, BR-R02);
-5. only when a field was repaired from the QR (D79): `ℹ️ Deducido del comprobante: {fields_desc}`;
-6. only when a field is doubtful (low confidence, a failed R-2.4 check, or a date in the future or older than `max_invoice_age_days`): `⚠️ Revisa: {fields_desc}`. Until replies are handled (`widen-b`), the invoice goes on (D80).
+4. `🔎 Leído de: {sources_desc}`: where the required fields came from, the source holding most of them named alone first, each other source as `{desc}: {fields_desc}`, `; ` separated, e.g. `QR` or `QR; texto: fecha, total` (D188);
+5. the matched routing rule's own message, e.g. `➡️ {flow.label}` (BR-R01, BR-R02);
+6. only when a field was repaired from the QR (D79): `ℹ️ Deducido del comprobante: {fields_desc}`;
+7. only when a field is doubtful (low confidence, a failed R-2.4 check, or a date in the future or older than `max_invoice_age_days`): `⚠️ Revisa: {fields_desc}`. Until replies are handled (`widen-b`), the invoice goes on (D80).
+8. only when the invoice goes on without waiting (not `CONFIRMING`): `⏳ Lo estoy archivando. Toca un botón solo si algo está mal.` (D188).
+
+That summary carries [✏️ Corregir] [✖️ Anular], the same edit and cancel actions as [Editar] [Cancelar], worded so nothing reads as pending; a question that waits (BR-E01, the `CONFIRMING` summary) keeps [Editar] [Cancelar] (D188).
 
 `{fields_desc}` names the fields in Spanish, comma separated: `fecha`, `tipo de comprobante`, `total`.
+
+**BR-E01 partial text.** When extraction keeps a partial reading, BR-E01 names what it read and what is missing (D188), one piece per line: `Leí parte del comprobante #{id}.`, `✅ Leído: {read_desc}`, `❓ Falta: {missing_desc}`, `Envíame otra foto más cerca y con buena luz, o escríbeme solo lo que falta, un dato por línea:`, then `{missing_lines}`, one `{key}=…` line per missing field (`fecha=dd/mm/aaaa` for the date). `{read_desc}` is each read required field's name and value, `; ` separated; `{missing_desc}` is a `{fields_desc}`. It carries [Editar] [Cancelar].
 
 ## 2. Pipeline rules
 
 ### Extraction (E)
 | ID | Condition | Result | Chat message |
 |---|---|---|---|
-| BR-E01 | No QR, and OCR is missing required fields | `EXTRACT_FAILED` (waits for the user) | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escribe los datos así:` + `ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…` |
+| BR-E01 | No QR, and OCR is missing required fields | `EXTRACT_FAILED` (waits for the user) | `No pude leer este comprobante. Envíame una foto más cerca y con buena luz, o escríbeme los datos, uno por línea:` + `ruc=…` + `serie=F001` + `numero=123` + `fecha=dd/mm/aaaa` + `total=…` [Editar] [Cancelar]; a partial reading gets the BR-E01 partial text above instead (D188) |
 | BR-E02 | The issuer RUC fails the check digit | Same as E01, with the field highlighted | `El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…` |
 | BR-E03 | The date is in the future or older than `max_invoice_age_days` | `CONFIRMING` | `La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa`, then the routed summary and [Confirmar] [Editar] [Cancelar] (D126) |
-| BR-E04 | The natural key already exists in the same profile and isn't failed or cancelled; another profile's invoice is never matched (D93, R-10.1) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}.` |
+| BR-E04 | The natural key already exists in the same profile and isn't failed or cancelled; another profile's invoice is never matched (D93, R-10.1) | `CANCELLED` | `Este comprobante ya lo registré el {created_at:%d/%m} (#{id}): {issuer}, S/ {total}.` [Ver #{id}] (D188) |
 | BR-E05 | Not a supported CPE (`tipo` ∉ config) | `CANCELLED` | `Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.` |
 | BR-E06 | OCR fails 2 or more times on photos from the same issuer | Raises gap `PARSER_MISS` | *(no extra message; E01 already asked the user)* |
 | BR-E07 | The file is too large, the image exceeds 40 megapixels, the type isn't supported (an XML on its own, D121), a PDF has more than `max_pdf_pages` pages (D122; `{reason_desc}` is "tiene más de {max_pages} páginas"), or a zip breaks the entry/ratio limits (R-1.11) | Not processed (`CANCELLED` if an invoice was created) | `No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG, hasta {image_mb} MB) o el PDF del comprobante (hasta {pdf_mb} MB).` |

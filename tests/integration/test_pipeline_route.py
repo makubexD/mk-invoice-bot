@@ -27,6 +27,7 @@ from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.routing.router import CompiledRule
+from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID, SUMMARY_MOVING
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
@@ -104,6 +105,14 @@ def _reading(
         },
         document_url=None,
     )
+
+
+def _reading_with_name(fecha: date, *, total: str = "49.90") -> Reading:
+    """Build a reading whose issuer name came from the padrón (D188)."""
+    reading = _reading(fecha, total=total)
+    fields = dict(reading.fields)
+    fields["razon_social"] = _field("ACME S.A.C.", source="padron")
+    return Reading(fields=fields, document_url=None)
 
 
 def _ocr_buyer_reading(fecha: date, *, buyer: str = WORK_RUC, buyer_type: str = "6") -> Reading:
@@ -361,8 +370,8 @@ async def test_validate_off_sends_the_routed_summary(
     assert "Revisa" not in text
     assert "Deducido" not in text
     assert buttons == [
-        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
-        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
+        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
     ]
 
 
@@ -493,7 +502,7 @@ async def test_old_date_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     row, texts = await _route_and_validate_one(db_pool, _reading(old), answers={"confirmed": True})
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-1] == "⚠️ Revisa: fecha"
+    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: fecha", SUMMARY_MOVING]
 
 
 async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -507,7 +516,7 @@ async def test_conflict_is_a_warning_line(db_pool: AsyncConnectionPool[AsyncConn
     row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-1] == "⚠️ Revisa: número"
+    assert texts[0].splitlines()[-2:] == ["⚠️ Revisa: número", SUMMARY_MOVING]
 
 
 async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
@@ -517,7 +526,7 @@ async def test_inferred_tipo_is_named(db_pool: AsyncConnectionPool[AsyncConnecti
     row, texts = await _route_and_validate_one(db_pool, reading)
 
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert texts[0].splitlines()[-1] == "ℹ️ Deducido del comprobante: tipo de comprobante"
+    assert texts[0].splitlines()[-2:] == ["ℹ️ Deducido del comprobante: tipo de comprobante", SUMMARY_MOVING]
 
 
 async def test_low_confidence_without_flag_is_not_named(
@@ -628,8 +637,8 @@ async def test_total_at_cap_routes_without_a_question(
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
-        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
+        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
     ]
 
 
@@ -655,8 +664,8 @@ async def test_flow_without_reimbursement_is_not_asked(
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
-        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
+        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
     ]
 
 
@@ -675,8 +684,8 @@ async def test_routed_summary_has_edit_and_cancel_buttons(
         outbox = await _outbox(conn, profile_id)
     assert len(outbox) == 1
     assert outbox[0][2] == [
-        {"id": button_id(invoice_id, "edit"), "title": "Editar"},
-        {"id": button_id(invoice_id, "cancel"), "title": "Cancelar"},
+        {"id": button_id(invoice_id, "edit"), "title": BUTTON_FIX},
+        {"id": button_id(invoice_id, "cancel"), "title": BUTTON_VOID},
     ]
 
 
@@ -998,7 +1007,7 @@ async def test_stale_comercio_is_dropped_and_reasked(
 async def test_second_invoice_with_a_done_key_is_cancelled(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-E04: a second invoice whose key a non-terminal invoice holds is cancelled."""
+    """BR-E04: a second invoice whose key a non-terminal invoice holds is cancelled (D188)."""
     profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
     cfg = _config(profile_id, FULL_PROFILE)
     reading = _reading(await _today(db_pool))
@@ -1012,15 +1021,45 @@ async def test_second_invoice_with_a_done_key_is_cancelled(
 
     async with db_pool.connection() as conn:
         row = await _invoice(conn, second)
-        texts = await _texts(conn, profile_id, "BR-E04")
+        outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, second)
         second_key = await _stored_key(conn, second)
     assert row == ("CANCELLED", "BR-E04", None)
     assert jobs == []
     assert second_key is None
+    assert len(outbox) == 1
+    text, rule_id, buttons = outbox[0]
+    assert rule_id == "BR-E04"
+    assert f"(#{first})" in text
+    assert f"RUC {OWNER_RUC}, S/ 49.90" in text
+    assert buttons == [{"id": button_id(first, "status"), "title": f"Ver #{first}"}]
+
+
+async def test_duplicate_names_the_issuer_when_the_padron_gave_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, BR-E04: BR-E04 names the original's issuer and total and offers [Ver #{id}]."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading_with_name(await _today(db_pool), total="30.90")
+    first = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, first)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, first, "DONE")
+
+    second = await _routing_invoice(db_pool, profile_id, reading)
+    await _run(db_pool, cfg, second)
+
+    async with db_pool.connection() as conn:
+        texts = await _texts(conn, profile_id, "BR-E04")
+        outbox = await _outbox(conn, profile_id)
     assert len(texts) == 1
+    assert "ACME S.A.C. (RUC 20000000001)" in texts[0]
+    assert "S/ 30.90" in texts[0]
     assert f"(#{first})" in texts[0]
-    assert f"/estado {first}" in texts[0]
+    _text, rule_id, buttons = outbox[-1]
+    assert rule_id == "BR-E04"
+    assert buttons == [{"id": button_id(first, "status"), "title": f"Ver #{first}"}]
 
 
 async def test_same_reading_from_two_profiles_is_not_a_duplicate(
@@ -1259,6 +1298,7 @@ async def test_date_one_year_and_a_day_old_asks_with_br_e03(
     assert text.endswith("¿Está todo bien?")
     assert buttons[0] == {"id": button_id(invoice_id, "confirm"), "title": "Confirmar"}
     assert [button["title"] for button in buttons] == ["Confirmar", "Editar", "Cancelar"]
+    assert SUMMARY_MOVING not in text  # D188: the bot waits here
 
 
 async def test_edit_of_the_bad_date_routes_on(
@@ -1320,3 +1360,4 @@ async def test_one_llm_field_asks_even_with_auto(
     assert rule_id == "BR-S10"
     assert text.endswith("¿Está todo bien?")
     assert [button["title"] for button in buttons] == ["Confirmar", "Editar", "Cancelar"]
+    assert SUMMARY_MOVING not in text  # D188: the bot waits here

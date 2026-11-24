@@ -41,7 +41,7 @@ from invoicebot.queue.jobs import Job
 from invoicebot.queue.outbox import OutboxSender
 from invoicebot.queue.worker import Handler
 from invoicebot.routing.router import compile_rules
-from invoicebot.rules.messages_es import FETCH_NOT_FOUND_LINE, MESSAGES, fetcher_desc
+from invoicebot.rules.messages_es import BUTTON_FIX, BUTTON_VOID, FETCH_NOT_FOUND_LINE, MESSAGES, fetcher_desc
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -411,8 +411,8 @@ async def test_dni_buyer_picks_a_flow_and_gets_the_summary(
     assert "Total: S/ 49.90" in summary.text
     assert "➡️ Trabajo (Microsoft)" in summary.text
     assert [(button.id, button.title) for button in summary.buttons] == [
-        (button_id(invoice_id, "edit"), "Editar"),
-        (button_id(invoice_id, "cancel"), "Cancelar"),
+        (button_id(invoice_id, "edit"), BUTTON_FIX),
+        (button_id(invoice_id, "cancel"), BUTTON_VOID),
     ]
 
 
@@ -436,7 +436,9 @@ async def test_second_photo_of_the_same_invoice_sends_br_e04(
         assert await _state_rule(conn, second) == ("CANCELLED", "BR-E04")
     assert fake.rule_ids()[-1] == "BR-E04"
     assert f"(#{first})" in fake.texts()[-1]
-    assert f"/estado {first}" in fake.texts()[-1]
+    assert [(button.id, button.title) for button in fake.sent[-1].buttons] == [
+        (button_id(first, "status"), f"Ver #{first}")
+    ]
 
 
 async def test_total_edit_reroutes_and_shows_the_new_summary(

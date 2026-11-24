@@ -17,7 +17,7 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
-from invoicebot.states import BATCHED, CANCELLED, FAILED, StateMoved
+from invoicebot.states import BATCHED, CANCELLED, FAILED, MANUAL_REQUIRED, StateMoved
 from invoicebot.store.flow_b import open_batch
 from invoicebot.store.invoices import (
     CpStatus,
@@ -35,6 +35,7 @@ from invoicebot.store.invoices import (
     get_waiting,
     has_file,
     list_pending,
+    list_recent,
     list_unattached_uploads,
     load_flow,
     load_invoice_head,
@@ -949,3 +950,33 @@ async def test_fetch_round_started_within_is_false_for_an_unknown_invoice(
         recent = await fetch_round_started_within(conn, UNKNOWN_INVOICE_ID, 600)
 
     assert recent is False
+
+
+async def test_list_rows_name_the_issuer_from_the_padron(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-2.5, D188: a list row without its own razón social takes the padrón's name for its RUC."""
+    profile_id = f"profile-{uuid4().hex}"
+    ruc = 20_000_000_000 + uuid4().int % 1_000_000_000
+
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO padron (ruc, razon_social, estado, condicion) VALUES (%s, %s, %s, %s)",
+            (ruc, "EMISOR DEL PADRON S.A.", "ACTIVO", "HABIDO"),
+        )
+        from_padron = await create_invoice(conn, profile_id, CHANNEL)
+        own_name = await create_invoice(conn, profile_id, CHANNEL)
+        await conn.execute(
+            "UPDATE invoices SET ruc_emisor = %s, state = %s WHERE id = ANY(%s)",
+            (ruc, MANUAL_REQUIRED, [from_padron, own_name]),
+        )
+        await conn.execute("UPDATE invoices SET razon_social = %s WHERE id = %s", ("NOMBRE PROPIO", own_name))
+        recent = await list_recent(conn, profile_id, 5)
+        pending, _ = await list_pending(
+            conn, profile_id, limit=20, remind_days=2, prepared_batch_state="prepared", timezone="UTC"
+        )
+        await conn.execute("DELETE FROM padron WHERE ruc = %s", (ruc,))
+
+    expected = {from_padron: "EMISOR DEL PADRON S.A.", own_name: "NOMBRE PROPIO"}
+    assert {row.id: row.razon_social for row in recent} == expected
+    assert {row.id: row.razon_social for row in pending} == expected

@@ -33,7 +33,7 @@ from invoicebot.pipeline.summary import flow_line, summary_text, summary_today
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
 from invoicebot.store.db import Pool
@@ -191,7 +191,7 @@ async def ask_sunat(
 
 async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) -> None:
     """Send the summary and move the invoice on, exactly as routing did before (D124)."""
-    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction)
+    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (SUMMARY_MOVING,))
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
@@ -205,7 +205,8 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
     if verdict.ask:
         await _ask(conn, inputs, verdict)
         return
-    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, _extra_lines(verdict))
+    extra_lines = (*_extra_lines(verdict), SUMMARY_MOVING)
+    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, extra_lines)
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)

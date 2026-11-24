@@ -8,16 +8,21 @@ from typing import Any, cast
 
 from psycopg import AsyncConnection
 
+from invoicebot.config.checks import ISSUER_NAME_MAX
 from invoicebot.config.models import Extraction, Flow
-from invoicebot.extract.fields import Reading
+from invoicebot.extract.fields import REQUIRED, Reading
 from invoicebot.extract.validate import check_date, doubtful_fields
 from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
+    ISSUER_NAMED,
+    ISSUER_RUC,
     MESSAGES,
+    SOURCE_DESC,
     SUMMARY,
     SUMMARY_DATE_FORMAT,
     SUMMARY_INFERRED,
     SUMMARY_REVIEW,
+    SUMMARY_SOURCES,
     TIPO_DESC,
     fields_desc,
 )
@@ -41,8 +46,9 @@ def summary_text(
             serie=reading.value("serie") or "",
             numero=reading.value("numero") or "",
             fecha=(reading.value(DATE_FIELD) or "") if fecha is None else fecha.strftime(SUMMARY_DATE_FORMAT),
-            ruc_emisor=reading.value("ruc_emisor") or "",
+            issuer=issuer_desc(reading),
             total=reading.value("total") or "",
+            sources_line=SUMMARY_SOURCES.format(sources_desc=sources_desc(reading)),
             flow_line=flow_line,
         )
     ]
@@ -57,6 +63,43 @@ def summary_text(
         lines.append(SUMMARY_REVIEW.format(fields_desc=fields_desc(doubtful)))
     lines.extend(extra_lines)
     return "\n".join(lines)
+
+
+def issuer_desc(reading: Reading) -> str:
+    """Return the summary's ``{issuer}``: the padrón's name and the RUC, or just the RUC (D188).
+
+    A name longer than :data:`ISSUER_NAME_MAX` is cut with ``…``.
+    """
+    ruc = reading.value("ruc_emisor") or ""
+    name = reading.value("razon_social")
+    if name is None:
+        return ISSUER_RUC.format(ruc=ruc)
+    if len(name) > ISSUER_NAME_MAX:
+        name = name[: ISSUER_NAME_MAX - 1] + "…"
+    return ISSUER_NAMED.format(name=name, ruc=ruc)
+
+
+def sources_desc(reading: Reading) -> str:
+    """Return the summary's ``{sources_desc}``: where the required fields came from (D188).
+
+    Sources are ordered by their first field in :data:`REQUIRED`; the source holding most
+    fields is named alone first, the rest follow as ``{desc}: {fields_desc}``.
+    """
+    sources: dict[str, list[str]] = {}
+    for name in REQUIRED:
+        field = reading.fields.get(name)
+        if field is None or reading.value(name) is None:
+            continue
+        sources.setdefault(field.source, []).append(name)
+    ordered = sorted(sources, key=lambda source: REQUIRED.index(sources[source][0]))
+    if not ordered:
+        return ""
+    primary = max(ordered, key=lambda source: len(sources[source]))
+    parts = [SOURCE_DESC[primary]]
+    parts.extend(
+        f"{SOURCE_DESC[source]}: {fields_desc(sources[source])}" for source in ordered if source != primary
+    )
+    return "; ".join(parts)
 
 
 def flow_line(flow: Flow, rule_id: str) -> str:

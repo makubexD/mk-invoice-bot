@@ -36,14 +36,16 @@ MESSAGES: dict[str, str] = {
     "BR-R10": "➡️ {flow.label}",
     "BR-E01": (
         "No pude leer este comprobante. Envíame una foto más cerca y con buena luz, "
-        "o escribe los datos así:\n"
-        "ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…"
+        "o escríbeme los datos, uno por línea:\n"
+        "ruc=…\n"
+        "serie=F001\n"
+        "numero=123\n"
+        "fecha=dd/mm/aaaa\n"
+        "total=…"
     ),
     "BR-E02": "El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…",
     "BR-E03": "La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa",
-    "BR-E04": (
-        "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}). Mira cómo va con /estado {id}."
-    ),
+    "BR-E04": "Este comprobante ya lo registré el {created_at:%d/%m} (#{id}): {issuer}, S/ {total}.",
     "BR-E05": "Solo proceso facturas y boletas electrónicas. Esto parece {tipo_desc}.",
     "BR-E07": (
         "No puedo procesar este archivo ({reason_desc}). Envíame una foto (JPG o PNG, "
@@ -179,6 +181,16 @@ MESSAGES: dict[str, str] = {
     "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
 }
 
+#: BR-E01's text when the reading kept some required fields: the fields read, with
+#: their values, and the lines to type for the ones still missing (D188).
+UNREADABLE_PARTIAL = (
+    "Leí parte del comprobante #{id}.\n"
+    "✅ Leído: {read_desc}\n"
+    "❓ Falta: {missing_desc}\n"
+    "Envíame otra foto más cerca y con buena luz, o escríbeme solo lo que falta, un dato por línea:\n"
+    "{missing_lines}"
+)
+
 #: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
 GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
 
@@ -261,17 +273,42 @@ def state_desc(state: str) -> str:
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
 
 
-#: The routed-invoice summary (spec 06 §1 "Summary message"). ``{flow_line}`` is the
-#: matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
+#: The routed-invoice summary (spec 06 §1 "Summary message"). ``{issuer}`` is the padrón's
+#: name and the RUC, or just the RUC; ``{sources_line}`` names where the fields came from;
+#: ``{flow_line}`` is the matched routing rule's own message, e.g. BR-R01's ``➡️ {flow.label}``.
 SUMMARY = (
-    "🧾 {tipo_desc} {serie}-{numero} · {fecha}\nEmisor: RUC {ruc_emisor}\nTotal: S/ {total}\n{flow_line}"
+    "🧾 {tipo_desc} {serie}-{numero} · {fecha}\n"
+    "Emisor: {issuer}\n"
+    "Total: S/ {total}\n"
+    "{sources_line}\n"
+    "{flow_line}"
 )
+#: Summary line naming where the required fields came from (D188).
+SUMMARY_SOURCES = "🔎 Leído de: {sources_desc}"
+#: ``{sources_desc}`` names, per origin of a field (D188).
+SOURCE_DESC: dict[str, str] = {
+    "qr": "QR",
+    "xml": "XML",
+    "ocr": "texto",
+    "pdf": "PDF",
+    "padron": "padrón",
+    "llm": "IA",
+    "user": "tú",
+}
 #: Summary line naming the fields repaired from the QR payload (D79).
 SUMMARY_INFERRED = "ℹ️ Deducido del comprobante: {fields_desc}"
 #: Summary line naming the doubtful fields; the invoice still goes on in this phase (D80).
 SUMMARY_REVIEW = "⚠️ Revisa: {fields_desc}"
+#: The last line of a summary whose invoice goes on without waiting, so its buttons read
+#: as corrections, not as a question (D188).
+SUMMARY_MOVING = "⏳ Lo estoy archivando. Toca un botón solo si algo está mal."
 #: How the summary writes ``{fecha}``.
 SUMMARY_DATE_FORMAT = "%d/%m/%Y"
+#: ``{issuer}`` when the padrón or the reading named the issuer, and when it did not (D188).
+ISSUER_NAMED = "{name} (RUC {ruc})"
+ISSUER_RUC = "RUC {ruc}"
+#: How BR-E01 shows a total it read (D188).
+AMOUNT_SHOWN = "S/ {total}"
 
 #: ``{tipo_desc}`` in the summary, per SUNAT document type.
 TIPO_DESC: dict[str, str] = {
@@ -412,8 +449,14 @@ BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
 #: BR-S10 and BR-E03: the sender confirms the routed summary (D126).
 BUTTON_CONFIRM = "Confirmar"
-#: The routed summary's [Editar] button (R-3.4).
+#: The [Editar] button of a question that waits: BR-E01 and the confirmation (R-3.4, D126).
 BUTTON_EDIT = "Editar"
+#: The summary's correction buttons while the invoice goes on: same actions as [Editar]
+#: and [Cancelar], worded so nothing reads as pending (D188).
+BUTTON_FIX = "✏️ Corregir"
+BUTTON_VOID = "✖️ Anular"
+#: The [Ver #{id}] button that answers like ``/estado {id}`` (D188).
+BUTTON_STATUS = "Ver #{id}"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
@@ -510,12 +553,21 @@ PENDING_LINE = "#{id} · {issuer} · {total} · {state_desc}"
 #: ``{issuer}`` for an invoice whose razón social is not read yet (S4.8).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_NO_ISSUER = "emisor sin leer"
+#: ``{issuer}`` for an EXTRACT_FAILED invoice: the required fields it lacks (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+PENDING_MISSING = "faltan: {fields_desc}"
 #: One prepared batch in ``/pendientes``'s list (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_BATCH_LINE = "#{id} · {issuer} · el correo está listo desde el {prepared_at:%d/%m}; falta enviarlo"
 #: The last line of ``/pendientes`` when more invoices matched than it lists (S11.4).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 PENDING_MORE = "…y {count} más."
+#: The line after the newest invoices when ``/estado`` has no id (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+ESTADO_HINT = "Para ver uno: /estado 12"
+#: ``/estado`` with no id when the sender has no invoices (D188).
+#: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
+ESTADO_NONE = "Aún no tengo comprobantes tuyos."
 #: The first line of ``/estado``'s answer (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 STATUS = "El comprobante #{id} está {state_desc}."

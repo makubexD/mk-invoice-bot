@@ -219,3 +219,76 @@ def test_edit_error_echoes_a_bad_ruc_or_date_safely(line: str, rule_id: str) -> 
     error = edits.errors[0]
     assert error.rule_id == rule_id
     assert not has_unsafe_char(error_text(error))
+
+
+def test_parse_edits_reads_several_pairs_on_one_line() -> None:
+    """D188, R-3.5: five pairs on one line parse as five fields, plus the inferred tipo, no errors."""
+    edits = parse_edits("ruc=20000000001 serie=F001 numero=123 fecha=05/11/2026 total=30.90")
+    assert edits.fields == {
+        "ruc_emisor": "20000000001",
+        "serie": "F001",
+        "tipo": "01",
+        "numero": "123",
+        "fecha_emision": "2026-11-05",
+        "total": "30.90",
+    }
+    assert edits.errors == ()
+
+
+def test_parse_edits_reads_a_second_pair_on_the_line() -> None:
+    """D188, R-3.5: fecha and total on one line parse as two fields."""
+    assert parse_edits("fecha=05/11/2026 total=30.90").fields == {
+        "fecha_emision": "2026-11-05",
+        "total": "30.90",
+    }
+
+
+def test_parse_edits_keeps_a_single_pair_unchanged() -> None:
+    """D188, R-3.5: one pair on one line still parses as one field."""
+    assert parse_edits("total=30.90").fields == {"total": "30.90"}
+
+
+def test_parse_edits_keeps_one_pair_per_line() -> None:
+    """D188, R-3.5: two lines with one pair each still parse as two fields."""
+    assert parse_edits("total=30.90\nnumero=123").fields == {"total": "30.90", "numero": "123"}
+
+
+def test_parse_edits_errors_with_its_own_pair_text() -> None:
+    """D188, R-3.5, BR-E02: a bad ruc on a shared line errors alone, and total still parses."""
+    edits = parse_edits("ruc=123 total=30.90")
+    assert edits.fields == {"total": "30.90"}
+    assert edits.errors == (EditError("BR-E02", "ruc=123", "ruc_emisor", "123"),)
+
+
+def test_parse_edits_does_not_split_an_unknown_first_key() -> None:
+    """D188, R-3.5: an unknown first key keeps the whole line as one pair, so total is not split out."""
+    edits = parse_edits("nota=hola total=30.90")
+    assert edits == Edits(
+        fields={},
+        errors=(EditError(None, "nota=hola total=30.90", None, "hola total=30.90"),),
+    )
+
+
+def test_parse_edits_does_not_split_a_free_text_value() -> None:
+    """D188, R-3.5: a motivo line keeps ``total=`` inside its text, so no total edit comes out."""
+    assert parse_edits("motivo=pagado total=30.90").fields == {}
+
+
+def test_parse_edits_an_over_long_line_is_one_error() -> None:
+    """D188: a line too long to hold ten capped pairs is one error and sets no field."""
+    line = "total=1" + " " * 4000 + "x" * 4000
+
+    edits = parse_edits(line)
+
+    assert edits.fields == {}
+    assert len(edits.errors) == 1
+    assert edits.errors[0].field is None
+
+
+def test_parse_edits_finds_pairs_after_any_whitespace_run() -> None:
+    """D188: a second pair after several spaces is still its own pair."""
+    edits = parse_edits("serie=F001     numero=123")
+
+    assert edits.fields["serie"] == "F001"
+    assert edits.fields["numero"] == "123"
+    assert edits.errors == ()
