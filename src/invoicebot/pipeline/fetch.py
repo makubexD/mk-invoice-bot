@@ -430,7 +430,7 @@ async def _wait_notice(
     row = await cur.fetchone()
     if row is None:
         raise RuntimeError("SELECT now() AT TIME ZONE yielded no row")
-    looks = LookTimes(next_at.astimezone(owner_timezone), last_at.astimezone(owner_timezone), row[0])
+    looks = LookTimes(last_at.astimezone(owner_timezone), row[0])
     text = docs_needed_text(
         invoice_id,
         reading,

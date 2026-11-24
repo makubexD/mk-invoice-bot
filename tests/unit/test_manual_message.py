@@ -203,9 +203,7 @@ def test_docs_needed_text_names_the_docs_the_fetcher_bullets_and_the_mailbox() -
         _flow(inbox=_inbox()),
         attempts,
         _with_store(),
-        LookTimes(
-            datetime(2026, 1, 1, 14, 5, tzinfo=UTC), datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)
-        ),
+        LookTimes(datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)),
     )
 
     assert text == (
@@ -226,9 +224,7 @@ def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
         _flow(inbox=_inbox()),
         [Attempt("qr_url", FetchReason.NO_URL)],
         _with_store(),
-        LookTimes(
-            datetime(2026, 1, 1, 14, 5, tzinfo=UTC), datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)
-        ),
+        LookTimes(datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)),
     )
 
     assert "Ya busqué:" not in text
@@ -259,7 +255,7 @@ def test_docs_needed_text_words_the_last_look_against_the_owner_date(
         _flow(inbox=_inbox()),
         [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
         _with_store(),
-        LookTimes(datetime(2026, 11, 24, 5, 15, tzinfo=UTC), last_at, today),
+        LookTimes(last_at, today),
     )
 
     assert text.startswith("⏳ Comprobante #7: no pude descargar el PDF y el XML.")
@@ -277,7 +273,6 @@ def test_docs_needed_text_names_outlook_for_a_graph_inbox() -> None:
         [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
         _with_store(),
         LookTimes(
-            datetime(2026, 11, 24, 5, 15, tzinfo=UTC),
             datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
             date(2026, 11, 24),
         ),
@@ -296,7 +291,6 @@ def test_docs_needed_text_needs_a_flow_with_an_inbox() -> None:
             [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
             _with_store(),
             LookTimes(
-                datetime(2026, 11, 24, 5, 15, tzinfo=UTC),
                 datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
                 date(2026, 11, 24),
             ),

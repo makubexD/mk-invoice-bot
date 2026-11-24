@@ -82,9 +82,8 @@ def manual_message(
 
 @dataclass(frozen=True)
 class LookTimes:
-    """When the inbox fetcher looks next and last, in the owner's timezone, and the owner's date (D190)."""
+    """The last inbox look in the owner's timezone, and the owner's date (D190)."""
 
-    next_at: datetime
     last_at: datetime
     today: date
 
