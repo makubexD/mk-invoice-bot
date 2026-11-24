@@ -986,7 +986,7 @@ async def test_list_rows_name_the_issuer_from_the_padron(
 async def test_list_recent_in_keeps_only_the_requested_states_newest_first(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, S4.9: only invoices in states come back, newest first."""
+    """D189, S4.9: only invoices in states come back, newest first, with their serie and numero."""
     profile_id = f"profile-{uuid4().hex}"
 
     async with db_pool.connection() as conn:
@@ -1004,7 +1004,8 @@ async def test_list_recent_in_keeps_only_the_requested_states_newest_first(
         await conn.execute(
             """
             UPDATE invoices
-            SET created_at = TIMESTAMPTZ '2026-11-21 10:00:00+00', state = %s
+            SET created_at = TIMESTAMPTZ '2026-11-21 10:00:00+00', state = %s,
+                serie = 'F001', numero = '123'
             WHERE id = %s
             """,
             (CANCELLED, newest),
@@ -1021,6 +1022,8 @@ async def test_list_recent_in_keeps_only_the_requested_states_newest_first(
 
     assert [row.id for row in rows] == [newest, oldest]
     assert {row.state for row in rows} == {FAILED, CANCELLED}
+    assert (rows[0].serie, rows[0].numero) == ("F001", "123")
+    assert (rows[1].serie, rows[1].numero) == (None, None)
 
 
 async def test_list_recent_in_limit_caps_the_newest_rows(

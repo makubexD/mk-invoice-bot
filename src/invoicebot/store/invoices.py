@@ -91,6 +91,8 @@ class PendingRow:
     razon_social: str | None
     total: Decimal | None
     batch_prepared_at: date | None
+    serie: str | None
+    numero: str | None
 
 
 async def create_invoice(conn: AsyncConnection[Any], profile_id: str, origin_channel: ChannelName) -> int:
@@ -406,7 +408,9 @@ async def list_pending(
                COALESCE(i.razon_social, p.razon_social),
                i.total,
                (i.updated_at AT TIME ZONE %s)::date,
-               count(*) OVER () AS total_count
+               count(*) OVER () AS total_count,
+               i.serie,
+               i.numero
         FROM invoices AS i
         LEFT JOIN batches AS b ON b.id = i.batch_id
         LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
@@ -442,6 +446,8 @@ async def list_pending(
             razon_social=None if row[4] is None else str(row[4]),
             total=cast(Decimal | None, row[5]),
             batch_prepared_at=cast(date, row[6]) if str(row[1]) == BATCHED else None,
+            serie=None if row[8] is None else str(row[8]),
+            numero=None if row[9] is None else str(row[9]),
         )
         for row in raw
     ]
@@ -455,7 +461,9 @@ _LIST_SELECT = """
            i.waiting_state,
            i.waiting_rule_id,
            COALESCE(i.razon_social, p.razon_social),
-           i.total
+           i.total,
+           i.serie,
+           i.numero
     FROM invoices AS i
     LEFT JOIN padron AS p ON p.ruc = i.ruc_emisor
 """
@@ -471,6 +479,8 @@ def _pending_row(row: Sequence[Any]) -> PendingRow:
         razon_social=None if row[4] is None else str(row[4]),
         total=cast(Decimal | None, row[5]),
         batch_prepared_at=None,
+        serie=None if row[6] is None else str(row[6]),
+        numero=None if row[7] is None else str(row[7]),
     )
 
 
