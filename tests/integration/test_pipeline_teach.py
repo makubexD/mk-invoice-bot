@@ -359,7 +359,7 @@ async def test_answer_url_still_answers_br_f02_after_another_invoices_br_f13(
 async def test_answer_dont_know_stores_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know_manual."""
     setup = _setup()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
@@ -370,7 +370,7 @@ async def test_answer_dont_know_stores_nothing(
 
     assert handled is True
     assert link is None
-    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know_manual"], "BR-F02_dont_know", [])
 
 
 async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(

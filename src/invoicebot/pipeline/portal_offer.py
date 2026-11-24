@@ -21,9 +21,9 @@ from invoicebot.pipeline.questions import OFFER_BUTTON_PREFIX as OFFER_BUTTON_PR
 from invoicebot.pipeline.teach import (
     NOT_QUESTIONS,
     RULE_ASK_PORTAL,
-    RULE_DONT_KNOW,
     TeachContext,
     TeachSetup,
+    dont_know_reply,
     teach,
 )
 from invoicebot.queue import outbox
@@ -101,8 +101,8 @@ async def handle_press(
     BR-F14 counts; [No sé] also counts when the newest question is that invoice's BR-F02.
     A press on the sender's own invoice whose question no longer applies is stale and
     answered BR-S02; anything else is logged and changes nothing. [Sí] teaches the
-    offered URL through BR-S06, [No] asks BR-F02, and [No sé] answers
-    ``BR-F02_dont_know``. The caller owns the transaction.
+    offered URL through BR-S06, [No] asks BR-F02, and [No sé] answers the text its
+    state calls for. The caller owns the transaction.
     """
     match = None if msg.button_id is None else re.fullmatch(_PRESS_PATTERN, msg.button_id)
     if match is None:
@@ -131,7 +131,7 @@ async def handle_press(
     elif action == BUTTON_NO_SUFFIX:
         await _ask_br_f02(conn, addressee, invoice_id, reading)
     else:
-        await queue_message(conn, addressee, MESSAGES[RULE_DONT_KNOW], rule_id=RULE_DONT_KNOW)
+        await dont_know_reply(conn, addressee, invoice_id)
 
 
 async def _teach_offer(

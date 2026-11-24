@@ -1516,7 +1516,7 @@ async def test_br_f02_url_teaches_the_portal(
 async def test_br_f02_dont_know_answers_and_stores_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: "no sé" after BR-F02 stores no link and answers BR-F02_dont_know."""
+    """R-11.4, D190: "no sé" after BR-F02 on a MANUAL_REQUIRED invoice answers the manual text."""
     profile_id = _profile()
     issuer = _issuer()
     invoice_id = await _invoice_in(
@@ -1544,7 +1544,7 @@ async def test_br_f02_dont_know_answers_and_stores_nothing(
 
     assert result.status == "stored"
     assert link is None
-    assert replies[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know")
+    assert replies[-1] == (MESSAGES["BR-F02_dont_know_manual"], "BR-F02_dont_know")
 
 
 async def test_br_f02_url_after_a_newer_question_is_not_taken(

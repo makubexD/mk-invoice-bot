@@ -5,7 +5,7 @@
 never replaced, an invalid one repeats BR-F02, and a second proposal while one
 is waiting thanks the sender without asking the owner again. :func:`answer`
 routes a free-text reply to BR-F02 (one ``https`` URL or "no sé") into
-:func:`teach` or the ``BR-F02_dont_know`` answer (R-11.4). :func:`handle_press`
+:func:`teach` or :func:`dont_know_reply` (R-11.4). :func:`handle_press`
 applies the owner's [Aprobar] or [Rechazar] decision and puts an approved link
 on the gap's issue (D118).
 """
@@ -34,9 +34,10 @@ from invoicebot.pipeline.outgoing import (
 from invoicebot.pipeline.questions import RULE_DOCS_NEEDED
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES, UNKNOWN_ISSUER
+from invoicebot.states import FETCHING_DOCS
 from invoicebot.store import taught_links
 from invoicebot.store.gaps import get_gap, set_hint
-from invoicebot.store.invoices import load_reading
+from invoicebot.store.invoices import load_invoice_head, load_reading
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,11 @@ logger = logging.getLogger(__name__)
 RULE_TEACH = "BR-S06"
 #: The question an invalid link repeats (BR-F02, R-11.4).
 RULE_ASK_PORTAL = "BR-F02"
-#: The answer when the sender does not know the issuer's portal (BR-F02, R-11.4).
+#: The answer when the sender does not know the issuer's portal, while the invoice still
+#: fetches its documents; also the rule of both answers (BR-F02, R-11.4, D190).
 RULE_DONT_KNOW = "BR-F02_dont_know"
+#: The answer when someone must add the issuer's portal by hand (BR-F02, D190).
+MESSAGE_DONT_KNOW_MANUAL = "BR-F02_dont_know_manual"
 #: Rules whose messages are never the question a typed answer or a BR-F14 press waits
 #: on: BR-S02 answers a stale press, and BR-F13's buttons are gated by the invoice's
 #: state, so a BR-F13 sent for another invoice must not hide a pending BR-F02 (D189).
@@ -146,12 +150,7 @@ async def answer(
     if question is None or question[0] != RULE_ASK_PORTAL:
         return False
     if is_dont_know(msg.text):
-        await queue_message(
-            conn,
-            Addressee(msg.channel, msg.profile_id),
-            MESSAGES[RULE_DONT_KNOW],
-            rule_id=RULE_DONT_KNOW,
-        )
+        await dont_know_reply(conn, Addressee(msg.channel, msg.profile_id), question[1])
         return True
     if not looks_like_url(msg.text):
         return False
@@ -173,6 +172,28 @@ async def answer(
         msg.text,
     )
     return True
+
+
+async def dont_know_reply(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+) -> None:
+    """Answer [No sé] with the text that is true for the invoice's state (BR-F02, D190).
+
+    An invoice still fetching its documents answers ``BR-F02_dont_know``; in any other
+    state someone must add the issuer's portal, so it answers ``BR-F02_dont_know_manual``.
+    The caller owns the transaction.
+    """
+    head = await load_invoice_head(conn, invoice_id)
+    key = RULE_DONT_KNOW if head is not None and head.state == FETCHING_DOCS else MESSAGE_DONT_KNOW_MANUAL
+    await queue_message(
+        conn,
+        addressee,
+        MESSAGES[key],
+        invoice_id=invoice_id,
+        rule_id=RULE_DONT_KNOW,
+    )
 
 
 async def handle_press(
