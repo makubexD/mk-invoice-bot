@@ -22,7 +22,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
-from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading
 from invoicebot.extract.validate import RULE_BAD_DATE, RULE_BAD_RUC, check_serie, is_valid_ruc
 from invoicebot.pipeline.extract import ROUTE_STEP, RULE_UNREADABLE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -33,7 +33,16 @@ from invoicebot.pipeline.overrides import (
     without_accents,
 )
 from invoicebot.queue.jobs import enqueue
-from invoicebot.rules.messages_es import EDIT_INVALID, EDIT_LATE, MESSAGES, state_desc
+from invoicebot.rules.messages_es import (
+    EDIT_INVALID,
+    EDIT_LATE,
+    FIELD_DESC,
+    MESSAGES,
+    TIPO_DESC,
+    UNREADABLE_PARTIAL,
+    fields_desc,
+    state_desc,
+)
 from invoicebot.states import EDITABLE, EXTRACT_FAILED, PENDING_USER, ROUTING
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
 from invoicebot.store.invoices import (
@@ -64,6 +73,8 @@ STALE_ANSWERS: Mapping[str, frozenset[str]] = {
     "serie": frozenset({"comercio"}),
     "total": frozenset({"cap_ok"}),
 }
+#: The example value BR-E01's ``{missing_lines}`` shows for a missing field (D188).
+_MISSING_EXAMPLES: Mapping[str, str] = {"fecha_emision": "dd/mm/aaaa"}
 
 _DATE_PATTERN = re.compile(r"([0-9]{2})[/-]([0-9]{2})[/-]([0-9]{4})")
 #: At most 10 integer digits, since ``invoices.total`` is ``NUMERIC(12,2)`` (R-3.5).
@@ -145,6 +156,59 @@ def _split_pairs(line: str) -> list[str]:
         end = starts[index + 1] if index + 1 < len(starts) else len(line)
         pairs.append(line[start:end].strip())
     return pairs
+
+
+def edit_key(field: str) -> str:
+    """Return the key a sender types for ``field`` (D188).
+
+    The key is the field's alias in :data:`ALIASES`, so it round-trips through
+    :func:`_canonical_key`; a field with no alias is typed by its own name.
+    """
+    for alias, name in ALIASES.items():
+        if name == field:
+            return alias
+    return field
+
+
+def unreadable_text(invoice_id: int, reading: Reading | None) -> str:
+    """Return BR-E01's text for an invoice whose reading lacks required fields (BR-E01, D188).
+
+    An invoice with no stored reading, or one that read none of the required fields, gets
+    the generic text. Otherwise the text lists the required fields that were read, with
+    their values, and one ``key=value`` line to type for each one still missing.
+    """
+    if reading is None:
+        return MESSAGES[RULE_UNREADABLE]
+    read = tuple(name for name in REQUIRED if reading.value(name) is not None)
+    if not read:
+        return MESSAGES[RULE_UNREADABLE]
+    missing = tuple(name for name in REQUIRED if reading.value(name) is None)
+    return UNREADABLE_PARTIAL.format(
+        id=invoice_id,
+        read_desc="; ".join(f"{FIELD_DESC[name]} {_shown(reading, name)}" for name in read),
+        missing_desc=fields_desc(missing),
+        missing_lines="\n".join(f"{edit_key(name)}={_MISSING_EXAMPLES.get(name, '…')}" for name in missing),
+    )
+
+
+def _shown(reading: Reading, name: str) -> str:
+    """Return a required field the reading kept as BR-E01 shows it (D188)."""
+    value = reading.value(name) or ""
+    if name == "total":
+        return f"S/ {value}"
+    if name == "tipo":
+        return TIPO_DESC.get(value, value)
+    if name == "fecha_emision":
+        return _fecha_shown(value)
+    return value
+
+
+def _fecha_shown(value: str) -> str:
+    """Return an ISO date as ``dd/mm/aaaa``, or ``value`` when it is not one (D188)."""
+    try:
+        return date.fromisoformat(value).strftime("%d/%m/%Y")
+    except ValueError:
+        return value
 
 
 async def apply_edits(

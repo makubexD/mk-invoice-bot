@@ -36,8 +36,12 @@ MESSAGES: dict[str, str] = {
     "BR-R10": "➡️ {flow.label}",
     "BR-E01": (
         "No pude leer este comprobante. Envíame una foto más cerca y con buena luz, "
-        "o escribe los datos así:\n"
-        "ruc=… serie=F001 numero=123 fecha=dd/mm/aaaa total=…"
+        "o escríbeme los datos, uno por línea:\n"
+        "ruc=…\n"
+        "serie=F001\n"
+        "numero=123\n"
+        "fecha=dd/mm/aaaa\n"
+        "total=…"
     ),
     "BR-E02": "El RUC {ruc} no es válido (dígito verificador). Corrígelo con ruc=…",
     "BR-E03": "La fecha {fecha} parece incorrecta. ¿La corrijo? fecha=dd/mm/aaaa",
@@ -178,6 +182,16 @@ MESSAGES: dict[str, str] = {
     "GAP_admin": "🧩 Falta configurar: {kind_desc} — {subject}.{issue_line}",
     "GAP_DIGEST_admin": "🧩 Pendientes de configuración:\n{gap_lines}",
 }
+
+#: BR-E01's text when the reading kept some required fields: the fields read, with
+#: their values, and the lines to type for the ones still missing (D188).
+UNREADABLE_PARTIAL = (
+    "Leí parte del comprobante #{id}.\n"
+    "✅ Leído: {read_desc}\n"
+    "❓ Falta: {missing_desc}\n"
+    "Envíame otra foto más cerca y con buena luz, o escríbeme solo lo que falta, un dato por línea:\n"
+    "{missing_lines}"
+)
 
 #: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
 GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
