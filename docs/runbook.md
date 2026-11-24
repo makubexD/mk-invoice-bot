@@ -103,12 +103,17 @@ Use this when a portal's site changed and every fetch fails.
 
 ## 5. Rotate secrets and the GitHub App key
 
-1. Edit the age store. It decrypts to a private temp file and re-encrypts on save:
+1. Edit the age store. It decrypts to a private temp file and re-encrypts on save. The identity file belongs to the
+   container's user, so the edit runs inside `podman unshare`, and the store goes back to mode 644 afterwards (the
+   container reads it through that bit):
 
    ```sh
-   uv run python scripts/secrets_edit.py "$LIVE_ROOT/config/secrets.age" \
+   podman unshare "$(command -v uv)" run python scripts/secrets_edit.py "$LIVE_ROOT/config/secrets.age" \
        --identity "$LIVE_ROOT/config/age-identity.txt"
+   chmod 644 "$LIVE_ROOT/config/secrets.age"
    ```
+
+   A Telegram token copied from BotFather can pick up a space where its message wraps: the token never has one.
 
 2. Type each new value yourself. Never paste one into a chat.
 3. **Reload.** Secrets are read again on the restart.
