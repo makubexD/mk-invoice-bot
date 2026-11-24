@@ -28,7 +28,6 @@ from invoicebot.rules.messages_es import (
     BUTTON_SEND_PDF,
     BUTTON_TEACH_PORTAL,
     BUTTON_VOID,
-    BUTTON_WAIT_MAIL,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -48,7 +47,8 @@ STATUS_ACTION = "status"
 INVALID_OK_ACTION = "invalid_ok"
 #: D126's [Confirmar]: the sender accepts the routed summary before validation.
 CONFIRM_ACTION = "confirm"
-#: BR-F13's three actions: send the PDF, teach the portal, or keep waiting (D189).
+#: BR-F13's offered actions: send the PDF or teach the portal (D189). A [⏳] press answers
+#: ``WAIT_MAIL_ACTION`` only from a message sent before D190.
 SEND_PDF_ACTION = "send_pdf"
 TEACH_PORTAL_ACTION = "teach_portal"
 WAIT_MAIL_ACTION = "wait_mail"
@@ -182,11 +182,11 @@ def confirm_buttons(invoice_id: int) -> list[Button]:
 
 
 def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
-    """Return BR-F13's [📎], [🔗] and [⏳] buttons, the portal one only when offered (D189)."""
-    buttons = [Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF)]
+    """Return BR-F13's [🔗] first when offered, then [📎] (D190)."""
+    buttons: list[Button] = []
     if offer_portal:
         buttons.append(Button(id=button_id(invoice_id, TEACH_PORTAL_ACTION), title=BUTTON_TEACH_PORTAL))
-    buttons.append(Button(id=button_id(invoice_id, WAIT_MAIL_ACTION), title=BUTTON_WAIT_MAIL))
+    buttons.append(Button(id=button_id(invoice_id, SEND_PDF_ACTION), title=BUTTON_SEND_PDF))
     return buttons
 
 

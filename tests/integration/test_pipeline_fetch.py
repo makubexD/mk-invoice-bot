@@ -36,7 +36,6 @@ from invoicebot.pipeline.questions import (
     RULE_DOCS_NEEDED,
     SEND_PDF_ACTION,
     TEACH_PORTAL_ACTION,
-    WAIT_MAIL_ACTION,
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
@@ -1197,7 +1196,7 @@ async def _run_portal_then_inbox(
 async def test_inbox_first_wait_offers_the_docs_needed_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D189 (BR-F13): an unknown issuer's first inbox wait offers [📎] [🔗] [⏳] and the no-portal bullet."""
+    """D189, D190 (BR-F13): an unknown issuer's first inbox wait offers [🔗] [📎] and the no-portal bullet."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
 
@@ -1224,9 +1223,8 @@ async def test_inbox_first_wait_offers_the_docs_needed_buttons(
     assert f"Mientras tanto, reviso tu Outlook hasta {last_desc} por si el comercio te lo envió" in text
     assert buttons == [
         [
-            f"{invoice_id}:{SEND_PDF_ACTION}",
             f"{invoice_id}:{TEACH_PORTAL_ACTION}",
-            f"{invoice_id}:{WAIT_MAIL_ACTION}",
+            f"{invoice_id}:{SEND_PDF_ACTION}",
         ]
     ]
 
@@ -1262,7 +1260,7 @@ async def test_inbox_first_wait_names_the_last_look_after_the_whole_schedule(
 async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D189 (BR-F13): an issuer with a taught link gets [📎] and [⏳] only."""
+    """D189, D190 (BR-F13): an issuer with a taught link gets [📎] only."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
     async with db_pool.connection() as conn, conn.transaction():
@@ -1278,7 +1276,7 @@ async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
 
     async with db_pool.connection() as conn:
         buttons = await _outbox_buttons(conn, profile_id)
-    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}", f"{invoice_id}:{WAIT_MAIL_ACTION}"]]
+    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}"]]
 
 
 async def test_inbox_second_wait_sends_no_new_message(

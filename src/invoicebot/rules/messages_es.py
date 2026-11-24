@@ -507,10 +507,9 @@ BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
 BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
-#: BR-F13's three offered actions and BR-F14's [No sé] answer (D189).
+#: BR-F13's two offered actions and BR-F14's [No sé] answer (D189).
 BUTTON_SEND_PDF = "📎 Te envío el PDF"
 BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"
-BUTTON_WAIT_MAIL = "⏳ Espero el correo"
 BUTTON_DONT_KNOW = "No sé"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
