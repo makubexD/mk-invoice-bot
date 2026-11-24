@@ -29,6 +29,7 @@ from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
+    BUTTON_MY_INVOICES,
     CANCEL_LATE,
     COMMAND_NEEDS_ID,
     COMMAND_PICK,
@@ -204,7 +205,13 @@ async def resolve_target(
         return None
     head = await load_invoice_head(conn, invoice_id)
     if head is None or (head.profile_id != msg.profile_id and msg.profile_id not in admins):
-        await _reply(conn, msg, RULE_NOT_FOUND, MESSAGES[RULE_NOT_FOUND].format(id=invoice_id))
+        await _reply(
+            conn,
+            msg,
+            RULE_NOT_FOUND,
+            MESSAGES[RULE_NOT_FOUND].format(id=invoice_id),
+            buttons=[Button(id=command_button_id("estado"), title=BUTTON_MY_INVOICES)],
+        )
         return None
     return invoice_id, head
 

@@ -40,7 +40,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.channels.base import Button
-from invoicebot.channels.buttons import button_id
+from invoicebot.channels.buttons import button_id, command_button_id
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
     GMAIL_PROVIDER,
@@ -77,7 +77,14 @@ from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEN
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import BUTTON_NOT_ARRIVED, BUTTON_SENT, KIND_SUBJECT, MESSAGES, modes_desc
+from invoicebot.rules.messages_es import (
+    BUTTON_NOT_ARRIVED,
+    BUTTON_RETRY,
+    BUTTON_SENT,
+    KIND_SUBJECT,
+    MESSAGES,
+    modes_desc,
+)
 from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
@@ -772,7 +779,7 @@ async def _crashed_send(
         delivery.invoice_id,
         RULE_SEND_FAILED,
         _send_failed_text(prepared, delivery.invoice_id),
-        [],
+        [_retry_button(delivery.invoice_id)],
     )
     await queue_admin_alert(
         conn,
@@ -795,13 +802,25 @@ async def _send_failed(
         await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
-        await _notify(conn, delivery.head, delivery.invoice_id, RULE_SEND_FAILED, text, [])
+        await _notify(
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            RULE_SEND_FAILED,
+            text,
+            [_retry_button(delivery.invoice_id)],
+        )
         await queue_admin_alert(
             conn,
             context.cfg.profiles,
             RULE_SEND_FAILED_ADMIN,
             _send_failed_admin_text(prepared, delivery.invoice_id),
         )
+
+
+def _retry_button(invoice_id: int) -> Button:
+    """Return BR-D03's [Reintentar] button, which runs ``/reprocesar <invoice_id>`` (D190)."""
+    return Button(id=command_button_id("reprocesar", str(invoice_id)), title=BUTTON_RETRY)
 
 
 def _send_failed_text(prepared: _Values, invoice_id: int) -> str:

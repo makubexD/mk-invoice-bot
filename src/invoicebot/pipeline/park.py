@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import logging
 
+from invoicebot.channels.base import Button
+from invoicebot.channels.buttons import command_button_id
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import BUTTON_PENDING, MESSAGES
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import RULE_PARKED, park_stale
 
@@ -35,6 +37,7 @@ async def park_stale_questions(pool: Pool, timeout_h: int) -> int:
                 MESSAGES[RULE_PARKED].format(id=ref.id),
                 invoice_id=ref.id,
                 rule_id=RULE_PARKED,
+                buttons=[Button(id=command_button_id("pendientes"), title=BUTTON_PENDING)],
             )
     logger.info("invoices_parked", extra={"count": len(refs)})
     return len(refs)

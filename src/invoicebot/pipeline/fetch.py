@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button
+from invoicebot.channels.buttons import command_button_id
 from invoicebot.channels.media_limits import DIRECTORY_MODE
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -71,6 +72,8 @@ from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_RETRY,
+    BUTTON_VOID,
     FETCH_WAITING,
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
@@ -474,7 +477,17 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_EXHAUSTED, expected=FETCHING_DOCS
         )
-        await _notify(conn, inputs.head, inputs.job.invoice_id, RULE_EXHAUSTED, text)
+        await _notify(
+            conn,
+            inputs.head,
+            inputs.job.invoice_id,
+            RULE_EXHAUSTED,
+            text,
+            [
+                Button(id=command_button_id("reprocesar", str(inputs.job.invoice_id)), title=BUTTON_RETRY),
+                Button(id=command_button_id("cancelar", str(inputs.job.invoice_id)), title=BUTTON_VOID),
+            ],
+        )
         await _ask_for_portal(conn, inputs, gap, reading)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
 
