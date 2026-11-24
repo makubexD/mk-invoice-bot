@@ -280,6 +280,14 @@ def _setup(*, github_repo: str | None = None) -> TeachSetup:
     return TeachSetup(profiles=ctx.profiles, resolver=ctx.resolver, github_repo=github_repo)
 
 
+def _setup_with_sender_channel() -> TeachSetup:
+    """Return a setup whose non-admin sender has a preferred channel (D190)."""
+    setup = _setup()
+    sender = setup.profiles[SENDER].model_copy(update={"preferred_channel": "whatsapp"})
+    profiles = {**setup.profiles, SENDER: sender}
+    return TeachSetup(profiles=profiles, resolver=setup.resolver, github_repo=setup.github_repo)
+
+
 def _button_press(profile_id: str, button_id: str) -> InboundMessage:
     """Build a canonical button press from ``profile_id``."""
     return InboundMessage(
@@ -710,6 +718,51 @@ async def test_press_reject_sets_rejected_and_a_later_teach_proposes_again(
     assert rejected == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
     assert admin_rows == [(expected, "BR-S06_rejected", [])]
     assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+
+
+async def test_press_approve_notifies_the_other_proposer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Aprobar] tells the assistant who proposed the link."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await handle_press(conn, _press(ADMIN, approved=True), _setup_with_sender_channel())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_sender_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert sender_rows == [(expected, "BR-S06_sender_approved", [])]
+
+
+async def test_press_reject_notifies_the_other_proposer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Rechazar] tells the assistant who proposed the link."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+        await handle_press(conn, _press(ADMIN, approved=False), _setup_with_sender_channel())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_sender_rejected"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
+    assert sender_rows == [(expected, "BR-S06_sender_rejected", [])]
+
+
+async def test_press_approve_of_the_owners_own_link_notifies_no_sender(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190, BR-S06: the owner's [Aprobar] on their own proposal answers only BR-S06_approved."""
+    async with db_pool.connection() as conn:
+        assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, ADMIN) is not None
+        await handle_press(conn, _press(ADMIN, approved=True), _setup_with_sender_channel())
+        admin_rows = await _outbox(conn, ADMIN)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert admin_rows == [(expected, "BR-S06_approved", [])]
+    assert sender_rows == []
 
 
 async def test_press_current_proposal_version_approves_it(

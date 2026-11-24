@@ -38,6 +38,7 @@ from invoicebot.states import FETCHING_DOCS
 from invoicebot.store import taught_links
 from invoicebot.store.gaps import get_gap, set_hint
 from invoicebot.store.invoices import load_invoice_head, load_reading
+from invoicebot.store.taught_links import TaughtLink
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +59,10 @@ NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED})
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
 RULE_REJECTED = "BR-S06_rejected"
+#: The proposer's notice when the owner approves their link (BR-S06, D190).
+RULE_SENDER_APPROVED = "BR-S06_sender_approved"
+#: The proposer's notice when the owner rejects their link (BR-S06, D190).
+RULE_SENDER_REJECTED = "BR-S06_sender_rejected"
 #: An approved link is used as it is and is never replaced (BR-S06).
 STATE_APPROVED = "approved"
 #: BR-S06's button ids: ``t<ruc>v<version>:ok`` and ``t<ruc>v<version>:no`` (D118, D137).
@@ -208,8 +213,9 @@ async def handle_press(
     press, changes nothing either. Approval stores the link as the PORTAL_MISSING gap's
     hint and puts it on the gap's issue, as a comment when the issue exists and in the
     pending ``create_issue`` row's fields when it does not. Every decision answers the
-    pressing admin with BR-S06_approved or BR-S06_rejected. The caller owns the
-    transaction.
+    pressing admin with BR-S06_approved or BR-S06_rejected, and tells the proposer
+    when someone else pressed and the proposer has a preferred channel. The caller
+    owns the transaction.
     """
     match = None if msg.button_id is None else re.fullmatch(_PRESS_PATTERN, msg.button_id)
     profile = setup.profiles.get(msg.profile_id)
@@ -230,6 +236,36 @@ async def handle_press(
         Addressee(msg.channel, msg.profile_id),
         MESSAGES[rule_id].format(ruc_emisor=ruc_emisor),
         rule_id=rule_id,
+    )
+    await _notify_proposer(conn, setup, link, msg.profile_id, ruc_emisor, approved)
+
+
+async def _notify_proposer(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    link: TaughtLink,
+    pressing_profile_id: str,
+    ruc_emisor: int,
+    approved: bool,
+) -> None:
+    """Tell a proposer someone else decided their link, if it has a preferred channel (BR-S06, D190).
+
+    A proposer who pressed the button already got the decision, an unknown profile
+    has no channel, and a profile without ``preferred_channel`` is unreachable, so
+    each of those queues nothing. The caller owns the transaction.
+    """
+    if link.profile_id == pressing_profile_id:
+        return
+    proposer = setup.profiles.get(link.profile_id)
+    channel = None if proposer is None else proposer.preferred_channel
+    if channel is None:
+        return
+    sender_rule_id = RULE_SENDER_APPROVED if approved else RULE_SENDER_REJECTED
+    await queue_message(
+        conn,
+        Addressee(channel, link.profile_id),
+        MESSAGES[sender_rule_id].format(ruc_emisor=ruc_emisor),
+        rule_id=sender_rule_id,
     )
 
 
