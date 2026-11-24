@@ -1,4 +1,4 @@
-"""Tests for the JSON form of a reading (R-2.6, R-2.8)."""
+"""Tests for the JSON form of a reading (R-2.6, R-2.8, D189)."""
 
 from __future__ import annotations
 
@@ -72,6 +72,31 @@ def test_reading_without_document_url_round_trips() -> None:
     reading = Reading(fields={"total": Field(value="49.90", source="ocr", confidence=1.0)}, document_url=None)
 
     assert reading_from_json(reading_to_json(reading)) == reading
+
+
+def test_reading_with_printed_url_round_trips() -> None:
+    """D189: a reading with a printed URL survives the JSON round trip unchanged."""
+    reading = Reading(
+        fields={"total": Field(value="49.90", source="ocr", confidence=1.0)},
+        document_url=None,
+        printed_url="https://portal.example.pe/consulta",
+    )
+
+    payload = reading_to_json(reading)
+
+    assert payload["printed_url"] == "https://portal.example.pe/consulta"
+    assert reading_from_json(payload) == reading
+
+
+def test_reading_without_printed_url_reads_as_none() -> None:
+    """D189: a reading stored before ``printed_url`` existed loads with it None."""
+    assert reading_from_json(_payload()).printed_url is None
+
+
+def test_reading_from_json_rejects_non_string_printed_url() -> None:
+    """D189: a ``printed_url`` that is not a string or null raises ValueError."""
+    with pytest.raises(ValueError, match="printed_url"):
+        reading_from_json({**_payload(), "printed_url": 5})
 
 
 @pytest.mark.parametrize("flag", ["inferred", "conflict"])

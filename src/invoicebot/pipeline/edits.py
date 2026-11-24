@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from types import MappingProxyType
 from typing import Any
@@ -237,7 +237,7 @@ def _edited_reading(reading: Reading | None, edits: Mapping[str, str]) -> Readin
     """
     base = Reading(fields={}, document_url=None) if reading is None else reading
     user_fields = {name: Field(value, "user", FULL_CONFIDENCE) for name, value in edits.items()}
-    return Reading(fields={**base.fields, **user_fields}, document_url=base.document_url)
+    return replace(base, fields={**base.fields, **user_fields})
 
 
 def error_text(error: EditError) -> str:

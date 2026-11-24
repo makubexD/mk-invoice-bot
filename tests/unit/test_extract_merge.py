@@ -1,4 +1,4 @@
-"""Tests for merging the OCR and QR readings (D81, R-2.6)."""
+"""Tests for merging the OCR and QR readings (D81, R-2.6, D189)."""
 
 from __future__ import annotations
 
@@ -7,11 +7,14 @@ from invoicebot.extract.merge import merge
 
 OCR_CONFIDENCE = 0.7
 DOCUMENT_URL = "https://example.test/invoice"
+PRINTED_URL = "https://portal.example.pe/consulta"
 
 
-def _reading(fields: dict[str, Field], document_url: str | None = None) -> Reading:
+def _reading(
+    fields: dict[str, Field], document_url: str | None = None, printed_url: str | None = None
+) -> Reading:
     """Return a reading built from already-parsed fields."""
-    return Reading(fields=fields, document_url=document_url)
+    return Reading(fields=fields, document_url=document_url, printed_url=printed_url)
 
 
 def _ocr_field(value: str, confidence: float = OCR_CONFIDENCE, flag: Flag | None = None) -> Field:
@@ -82,6 +85,28 @@ def test_merge_takes_document_url_from_the_qr() -> None:
 
     assert merged.document_url == DOCUMENT_URL
     assert merged.fields == {"total": ocr_field}
+
+
+def test_merge_keeps_the_ocr_printed_url() -> None:
+    """D189: a merged reading keeps the OCR reading's printed URL."""
+    merged = merge(
+        _reading({"total": _ocr_field("12.50")}, printed_url=PRINTED_URL),
+        _reading({"total": _qr_field("12.50")}),
+    )
+
+    assert merged.printed_url == PRINTED_URL
+
+
+def test_merge_without_ocr_has_no_printed_url() -> None:
+    """D189: a QR-only merge carries no printed URL."""
+    assert merge(None, _reading({"total": _qr_field("12.50")})).printed_url is None
+
+
+def test_merge_without_qr_keeps_the_ocr_printed_url() -> None:
+    """D189: a merge with no QR reading keeps the OCR printed URL."""
+    ocr = _reading({"total": _ocr_field("12.50")}, printed_url=PRINTED_URL)
+
+    assert merge(ocr, None).printed_url == PRINTED_URL
 
 
 def test_merge_keeps_tipo_inferred_when_both_readers_inferred_it() -> None:
