@@ -15,6 +15,7 @@ from invoicebot.channels.telegram.setup import (
     WebhookInfo,
     delete_webhook,
     sender_ids,
+    set_commands,
     set_webhook,
     webhook_info,
 )
@@ -213,3 +214,56 @@ async def test_delete_webhook_keeps_the_pending_updates() -> None:
     assert len(requests) == 1
     assert requests[0].url.path == f"/bot{TOKEN}/deleteWebhook"
     assert json.loads(requests[0].content) == {"drop_pending_updates": False}
+
+
+async def test_set_commands_without_a_chat_id_uses_the_default_scope() -> None:
+    """D187: setMyCommands carries the given entries in the bot's default scope."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    entries = [("factura", "Upload an invoice"), ("estado", "Show the status")]
+    async with _make_client(handler) as client:
+        await set_commands(client, entries)
+
+    assert requests[0].url.path == f"/bot{TOKEN}/setMyCommands"
+    assert json.loads(requests[0].content) == {
+        "commands": [
+            {"command": "factura", "description": "Upload an invoice"},
+            {"command": "estado", "description": "Show the status"},
+        ],
+        "scope": {"type": "default"},
+    }
+
+
+async def test_set_commands_with_a_chat_id_scopes_the_menu_to_that_chat() -> None:
+    """D187: a given chat id narrows the menu's scope to that chat."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with _make_client(handler) as client:
+        await set_commands(client, [("start", "Begin")], chat_id=100000001)
+
+    assert json.loads(requests[0].content) == {
+        "commands": [{"command": "start", "description": "Begin"}],
+        "scope": {"type": "chat", "chat_id": 100000001},
+    }
+
+
+async def test_set_commands_with_no_entries_sends_an_empty_list() -> None:
+    """D187: no entries sends an empty commands list, clearing the menu."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with _make_client(handler) as client:
+        await set_commands(client, [])
+
+    assert json.loads(requests[0].content) == {"commands": [], "scope": {"type": "default"}}

@@ -6,6 +6,7 @@ imported by the running bot.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from invoicebot.channels.telegram.client import (
@@ -118,3 +119,21 @@ async def webhook_info(client: TelegramClient) -> WebhookInfo:
 async def delete_webhook(client: TelegramClient) -> None:
     """Delete the bot's webhook without dropping the pending updates (D186)."""
     await client.call("deleteWebhook", {"drop_pending_updates": False})
+
+
+async def set_commands(
+    client: TelegramClient,
+    entries: Sequence[tuple[str, str]],
+    chat_id: int | None = None,
+) -> None:
+    """Publish the command menu for every chat, or only for ``chat_id`` (D187).
+
+    ``entries`` are the ``(command, description)`` pairs the caller took from
+    the registry; the scope is the bot's default menu unless a chat is given.
+    """
+    if chat_id is None:
+        scope: dict[str, object] = {"type": "default"}
+    else:
+        scope = {"type": "chat", "chat_id": chat_id}
+    commands = [{"command": command, "description": description} for command, description in entries]
+    await client.call("setMyCommands", {"commands": commands, "scope": scope})
