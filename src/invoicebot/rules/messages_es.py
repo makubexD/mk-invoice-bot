@@ -15,6 +15,7 @@ the placeholders spec 06 §1 describes in prose.
 """
 
 from collections.abc import Sequence
+from datetime import date, datetime, timedelta
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
@@ -291,6 +292,24 @@ REJECTION_DESC: dict[str, str] = {
 def state_desc(state: str) -> str:
     """Return the es-PE description of an invoice state for BR-S02's ``{state_desc}``."""
     return STATE_DESC.get(state, _UNKNOWN_STATE_DESC)
+
+
+#: How ``when_desc`` writes a look time later today (D190).
+WHEN_TODAY = "hoy a las {time}"
+#: How ``when_desc`` writes a look time tomorrow (D190).
+WHEN_TOMORROW = "mañana a las {time}"
+#: How ``when_desc`` writes a look time on any other day (D190).
+WHEN_OTHER = "el {day} a las {time}"
+
+
+def when_desc(at: datetime, today: date) -> str:
+    """Return a look time for a message, in the owner's timezone (D190)."""
+    clock = at.strftime("%H:%M")
+    if at.date() == today:
+        return WHEN_TODAY.format(time=clock)
+    if at.date() == today + timedelta(days=1):
+        return WHEN_TOMORROW.format(time=clock)
+    return WHEN_OTHER.format(day=at.strftime("%d/%m"), time=clock)
 
 
 #: The routed-invoice summary (spec 06 §1 "Summary message"). ``{issuer}`` is the padrón's
