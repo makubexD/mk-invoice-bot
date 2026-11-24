@@ -20,6 +20,7 @@ from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.pipeline.fetch import FETCH_STEP, make_fetch_handler
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
+from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import (
     RULE_DOCS_NEEDED,
     SEND_PDF_ACTION,
@@ -48,6 +49,9 @@ ISSUER_RUC = "20000000001"
 RAZON_SOCIAL = "Comercio Sintético"
 PRINTED_URL = "https://portal.example.pe/consulta"
 SERIE = "F001"
+#: The text of the BR-F13 a test queues before pressing its buttons; the real text is fetch's.
+ASKED_TEXT = "BR-F13 docs needed"
+ASKED = (RULE_DOCS_NEEDED, ASKED_TEXT)
 NUMERO = "15160"
 
 
@@ -138,6 +142,19 @@ async def _invoice(
     return invoice_id
 
 
+async def _ask_docs(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    invoice_id: int,
+    rule_id: str = RULE_DOCS_NEEDED,
+) -> None:
+    """Queue the invoice's newest question as fetch would, BR-F13 unless ``rule_id`` says otherwise."""
+    async with pool.connection() as conn, conn.transaction():
+        await queue_message(
+            conn, Addressee("whatsapp", profile_id), ASKED_TEXT, invoice_id=invoice_id, rule_id=rule_id
+        )
+
+
 async def _handle(pool: AsyncConnectionPool[AsyncConnection[Any]], msg: InboundMessage) -> None:
     """Run one inbound message through intake in its own transaction."""
     async with pool.connection() as conn:
@@ -210,6 +227,7 @@ async def test_send_pdf_moves_to_manual_required_and_the_pending_fetch_changes_n
     """D189, BR-F13: [📎] moves the invoice to MANUAL_REQUIRED and the pending fetch writes nothing."""
     profile_id = _profile()
     invoice_id = await _invoice(db_pool, profile_id)
+    await _ask_docs(db_pool, profile_id, invoice_id)
     await _handle(db_pool, _press(invoice_id, SEND_PDF_ACTION, profile_id))
 
     fetcher = RecordingFetcher()
@@ -222,7 +240,7 @@ async def test_send_pdf_moves_to_manual_required_and_the_pending_fetch_changes_n
         files = await _files(conn, invoice_id)
 
     assert invoice == (MANUAL_REQUIRED, RULE_DOCS_NEEDED)
-    assert outbox == [(RULE_DOCS_NEEDED, MESSAGES["BR-F13_upload"])]
+    assert outbox == [ASKED, (RULE_DOCS_NEEDED, MESSAGES["BR-F13_upload"])]
     assert fetcher.calls == 0
     assert attempts == []
     assert files == 0
@@ -234,6 +252,7 @@ async def test_wait_mail_answers_and_keeps_the_invoice_fetching(
     """D189, BR-F13: [⏳] queues BR-F13_wait and changes no state."""
     profile_id = _profile()
     invoice_id = await _invoice(db_pool, profile_id)
+    await _ask_docs(db_pool, profile_id, invoice_id)
     await _handle(db_pool, _press(invoice_id, WAIT_MAIL_ACTION, profile_id))
 
     async with db_pool.connection() as conn:
@@ -241,7 +260,7 @@ async def test_wait_mail_answers_and_keeps_the_invoice_fetching(
         outbox = await _outbox(conn, profile_id)
 
     assert invoice == (FETCHING_DOCS, None)
-    assert outbox == [(RULE_DOCS_NEEDED, MESSAGES["BR-F13_wait"])]
+    assert outbox == [ASKED, (RULE_DOCS_NEEDED, MESSAGES["BR-F13_wait"])]
 
 
 @pytest.mark.parametrize(
@@ -268,6 +287,7 @@ async def test_teach_portal_offers_the_printed_url_or_asks_for_it(
     """D189, BR-F13: [🔗] queues BR-F14 for the printed URL and BR-F02 when the reading has none."""
     profile_id = _profile()
     invoice_id = await _invoice(db_pool, profile_id, reading=_portal_reading(printed_url))
+    await _ask_docs(db_pool, profile_id, invoice_id)
     await _handle(db_pool, _press(invoice_id, TEACH_PORTAL_ACTION, profile_id))
 
     async with db_pool.connection() as conn:
@@ -275,7 +295,7 @@ async def test_teach_portal_offers_the_printed_url_or_asks_for_it(
         outbox = await _outbox(conn, profile_id)
 
     assert invoice == (FETCHING_DOCS, None)
-    assert outbox == [(rule_id, text)]
+    assert outbox == [ASKED, (rule_id, text)]
 
 
 async def test_send_pdf_on_a_delivering_invoice_is_stale(
@@ -297,3 +317,30 @@ async def test_send_pdf_on_a_delivering_invoice_is_stale(
             MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(DELIVERING)),
         )
     ]
+
+
+@pytest.mark.parametrize("action", [SEND_PDF_ACTION, WAIT_MAIL_ACTION, TEACH_PORTAL_ACTION])
+@pytest.mark.parametrize("newest_rule", [None, RULE_PORTAL_OFFER])
+async def test_docs_button_when_br_f13_is_not_the_newest_question_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    action: str,
+    newest_rule: str | None,
+) -> None:
+    """D189, BR-S02: a BR-F13 button on an invoice never asked BR-F13, or asked something since, is stale."""
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id, reading=_portal_reading(PRINTED_URL))
+    if newest_rule is not None:
+        await _ask_docs(db_pool, profile_id, invoice_id)
+        await _ask_docs(db_pool, profile_id, invoice_id, newest_rule)
+    await _handle(db_pool, _press(invoice_id, action, profile_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+
+    assert invoice == (FETCHING_DOCS, None)
+    assert outbox[-1] == (
+        RULE_STALE_BUTTON,
+        MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(FETCHING_DOCS)),
+    )
+    assert len(outbox) == (1 if newest_rule is None else 3)

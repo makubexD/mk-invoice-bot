@@ -7,6 +7,7 @@ is what one reader produced for an invoice, plus the URL when the QR carried one
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -25,6 +26,14 @@ AMOUNT_FIELDS = frozenset({"total", "base", "igv", "service_charge", "icbper", "
 
 #: Confidence of a value a reader took directly from the document (R-2.6).
 FULL_CONFIDENCE = 1.0
+
+#: Most characters a printed URL may have; a longer one is not kept (D189).
+MAX_PRINTED_URL_CHARS = 200
+#: The characters a printed URL's path may hold: the ASCII ones URLs allow (RFC 3986), so no
+#: bidi control, zero-width or other non-ASCII character reaches a message in the bot's voice (D189).
+PRINTED_URL_PATH_CHARS = r"[A-Za-z0-9\-._~%!$&'()*+,;=:@/?#]"
+#: A printed URL as a reading stores it: https, a lowercase ASCII host, an optional path (D189).
+_PRINTED_URL_SHAPE = re.compile(rf"https://[a-z0-9.-]+(?:/{PRINTED_URL_PATH_CHARS}*)?")
 
 #: The shapes the JSON form of a reading has; all are closed (R-2.6, D189).
 _READING_KEYS = frozenset({"fields", "document_url"})
@@ -106,6 +115,15 @@ def reading_to_json(reading: Reading) -> dict[str, Any]:
     }
 
 
+def is_printed_url(value: object) -> bool:
+    """Return whether ``value`` is a printed URL a reading may hold: https, ASCII, capped (D189)."""
+    return (
+        isinstance(value, str)
+        and len(value) <= MAX_PRINTED_URL_CHARS
+        and _PRINTED_URL_SHAPE.fullmatch(value) is not None
+    )
+
+
 def reading_from_json(payload: object) -> Reading:
     """Return ``payload`` as a :class:`Reading`, or raise ValueError when it is not one.
 
@@ -124,8 +142,8 @@ def reading_from_json(payload: object) -> Reading:
     if document_url is not None and not isinstance(document_url, str):
         raise ValueError("reading field 'document_url' must be a string or null")
     printed_url = payload.get("printed_url")
-    if printed_url is not None and not isinstance(printed_url, str):
-        raise ValueError("reading field 'printed_url' must be a string or null")
+    if printed_url is not None and not is_printed_url(printed_url):
+        raise ValueError("reading field 'printed_url' must be a printed https URL or null")
     return Reading(
         fields={name: _field_from_json(name, raw) for name, raw in raw_fields.items()},
         document_url=document_url,

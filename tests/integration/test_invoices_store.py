@@ -18,7 +18,7 @@ from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, In
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.queue.jobs import enqueue
 from invoicebot.states import BATCHED, CANCELLED, FAILED, MANUAL_REQUIRED, StateMoved
-from invoicebot.store.flow_b import open_batch
+from invoicebot.store.flow_b import open_batch, set_batch_state
 from invoicebot.store.invoices import (
     CpStatus,
     Duplicate,
@@ -1095,3 +1095,32 @@ async def test_list_recent_in_returns_nothing_for_an_empty_states(
         rows = await list_recent_in(conn, profile_id, (), 10)
 
     assert rows == []
+
+
+@pytest.mark.parametrize(
+    ("batch_state", "listed"),
+    [(None, {"prepared", "failed"}), ("failed", {"failed"})],
+)
+async def test_list_recent_in_batch_state_keeps_only_batched_invoices_on_that_batch_state(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    batch_state: str | None,
+    listed: set[str],
+) -> None:
+    """D189, S4.9: with batch_state, a BATCHED invoice is listed only when its batch is in that state."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        by_batch: dict[int, str] = {}
+        for state in ("prepared", "failed"):
+            invoice_id = await create_invoice(conn, profile_id, CHANNEL)
+            await set_flow(conn, invoice_id, "work_microsoft")
+            batch_id = await open_batch(conn, invoice_id, "work_microsoft", "prepared")
+            await set_batch_state(conn, batch_id, state)
+            await set_state(conn, invoice_id, BATCHED)
+            by_batch[invoice_id] = state
+        failed = await create_invoice(conn, profile_id, CHANNEL)
+        await conn.execute("UPDATE invoices SET state = %s WHERE id = %s", (FAILED, failed))
+        rows = await list_recent_in(conn, profile_id, (BATCHED, FAILED), 10, batch_state=batch_state)
+
+    assert {by_batch[row.id] for row in rows if row.id in by_batch} == listed
+    assert failed in {row.id for row in rows}

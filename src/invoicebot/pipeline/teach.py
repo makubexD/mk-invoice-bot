@@ -31,6 +31,7 @@ from invoicebot.pipeline.outgoing import (
     queue_admin_alert,
     queue_message,
 )
+from invoicebot.pipeline.questions import RULE_DOCS_NEEDED
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES, UNKNOWN_ISSUER
 from invoicebot.store import taught_links
@@ -45,6 +46,10 @@ RULE_TEACH = "BR-S06"
 RULE_ASK_PORTAL = "BR-F02"
 #: The answer when the sender does not know the issuer's portal (BR-F02, R-11.4).
 RULE_DONT_KNOW = "BR-F02_dont_know"
+#: Rules whose messages are never the question a typed answer or a BR-F14 press waits
+#: on: BR-S02 answers a stale press, and BR-F13's buttons are gated by the invoice's
+#: state, so a BR-F13 sent for another invoice must not hide a pending BR-F02 (D189).
+NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED})
 #: The admin's answer after [Aprobar] (BR-S06, D118).
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
@@ -137,7 +142,7 @@ async def answer(
     "no sé" stores nothing and answers BR-F02_dont_know. Returns True when the text
     was handled, so the caller does not run the usual edit/override paths.
     """
-    question = await outbox.last_question(conn, msg.profile_id, RULE_STALE_BUTTON)
+    question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
     if question is None or question[0] != RULE_ASK_PORTAL:
         return False
     if is_dont_know(msg.text):

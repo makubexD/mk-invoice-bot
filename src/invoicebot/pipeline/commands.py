@@ -20,7 +20,7 @@ from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
 from invoicebot.pipeline.actions import cancel_invoice
-from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE
+from invoicebot.pipeline.deliver import FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
 from invoicebot.pipeline.resume import retry_delivery, retry_documents
@@ -314,7 +314,7 @@ async def _reprocesar(
     With no id, list the invoices ``_requeue`` can act on as buttons (D189).
     """
     if not arg:
-        await _list_choices(conn, msg, "reprocesar", REPROCESS_STATES)
+        await _list_choices(conn, msg, "reprocesar", REPROCESS_STATES, batch_state=FAILED_BATCH_STATE)
         return
     target = await resolve_target(conn, msg, "reprocesar", arg, context.admins)
     if target is None:
@@ -337,13 +337,16 @@ async def _list_choices(
     msg: InboundMessage,
     command: str,
     states: frozenset[str],
+    *,
+    batch_state: str | None = None,
 ) -> None:
     """List the sender's invoices in ``states`` as buttons, or answer COMMAND_PICK_NONE (D189).
 
     At most :data:`ESTADO_RECENT` rows, newest first; a press of one runs the command
-    with that invoice's id as its argument.
+    with that invoice's id as its argument. ``batch_state`` keeps only the ``BATCHED``
+    invoices whose batch is in it, as :func:`list_recent_in` says.
     """
-    rows = await list_recent_in(conn, msg.profile_id, states, ESTADO_RECENT)
+    rows = await list_recent_in(conn, msg.profile_id, states, ESTADO_RECENT, batch_state=batch_state)
     if not rows:
         await _reply(conn, msg, None, COMMAND_PICK_NONE.format(verb=command))
         return

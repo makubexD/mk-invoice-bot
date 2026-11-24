@@ -11,9 +11,15 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.extract.fields import Reading
-from invoicebot.fetchers.qr_url import SUNAT_DOMAIN
-from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message
-from invoicebot.pipeline.teach import RULE_ASK_PORTAL, RULE_DONT_KNOW, TeachContext, TeachSetup, teach
+from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
+from invoicebot.pipeline.teach import (
+    NOT_QUESTIONS,
+    RULE_ASK_PORTAL,
+    RULE_DONT_KNOW,
+    TeachContext,
+    TeachSetup,
+    teach,
+)
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
     BUTTON_DONT_KNOW,
@@ -23,6 +29,7 @@ from invoicebot.rules.messages_es import (
     UNKNOWN_ISSUER,
 )
 from invoicebot.store.invoices import load_invoice_head, load_reading
+from invoicebot.sunat_origins import is_sunat_host
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +97,9 @@ async def handle_press(
     """Answer BR-F14's [Sí], [No] or [No sé] for the sender's newest question (BR-F14, D189).
 
     Only a press for the sender's own invoice whose newest question is that invoice's
-    BR-F14 counts; anything else is logged and changes nothing. [Sí] teaches the
+    BR-F14 counts. A press on the sender's own invoice whose BR-F14 is no longer the
+    newest question is stale and answered BR-S02; anything else is logged and changes
+    nothing. [Sí] teaches the
     offered URL through BR-S06, [No] asks BR-F02, and [No sé] answers
     ``BR-F02_dont_know``. The caller owns the transaction.
     """
@@ -100,15 +109,18 @@ async def handle_press(
         return
     invoice_id = int(match.group(1))
     head = await load_invoice_head(conn, invoice_id)
-    question = await outbox.last_question(conn, msg.profile_id, RULE_STALE_BUTTON)
-    if head is None or head.profile_id != msg.profile_id or question != (RULE_PORTAL_OFFER, invoice_id):
+    if head is None or head.profile_id != msg.profile_id:
         _log_ignored(msg)
+        return
+    addressee = Addressee(msg.channel, msg.profile_id)
+    question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
+    if question != (RULE_PORTAL_OFFER, invoice_id):
+        await queue_stale(conn, addressee, invoice_id, head.state)
         return
     reading = await load_reading(conn, invoice_id)
     if reading is None:
         _log_ignored(msg)
         return
-    addressee = Addressee(msg.channel, msg.profile_id)
     action = match.group(2)
     if action == BUTTON_YES_SUFFIX:
         await _teach_offer(conn, setup, addressee, reading)
@@ -175,10 +187,7 @@ def _is_sunat_url(url: str) -> bool:
         host = urlsplit(url).hostname
     except ValueError:
         return False
-    if host is None:
-        return False
-    host = host.lower()
-    return host == SUNAT_DOMAIN or host.endswith("." + SUNAT_DOMAIN)
+    return host is not None and is_sunat_host(host)
 
 
 def _log_ignored(msg: InboundMessage) -> None:

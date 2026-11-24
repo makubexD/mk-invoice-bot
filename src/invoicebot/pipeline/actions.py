@@ -47,7 +47,6 @@ from invoicebot.pipeline.questions import (
     RULE_BUYER,
     RULE_CAP,
     RULE_CONFIRM,
-    RULE_DOCS_NEEDED,
     SEND_PDF_ACTION,
     STATUS_ACTION,
     TEACH_PORTAL_ACTION,
@@ -161,10 +160,6 @@ ASKED_RULES: Mapping[str, frozenset[str]] = {
     # BR-E03 date check's and the confirmation's (D126).
     EDIT_ACTION: frozenset({RULE_UNREADABLE, RULE_BAD_DATE, RULE_CONFIRM}),
     INVALID_OK_ACTION: frozenset({RULE_ANNULLED, RULE_NOT_AUTHORIZED}),
-    # BR-F13's three buttons answer that question while its wait is still open (D189).
-    SEND_PDF_ACTION: frozenset({RULE_DOCS_NEEDED}),
-    WAIT_MAIL_ACTION: frozenset({RULE_DOCS_NEEDED}),
-    TEACH_PORTAL_ACTION: frozenset({RULE_DOCS_NEEDED}),
 }
 
 

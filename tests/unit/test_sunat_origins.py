@@ -10,7 +10,7 @@ import yaml
 from pydantic import ValidationError
 
 from invoicebot.config.models import SunatSolSite
-from invoicebot.sunat_origins import SUNAT_ORIGINS, is_sunat_origin
+from invoicebot.sunat_origins import SUNAT_ORIGINS, is_sunat_host, is_sunat_origin
 
 ROOT = Path(__file__).resolve().parents[2]
 SUNAT_SOL = ROOT / "config" / "sunat_sol.yaml"
@@ -59,3 +59,18 @@ def test_site_refuses_a_login_outside_sunat() -> None:
     }
     with pytest.raises(ValidationError):
         SunatSolSite.model_validate(document)
+
+
+@pytest.mark.parametrize(
+    ("host", "expected"),
+    [
+        ("sunat.gob.pe", True),
+        ("E-Consulta.SUNAT.gob.pe", True),
+        ("sunat.gob.pe.evil.test", False),
+        ("notsunat.gob.pe", False),
+        ("portal.example.pe", False),
+    ],
+)
+def test_is_sunat_host_matches_sunat_and_its_subdomains_only(host: str, expected: bool) -> None:
+    """R-5.2, D189: SUNAT's domain and its subdomains match in any case; a lookalike does not."""
+    assert is_sunat_host(host) is expected

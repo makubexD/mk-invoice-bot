@@ -26,6 +26,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_REJECT,
     BUTTON_YES,
     MESSAGES,
+    state_desc,
 )
 from invoicebot.store import taught_links
 from invoicebot.store.invoices import create_invoice, save_reading
@@ -288,10 +289,10 @@ async def test_press_from_another_profile_changes_nothing(
     assert owner_rows == []
 
 
-async def test_press_after_a_newer_question_changes_nothing(
+async def test_press_after_a_newer_question_is_stale(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F14: a press whose invoice is no longer the newest question answers nothing."""
+    """D189, BR-S02: a press whose BR-F14 is no longer the newest question answers BR-S02 only."""
     setup = _setup()
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
@@ -309,7 +310,36 @@ async def test_press_after_a_newer_question_changes_nothing(
         after = await _outbox(conn, SENDER)
         link = await taught_links.get(conn, ISSUER_RUC)
         owner_rows = await _outbox(conn, ADMIN)
+        state = await _state(conn, invoice_id)
 
-    assert after == before
+    stale = MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(state))
+    assert after == [*before, (stale, "BR-S02", [])]
     assert link is None
     assert owner_rows == []
+
+
+async def test_yes_still_answers_after_another_invoices_br_f13(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D189, BR-F14: a BR-F13 notice for another invoice sent after the offer does not make [Sí] stale."""
+    setup = _setup()
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        other_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await queue_message(
+            conn, Addressee("whatsapp", SENDER), "BR-F13 docs needed", invoice_id=other_id, rule_id="BR-F13"
+        )
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, PRINTED_URL, SENDER, "proposed")
+
+
+async def _state(conn: AsyncConnection[Any], invoice_id: int) -> str:
+    """Return the invoice's state."""
+    cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    assert row is not None
+    return str(row[0])

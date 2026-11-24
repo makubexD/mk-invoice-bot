@@ -513,23 +513,27 @@ async def list_recent_in(
     profile_id: str,
     states: Collection[str],
     limit: int,
+    *,
+    batch_state: str | None = None,
 ) -> list[PendingRow]:
     """Return the profile's newest invoices in ``states``, newest first (D189, S4.9).
 
     Same columns, order and ``limit`` as :func:`list_recent`, but only the invoices whose
-    state is in ``states``; an empty ``states`` returns nothing. Does not commit.
+    state is in ``states``; an empty ``states`` returns nothing. With ``batch_state``, a
+    ``BATCHED`` invoice is listed only when its batch is in that state, so ``/reprocesar``
+    lists only the batches it can resend. Does not commit.
     """
-    if not states:
-        return []
     cur = await conn.execute(
         _LIST_SELECT
         + """
+        LEFT JOIN batches AS b ON b.id = i.batch_id
         WHERE i.profile_id = %s
           AND i.state = ANY(%s)
+          AND (i.state <> %s OR %s::text IS NULL OR b.state = %s)
         ORDER BY i.created_at DESC, i.id DESC
         LIMIT %s
         """,
-        (profile_id, list(states), limit),
+        (profile_id, list(states), BATCHED, batch_state, batch_state, limit),
     )
     return [_pending_row(row) for row in await cur.fetchall()]
 

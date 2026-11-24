@@ -93,10 +93,21 @@ def test_reading_without_printed_url_reads_as_none() -> None:
     assert reading_from_json(_payload()).printed_url is None
 
 
-def test_reading_from_json_rejects_non_string_printed_url() -> None:
-    """D189: a ``printed_url`` that is not a string or null raises ValueError."""
+@pytest.mark.parametrize(
+    "printed_url",
+    [
+        5,
+        "http://portal.example.pe/consulta",
+        "https://portal.example.pe/con\u202esulta",
+        "https://Portal.Example.pe/consulta",
+        "https://portal.example.pe/" + "a" * 200,
+        "javascript:alert(1)",
+    ],
+)
+def test_reading_from_json_rejects_a_printed_url_of_the_wrong_shape(printed_url: object) -> None:
+    """D189: a ``printed_url`` that is not an https, ASCII, capped printed URL or null raises ValueError."""
     with pytest.raises(ValueError, match="printed_url"):
-        reading_from_json({**_payload(), "printed_url": 5})
+        reading_from_json({**_payload(), "printed_url": printed_url})
 
 
 @pytest.mark.parametrize("flag", ["inferred", "conflict"])

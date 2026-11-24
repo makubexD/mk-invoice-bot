@@ -386,3 +386,18 @@ def test_parse_ocr_printed_url_does_not_change_the_fields(rules: ParsingRules) -
 
     assert _fields(with_url, rules) == _fields(without_url, rules)
     assert parse_ocr(with_url, rules).reading.printed_url == "https://sy.ecomprobantes.pe/pebsa"
+
+
+@pytest.mark.parametrize("unsafe", ["‮", "​", "ñ", " "])
+def test_parse_ocr_printed_url_path_stops_at_a_non_ascii_character(rules: ParsingRules, unsafe: str) -> None:
+    """D189: a bidi, zero-width or other non-ASCII character ends the printed path and is never kept."""
+    reading = parse_ocr(_ocr(f"https://portal.example.pe/con{unsafe}sulta"), rules).reading
+
+    assert reading.printed_url == "https://portal.example.pe/con"
+
+
+def test_parse_ocr_skips_a_punycode_printed_host(rules: ParsingRules) -> None:
+    """D189: an internationalized (xn--) host is skipped, so a lookalike domain is never offered."""
+    reading = parse_ocr(_ocr("https://xn--sunt-gra.pe/x https://portal.example.pe/y"), rules).reading
+
+    assert reading.printed_url == "https://portal.example.pe/y"
