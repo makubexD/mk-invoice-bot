@@ -79,7 +79,7 @@ from invoicebot.states import EXTRACT_FAILED, StateMoved
 from invoicebot.store import taught_links
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.flow_b import get_batch_state, open_batch, set_batch_state
-from invoicebot.store.gaps import mark_reported, upsert_gap
+from invoicebot.store.gaps import get_gap, mark_reported, upsert_gap
 from invoicebot.store.invoices import (
     InvoiceHead,
     create_invoice,
@@ -950,6 +950,62 @@ async def test_reprocesar_without_an_id_lists_requeueable_invoices_as_buttons(
     assert head.state == "FETCHING_DOCS"
     assert jobs == ["fetch"]
     assert replies[-1] == (REPROCESS_STARTED.format(id=invoice_id), None)
+
+
+async def test_gap_command_button_outside_the_allowlist_runs_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190: a command button outside the allowlist runs nothing."""
+    profile_id = _profile()
+    fingerprint = f"portal_missing:{uuid4().hex}"
+    async with db_pool.connection() as conn, conn.transaction():
+        await upsert_gap(conn, PORTAL_MISSING, fingerprint, GAP_SUBJECT, None)
+    roles = IntakeRoles(reprocess_min_interval_s=0, admins=frozenset({profile_id}))
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(profile_id, f"/gap ignorar {fingerprint}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=roles,
+        )
+        rows = await _outbox_rows(conn, profile_id)
+        gap = await get_gap(conn, fingerprint)
+
+    assert result.status == "stored"
+    assert rows == []
+    assert gap is not None
+    assert gap.state == "open"
+
+
+async def test_estado_command_button_runs_like_the_typed_command(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D190: an allowed command button runs like the typed command."""
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id)
+    line = PENDING_LINE.format(
+        id=invoice_id,
+        issuer=PENDING_NO_ISSUER,
+        total="—",
+        state_desc=state_desc("RECEIVED"),
+    )
+    expected = f"{line}\n{ESTADO_HINT.format(id=invoice_id)}"
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _button_press(profile_id, "/estado"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.status == "stored"
+    assert replies == [(expected, None)]
 
 
 async def test_reprocesar_on_failed_with_a_flow_refetches(
