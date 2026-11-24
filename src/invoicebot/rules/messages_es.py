@@ -409,6 +409,8 @@ FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
 FETCH_TECHNICAL_LINE = "• {fetcher}: falló por un error técnico"
 #: BR-F07 bullet: the mailbox needs a new sign-in, which the owner was already told (S7.4).
 FETCH_AUTH_LINE = "• Correo: el buzón necesita reconectarse; ya avisé al administrador"
+#: BR-F13's heading over the fetcher bullets already tried (D189).
+SEARCHED_HEADER = "Ya busqué:"
 #: BR-F11's ``{comercio}`` when the store directory does not know the issuer (BR-F07).
 STORE_FALLBACK = "el comercio"
 #: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
@@ -473,6 +475,11 @@ BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
 BUTTON_NO = "No"
 BUTTON_CHANGE = "Cambiar"
+#: BR-F13's three offered actions and BR-F14's [No sé] answer (D189).
+BUTTON_SEND_PDF = "📎 Te envío el PDF"
+BUTTON_TEACH_PORTAL = "🔗 Enseñar el portal"
+BUTTON_WAIT_MAIL = "⏳ Espero el correo"
+BUTTON_DONT_KNOW = "No sé"
 #: BR-S06's two owner buttons (D118).
 BUTTON_APPROVE = "Aprobar"
 BUTTON_REJECT = "Rechazar"

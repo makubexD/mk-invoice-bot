@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import pytest
 
@@ -10,7 +11,7 @@ from invoicebot.config.models import Brand, Flow, Portal, Store, StoreDirectory
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.chain import Attempt
-from invoicebot.pipeline.manual_message import manual_message
+from invoicebot.pipeline.manual_message import docs_needed_text, manual_message
 from invoicebot.rules.messages_es import (
     FETCH_AUTH_LINE,
     FETCH_NO_PORTAL_LINE,
@@ -181,6 +182,46 @@ def test_portal_placeholder_falls_back_to_key_or_a_generic_name(
     assert _bullets(FetchReason.PORTAL_INACTIVE, directory=directory) == [
         FETCH_PORTAL_TODO_LINE.format(portal=portal)
     ]
+
+
+def test_docs_needed_text_names_the_docs_and_the_fetcher_bullets() -> None:
+    """D189 (BR-F13): the text names the missing docs, the bullets tried, the next look and the offer."""
+    attempts = [
+        Attempt("qr_url", FetchReason.NO_URL),
+        Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL),
+    ]
+
+    text = docs_needed_text(
+        7, _reading(), _flow(), attempts, _with_store(), datetime(2026, 1, 1, 14, 5, tzinfo=UTC)
+    )
+
+    assert text == (
+        "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
+        "Ya busqué:\n"
+        "• Portal del comercio: no lo conozco\n"
+        "Vuelvo a mirar el correo a las 14:05.\n"
+        "Si lo tienes, me ayudas:"
+    )
+
+
+def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
+    """D189 (BR-F13): only a qr_url with no link leaves no "Ya busqué:" line and no blank line."""
+    text = docs_needed_text(
+        7,
+        _reading(),
+        _flow(),
+        [Attempt("qr_url", FetchReason.NO_URL)],
+        _with_store(),
+        datetime(2026, 1, 1, 14, 5, tzinfo=UTC),
+    )
+
+    assert "Ya busqué:" not in text
+    assert "\n\n" not in text
+    assert text == (
+        "⏳ Comprobante #7: me falta el PDF y el XML para archivarlo.\n"
+        "Vuelvo a mirar el correo a las 14:05.\n"
+        "Si lo tienes, me ayudas:"
+    )
 
 
 def test_br_f11_uses_a_generic_comercio_without_a_store() -> None:
