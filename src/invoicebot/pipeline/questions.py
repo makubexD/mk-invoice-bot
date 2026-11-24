@@ -32,6 +32,8 @@ BRAND_ACTION = "brand"
 CONTINUE_ACTION = "continue"
 CANCEL_ACTION = "cancel"
 EDIT_ACTION = "edit"
+#: The [Ver #{id}] button's action: it answers like ``/estado {id}`` (D188).
+STATUS_ACTION = "status"
 #: The [Sí] that accepts a BR-V02/BR-V06 comprobante (D125).
 INVALID_OK_ACTION = "invalid_ok"
 #: D126's [Confirmar]: the sender accepts the routed summary before validation.

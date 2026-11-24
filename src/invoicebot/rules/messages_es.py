@@ -445,6 +445,8 @@ BUTTON_CANCEL = "Cancelar"
 BUTTON_CONFIRM = "Confirmar"
 #: The routed summary's [Editar] button (R-3.4).
 BUTTON_EDIT = "Editar"
+#: The [Ver #{id}] button that answers like ``/estado {id}`` (D188).
+BUTTON_STATUS = "Ver #{id}"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).

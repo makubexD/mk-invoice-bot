@@ -46,10 +46,12 @@ from invoicebot.pipeline.questions import (
     RULE_BUYER,
     RULE_CAP,
     RULE_CONFIRM,
+    STATUS_ACTION,
     YES_ACTION,
     unreadable_buttons,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
+from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.steps import FETCH_STEP, FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
@@ -64,6 +66,7 @@ from invoicebot.rules.messages_es import (
     MESSAGES,
 )
 from invoicebot.states import (
+    ALL_STATES,
     BATCHED,
     CANCELLABLE,
     CANCELLED,
@@ -132,6 +135,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     ARRIVED_ACTION: frozenset({DONE, BATCHED}),
     VIA_LAPTOP_ACTION: frozenset({DONE, BATCHED}),
     SELF_SEND_ACTION: frozenset({DONE, BATCHED}),
+    # [Ver #{id}] asks for the invoice's status, so every state answers it (D188).
+    STATUS_ACTION: ALL_STATES,
 }
 
 #: The rules each question action answers; a parked invoice resumes only for its own (D94).
@@ -369,6 +374,22 @@ async def _edit(
     return ()
 
 
+async def _status(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Answer a [Ver #{id}] press with the same text as ``/estado {id}`` (D188, S4.9).
+
+    :func:`status_text` is the command's own answer, so the button and ``/estado``
+    cannot drift apart. It changes no state and asks no question.
+    """
+    await _reply(conn, msg, invoice_id, None, await status_text(conn, invoice_id))
+    return ()
+
+
 async def _sent(
     conn: AsyncConnection[Any],
     invoice_id: int,
@@ -596,6 +617,7 @@ ACTIONS: Mapping[str, Action] = {
     INVALID_OK_ACTION: _invalid_ok,
     CANCEL_ACTION: _cancel,
     EDIT_ACTION: _edit,
+    STATUS_ACTION: _status,
     SENT_ACTION: _sent,
     NOT_ARRIVED_ACTION: _not_arrived,
     ARRIVED_ACTION: _arrived,

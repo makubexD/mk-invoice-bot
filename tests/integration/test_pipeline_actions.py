@@ -29,6 +29,8 @@ from invoicebot.rules.messages_es import (
     CANCELLED_BY_USER,
     EDIT_PROMPT,
     MESSAGES,
+    STATUS,
+    STATUS_RULE_ONLY,
     state_desc,
 )
 from invoicebot.store.flow_b import (
@@ -67,6 +69,7 @@ FETCHING_DOCS = "FETCHING_DOCS"
 DELIVERING = "DELIVERING"
 BATCHED = "BATCHED"
 DONE = "DONE"
+CANCELLED = "CANCELLED"
 RULE_UNREADABLE = "BR-E01"
 RULE_ASK = "BR-R03"
 RULE_BUYER = "BR-R04"
@@ -129,6 +132,18 @@ def _press(
         profile_id=profile_id,
         sender_role="owner",
         button_id=button_id(invoice_id, action, choice, menu),
+        received_at=datetime.now(UTC),
+    )
+
+
+def _text(profile_id: str, text: str) -> InboundMessage:
+    """Build a canonical text message for profile_id."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        text=text,
         received_at=datetime.now(UTC),
     )
 
@@ -197,12 +212,17 @@ async def _extract_failed_invoice(
     return invoice_id
 
 
-async def _invoice_in(pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, state: str) -> int:
-    """Create an invoice in state, which needs no rule id."""
+async def _invoice_in(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    state: str,
+    rule_id: str | None = None,
+) -> int:
+    """Create an invoice in state, waiting on rule_id when one is given."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await set_flow(conn, invoice_id, FLOW)
-        await set_state(conn, invoice_id, state)
+        await set_state(conn, invoice_id, state, rule_id=rule_id)
     return invoice_id
 
 
@@ -1459,3 +1479,99 @@ async def test_invalid_ok_on_a_fetching_docs_invoice_is_stale(
     assert texts == [
         ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(FETCHING_DOCS)))
     ]
+
+
+async def test_status_press_answers_like_the_estado_command(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188: a [Ver #{id}] press answers the same text as /estado {id}."""
+    profile_id = _profile()
+    invoice_id = await _waiting_invoice(db_pool, profile_id)
+    expected = (
+        STATUS.format(id=invoice_id, state_desc=state_desc(CONFIRMING))
+        + "\n"
+        + STATUS_RULE_ONLY.format(rule_id=RULE_CAP)
+    )
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            _press(invoice_id, "status", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        jobs = await _jobs(conn, invoice_id)
+        pressed = await _texts(conn, profile_id)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _text(profile_id, f"/estado {invoice_id}"),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        both = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert jobs == []
+    assert pressed == [(None, expected)]
+    assert both == [(None, expected), (None, expected)]
+
+
+@pytest.mark.parametrize("state", [CANCELLED, DONE])
+async def test_status_press_answers_a_terminal_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    state: str,
+) -> None:
+    """D188: [Ver #{id}] is answered in CANCELLED and DONE, where other actions are stale."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, state, RULE_CAP)
+    msg = _press(invoice_id, "status", profile_id)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert result.status == "stored"
+    assert result.invoice_id == invoice_id
+    assert invoice == (state, RULE_CAP)
+    assert jobs == []
+    assert texts == [
+        (
+            None,
+            STATUS.format(id=invoice_id, state_desc=state_desc(state))
+            + "\n"
+            + STATUS_RULE_ONLY.format(rule_id=RULE_CAP),
+        )
+    ]
+
+
+async def test_status_press_from_another_profile_sends_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D188, R-10.1: another profile's [Ver #{id}] resolves to None and queues no outbox row."""
+    owner = _profile()
+    other = _profile()
+    invoice_id = await _invoice_in(db_pool, owner, DONE)
+    msg = _press(invoice_id, "status", other)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn, msg, max_queued_per_sender=MAX_QUEUED, media_max_bytes=MEDIA_MAX_BYTES, timezone=TIMEZONE
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        owner_texts = await _texts(conn, owner)
+        other_texts = await _texts(conn, other)
+
+    assert result.status == "stored"
+    assert result.invoice_id is None
+    assert invoice == (DONE, None)
+    assert owner_texts == []
+    assert other_texts == []

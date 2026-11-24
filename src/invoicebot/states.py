@@ -26,6 +26,28 @@ DONE: Final = "DONE"
 CANCELLED: Final = "CANCELLED"
 FAILED: Final = "FAILED"
 
+#: Every invoice state (spec 03 §4).
+ALL_STATES: Final[frozenset[str]] = frozenset(
+    {
+        RECEIVED,
+        EXTRACTING,
+        EXTRACT_FAILED,
+        ROUTING,
+        CONFIRMING,
+        VALIDATING,
+        CONFIRM_INVALID,
+        FETCHING_DOCS,
+        WAITING_CAPTCHA,
+        MANUAL_REQUIRED,
+        PENDING_USER,
+        PENDING_AUTH,
+        DELIVERING,
+        BATCHED,
+        DONE,
+        CANCELLED,
+        FAILED,
+    }
+)
 #: No further job moves an invoice out of these states.
 TERMINAL: Final[frozenset[str]] = frozenset({DONE, CANCELLED, FAILED})
 
