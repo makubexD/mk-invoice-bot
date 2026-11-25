@@ -313,6 +313,19 @@ async def test_ask_portal_with_a_strip_that_repairs_to_nothing_asks_br_f02(
     assert candidate is None
 
 
+async def test_ask_portal_with_an_unrepairable_strip_offers_the_qr_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: a strip that repairs to nothing does not hide the QR's own link."""
+    reading = _reading(document_url=CHANGED_URL, url_strip="no hay nada")
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert candidate == CHANGED_URL
+
+
 async def test_ask_portal_printed_url_wins_over_the_strip(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

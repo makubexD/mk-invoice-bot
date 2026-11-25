@@ -62,14 +62,16 @@ def offer_url(reading: Reading, known_hosts: frozenset[str]) -> str | None:
     """Return the URL BR-F14 offers: the printed one, the repaired strip, else the QR link (D191).
 
     The strip under ``CONSULT… EN`` is repaired against the approved hosts when it was
-    read. A QR link on SUNAT's own host is the generic query page, not the issuer's
-    portal, and a QR link longer than a teachable URL could never be stored as the
-    candidate, so neither is offered.
+    read; one that repairs to nothing leaves the QR link to offer. A QR link on SUNAT's
+    own host is the generic query page, not the issuer's portal, and one longer than a
+    teachable URL could never be stored as the candidate, so neither is offered.
     """
     if reading.printed_url is not None:
         return reading.printed_url
     if reading.url_strip is not None:
-        return repair_url(reading.url_strip, reading.value("razon_social"), known_hosts)
+        repaired = repair_url(reading.url_strip, reading.value("razon_social"), known_hosts)
+        if repaired is not None:
+            return repaired
     document_url = reading.document_url
     if document_url is None or len(document_url) > MAX_TAUGHT_URL_CHARS or _is_sunat_url(document_url):
         return None
