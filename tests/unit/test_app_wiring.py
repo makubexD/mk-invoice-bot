@@ -32,6 +32,7 @@ from invoicebot.app import (
     _google_tokens,
     _laptop_secrets,
     _log_reload_failure,
+    _portal_handlers,
     _secret_problem,
     _sol_fetcher,
     _sol_secrets,
@@ -42,7 +43,7 @@ from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
-from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import DELIVER_STEP, PORTAL_CHECK_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.runtime_config import ConfigRejected
@@ -323,6 +324,13 @@ def test_sunat_validation_on_with_secrets_registers_the_recheck_step(tmp_path: P
     assert secrets.enabled
     handlers = _validation_handlers(cfg, cast(Any, None), cast(Any, None), secrets)
     assert set(handlers) == {VALIDATE_STEP, SUNAT_RECHECK_STEP}
+
+
+def test_portal_check_step_is_registered() -> None:
+    """D192: the app registers the portal check step, so a queued check never dies as an unknown step."""
+    handlers = _portal_handlers(cast(Any, None), cast(Any, None))
+
+    assert set(handlers) == {PORTAL_CHECK_STEP}
 
 
 def test_google_secret_view_declares_only_the_client_secret() -> None:

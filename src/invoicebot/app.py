@@ -93,9 +93,10 @@ from invoicebot.pipeline.laptop import check_overdue, poll_receipts
 from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
+from invoicebot.pipeline.portal_check import make_portal_check_handler
 from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, PORTAL_CHECK_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
@@ -344,6 +345,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         sources = _media_sources(wirings)
         handlers = {
             **_media_handlers(cfg, sources, settings, pool),
+            **_portal_handlers(pool, guarded_http),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -496,6 +498,11 @@ def _media_handlers(
         DOWNLOAD_STEP: make_download_handler(pool, sources, settings.data_dir, cfg.limits.media),
         ATTACH_STEP: make_attach_handler(pool, cfg, sources, settings.data_dir, cfg.limits.media),
     }
+
+
+def _portal_handlers(pool: Pool, guarded_http: httpx.AsyncClient) -> dict[str, Handler]:
+    """Return the portal check handler, which must only use the guarded client (R-5.10, D192)."""
+    return {PORTAL_CHECK_STEP: make_portal_check_handler(pool, guarded_http)}
 
 
 def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:
