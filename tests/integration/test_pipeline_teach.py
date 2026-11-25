@@ -213,6 +213,30 @@ async def test_propose_same_link_while_proposed_asks_no_admin_again(
     assert second_rows == []
 
 
+async def test_teach_strips_the_session_address_and_teaching_it_again_proposes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D193: the stored link loses the session address; teaching the clean link again asks no admin."""
+    ctx = _context()
+    session_url = "https://portal.example.pe/(S(abc123))/frm.aspx"
+    clean_url = "https://portal.example.pe/frm.aspx"
+    async with db_pool.connection() as conn:
+        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, session_url)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        await conn.execute("DELETE FROM outbox")
+        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, clean_url)
+        version = await _version(conn)
+        sender_rows = await _outbox(conn, SENDER)
+        owner_rows = await _outbox(conn, ADMIN)
+        second_rows = await _outbox(conn, "segundo")
+
+    assert link == TaughtLink(ISSUER_RUC, clean_url, SENDER, "proposed")
+    assert version == 1
+    assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
+    assert owner_rows == []
+    assert second_rows == []
+
+
 async def test_propose_newer_different_link_replaces_the_waiting_one(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
