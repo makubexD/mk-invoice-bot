@@ -113,6 +113,7 @@ gaps(fingerprint TEXT PK, kind, subject, state /*open|reported|fixed|closed|igno
 invoice_gaps(invoice_id, fingerprint, PRIMARY KEY(invoice_id, fingerprint))
 taught_links(ruc_emisor bigint PK, url, profile_id, state /*proposed|approved|rejected*/,
              approved_at NULL, at)                                    -- R-11.4, R-10.2
+portal_candidates(invoice_id PK FK ON DELETE CASCADE, url, updated_at) -- BR-F14's offered URL, D191
 pending_actions(id PK, kind, invoice_id, requested_by /*token name or profile*/,
                 state /*pending|approved|rejected|expired*/, created_at, decided_at) -- R-12.8
 llm_usage(id PK, invoice_id, provider, model, tokens_in, tokens_out, cost_usd, at)  -- R-2.11
@@ -210,6 +211,7 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
      - `RECARGO|SERVICIO`, `ICBPER`, `DESCUENTO` (R-2.14)
    - The serie's last three characters map `O Q D` to `0` and `I L` to `1` before validation: Tesseract reads `F001` as `FOO1` (S0.3).
    - The first 11-digit RUC with a valid check digit near the header is the issuer; the second one is the buyer.
+   - **Printed portal URL (D189, D191):** a URL found in the text becomes `printed_url`. When there is none, a photo's helper finds the line matching the rule `printed_url_anchor` (`CONSULT… EN`), crops six bands under it from the deskewed gray page, upscales each 3× and reads it again (`eng`, `--psm 7`), keeping the most confident read (`extract/url_strip.py`, `specs/spikes/portal-guess.md`). The result, reduced to URL characters and capped at 120, is `url_strip`; it is repaired into a URL only in the bot process, when BR-F14 is offered (`pipeline/portal_guess.py`, with the approved taught hosts and the issuer's name).
 5. **Merge (D81):** OCR is the primary reading and the QR confirms it.
    - A field both give with the same value gets confidence 1.0.
    - When they disagree, the OCR value stays and the field is flagged `conflict` (R-2.6), which the summary shows on the D80 warning line.

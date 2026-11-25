@@ -22,3 +22,5 @@ amounts:   # field -> keywords; the first keyword (in list order) with a match w
   service_charge: ['RECARGO']
   icbper: ['ICBPER']
   discounts: ['DESCUENTOS?']
+# The line just above a printed portal address; OCR may read the colon as `;` (D191, spike).
+printed_url_anchor: '\bconsult\w*\b.*\ben\s*[:;.,]?\s*$'

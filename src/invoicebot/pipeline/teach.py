@@ -3,9 +3,7 @@
 :func:`teach` validates the sender's link with the request guard, stores it as
 ``proposed`` and asks every admin to approve or reject it. An approved link is
 never replaced, an invalid one repeats BR-F02, and a second proposal while one
-is waiting thanks the sender without asking the owner again. :func:`answer`
-routes a free-text reply to BR-F02 (one ``https`` URL or "no sé") into
-:func:`teach` or :func:`dont_know_reply` (R-11.4). :func:`handle_press`
+is waiting thanks the sender without asking the owner again. :func:`handle_press`
 applies the owner's [Aprobar] or [Rechazar] decision and puts an approved link
 on the gap's issue (D118).
 """
@@ -24,7 +22,7 @@ from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.models import Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.net.guard import Resolver
-from invoicebot.net.taught_url import TaughtUrlError, check_taught_url, is_dont_know, looks_like_url
+from invoicebot.net.taught_url import check_taught_url
 from invoicebot.pipeline.failed import RULE_DEAD
 from invoicebot.pipeline.outgoing import (
     RULE_STALE_BUTTON,
@@ -38,7 +36,7 @@ from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES
 from invoicebot.states import FETCHING_DOCS
 from invoicebot.store import taught_links
 from invoicebot.store.gaps import get_gap, set_hint
-from invoicebot.store.invoices import load_invoice_head, load_reading
+from invoicebot.store.invoices import load_invoice_head
 from invoicebot.store.taught_links import TaughtLink
 
 logger = logging.getLogger(__name__)
@@ -111,25 +109,14 @@ async def teach(
 ) -> None:
     """Propose a taught portal link and ask the owner to approve it (BR-S06).
 
-    An approved link only thanks the sender; an invalid one repeats BR-F02.
+    An approved link only thanks the sender; an invalid one raises ``TaughtUrlError``.
     The caller owns the transaction, so the link and both messages commit together.
     """
     existing = await taught_links.get(conn, ruc_emisor)
     if existing is not None and existing.state == STATE_APPROVED:
         await queue_message(conn, ctx.sender, MESSAGES[RULE_TEACH], rule_id=RULE_TEACH)
         return
-    try:
-        url = await check_taught_url(raw_url, ctx.resolver)
-    except TaughtUrlError:
-        await queue_message(
-            conn,
-            ctx.sender,
-            MESSAGES[RULE_ASK_PORTAL].format(
-                razon_social=razon_social or UNKNOWN_ISSUER, ruc_emisor=ruc_emisor
-            ),
-            rule_id=RULE_ASK_PORTAL,
-        )
-        return
+    url = await check_taught_url(raw_url, ctx.resolver)
     proposed = await taught_links.propose(conn, ruc_emisor, url, ctx.sender.profile_id)
     await queue_message(conn, ctx.sender, MESSAGES[RULE_TEACH], rule_id=RULE_TEACH)
     if proposed is not None:
@@ -140,46 +127,6 @@ async def teach(
             _owner_text(ctx, razon_social, ruc_emisor, url),
             buttons=_decision_buttons(ruc_emisor, proposed),
         )
-
-
-async def answer(
-    conn: AsyncConnection[Any],
-    setup: TeachSetup,
-    msg: InboundMessage,
-) -> bool:
-    """Answer BR-F02 with the sender's free text, or do nothing and return False (R-11.4).
-
-    Only a sender whose newest question is BR-F02 may answer it, and only with one
-    ``https`` URL or "no sé". A URL proposes the link for that question's invoice;
-    "no sé" stores nothing and answers BR-F02_dont_know. Returns True when the text
-    was handled, so the caller does not run the usual edit/override paths.
-    """
-    question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
-    if question is None or question[0] != RULE_ASK_PORTAL:
-        return False
-    if is_dont_know(msg.text):
-        await dont_know_reply(conn, Addressee(msg.channel, msg.profile_id), question[1])
-        return True
-    if not looks_like_url(msg.text):
-        return False
-    reading = await load_reading(conn, question[1])
-    if reading is None:
-        return False
-    ruc_emisor = reading.value("ruc_emisor")
-    if ruc_emisor is None:
-        return False
-    await teach(
-        conn,
-        TeachContext(
-            profiles=setup.profiles,
-            sender=Addressee(msg.channel, msg.profile_id),
-            resolver=setup.resolver,
-        ),
-        int(ruc_emisor),
-        reading.value("razon_social"),
-        msg.text,
-    )
-    return True
 
 
 async def dont_know_reply(

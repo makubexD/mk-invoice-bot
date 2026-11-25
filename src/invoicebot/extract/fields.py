@@ -35,9 +35,22 @@ PRINTED_URL_PATH_CHARS = r"[A-Za-z0-9\-._~%!$&'()*+,;=:@/?#]"
 #: A printed URL as a reading stores it: https, a lowercase ASCII host, an optional path (D189).
 _PRINTED_URL_SHAPE = re.compile(rf"https://[a-z0-9.-]+(?:/{PRINTED_URL_PATH_CHARS}*)?")
 
-#: The shapes the JSON form of a reading has; all are closed (R-2.6, D189).
+#: The label prefix of an internationalized (punycode) host, refused so a lookalike of a
+#: known domain is never offered (D189).
+PUNYCODE_PREFIX = "xn--"
+#: A host needs a dot, so at least two labels, and a 2-24 letter top level (D189).
+HOST_MIN_LABELS = 2
+TLD_MIN_CHARS = 2
+TLD_MAX_CHARS = 24
+
+#: Most characters the re-read line under a consult anchor may have (D191).
+MAX_URL_STRIP_CHARS = 120
+#: The characters a URL strip may hold: the URL ones a portal guess needs, plus a space (D191).
+_URL_STRIP_SHAPE = re.compile(r"[A-Za-z0-9.:/_~% -]+")
+
+#: The shapes the JSON form of a reading has; all are closed (R-2.6, D189, D191).
 _READING_KEYS = frozenset({"fields", "document_url"})
-_READING_KEYS_WITH_PRINTED_URL = _READING_KEYS | {"printed_url"}
+_READING_OPTIONAL_KEYS = frozenset({"printed_url", "url_strip"})
 _FIELD_KEYS = frozenset({"value", "source", "confidence"})
 _FIELD_KEYS_WITH_FLAG = _FIELD_KEYS | {"flag"}
 _SOURCES = frozenset(get_args(Source))
@@ -72,6 +85,7 @@ class Reading:
     fields: Mapping[str, Field]
     document_url: str | None
     printed_url: str | None = None
+    url_strip: str | None = None
 
     def missing_required(self) -> tuple[str, ...]:
         """Return the required field names (R-2.13) this reading lacks or leaves empty, in order."""
@@ -100,7 +114,7 @@ class Reading:
 
 def reading_to_json(reading: Reading) -> dict[str, Any]:
     """Render a reading as the JSON object the helper and ``fields_json`` carry (R-2.6)."""
-    return {
+    payload: dict[str, Any] = {
         "fields": {
             name: {
                 "value": field.value,
@@ -113,6 +127,10 @@ def reading_to_json(reading: Reading) -> dict[str, Any]:
         "document_url": reading.document_url,
         "printed_url": reading.printed_url,
     }
+    if reading.url_strip is not None:
+        # Written only when read: the previous release refuses the key (rollback, D191).
+        payload["url_strip"] = reading.url_strip
+    return payload
 
 
 def is_printed_url(value: object) -> bool:
@@ -124,17 +142,36 @@ def is_printed_url(value: object) -> bool:
     )
 
 
+def is_printed_host(host: str) -> bool:
+    """Return whether ``host`` is dotted labels whose top level is 2-24 letters (D189)."""
+    labels = host.split(".")
+    if len(labels) < HOST_MIN_LABELS or not all(labels):
+        return False
+    if any(label.startswith(PUNYCODE_PREFIX) for label in labels):
+        return False
+    top_level = labels[-1]
+    return TLD_MIN_CHARS <= len(top_level) <= TLD_MAX_CHARS and top_level.isascii() and top_level.isalpha()
+
+
+def is_url_strip(value: object) -> bool:
+    """Return whether ``value`` is a URL strip a reading may hold: 1 to 120 URL characters (D191)."""
+    return (
+        isinstance(value, str)
+        and len(value) <= MAX_URL_STRIP_CHARS
+        and _URL_STRIP_SHAPE.fullmatch(value) is not None
+    )
+
+
 def reading_from_json(payload: object) -> Reading:
     """Return ``payload`` as a :class:`Reading`, or raise ValueError when it is not one.
 
     The payload comes from the helper process or the database, so every level is checked
     here. An error message names the offending key, never its value (R-9.16).
     """
-    if not isinstance(payload, dict) or frozenset(payload) not in (
-        _READING_KEYS,
-        _READING_KEYS_WITH_PRINTED_URL,
-    ):
-        raise ValueError("reading must be an object with fields, document_url and optionally printed_url")
+    if not isinstance(payload, dict) or not _has_reading_shape(payload):
+        raise ValueError(
+            "reading must be an object with fields, document_url and optionally printed_url or url_strip"
+        )
     raw_fields = payload["fields"]
     if not isinstance(raw_fields, dict):
         raise ValueError("reading field 'fields' must be an object")
@@ -144,11 +181,21 @@ def reading_from_json(payload: object) -> Reading:
     printed_url = payload.get("printed_url")
     if printed_url is not None and not is_printed_url(printed_url):
         raise ValueError("reading field 'printed_url' must be a printed https URL or null")
+    url_strip = payload.get("url_strip")
+    if url_strip is not None and not is_url_strip(url_strip):
+        raise ValueError("reading field 'url_strip' must be URL characters or null")
     return Reading(
         fields={name: _field_from_json(name, raw) for name, raw in raw_fields.items()},
         document_url=document_url,
         printed_url=printed_url,
+        url_strip=url_strip,
     )
+
+
+def _has_reading_shape(payload: dict[object, object]) -> bool:
+    """Return whether ``payload`` has the required keys and only the optional ones (R-2.6, D191)."""
+    keys = frozenset(payload)
+    return keys >= _READING_KEYS and keys <= _READING_KEYS | _READING_OPTIONAL_KEYS
 
 
 def _field_from_json(name: object, raw: object) -> Field:

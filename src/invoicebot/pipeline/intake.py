@@ -28,17 +28,14 @@ from invoicebot.pipeline.handlers import MEGABYTE, RULE_MEDIA_REJECTED
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.overrides import apply_overrides, parse_overrides
 from invoicebot.pipeline.payments import PAYMENT_BUTTON_PREFIX, handle_payment_press
-from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX
+from invoicebot.pipeline.portal_offer import OFFER_BUTTON_PREFIX, answer
 from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.steps import ATTACH_STEP
 from invoicebot.pipeline.steps import DOWNLOAD_STEP as DOWNLOAD_STEP
 from invoicebot.pipeline.teach import (
     BUTTON_ID_PREFIX as TEACH_BUTTON_PREFIX,
 )
-from invoicebot.pipeline.teach import (
-    TeachSetup,
-    answer,
-)
+from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.teach import (
     handle_press as handle_teach_press,
 )
@@ -148,8 +145,8 @@ async def handle_inbound(
     invoice is ``stored`` as an upload for it (R-1.5); an xml with no open invoice is
     refused with BR-E07, naming the photo and PDF size caps from
     ``media_max_bytes``, and creates nothing (D58, D121). A text-only message may also
-    run a command (R-10.1), answer a BR-F02 portal question (R-11.4), apply its edits
-    (D97) and store its overrides (D70). ``timezone`` is the owner's zone for the dates
+    run a command (R-10.1), answer a BR-F15 or BR-F02 portal question (R-11.4, D191),
+    apply its edits (D97) and store its overrides (D70). ``timezone`` is the owner's zone for the dates
     a command prints (S11.4), and ``roles`` carries the admins, the payment flow and
     the laptop flows (:class:`IntakeRoles`).
     """
@@ -301,11 +298,12 @@ async def _store_with_overrides(
     """Store a non-photo text, running its command or applying its edits and overrides.
 
     A text starting with ``/`` is a command and is answered before anything else
-    (R-10.1). A text that answers the sender's newest BR-F02 question teaches a portal
-    (R-11.4). Otherwise it may hold both ``campo=valor`` edits when ``parse_edits`` finds
-    fields or errors, and ``motivo``/``descripcion`` overrides (D70, D90, D97). Each is
-    applied independently to the invoice it targets, and the result names the invoice the
-    edits first touched. A pdf/xml upload is linked to the stuck invoice it belongs to
+    (R-10.1). A text that answers the sender's newest BR-F15 or BR-F02 question is taken
+    by the portal answer (R-11.4, D191). Otherwise it may hold both ``campo=valor`` edits
+    when ``parse_edits`` finds fields or errors, and ``motivo``/``descripcion`` overrides
+    (D70, D90, D97). Each is applied independently to the invoice it targets, and the
+    result names the invoice the edits first touched. A pdf/xml upload is linked to the
+    stuck invoice it belongs to
     (R-1.5); another attachment kind, or a text with neither, changes nothing.
     """
     if msg.attachments:
