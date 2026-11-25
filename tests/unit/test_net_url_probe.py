@@ -56,11 +56,12 @@ async def test_first_answering_returns_the_url_that_answers() -> None:
 
 
 async def test_first_answering_skips_a_url_that_does_not_answer() -> None:
-    """R-5.10, D192: a 404 is no answer and the next candidate is tried."""
+    """R-5.10, D193: a connection error gives no status and the next candidate is tried."""
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        status = 404 if str(request.url) == PORTAL else 200
-        return httpx.Response(status)
+        if str(request.url) == PORTAL:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, False)
@@ -274,17 +275,151 @@ async def test_first_answering_stops_at_a_busy_url() -> None:
 
 
 async def test_first_answering_reports_the_busy_url_after_a_no_answer() -> None:
-    """R-5.10, D192: the first busy URL after a no-answer one is reported with its own URL."""
+    """R-5.10, D193: the first busy URL after a no-status one is reported with its own URL."""
     requested: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requested.append(str(request.url))
+        if str(request.url) == PORTAL:
+            raise httpx.ConnectError("connection refused")
         return httpx.Response(503 if str(request.url) == OTHER else 404)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, True)
 
     assert requested == [PORTAL, OTHER]
+
+
+async def test_first_answering_skips_a_look_alike_after_the_read_host_answered() -> None:
+    """R-5.10, D193: a status on the read host stops another host, while a same-host URL is tried."""
+    read_x = "https://portal.example.pe/x"
+    read_y = "https://portal.example.pe/y"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+    statuses = {read_x: 404, read_y: 200}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(statuses[str(request.url)])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, read_y, look_alike]) == Probed(read_y, False)
+
+    assert requested == [read_x, read_y]
+
+
+async def test_first_answering_skips_a_look_alike_after_the_read_host_answered_an_error() -> None:
+    """R-5.10, D193: a 403 on the read host is still a status, so the other host is not tried."""
+    read_x = "https://portal.example.pe/x"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+    statuses = {read_x: 403, look_alike: 200}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(statuses[str(request.url)])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, look_alike]) is None
+
+    assert requested == [read_x]
+
+
+async def test_first_answering_tries_a_look_alike_after_a_connect_error() -> None:
+    """R-5.10, D193: a connection error gives no status, so the other host is tried and answers."""
+    read_x = "https://portal.example.pe/x"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == read_x:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, look_alike]) == Probed(look_alike, False)
+
+    assert requested == [read_x, look_alike]
+
+
+async def test_first_answering_tries_a_look_alike_after_a_guard_block() -> None:
+    """R-5.10, D193: a guard refusal gives no status, so the other host is tried and is busy."""
+    read_x = "https://portal.example.pe/x"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == read_x:
+            raise GuardBlocked(GuardReason.PRIVATE_ADDRESS)
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, look_alike]) == Probed(look_alike, True)
+
+    assert requested == [read_x, look_alike]
+
+
+async def test_first_answering_skips_a_look_alike_after_a_refused_redirect() -> None:
+    """R-5.10, D193: a redirect status counts, so the other host is not tried though its hop is refused."""
+    read_x = "https://portal.example.pe/x"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == read_x:
+            return httpx.Response(301, headers={"location": "http://other.example.pe/"})
+        return httpx.Response(200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, look_alike]) is None
+
+    assert requested == [read_x]
+
+
+async def test_first_answering_skips_a_look_alike_after_a_redirect_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R-5.10, D193: a redirect status counts even when the next hop hangs, so the other host is not tried."""
+    monkeypatch.setattr(url_probe, "PROBE_TIMEOUT_S", 0.05)
+    read_x = "https://portal.example.pe/x"
+    read_hang = "https://portal.example.pe/hang"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == read_x:
+            return httpx.Response(302, headers={"location": "/hang"})
+        await asyncio.Event().wait()
+        return httpx.Response(200)  # pragma: no cover
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, look_alike]) is None
+
+    assert requested == [read_x, read_hang]
+
+
+async def test_first_answering_skips_a_look_alike_after_a_same_host_no_answer() -> None:
+    """R-5.10, D193: a 404 on a second URL of the read host still stops a later host."""
+    read_x = "https://portal.example.pe/x"
+    read_y = "https://portal.example.pe/y"
+    look_alike = "https://other.example.pe/x"
+    requested: list[str] = []
+    statuses = {read_y: 404, look_alike: 200}
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) == read_x:
+            raise httpx.ConnectError("connection refused")
+        return httpx.Response(statuses[str(request.url)])
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [read_x, read_y, look_alike]) is None
+
+    assert requested == [read_x, read_y]
 
 
 async def test_first_answering_tries_the_next_url_after_a_hanging_hop(
