@@ -55,7 +55,7 @@ Date: 2026-11-25 (12:57 AM, Lima). Host: `invoicebot-live`, image `c5cc7e9f0d85`
 | The typed address is echoed as BR-F14               | waived by the owner (2026-11-25); integration tests cover it |
 | [✅ Sí, es este] gives BR-S06 and the owner's alert | pass, on the first offer                                     |
 | The owner's decision                                | [Aprobar]; the confirmation arrived                          |
-| Cancel the test invoice                             | not confirmed                                                |
+| Cancel the test invoice                             | pass: #26 cancelled                                          |
 
 Correction: the printed host is `sy`, not `sv` as the findings above assume. On 2026-11-25 `sy.ecomprobantes.pe/pebsa`
 answered 200 and `sv.ecomprobantes.pe` did not resolve, so the repaired URL was exact and the findings' edit
