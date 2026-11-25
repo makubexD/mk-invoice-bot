@@ -154,3 +154,24 @@ def test_helper_reports_technical_for_malformed_stdin() -> None:
 
     assert completed.returncode == 0
     assert json.loads(completed.stdout) == {"reason": "technical", "files": [], "error_class": None}
+
+
+def test_probe_helper_reports_guard_blocked_for_a_loopback_url(tmp_path: Path) -> None:
+    """D193, R-9.16: a probe of http://127.0.0.1 ends guard_blocked or technical with exit 0."""
+    request = {
+        "url": "http://127.0.0.1:8080/",
+        "invoice": _request(tmp_path)["invoice"],
+        "out_dir": str(tmp_path),
+        "max_bytes": _request(tmp_path)["max_bytes"],
+        "page_timeout_ms": 5000,
+    }
+    completed = subprocess.run(
+        [sys.executable, "-P", "-m", "invoicebot.fetchers.browser.probe"],
+        input=json.dumps(request).encode(),
+        capture_output=True,
+        timeout=60,
+        check=False,
+    )
+
+    assert completed.returncode == 0
+    assert json.loads(completed.stdout)["outcome"] in {"guard_blocked", "technical"}
