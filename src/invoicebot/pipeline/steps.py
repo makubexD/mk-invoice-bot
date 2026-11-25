@@ -14,6 +14,8 @@ DELIVER_STEP = "deliver"
 SUNAT_RECHECK_STEP = "sunat_recheck"
 #: Job step that tries a ticket's printed URL or strip and offers the portal found (BR-F14, D192).
 PORTAL_CHECK_STEP = "portal_check"
+#: Job step that opens a taught portal link once, fills its form and files what it downloads (D193).
+PORTAL_PROBE_STEP = "portal_probe"
 #: Job step that attaches a sender's uploaded document to a stuck invoice (R-1.5, S7.5).
 ATTACH_STEP = "attach_upload"
 #: Job step that converges an invoice's folder name to its sent and paid status (R-7.11).

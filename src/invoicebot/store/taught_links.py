@@ -49,6 +49,16 @@ async def get(conn: AsyncConnection[Any], ruc_emisor: int) -> TaughtLink | None:
     return TaughtLink(ruc_emisor=row[0], url=row[1], profile_id=row[2], state=row[3])
 
 
+async def approved_url(conn: AsyncConnection[Any], ruc_emisor: int, version: int) -> str | None:
+    """Return the issuer's URL when the link at ``version`` is approved, else None (D193); does not commit."""
+    cur = await conn.execute(
+        "SELECT url FROM taught_links WHERE ruc_emisor = %s AND version = %s AND state = 'approved'",
+        (ruc_emisor, version),
+    )
+    row = await cur.fetchone()
+    return None if row is None else str(row[0])
+
+
 async def approved_hosts(conn: AsyncConnection[Any]) -> frozenset[str]:
     """Return the lowercase hostnames of every approved link (D191); does not commit.
 
