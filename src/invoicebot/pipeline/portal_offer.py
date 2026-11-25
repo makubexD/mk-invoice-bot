@@ -1,4 +1,7 @@
-"""Ask for the issuer's portal, offering a URL from the ticket first (BR-F14, BR-F02, BR-F15, D191, D192)."""
+"""Ask for the issuer's portal: a ticket's address queues the check, a QR link is offered.
+
+BR-F14, BR-F02, BR-F15, D191, D192.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +21,6 @@ from invoicebot.net.taught_url import (
     taught_url_refusal,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
-from invoicebot.pipeline.portal_guess import repair_url
 from invoicebot.pipeline.questions import (
     BUTTON_DONT_KNOW_SUFFIX,
     BUTTON_FIX_SUFFIX,
@@ -30,19 +32,22 @@ from invoicebot.pipeline.questions import (
     yes_press_suffix,
 )
 from invoicebot.pipeline.questions import OFFER_BUTTON_PREFIX as OFFER_BUTTON_PREFIX
+from invoicebot.pipeline.steps import PORTAL_CHECK_STEP
 from invoicebot.pipeline.teach import (
     NOT_QUESTIONS,
     RULE_ASK_PORTAL,
     RULE_DONT_KNOW,
+    RULE_PORTAL_CHECKING,
     TeachContext,
     TeachSetup,
     dont_know_reply,
     teach,
 )
 from invoicebot.queue import outbox
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES, UNKNOWN_ISSUER
 from invoicebot.states import SETTLED
-from invoicebot.store import portal_candidates, taught_links
+from invoicebot.store import portal_candidates
 from invoicebot.store.invoices import load_invoice_head, load_reading
 
 logger = logging.getLogger(__name__)
@@ -70,22 +75,6 @@ _PRESS_PATTERN = (
 )
 
 
-def offer_url(reading: Reading, known_hosts: frozenset[str]) -> str | None:
-    """Return the URL BR-F14 offers: the printed one, the repaired strip, else the QR link (D191, D192).
-
-    The strip under ``CONSULT… EN`` is repaired against the approved hosts when it was
-    read; one that repairs to nothing leaves the QR link to offer. A QR link that could
-    not be taught, such as SUNAT's generic query page, is not offered.
-    """
-    if reading.printed_url is not None:
-        return reading.printed_url
-    if reading.url_strip is not None:
-        repaired = repair_url(reading.url_strip, reading.value("razon_social"), known_hosts)
-        if repaired is not None:
-            return repaired
-    return qr_offer(reading)
-
-
 def qr_offer(reading: Reading) -> str | None:
     """Return the reading's QR link when BR-F14 may teach it, else None (D192).
 
@@ -104,12 +93,24 @@ async def ask_portal(
     invoice_id: int,
     reading: Reading,
 ) -> None:
-    """Offer the reading's URL as BR-F14, or ask BR-F02 when there is none (BR-F14, BR-F02).
+    """Queue the portal check for a ticket address, or offer the QR link at once (BR-F14, BR-F02, D192).
 
-    BR-F02's question is queued against ``invoice_id`` so the sender's typed answer
-    reaches :func:`answer`. The caller owns the transaction.
+    A reading whose printed URL or strip may name the portal queues BR-F14_checking and
+    the ``portal_check`` job in the caller's transaction. Without either, BR-F14 offers
+    the QR link, or BR-F02 asks for the portal against ``invoice_id`` so the sender's
+    typed answer reaches :func:`answer`. The caller owns the transaction.
     """
-    url = offer_url(reading, await taught_links.approved_hosts(conn))
+    if reading.printed_url is not None or reading.url_strip is not None:
+        await queue_message(
+            conn,
+            addressee,
+            MESSAGES[RULE_PORTAL_CHECKING],
+            invoice_id=invoice_id,
+            rule_id=RULE_PORTAL_CHECKING,
+        )
+        await enqueue(conn, invoice_id, PORTAL_CHECK_STEP)
+        return
+    url = qr_offer(reading)
     if url is None:
         await _ask_br_f02(conn, addressee, invoice_id, reading)
         return

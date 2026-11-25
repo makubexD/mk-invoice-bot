@@ -45,6 +45,15 @@ URL_STRIP = "portal.example.pe/consulta"
 PRINTED_URL = "https://portal.example.pe/consulta"
 #: A strip with no portal address in it, so :func:`candidate_urls` returns nothing (D192).
 UNREADABLE_STRIP = "consulta en la tienda"
+#: The strip OCR read under ``CONSULT… EN``, garbled as a scan prints it (D192).
+GARBLED_STRIP = "hitps.//sy.example pe/tiemda"
+STRIP_RAZON_SOCIAL = "TIENDA SOL S.A.C."
+#: What the garbled strip repairs to with no approved host close enough (D192).
+GARBLED_REPAIRED_URL = "https://sy.example.pe/tienda"
+#: The strip's host as read, before the issuer repairs its path (D192).
+READ_HOST_URL = "https://sy.example.pe/tiemda"
+#: An approved host close to the strip's own, which is offered when only it answers (D192).
+APPROVED_HOST_URL = "https://sv.example.pe/tienda"
 #: A QR link BR-F14 may offer when the strip is no address (D192).
 QR_URL = "https://otro.example.pe/comprobante"
 RAZON_SOCIAL = "Tienda Example"
@@ -465,3 +474,52 @@ async def test_invoice_without_a_reading_queues_nothing(
     assert requested == []
     assert rows == []
     assert candidate is None
+
+
+async def test_garbled_strip_is_tried_first_with_the_path_repaired_from_the_issuer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: the garbled strip repaired from the issuer name is the first candidate tried."""
+    candidates = candidate_urls(GARBLED_STRIP, STRIP_RAZON_SOCIAL, frozenset())
+    assert candidates[0] == GARBLED_REPAIRED_URL
+    transport, requested = _answering(GARBLED_REPAIRED_URL)
+    invoice_id = await _invoice(db_pool, _reading(url_strip=GARBLED_STRIP, razon_social=STRIP_RAZON_SOCIAL))
+
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn:
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=GARBLED_REPAIRED_URL)
+    assert requested[0] == GARBLED_REPAIRED_URL
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, GARBLED_REPAIRED_URL))]
+    assert candidate == GARBLED_REPAIRED_URL
+
+
+async def test_approved_host_close_to_the_strip_is_tried_after_it_and_offered(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: an approved host close to the strip's is tried after the host as read, and offered."""
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO taught_links (ruc_emisor, url, profile_id, state, approved_at)
+            VALUES (%s, %s, %s, 'approved', now())
+            """,
+            (ISSUER_RUC, APPROVED_HOST_URL, SENDER),
+        )
+    candidates = candidate_urls(GARBLED_STRIP, STRIP_RAZON_SOCIAL, frozenset({"sv.example.pe"}))
+    assert candidates[:2] == (GARBLED_REPAIRED_URL, READ_HOST_URL)
+    assert APPROVED_HOST_URL in candidates[2:]
+    transport, requested = _answering(APPROVED_HOST_URL)
+    invoice_id = await _invoice(db_pool, _reading(url_strip=GARBLED_STRIP, razon_social=STRIP_RAZON_SOCIAL))
+
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn:
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL)
+    assert requested == [GARBLED_REPAIRED_URL, READ_HOST_URL, APPROVED_HOST_URL]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, APPROVED_HOST_URL))]
+    assert candidate == APPROVED_HOST_URL

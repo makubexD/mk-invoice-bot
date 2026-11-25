@@ -49,14 +49,19 @@ RULE_ASK_PORTAL = "BR-F02"
 #: The answer when the sender does not know the issuer's portal, while the invoice still
 #: fetches its documents; also the rule of both answers (BR-F02, R-11.4, D190).
 RULE_DONT_KNOW = "BR-F02_dont_know"
+#: The notice queued before a ticket's printed URL or strip is checked (BR-F14, D192).
+RULE_PORTAL_CHECKING = "BR-F14_checking"
 #: The answer when someone must add the issuer's portal by hand (BR-F02, D190).
 MESSAGE_DONT_KNOW_MANUAL = "BR-F02_dont_know_manual"
 #: Rules whose messages are never the question a typed answer or a BR-F14 press waits
 #: on: BR-S02 answers a stale press, and BR-F13's buttons are gated by the invoice's
 #: state, so a BR-F13 sent for another invoice must not hide a pending BR-F02 (D189).
 #: BR-F02's "no sé" answer and BR-S03's notice ask nothing either, so a URL typed after
-#: them still answers the pending BR-F02 (D190).
-NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED, RULE_DONT_KNOW, RULE_DEAD})
+#: them still answers the pending BR-F02 (D190). BR-F14's checking notice asks nothing
+#: either: the portal check answers it (D192).
+NOT_QUESTIONS = frozenset(
+    {RULE_STALE_BUTTON, RULE_DOCS_NEEDED, RULE_DONT_KNOW, RULE_DEAD, RULE_PORTAL_CHECKING}
+)
 #: The admin's answer after [Aprobar] (BR-S06, D118).
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
