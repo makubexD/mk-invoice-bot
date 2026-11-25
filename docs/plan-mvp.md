@@ -344,15 +344,22 @@ own message showed and closes the offer; BR-F15 lets go of text after "no sé" a
 offered link must be visible ASCII with a plain, non-SUNAT host on the default port; scheme repair keeps hosts that
 start with `h`; the strip is kept only when it looks like an address, has a total deadline and is written only when read.
 
-- **Owner decides:** while BR-F15 is open, `total=118` for another invoice also gets the BR-F15 retry (the 9v row says
-  "never another path"), even right after [✏️ Corregir] on that invoice's summary.
-- **Owner decides (explained 2026-11-25, no answer yet):** a correctly read host one or two characters from an approved
-  one is replaced by it (`app1.foo.com` → `app2.foo.com`). Proposed: the reconciliation below tries both.
+- **Owner, 2026-11-25:** while BR-F15 is open, `campo=valor` is an edit, not an address (replaces "never another path"
+  for that shape only). [✏️ Corregir] should be smart: fields as buttons with the value read preloaded, likely values
+  first, the answer checked before it is applied, so the sender types as little as possible.
+- **Owner, 2026-11-25:** a host close to an approved one: try the host as read first, the approved one only if it fails.
 - **Owner, 2026-11-25 (for 9t's plan):** reconcile the URL. Repair OCR slips first (`harps:` → `https:`, `,` → `.`),
   build a few candidates (host and path variants, capitals kept and lowered), try them and suggest the one that works.
   When none works, show what was read so the sender fixes it in the chat. This replaces D191's "the bot never fetches
   the guess" and the rule that a probe waits for [Aprobar]; the plan proposes the limits (request guard, public hosts
   only, few tries, small answers). A page that answers is not proof it is the issuer's, so [Sí] stays.
+- **Owner, 2026-11-25 (with the reconciliation):** the owner's OCR slips are only examples; the plan lists more and the
+  bot learns. Proposed: the rules in code; what it learns in the database (the strip read and the URL confirmed by
+  [Sí], plus [Aprobar], per issuer and provider host), reused before guessing and dropped when its link stops working;
+  a slip seen often becomes a GitHub issue proposing a rule, with no invoice data (public repo). It learns only from
+  confirmed answers. More slips to plan: `:` read as `;` or `.`, `//` as `||`, `ll` or `II`, a missing scheme or `www`,
+  spaces around dots, `rn`/`m`, `l`/`1`/`I`, `0`/`o`, `5`/`s`, `8`/`b`, `vv`/`w`, accents, `.pe`/`.com.pe` as `,pe`,
+  `.corn` or `. pe`, a URL broken over two lines, a trailing period.
 - **Owner, 2026-11-25:** a URL typed while BR-F14 is newest is taken as the correction (the owner tests it by hand).
 - **Owner, 2026-11-25:** a taught portal may move later. When an approved link stops working, say that the store's URL
   seems to have changed and start over: re-read the invoice image, compare, look for a new URL. With none, say so (the
