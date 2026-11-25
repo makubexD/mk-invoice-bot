@@ -99,9 +99,9 @@ async def _serve(page: Page, routes: Mapping[str, _Served], requested: list[str]
             await route.fulfill(status=404, body=b"not found")
             return
         if served.redirect is not None:
-            # Playwright 1.64 does not route a fulfilled 302's hop, so redirect the
-            # navigation through Playwright itself; the page still lands elsewhere.
-            await route._impl_obj._redirected_navigation_request(served.redirect)
+            # A fulfilled 302's hop skips routing, so the page itself goes elsewhere.
+            script = f"<script>location.replace({json.dumps(served.redirect)});</script>"
+            await route.fulfill(body=script.encode(), content_type="text/html; charset=utf-8")
             return
         if served.body:
             await route.fulfill(

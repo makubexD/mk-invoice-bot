@@ -121,13 +121,17 @@ _READ_LANDING_JS = Template(
       continue;
     }
     const rawHref = element.getAttribute("href");
+    const href = element.tagName === "A" ? String(element.href) : "";
+    if (href.length > maxText && !/^javascript:/i.test(href)) {
+      continue;
+    }
     const text = element.tagName === "INPUT" ? element.value : element.textContent;
     candidates.push({
       index: index,
       text: cut(text),
       tag: cut(element.tagName),
       raw_href: rawHref === null ? null : cut(rawHref),
-      href: element.tagName === "A" ? cut(element.href) : "",
+      href: cut(href),
       would_submit: wouldSubmit(element),
     });
   }
