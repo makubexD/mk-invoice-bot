@@ -346,12 +346,18 @@ start with `h`; the strip is kept only when it looks like an address, has a tota
 
 - **Owner decides:** while BR-F15 is open, `total=118` for another invoice also gets the BR-F15 retry (the 9v row says
   "never another path"), even right after [✏️ Corregir] on that invoice's summary.
-- **Owner decides:** a correctly read host one or two characters from an approved one is replaced by it
-  (`app1.foo.com` → `app2.foo.com`); options: not when the difference is a digit, or only for a garbled read.
-- **Owner decides:** repaired paths are lowercased (D191), which breaks on a case-sensitive server.
-- **Owner decides:** a URL typed while BR-F14 is the newest question is ignored; BR-F02 and BR-F15 take it.
-- **Owner decides:** a different link for an issuer whose link still waits for the owner thanks the sender but is
-  dropped (the first proposal waits, BR-S06), also from a later invoice.
+- **Owner decides (explained 2026-11-25, no answer yet):** a correctly read host one or two characters from an approved
+  one is replaced by it (`app1.foo.com` → `app2.foo.com`). Proposed: the reconciliation below tries both.
+- **Owner, 2026-11-25 (for 9t's plan):** reconcile the URL. Repair OCR slips first (`harps:` → `https:`, `,` → `.`),
+  build a few candidates (host and path variants, capitals kept and lowered), try them and suggest the one that works.
+  When none works, show what was read so the sender fixes it in the chat. This replaces D191's "the bot never fetches
+  the guess" and the rule that a probe waits for [Aprobar]; the plan proposes the limits (request guard, public hosts
+  only, few tries, small answers). A page that answers is not proof it is the issuer's, so [Sí] stays.
+- **Owner, 2026-11-25:** a URL typed while BR-F14 is newest is taken as the correction (the owner tests it by hand).
+- **Owner, 2026-11-25:** a taught portal may move later. When an approved link stops working, say that the store's URL
+  seems to have changed and start over: re-read the invoice image, compare, look for a new URL. With none, say so (the
+  site may be down or not updated) and give options so the invoice is not blocked.
+- **Owner, 2026-11-25:** a newer link for an issuer replaces the one still waiting for the owner's approval.
 - **Later:** a URL typed after BR-F07 or another invoice's notice no longer answers BR-F15 and gets no reply
   (`teach.NOT_QUESTIONS`).
 - **Later:** SUNAT lookalikes (`sunat.gob.pe.<other>`) can be offered; the config check does not count the strip's
