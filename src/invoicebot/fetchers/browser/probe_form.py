@@ -176,7 +176,7 @@ async def read_form(page: Page, url: str) -> FormRead:
     Raises:
         PlaywrightError: a page could not be loaded, read or clicked.
     """
-    approved_host = _approved_host(url)
+    approved_host = approved_host_of(url)
     outcome = _status_outcome(await page.goto(url))
     if outcome is not None:
         return FormRead(outcome=outcome)
@@ -283,7 +283,7 @@ def _link_allowed(candidate: _RawCandidate, approved_host: str) -> bool:
     parts = urlsplit(candidate.href)
     if parts.scheme.lower() != _HTTPS:
         return False
-    return _is_approved_host((parts.hostname or "").lower(), approved_host)
+    return is_approved_host((parts.hostname or "").lower(), approved_host)
 
 
 def _is_click_target(raw_href: str) -> bool:
@@ -327,7 +327,7 @@ def _no_form_outcome(has_password: bool) -> ProbeOutcome:
     return ProbeOutcome.LOGIN_ONLY if has_password else ProbeOutcome.NO_FORM
 
 
-def _approved_host(url: str) -> str:
+def approved_host_of(url: str) -> str:
     """Return the lowercase host of the link the sender taught (D193)."""
     return (urlsplit(url).hostname or "").lower()
 
@@ -338,12 +338,12 @@ def _page_host_outcome(page_url: str, approved_host: str) -> ProbeOutcome | None
     if parts.scheme.lower() != _HTTPS:
         return ProbeOutcome.OTHER_HOST
     host = (parts.hostname or "").lower()
-    if _is_approved_host(host, approved_host):
+    if is_approved_host(host, approved_host):
         return None
     return ProbeOutcome.OTHER_HOST
 
 
-def _is_approved_host(host: str, approved_host: str) -> bool:
+def is_approved_host(host: str, approved_host: str) -> bool:
     """Return whether *host* is the approved host or a subdomain of it (D193)."""
     return host == approved_host or host.endswith(f".{approved_host}")
 
