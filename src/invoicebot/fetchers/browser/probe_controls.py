@@ -18,7 +18,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import Page
 from pydantic import BaseModel, ConfigDict, Field
 
-from invoicebot.fetchers.browser.field_match import value_name, words
+from invoicebot.fetchers.browser.field_match import fold, value_name, words
 from invoicebot.fetchers.browser.probe_protocol import (
     MAX_FIELD_OPTIONS,
     MAX_REPORT_FIELDS,
@@ -44,6 +44,11 @@ _HCAPTCHA_HOST = "hcaptcha.com"
 #: Whole words that mark the control that submits a search form (D193).
 _SUBMIT_WORDS = frozenset({"buscar", "consultar", "ver"})
 
+#: Control types the probe never reports as fields, only notices when required (D193).
+_UNREAD_TYPES = frozenset({"textarea", "radio", "checkbox"})
+#: Folded starts of a select's placeholder option, which is not a real choice (D193).
+_PLACEHOLDER_STARTS = ("selec", "elij", "escoj", "--")
+
 _RawText = Annotated[str, Field(max_length=MAX_RAW_TEXT)]
 
 
@@ -58,6 +63,8 @@ class _RawControl(BaseModel):
     type: _RawText
     label: _RawText
     options: tuple[_RawText, ...] = Field(default=(), max_length=MAX_OPTIONS)
+    option_values: tuple[_RawText, ...] = Field(default=(), max_length=MAX_OPTIONS)
+    required: bool = False
 
 
 class _RawButton(BaseModel):
@@ -128,8 +135,9 @@ _READ_PAGE_JS = Template(
     return "";
   };
   const textTypes = new Set(["text", "search", "tel", "number", "date", "email"]);
+  const unreadTypes = new Set(["radio", "checkbox"]);
   const controls = [];
-  for (const element of document.querySelectorAll("input, select")) {
+  for (const element of document.querySelectorAll("input, select, textarea")) {
     if (controls.length >= maxControls) {
       break;
     }
@@ -139,6 +147,10 @@ _READ_PAGE_JS = Template(
     let kind = (element.getAttribute("type") || "").toLowerCase();
     if (element.tagName === "SELECT") {
       kind = "select";
+    } else if (element.tagName === "TEXTAREA") {
+      kind = "textarea";
+    } else if (unreadTypes.has(kind)) {
+      // kept only so a required one can be noticed; never reported as a field
     } else if (kind !== "" && !textTypes.has(kind)) {
       continue;
     } else if (kind === "") {
@@ -148,8 +160,14 @@ _READ_PAGE_JS = Template(
       kind === "select"
         ? Array.from(element.options).slice(0, maxOptions).map((option) => cut(option.textContent))
         : [];
+    const optionValues =
+      kind === "select"
+        ? Array.from(element.options).slice(0, maxOptions).map((option) => cut(option.value))
+        : [];
     controls.push({
       group: groupOf(element),
+      required: element.required === true || element.getAttribute("aria-required") === "true",
+      option_values: optionValues,
       id: cut(element.id),
       name: cut(element.getAttribute("name")),
       type: cut(kind),
@@ -222,7 +240,11 @@ _READ_PAGE_JS = Template(
 class PageForm:
     """The form the current page shows, read before anything is typed (D193).
 
-    ``fields`` is empty when the page has no form. ``captcha`` is ``none`` when the
+    ``fields`` is empty when the page has no form. ``required_unmatched`` is true when
+    a visible enabled required control of the form is one the probe cannot fill from
+    the invoice: it has no value name, no unique selector, lies past the field cap, or
+    is a textarea, radio or checkbox (an unmatched select with one real option is
+    fine). ``captcha`` is ``none`` when the
     page asks for no captcha; ``has_password`` is true when a visible password input
     is anywhere on the page, even outside the form.
     """
@@ -231,6 +253,7 @@ class PageForm:
     has_password: bool
     fields: tuple[ProbedField, ...]
     submit: str | None
+    required_unmatched: bool = False
 
 
 async def read_page(page: Page) -> PageForm:
@@ -249,9 +272,15 @@ async def read_page(page: Page) -> PageForm:
     form_group = _form_group(grouped)
     if form_group is None:
         return PageForm(captcha=_captcha_kind(raw), has_password=raw.has_password, fields=(), submit=None)
-    fields = await _fields(page, grouped[form_group])
+    fields, required_unmatched = await _fields(page, grouped[form_group])
     submit = await _submit(page, raw.buttons, form_group)
-    return PageForm(captcha=_captcha_kind(raw), has_password=raw.has_password, fields=fields, submit=submit)
+    return PageForm(
+        captcha=_captcha_kind(raw),
+        has_password=raw.has_password,
+        fields=fields,
+        submit=submit,
+        required_unmatched=required_unmatched,
+    )
 
 
 def _grouped_controls(
@@ -266,6 +295,8 @@ def _grouped_controls(
 
 def _matched_value(control: _RawControl) -> ValueName | None:
     """Return the invoice value *control* carries, matching its raw label first (D193)."""
+    if control.type in _UNREAD_TYPES:
+        return None
     return value_name(control.label, control.name or control.id)
 
 
@@ -281,23 +312,59 @@ def _form_group(
 
 async def _fields(
     page: Page, members: Sequence[tuple[_RawControl, ValueName | None]]
-) -> tuple[ProbedField, ...]:
-    """Turn a form group's controls into report fields, skipping unselectable ones (D193)."""
+) -> tuple[tuple[ProbedField, ...], bool]:
+    """Turn a form group's controls into report fields and flag required ones left out (D193).
+
+    A control with no unique selector, or of a type not read, is skipped. The flag is
+    true when a required control is skipped, has no value name (see
+    :func:`_needs_a_value`) or lies past ``MAX_REPORT_FIELDS``.
+    """
     fields: list[ProbedField] = []
+    required_unmatched = False
     for control, matched in members[:MAX_REPORT_FIELDS]:
-        selector = await _locate(page, control.id, control.name)
-        if selector is None:
-            continue
-        fields.append(
-            ProbedField(
-                selector=selector,
-                kind=_kind(control.type),
-                label=safe_text(control.label),
-                value_name=matched,
-                options=_options(control),
-            )
-        )
-    return tuple(fields)
+        field = await _field(page, control, matched)
+        if field is not None:
+            fields.append(field)
+        if control.required and _needs_a_value(control, matched, field):
+            required_unmatched = True
+    if any(control.required for control, _ in members[MAX_REPORT_FIELDS:]):
+        required_unmatched = True
+    return tuple(fields), required_unmatched
+
+
+async def _field(page: Page, control: _RawControl, matched: ValueName | None) -> ProbedField | None:
+    """Return the report field of a control, or None when it has none to report (D193)."""
+    if control.type in _UNREAD_TYPES:
+        return None
+    selector = await _locate(page, control.id, control.name)
+    if selector is None:
+        return None
+    return ProbedField(
+        selector=selector,
+        kind=_kind(control.type),
+        label=safe_text(control.label),
+        value_name=matched,
+        options=_options(control),
+    )
+
+
+def _needs_a_value(control: _RawControl, matched: ValueName | None, field: ProbedField | None) -> bool:
+    """Return whether a required control is one the probe cannot fill (D193)."""
+    if field is None:
+        return True
+    if matched is not None:
+        return False
+    return not (control.type == "select" and _real_options(control) == 1)
+
+
+def _real_options(control: _RawControl) -> int:
+    """Count a select's real options: a non-blank value and text that is not a placeholder (D193)."""
+    count = 0
+    for text, value in zip(control.options, control.option_values, strict=False):
+        folded = fold(text.strip())
+        if value.strip() and folded and not folded.startswith(_PLACEHOLDER_STARTS):
+            count += 1
+    return count
 
 
 def _kind(raw_type: str) -> FieldKind:
