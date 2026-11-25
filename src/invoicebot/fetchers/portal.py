@@ -16,6 +16,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import ValidationError
@@ -25,6 +26,7 @@ from invoicebot.config.models import MediaMaxBytes, Portal, StoreDirectory
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
+from invoicebot.fetchers.browser.probe_protocol import ProbeReport
 from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
 from invoicebot.helper import run_helper
 from invoicebot.sandbox import check_no_parent_dir
@@ -93,35 +95,44 @@ class PortalFetcher:
             max_bytes=self._max_bytes,
             page_timeout_ms=PAGE_TIMEOUT_MS,
         )
-        return await run_browser_job(
-            self._helper_command,
-            request.model_dump_json().encode(),
-            self._helper_timeout_s,
-            portal.key,
-            out_dir,
+        job = BrowserJob(
+            command=self._helper_command,
+            payload=request.model_dump_json().encode(),
+            timeout_s=self._helper_timeout_s,
+            name=portal.key,
+            out_dir=out_dir,
+            model=HelperOutput,
         )
+        return await run_browser_job(job)
 
 
-async def run_browser_job(
-    command: Sequence[str],
-    payload: bytes,
-    timeout_s: float,
-    fetcher_name: str,
-    out_dir: Path,
-) -> HelperOutput | FetchResult:
+@dataclass(frozen=True)
+class BrowserJob[T: (HelperOutput, ProbeReport)]:
+    """One browser-helper run: what to start, what to send and the model its line must fit."""
+
+    command: Sequence[str]
+    payload: bytes
+    timeout_s: float
+    #: Becomes the ``portal_key`` of a failure result and the ``fetcher`` of a log line.
+    name: str
+    out_dir: Path
+    model: type[T]
+
+
+async def run_browser_job[T: (HelperOutput, ProbeReport)](job: BrowserJob[T]) -> T | FetchResult:
     """Run one browser-helper job in its own temp folder and validate its one JSON line.
 
     The helper runs with a minimal environment whose temp files stay in a scratch folder
     removed after the run, and its output is capped at ``MAX_HELPER_OUTPUT_BYTES`` (R-9.2).
     The fetch folder reaches the sandbox wrapper as ``HELPER_OUT_DIR`` (D150).
-    ``fetcher_name`` becomes the ``portal_key`` of a failure result, so each fetcher reports
+    ``job.name`` becomes the ``portal_key`` of a failure result, so each fetcher reports
     itself (R-5.7). A helper that reports an ``error_class``, and one that exits non-zero,
     log a warning naming only the error class and our own message, never page text (D169).
 
     Returns:
-        The helper's parsed output, or the ``FetchResult`` saying why the job failed:
+        The helper's parsed ``job.model`` output, or the ``FetchResult`` saying why the job failed:
         ``TIMEOUT`` when it outlives ``timeout_s``, ``TECHNICAL`` when the helper fails or
-        prints something that is not a valid ``HelperOutput``.
+        prints something that is not a valid ``job.model``.
 
     Raises:
         ValueError: when ``out_dir`` has a ``..`` component, which would let it leave the
@@ -129,14 +140,15 @@ async def run_browser_job(
         asyncio.CancelledError: when the caller is cancelled; the helper's process group is
             killed and reaped first (R-9.2).
     """
+    command, out_dir, fetcher_name = job.command, job.out_dir, job.name
     check_no_parent_dir(out_dir, "out_dir")
     try:
         with tempfile.TemporaryDirectory(prefix="invoicebot-browser-") as scratch:
             stdout = await run_helper(
                 command,
-                payload,
+                job.payload,
                 helper_env(Path(scratch)) | {"HELPER_OUT_DIR": str(out_dir)},
-                timeout_s,
+                job.timeout_s,
                 MAX_HELPER_OUTPUT_BYTES,
             )
     except TimeoutError:
@@ -150,7 +162,7 @@ async def run_browser_job(
         )
         return FetchResult(FetchReason.TECHNICAL, (), fetcher_name)
     try:
-        output = HelperOutput.model_validate_json(stdout)
+        output = job.model.model_validate_json(stdout)
     except ValidationError as err:
         logger.warning(
             "portal helper output invalid",
@@ -193,7 +205,7 @@ def result_from(
     if reason is FetchReason.OK:
         reason = _validate_files(output.files, root, invoice, max_bytes, digests)
     if reason is not FetchReason.OK:
-        _delete_inside(output.files, root)
+        delete_inside(output.files, root)
         return FetchResult(reason, (), key)
     files = tuple(
         FetchedFile(file.kind, file.path, file.path.stat().st_size, digests[file.path])
@@ -209,7 +221,23 @@ def _validate_files(
     max_bytes: MediaMaxBytes,
     digests: dict[Path, str],
 ) -> FetchReason:
-    """Return why the helper's files are unusable, or ``OK`` when they carry a matching XML.
+    """Return why the helper's files are unusable, or ``OK`` when they carry a matching XML (R-5.6)."""
+    reason = check_files(files, root, max_bytes, digests)
+    if reason is not FetchReason.OK:
+        return reason
+    xml = next((file for file in files if file.kind == "xml"), None)
+    if xml is None:
+        return FetchReason.MISSING_DOCS
+    return xml_reason(xml.path, invoice) or FetchReason.OK
+
+
+def check_files(
+    files: Sequence[HelperFile],
+    root: Path,
+    max_bytes: MediaMaxBytes,
+    digests: dict[Path, str],
+) -> FetchReason:
+    """Return ``OK`` when every file lies inside ``root``, fits its limit and matches its hash.
 
     ``digests`` receives each file's bot-computed hash, so the caller builds the result
     without reading the files a second time (R-5.6).
@@ -228,11 +256,7 @@ def _validate_files(
         if digest != file.sha256:
             return FetchReason.TECHNICAL
         digests[file.path] = digest
-    xml = next((file for file in files if file.kind == "xml"), None)
-    if xml is None:
-        return FetchReason.MISSING_DOCS
-    reason = xml_reason(xml.path, invoice)
-    return FetchReason.OK if reason is None else reason
+    return FetchReason.OK
 
 
 def _too_large(file: HelperFile, max_bytes: MediaMaxBytes) -> FetchReason | None:
@@ -301,7 +325,7 @@ def _inside(path: Path, root: Path) -> bool:
     return resolved is not None and resolved.is_relative_to(root)
 
 
-def _delete_inside(files: Sequence[HelperFile], root: Path) -> None:
+def delete_inside(files: Sequence[HelperFile], root: Path) -> None:
     """Remove every listed file that resolves inside ``root`` (R-5.6)."""
     for file in files:
         resolved = _resolved(file.path)
