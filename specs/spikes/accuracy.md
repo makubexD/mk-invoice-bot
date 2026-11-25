@@ -9,18 +9,18 @@ numbers come with the live check (`docs/archive/plan-mvp-read-more.md` § "Defer
 - OCR-only required-field rate: 100.0%
 - Pass: yes
 
-| field          | right | total |   rate |
-| -------------- | ----: | ----: | -----: |
-| base           |    10 |    12 |  83.3% |
-| fecha_emision  |    12 |    12 | 100.0% |
-| igv            |    12 |    12 | 100.0% |
-| num_doc_adq    |    12 |    12 | 100.0% |
-| numero         |    12 |    12 | 100.0% |
-| ruc_emisor     |    12 |    12 | 100.0% |
-| serie          |    12 |    12 | 100.0% |
-| service_charge |     4 |     4 | 100.0% |
-| tipo           |    12 |    12 | 100.0% |
-| total          |    12 |    12 | 100.0% |
+| field | right | total | rate |
+|---|---:|---:|---:|
+| base | 10 | 12 | 83.3% |
+| fecha_emision | 12 | 12 | 100.0% |
+| igv | 12 | 12 | 100.0% |
+| num_doc_adq | 12 | 12 | 100.0% |
+| numero | 12 | 12 | 100.0% |
+| ruc_emisor | 12 | 12 | 100.0% |
+| serie | 12 | 12 | 100.0% |
+| service_charge | 4 | 4 | 100.0% |
+| tipo | 12 | 12 | 100.0% |
+| total | 12 | 12 | 100.0% |
 
 ## Padrón import (S3.4, live host)
 
