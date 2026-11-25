@@ -336,7 +336,7 @@ Files: `src/invoicebot/net/url_probe.py`, `tests/unit/test_net_url_probe.py`, `s
 
 - `@dataclass(frozen=True) class Probed: url: str; busy: bool`. `first_answering(http, urls) -> Probed | None`: the first
   URL that answers (`busy=False`) or is busy (`busy=True`), whichever comes first in order; the rest are not tried. Busy
-  is 429, 500 to 599, `httpx.ReadError` or `httpx.RemoteProtocolError`, on the URL or any hop. All else stays no answer.
+  is 429, 500 to 599, or `httpx.ReadError`, on the URL or any hop (httpx also raises `RemoteProtocolError` for a malformed location, so that one stays no answer). All else stays no answer.
 - One INFO line per call, `probe finished`, with `extra` `outcome` (`answered`, `busy`, `none`), `tried` and `reasons` (per
   tried URL: the status, the exception class name, the refusal value or `TimeoutError`). Never a URL or host.
 - `portal_check.py`: only the call site, so it type-checks: it keeps today's behavior by treating a busy result as None.
@@ -344,7 +344,7 @@ Files: `src/invoicebot/net/url_probe.py`, `tests/unit/test_net_url_probe.py`, `s
 Test cases (docstrings `R-5.10, D192`); existing ones compare with `Probed(url, False)`, and the 500 case moves to busy:
 
 - 429, 500, 502, 503 → `Probed(PORTAL, True)`; 403 and 404 → None.
-- `ReadError`, `RemoteProtocolError` → busy; `ConnectError`, `ReadTimeout`, `GuardBlocked` → the next URL is tried.
+- `ReadError` → busy; `RemoteProtocolError`, `ConnectError`, `ReadTimeout`, `GuardBlocked` → the next URL is tried.
 - 503 on the second hop of a redirect → `Probed(PORTAL, True)`.
 - `[PORTAL busy, OTHER 200]` → `Probed(PORTAL, True)` and OTHER is never requested.
 - `[PORTAL 404, OTHER 503]` → `Probed(OTHER, True)`.
