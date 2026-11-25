@@ -181,14 +181,16 @@ async def answer(
     setup: TeachSetup,
     msg: InboundMessage,
 ) -> bool:
-    """Answer the sender's newest BR-F15 or BR-F02 question with their free text (R-11.4, D191).
+    """Answer the sender's newest BR-F14, BR-F15 or BR-F02 question (R-11.4, D191, D192).
 
     BR-F15 takes any text, but only a link once the question was answered "no
     sé"; a settled invoice takes none: "no sé" answers BR-F02_dont_know, a link the request guard
     accepts is echoed as BR-F14 with the invoice's candidate stored, and anything else
-    repeats BR-F15. BR-F02 takes only "no sé" or one ``https`` URL, echoed the same way;
-    any other text is left to the edit paths. Returns True when the text was handled, so
-    the caller does not run the usual edit/override paths.
+    repeats BR-F15. BR-F14 takes only one ``https`` URL, and only while its candidate still
+    waits on an invoice that is not settled: the URL is the correction and is echoed as the
+    new BR-F14, replacing the candidate. BR-F02 takes only "no sé" or one ``https`` URL,
+    echoed the same way; any other text over BR-F14 or BR-F02 is left to the edit paths. Returns
+    True when the text was handled, so the caller does not run the usual edit/override paths.
     """
     question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
     if question is None:
@@ -199,6 +201,8 @@ async def answer(
             return False
         await _answer_br_f15(conn, setup, msg, invoice_id)
         return True
+    if rule_id == RULE_PORTAL_OFFER:
+        return await _answer_br_f14(conn, setup, msg, invoice_id)
     if rule_id != RULE_ASK_PORTAL:
         return False
     return await _answer_br_f02(conn, setup, msg, invoice_id)
@@ -323,6 +327,30 @@ async def _answer_br_f15(
         await dont_know_reply(conn, addressee, invoice_id)
         return
     await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+
+
+async def _answer_br_f14(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    msg: InboundMessage,
+    invoice_id: int,
+) -> bool:
+    """Answer BR-F14 with a typed link, leaving any other text to the edit paths (BR-F14, D192).
+
+    The link is the correction only while the offer still waits: the invoice exists and is
+    not settled, and its candidate was not consumed. The shape check comes first, so any
+    other text costs no query.
+    """
+    if not looks_like_url(msg.text):
+        return False
+    head = await load_invoice_head(conn, invoice_id)
+    if head is None or head.state in SETTLED:
+        return False
+    if await portal_candidates.get(conn, invoice_id) is None:
+        return False
+    addressee = Addressee(msg.channel, msg.profile_id)
+    await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+    return True
 
 
 async def _answer_br_f02(
