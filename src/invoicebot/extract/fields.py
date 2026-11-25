@@ -35,6 +35,14 @@ PRINTED_URL_PATH_CHARS = r"[A-Za-z0-9\-._~%!$&'()*+,;=:@/?#]"
 #: A printed URL as a reading stores it: https, a lowercase ASCII host, an optional path (D189).
 _PRINTED_URL_SHAPE = re.compile(rf"https://[a-z0-9.-]+(?:/{PRINTED_URL_PATH_CHARS}*)?")
 
+#: The label prefix of an internationalized (punycode) host, refused so a lookalike of a
+#: known domain is never offered (D189).
+PUNYCODE_PREFIX = "xn--"
+#: A host needs a dot, so at least two labels, and a 2-24 letter top level (D189).
+HOST_MIN_LABELS = 2
+TLD_MIN_CHARS = 2
+TLD_MAX_CHARS = 24
+
 #: Most characters the re-read line under a consult anchor may have (D191).
 MAX_URL_STRIP_CHARS = 120
 #: The characters a URL strip may hold: the URL ones a portal guess needs, plus a space (D191).
@@ -129,6 +137,17 @@ def is_printed_url(value: object) -> bool:
         and len(value) <= MAX_PRINTED_URL_CHARS
         and _PRINTED_URL_SHAPE.fullmatch(value) is not None
     )
+
+
+def is_printed_host(host: str) -> bool:
+    """Return whether ``host`` is dotted labels whose top level is 2-24 letters (D189)."""
+    labels = host.split(".")
+    if len(labels) < HOST_MIN_LABELS or not all(labels):
+        return False
+    if any(label.startswith(PUNYCODE_PREFIX) for label in labels):
+        return False
+    top_level = labels[-1]
+    return TLD_MIN_CHARS <= len(top_level) <= TLD_MAX_CHARS and top_level.isascii() and top_level.isalpha()
 
 
 def is_url_strip(value: object) -> bool:
