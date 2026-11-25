@@ -84,6 +84,43 @@ def test_load_rules_unknown_document_type_raises(tmp_path: Path) -> None:
         load_rules(path)
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("ESTE COMPROBANTE PODRÁ SER CONSULTADO EN:", id="accented-colon"),
+        pytest.param("ESTE COMPROSANTE PODRÁ SER CONSULTADO EN;", id="garble-semicolon"),
+        pytest.param("Consulte su comprobante en", id="no-punctuation"),
+        pytest.param("CONSULTADO EN :", id="spaced-colon"),
+    ],
+)
+def test_anchor_pattern_matches_the_line_above_a_printed_url(rules: ParsingRules, line: str) -> None:
+    """D191: the CONSULT… EN line printed above a portal address matches the anchor."""
+    assert rules.anchor_pattern.search(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param("CONSULTADO EN https://portal.example.pe", id="url-on-the-same-line"),
+        pytest.param("TOTAL EN SOLES", id="no-consult-keyword"),
+    ],
+)
+def test_anchor_pattern_does_not_match_a_line_without_an_anchor(rules: ParsingRules, line: str) -> None:
+    """D191: a URL on the anchor's own line or an unrelated EN line is not an anchor."""
+    assert rules.anchor_pattern.search(line) is None
+
+
+def test_load_rules_anchor_pattern_that_does_not_compile_raises(tmp_path: Path) -> None:
+    """D191: a printed_url_anchor that is not a valid regex is rejected when the file loads."""
+    document = yaml.safe_load(RULES_PATH.read_text(encoding="utf-8"))
+    document["printed_url_anchor"] = "("
+    path = tmp_path / "parsing_rules.yaml"
+    path.write_text(yaml.safe_dump(document), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not compile"):
+        load_rules(path)
+
+
 def test_parse_ocr_factura_reads_six_required_fields(rules: ParsingRules) -> None:
     """R-2.3: a factura with every required field reads them all with source 'ocr'."""
     text = _ocr(

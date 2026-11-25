@@ -67,8 +67,10 @@ class ParsingRules(BaseModel):
     amount_gap: KeywordPattern
     amount_value: ValuePattern
     amounts: dict[str, tuple[KeywordPattern, ...]]
+    printed_url_anchor: str
 
     _amount_patterns: dict[str, tuple[re.Pattern[str], ...]] = PrivateAttr()
+    _anchor_pattern: re.Pattern[str] = PrivateAttr()
 
     @model_validator(mode="after")
     def _check_field_names(self) -> Self:
@@ -96,10 +98,21 @@ class ParsingRules(BaseModel):
         object.__setattr__(self, "_amount_patterns", combined)
         return self
 
+    @model_validator(mode="after")
+    def _build_anchor_pattern(self) -> Self:
+        """Compile the line anchor that sits just above a printed portal address (D191)."""
+        object.__setattr__(self, "_anchor_pattern", _compile_rule(self.printed_url_anchor, ()))
+        return self
+
     @property
     def amount_patterns(self) -> dict[str, tuple[re.Pattern[str], ...]]:
         """Return the compiled keyword-gap-value patterns per amount field, in file order."""
         return self._amount_patterns
+
+    @property
+    def anchor_pattern(self) -> re.Pattern[str]:
+        """Return the compiled pattern for the line above a printed portal address (D191)."""
+        return self._anchor_pattern
 
 
 def load_rules(path: Path) -> ParsingRules:
