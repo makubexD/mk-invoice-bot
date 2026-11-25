@@ -62,6 +62,8 @@ MESSAGE_BR_F15_RETRY = "BR-F15_retry"
 MESSAGE_UNVERIFIED = "BR-F14_unverified"
 #: BR-F14's text when the address exists but its server is down (BR-F14, D192).
 MESSAGE_BUSY = "BR-F14_busy"
+#: BR-F14's text when the address that answers is on another host than the one read (BR-F14, D193).
+MESSAGE_OTHER_HOST = "BR-F14_other_host"
 #: BR-F15's text when the ticket's strip is no address at all (BR-F15, D192).
 MESSAGE_UNREAD = "BR-F15_unread"
 #: The questions each press answers when its rule is the invoice's newest (BR-F14, BR-F02, BR-F15, D191).
@@ -134,11 +136,43 @@ async def offer_candidate(
     ``message`` picks the text from :data:`MESSAGES`; the rule id, the buttons and the
     stored candidate stay BR-F14's. The caller owns the transaction.
     """
-    await portal_candidates.save(conn, invoice_id, url)
     text = MESSAGES[message].format(
         razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
         url=url,
     )
+    await _offer_text(conn, addressee, invoice_id, url, text)
+
+
+async def offer_other_host(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+    reading: Reading,
+    url: str,
+    read_host: str,
+) -> None:
+    """Offer ``url`` as BR-F14, saying the ticket's own host ``read_host`` did not answer (BR-F14, D193).
+
+    The rule id, the buttons and the stored candidate are BR-F14's, as in :func:`offer_candidate`.
+    The caller owns the transaction.
+    """
+    text = MESSAGES[MESSAGE_OTHER_HOST].format(
+        read_host=read_host,
+        razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
+        url=url,
+    )
+    await _offer_text(conn, addressee, invoice_id, url, text)
+
+
+async def _offer_text(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+    url: str,
+    text: str,
+) -> None:
+    """Store ``url`` as the candidate, then queue ``text`` with BR-F14's buttons (BR-F14, D191)."""
+    await portal_candidates.save(conn, invoice_id, url)
     await queue_message(
         conn,
         addressee,
