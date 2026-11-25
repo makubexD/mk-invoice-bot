@@ -382,13 +382,18 @@ async def test_printed_url_is_tried_before_the_strip(
 
 @pytest.mark.parametrize(
     "url",
-    ["https://portal.example.pe/cpe?ruc=1", "https://portal.example.app/cpe"],
-    ids=["query", "other_top_level"],
+    [
+        "https://portal.example.pe/cpe?ruc=1",
+        "https://portal.example.app/cpe",
+        "https://portal.example.pe/Tienda",
+        "https://portal.example.pe/tiendas",
+    ],
+    ids=["query", "other_top_level", "issuer_word_with_capital", "close_to_an_issuer_word"],
 )
 async def test_printed_url_the_repair_loses_is_tried_first_as_printed(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], url: str
 ) -> None:
-    """BR-F14, D192: a printed URL with a query or another top level is tried and offered verbatim."""
+    """BR-F14, D192: a printed URL the repair would change is tried and offered verbatim."""
     transport, requested = _answering(url)
     invoice_id = await _invoice(db_pool, _reading(printed_url=url))
 

@@ -133,8 +133,10 @@ async def test_first_answering_follows_a_public_redirect() -> None:
         "https://127.0.0.1/",
         "https://e-consulta.sunat.gob.pe/",
         "https://x.example.pe:8443/",
+        "https://x.example.pe:99999/",
+        "https://x.example.pe:abc/",
     ],
-    ids=["plain_http", "loopback", "sunat", "other_port"],
+    ids=["plain_http", "loopback", "sunat", "other_port", "port_out_of_range", "port_not_a_number"],
 )
 async def test_first_answering_refuses_a_redirect_target(target: str) -> None:
     """R-5.10, D192: a redirect the taught-link checks refuse is no answer and is never requested."""

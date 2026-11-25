@@ -71,7 +71,7 @@ _NAME_WORD_PATTERN = re.compile(r"[a-z0-9]+")
 def candidate_urls(text: str, issuer_name: str | None, known_hosts: frozenset[str]) -> tuple[str, ...]:
     """Return at most :data:`MAX_CANDIDATES` portal URLs the strip may mean, best first (BR-F14, D192).
 
-    A host read as SUNAT's gives no candidate, so no look-alike of it is ever offered (R-5.2).
+    A host read as SUNAT's gives no candidate, so none of its variants is ever offered (R-5.2).
     """
     host_part, path_part = _host_and_path(text)
     host = _repair_host_read(host_part)

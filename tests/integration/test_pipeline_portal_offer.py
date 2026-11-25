@@ -842,6 +842,23 @@ async def test_typed_url_that_resolves_private_asks_br_f15_retry(
     assert candidate == PRINTED_URL
 
 
+async def test_typed_url_with_a_bad_port_asks_br_f15_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a typed link whose port is out of range asks BR-F15 again and leaves the candidate."""
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        handled = await answer(conn, _setup(), _text_message(SENDER, "https://x.example.pe:99999/"))
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is True
+    assert rows[-1] == (MESSAGES["BR-F15_retry"], "BR-F15", _br_f15_buttons(invoice_id))
+    assert candidate == PRINTED_URL
+
+
 async def test_text_that_is_not_a_url_leaves_br_f14_open(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

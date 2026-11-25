@@ -32,6 +32,7 @@ from invoicebot.app import (
     _google_tokens,
     _laptop_secrets,
     _log_reload_failure,
+    _no_cookies,
     _portal_handlers,
     _secret_problem,
     _sol_fetcher,
@@ -326,8 +327,17 @@ def test_sunat_validation_on_with_secrets_registers_the_recheck_step(tmp_path: P
     assert set(handlers) == {VALIDATE_STEP, SUNAT_RECHECK_STEP}
 
 
+def test_no_cookies_jar_keeps_nothing() -> None:
+    """R-5.10, D192: a cookie a guessed host sets is not kept by the probe's client."""
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, headers={"set-cookie": "a=b; Path=/"}))
+    with httpx.Client(transport=transport, cookies=_no_cookies()) as client:
+        client.get("https://portal.example.pe/")
+
+        assert len(client.cookies.jar) == 0
+
+
 def test_portal_check_step_is_registered() -> None:
-    """D192: the app registers the portal check step, so a queued check never dies as an unknown step."""
+    """D192: the portal handlers hold the portal check step and no other."""
     handlers = _portal_handlers(cast(Any, None), cast(Any, None))
 
     assert set(handlers) == {PORTAL_CHECK_STEP}

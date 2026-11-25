@@ -15,6 +15,7 @@ from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from functools import partial
+from http.cookiejar import CookieJar, DefaultCookiePolicy
 from pathlib import Path
 
 import httpx
@@ -293,17 +294,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
     intake_deps = IntakeDeps(pool=pool, intake=intake_settings(cfg))
     async with (
         httpx.AsyncClient(timeout=HTTP_TIMEOUT_S) as http,
-        httpx.AsyncClient(
-            transport=GuardedTransport(
-                # A pinned request reaches httpcore by IP, so a pooled connection would carry an
-                # earlier host's TLS check to another host on the same IP (R-5.10). HTTP/2 must
-                # stay off for the same reason: one h2 connection multiplexes hosts on an IP.
-                httpx.AsyncHTTPTransport(limits=httpx.Limits(max_keepalive_connections=0)),
-                SystemResolver(),
-            ),
-            follow_redirects=False,
-            timeout=HTTP_TIMEOUT_S,
-        ) as guarded_http,
+        _guarded_client() as guarded_http,
+        # A guessed host must not plant cookies in the client the fetchers use (D192).
+        _guarded_client(_no_cookies()) as probe_http,
     ):
         wirings, channel_problem = _build_channels(
             cfg, _channel_builders(settings.data_dir), lambda b: b(cfg, store, http, intake_deps)
@@ -345,7 +338,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         sources = _media_sources(wirings)
         handlers = {
             **_media_handlers(cfg, sources, settings, pool),
-            **_portal_handlers(pool, guarded_http),
+            **_portal_handlers(pool, probe_http),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -500,9 +493,30 @@ def _media_handlers(
     }
 
 
-def _portal_handlers(pool: Pool, guarded_http: httpx.AsyncClient) -> dict[str, Handler]:
-    """Return the portal check handler, which must only use the guarded client (R-5.10, D192)."""
-    return {PORTAL_CHECK_STEP: make_portal_check_handler(pool, guarded_http)}
+def _guarded_client(cookies: CookieJar | None = None) -> httpx.AsyncClient:
+    """Return a client whose every request passes the request guard (R-5.10)."""
+    return httpx.AsyncClient(
+        transport=GuardedTransport(
+            # A pinned request reaches httpcore by IP, so a pooled connection would carry an
+            # earlier host's TLS check to another host on the same IP (R-5.10). HTTP/2 must
+            # stay off for the same reason: one h2 connection multiplexes hosts on an IP.
+            httpx.AsyncHTTPTransport(limits=httpx.Limits(max_keepalive_connections=0)),
+            SystemResolver(),
+        ),
+        cookies=cookies,
+        follow_redirects=False,
+        timeout=HTTP_TIMEOUT_S,
+    )
+
+
+def _no_cookies() -> CookieJar:
+    """Return a cookie jar that keeps nothing (D192)."""
+    return CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
+
+
+def _portal_handlers(pool: Pool, probe_http: httpx.AsyncClient) -> dict[str, Handler]:
+    """Return the portal check handler, which must only use a guarded client (R-5.10, D192)."""
+    return {PORTAL_CHECK_STEP: make_portal_check_handler(pool, probe_http)}
 
 
 def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:

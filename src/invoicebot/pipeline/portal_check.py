@@ -89,16 +89,16 @@ def make_portal_check_handler(pool: Pool, http: httpx.AsyncClient) -> Handler:
 
 
 def _candidates(check: _Check) -> tuple[str, ...]:
-    """Return the URLs to try, with a printed URL the OCR repair loses first, as printed (D192).
+    """Return the URLs to try, a printed URL first and as printed (D192).
 
     The repair is made for a strip: it drops a query string and any top level it does not
-    expect, both of which a printed URL may really have (D189).
+    expect, and bends the path to the issuer's name; a printed URL needs none of that (D189).
     """
     candidates = candidate_urls(check.text, check.reading.value("razon_social"), check.hosts)
     printed = check.reading.printed_url
-    if printed is None or printed in candidates or taught_url_refusal(printed) is not None:
+    if printed is None or taught_url_refusal(printed) is not None:
         return candidates
-    return (printed, *candidates)[:MAX_CANDIDATES]
+    return tuple(dict.fromkeys((printed, *candidates)))[:MAX_CANDIDATES]
 
 
 async def _read(pool: Pool, invoice_id: int) -> _Check | None:
