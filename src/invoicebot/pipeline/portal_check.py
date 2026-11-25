@@ -71,7 +71,8 @@ def make_portal_check_handler(pool: Pool, http: httpx.AsyncClient) -> Handler:
         if check is None:
             return
         candidates = _candidates(check)
-        answering = await first_answering(http, candidates) if candidates else None
+        probed = await first_answering(http, candidates) if candidates else None
+        answering = probed.url if probed is not None and not probed.busy else None
         async with pool.connection() as conn, conn.transaction():
             await _record(conn, check, candidates, answering)
         logger.info(

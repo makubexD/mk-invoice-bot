@@ -12,7 +12,7 @@ import pytest
 from invoicebot.net import url_probe
 from invoicebot.net.guard import GuardReason, Resolver
 from invoicebot.net.http import GuardBlocked, GuardedTransport
-from invoicebot.net.url_probe import first_answering
+from invoicebot.net.url_probe import Probed, first_answering
 
 PORTAL = "https://portal.example.pe/"
 OTHER = "https://other.example.pe/"
@@ -52,7 +52,7 @@ async def test_first_answering_returns_the_url_that_answers() -> None:
         return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL]) == PORTAL
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, False)
 
 
 async def test_first_answering_skips_a_url_that_does_not_answer() -> None:
@@ -63,12 +63,12 @@ async def test_first_answering_skips_a_url_that_does_not_answer() -> None:
         return httpx.Response(status)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL, OTHER]) == OTHER
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, False)
 
 
-@pytest.mark.parametrize("status", [403, 500], ids=["forbidden", "server_error"])
+@pytest.mark.parametrize("status", [403, 404], ids=["forbidden", "not_found"])
 async def test_first_answering_does_not_answer_on_an_error_status(status: int) -> None:
-    """R-5.10, D192: a non-2xx status is no answer."""
+    """R-5.10, D192: a 403 or 404 is no answer."""
     requested: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -77,6 +77,25 @@ async def test_first_answering_does_not_answer_on_an_error_status(status: int) -
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
         assert await first_answering(client, [PORTAL]) is None
+
+    assert requested == [PORTAL]
+
+
+@pytest.mark.parametrize(
+    "status",
+    [429, 500, 502, 503],
+    ids=["too_many_requests", "server_error", "bad_gateway", "unavailable"],
+)
+async def test_first_answering_reports_a_busy_status(status: int) -> None:
+    """R-5.10, D192: a 429 or a 5xx means the address is busy."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(status)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, True)
 
     assert requested == [PORTAL]
 
@@ -104,7 +123,7 @@ async def test_first_answering_follows_a_public_redirect() -> None:
         return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL]) == PORTAL
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, False)
 
 
 @pytest.mark.parametrize(
@@ -142,7 +161,7 @@ async def test_first_answering_follows_five_redirects() -> None:
         return httpx.Response(302, headers={"location": f"https://portal.example.pe/hop{len(requested)}"})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL]) == PORTAL
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, False)
 
     assert len(requested) == 6
 
@@ -188,14 +207,27 @@ async def test_first_answering_does_not_answer_on_a_malformed_location() -> None
         assert await first_answering(client, [PORTAL]) is None
 
 
+async def test_first_answering_reports_a_busy_redirect_hop() -> None:
+    """R-5.10, D192: a 5xx on a hop of a redirect means the address is busy."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if str(request.url) == PORTAL:
+            return httpx.Response(302, headers={"location": "/portal"})
+        return httpx.Response(503)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, True)
+
+
 @pytest.mark.parametrize(
     "error",
     [
         GuardBlocked(GuardReason.PRIVATE_ADDRESS),
         httpx.ConnectError("connection refused"),
         httpx.ReadTimeout("read timed out"),
+        httpx.RemoteProtocolError("protocol error"),
     ],
-    ids=["guard_blocked", "connect_error", "read_timeout"],
+    ids=["guard_blocked", "connect_error", "read_timeout", "protocol_error"],
 )
 async def test_first_answering_tries_the_next_url_after_a_transport_error(
     error: Exception,
@@ -208,7 +240,49 @@ async def test_first_answering_tries_the_next_url_after_a_transport_error(
         return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL, OTHER]) == OTHER
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, False)
+
+
+async def test_first_answering_reports_a_dropped_connection_as_busy() -> None:
+    """R-5.10, D192: a connection dropped after it opened means the address is busy."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        raise httpx.ReadError("connection dropped")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(PORTAL, True)
+
+    assert requested == [PORTAL]
+
+
+async def test_first_answering_stops_at_a_busy_url() -> None:
+    """R-5.10, D192: a busy address stops the probe before a later one that answers."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(503 if str(request.url) == PORTAL else 200)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(PORTAL, True)
+
+    assert requested == [PORTAL]
+
+
+async def test_first_answering_reports_the_busy_url_after_a_no_answer() -> None:
+    """R-5.10, D192: the first busy URL after a no-answer one is reported with its own URL."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(503 if str(request.url) == OTHER else 404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, True)
+
+    assert requested == [PORTAL, OTHER]
 
 
 async def test_first_answering_tries_the_next_url_after_a_hanging_hop(
@@ -224,7 +298,7 @@ async def test_first_answering_tries_the_next_url_after_a_hanging_hop(
         return httpx.Response(200)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL, OTHER]) == OTHER
+        assert await first_answering(client, [PORTAL, OTHER]) == Probed(OTHER, False)
 
 
 async def test_first_answering_gives_up_at_the_total_deadline(
@@ -249,7 +323,7 @@ async def test_first_answering_does_not_read_the_body() -> None:
         return httpx.Response(200, stream=stream)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-        assert await first_answering(client, [PORTAL]) == PORTAL
+        assert await first_answering(client, [PORTAL]) == Probed(PORTAL, False)
 
     assert stream.closed
 
@@ -271,6 +345,54 @@ async def test_first_answering_sends_no_cookie_header() -> None:
     assert "cookie" not in requests[1].headers
 
 
+@pytest.mark.parametrize(
+    ("status", "outcome"),
+    [(200, "answered"), (503, "busy"), (404, "none")],
+    ids=["answered", "busy", "none"],
+)
+async def test_first_answering_logs_one_outcome_per_call(
+    status: int,
+    outcome: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-5.10, D192: one probe finished record reports the outcome, the count and the reasons."""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status)
+
+    with caplog.at_level(logging.INFO, logger="invoicebot.net.url_probe"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await first_answering(client, [PORTAL])
+
+    records = [record for record in caplog.records if record.name == "invoicebot.net.url_probe"]
+    assert [record.getMessage() for record in records] == ["probe finished"]
+    assert records[0].__dict__["outcome"] == outcome
+    assert records[0].__dict__["tried"] == 1
+    assert records[0].__dict__["reasons"] == [str(status)]
+
+
+async def test_first_answering_logs_the_total_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """R-5.10, D192: a probe stopped by its total deadline logs none with TimeoutError."""
+    monkeypatch.setattr(url_probe, "PROBE_TOTAL_S", 0.05)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        await asyncio.Event().wait()
+        return httpx.Response(200)  # pragma: no cover
+
+    with caplog.at_level(logging.INFO, logger="invoicebot.net.url_probe"):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            assert await first_answering(client, [PORTAL, OTHER]) is None
+
+    records = [record for record in caplog.records if record.name == "invoicebot.net.url_probe"]
+    assert [record.getMessage() for record in records] == ["probe finished"]
+    assert records[0].__dict__["outcome"] == "none"
+    assert records[0].__dict__["tried"] == 1
+    assert records[0].__dict__["reasons"] == ["TimeoutError"]
+
+
 async def test_first_answering_logs_no_url_or_host(caplog: pytest.LogCaptureFixture) -> None:
     """R-5.10, D192: a refused, an erroring and an answering URL are logged without either."""
     secret = f"cannot reach {BROKEN}"
@@ -282,12 +404,13 @@ async def test_first_answering_logs_no_url_or_host(caplog: pytest.LogCaptureFixt
 
     with caplog.at_level(logging.DEBUG, logger="invoicebot.net.url_probe"):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            assert await first_answering(client, [REFUSED, BROKEN, PORTAL]) == PORTAL
+            assert await first_answering(client, [REFUSED, BROKEN, PORTAL]) == Probed(PORTAL, False)
 
     records = [record for record in caplog.records if record.name == "invoicebot.net.url_probe"]
-    assert any(record.__dict__.get("reason") == "http_not_allowed" for record in records)
-    assert any(record.__dict__.get("error") == "ConnectError" for record in records)
-    assert any(record.__dict__.get("status") == 200 for record in records)
+    assert [record.getMessage() for record in records] == ["probe finished"]
+    assert records[0].__dict__["outcome"] == "answered"
+    assert records[0].__dict__["tried"] == 3
+    assert records[0].__dict__["reasons"] == ["http_not_allowed", "ConnectError", "200"]
     logged = repr([record.__dict__ for record in records])
     for value in (
         REFUSED,
