@@ -36,19 +36,19 @@ _EXCLUDED_WORDS: frozenset[str] = frozenset(
 _TIPO_EXCLUDED_WORDS: frozenset[str] = frozenset({"nota", "exportacion"})
 
 
-def _fold(text: str) -> str:
+def fold(text: str) -> str:
     """Drop accents and case so words compare across typography (D193)."""
     decomposed = unicodedata.normalize("NFKD", text)
     return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
 
 
-def _words(text: str) -> frozenset[str]:
+def words(text: str) -> frozenset[str]:
     """Fold *text* and split it into whole words (D193).
 
     Words are runs of letters or digits; ``N°`` becomes ``n`` so the degree sign
     does not split the surrounding words.
     """
-    return frozenset(re.findall(r"[a-z0-9]+", _fold(text)))
+    return frozenset(re.findall(r"[a-z0-9]+", fold(text)))
 
 
 def _name_words(html_name: str) -> frozenset[str]:
@@ -63,7 +63,7 @@ def _name_words(html_name: str) -> frozenset[str]:
         " ",
         html_name,
     )
-    return _words(separated)
+    return words(separated)
 
 
 def _match(words: frozenset[str]) -> ValueName | None:
@@ -82,7 +82,7 @@ def value_name(label: str, html_name: str) -> ValueName | None:
     separator parts and matched the same way. At most one value is returned, the first
     in the tie-break order.
     """
-    label_words = _words(label)
+    label_words = words(label)
     if _EXCLUDED_WORDS & label_words:
         return None
     label_match = _match(label_words)
@@ -108,8 +108,9 @@ def tipo_option(options: Sequence[str], tipo: str) -> str | None:
     other = "boleta" if wanted == "factura" else "factura"
     counted: list[str] = []
     for option in options:
-        words = _words(option)
-        if wanted in words and other not in words and not (_TIPO_EXCLUDED_WORDS & words):
+        option_words = words(option)
+        usable = wanted in option_words and other not in option_words
+        if usable and not (_TIPO_EXCLUDED_WORDS & option_words):
             counted.append(option)
     return counted[0] if len(counted) == 1 else None
 
@@ -120,7 +121,7 @@ def date_text(fecha: date, placeholder: str) -> str:
     An empty placeholder or ``yyyy-mm-dd`` gives ISO; ``dd-mm-yyyy`` gives dashes;
     anything else gives ``dd/mm/yyyy``. Spanish ``aaaa`` stands for ``yyyy``.
     """
-    folded = _fold(placeholder.strip()).replace("aaaa", "yyyy")
+    folded = fold(placeholder.strip()).replace("aaaa", "yyyy")
     if folded in ("", "yyyy-mm-dd"):
         return fecha.isoformat()
     if folded == "dd-mm-yyyy":

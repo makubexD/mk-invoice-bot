@@ -9,7 +9,6 @@ or clicks; reaching the form is another module's job.
 from __future__ import annotations
 
 import re
-import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from string import Template
@@ -19,7 +18,7 @@ from urllib.parse import urlsplit
 from playwright.async_api import Page
 from pydantic import BaseModel, ConfigDict, Field
 
-from invoicebot.fetchers.browser.field_match import value_name
+from invoicebot.fetchers.browser.field_match import value_name, words
 from invoicebot.fetchers.browser.probe_protocol import (
     MAX_FIELD_OPTIONS,
     MAX_REPORT_FIELDS,
@@ -336,18 +335,7 @@ async def _submit(page: Page, buttons: Sequence[_RawButton], group: int) -> str 
 
 def _has_submit_word(text: str) -> bool:
     """Return whether *text* has a whole submit word, accents and case dropped (D193)."""
-    return bool(_words(text) & _SUBMIT_WORDS)
-
-
-def _fold(text: str) -> str:
-    """Drop accents and case so words compare across typography (D193)."""
-    decomposed = unicodedata.normalize("NFKD", text)
-    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).casefold()
-
-
-def _words(text: str) -> frozenset[str]:
-    """Fold *text* and split it into whole words (D193)."""
-    return frozenset(re.findall(r"[a-z0-9]+", _fold(text)))
+    return bool(words(text) & _SUBMIT_WORDS)
 
 
 async def _locate(page: Page, control_id: str, name: str) -> str | None:
