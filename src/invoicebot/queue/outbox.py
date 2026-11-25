@@ -139,6 +139,36 @@ async def set_pending_issue_hint(
     return cur.rowcount
 
 
+async def hold(conn: AsyncConnection[Any], outbox_id: int, delay: timedelta) -> None:
+    """Make a row just added by :func:`add` due ``delay`` after the database clock's now (D193).
+
+    Does not commit.
+    """
+    await conn.execute(
+        "UPDATE outbox SET run_after = now() + %s WHERE id = %s AND state = 'pending'",
+        (delay, outbox_id),
+    )
+
+
+async def release_issue(conn: AsyncConnection[Any], fingerprint: str) -> int:
+    """Make a held ``create_issue`` row of ``fingerprint`` due now and return the row count (D193).
+
+    Only a pending row that was never tried and has no error is released; a sent row,
+    or one that already failed and keeps its backoff, matches nothing. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        UPDATE outbox
+        SET run_after = now()
+        WHERE channel = 'github' AND state = 'pending' AND attempts = 0 AND last_error IS NULL
+          AND payload_json->>'op' = 'create_issue'
+          AND payload_json->>'fingerprint' = %s
+        """,
+        (fingerprint,),
+    )
+    return cur.rowcount
+
+
 async def rows_after(conn: AsyncConnection[Any], channel: str, after_id: int) -> list[OutboxRow]:
     """Return ``channel``'s outbox rows above ``after_id``, oldest first (D165).
 

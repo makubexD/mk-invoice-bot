@@ -17,6 +17,7 @@ from invoicebot.fetchers.base import FetchReason
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.gaps import (
+    PORTAL_ISSUE_HOLD,
     GapContext,
     GapSighting,
     close_if_fixed,
@@ -26,6 +27,7 @@ from invoicebot.pipeline.gaps import (
     writes_today,
 )
 from invoicebot.queue import outbox
+from invoicebot.store import portal_probes, taught_links
 from invoicebot.store.gaps import upsert_gap
 from invoicebot.store.invoices import create_invoice
 
@@ -57,6 +59,8 @@ async def clean_gap_tables(db_pool: AsyncConnectionPool[AsyncConnection[Any]]) -
         await conn.execute("DELETE FROM invoice_gaps")
         await conn.execute("DELETE FROM gaps")
         await conn.execute("DELETE FROM outbox")
+        await conn.execute("DELETE FROM portal_probes")
+        await conn.execute("DELETE FROM taught_links")
     yield
 
 
@@ -571,3 +575,99 @@ async def test_writes_today_counts_only_github_rows_since_local_midnight(
         )
 
     assert await writes_today(db_pool, "America/Lima") == 1
+
+
+async def _create_issue_hold_seconds(conn: AsyncConnection[Any]) -> float:
+    """Return how many seconds ahead of now the one ``create_issue`` row is due."""
+    cur = await conn.execute(
+        """
+        SELECT extract(epoch FROM run_after - now()) FROM outbox
+        WHERE payload_json->>'op' = 'create_issue'
+        """
+    )
+    rows = await cur.fetchall()
+    assert len(rows) == 1
+    return float(rows[0][0])
+
+
+async def _probe_report_rows(conn: AsyncConnection[Any]) -> list[dict[str, Any]]:
+    """Return the payloads of every ``probe_report`` outbox row."""
+    cur = await conn.execute("SELECT payload_json FROM outbox WHERE payload_json->>'op' = 'probe_report'")
+    return [row[0] for row in await cur.fetchall()]
+
+
+def _teach_context(teach: bool) -> GapContext:
+    """Return a GitHub-enabled context with ``gaps.teach_via_chat`` set to ``teach``."""
+    ctx = _context(True)
+    return GapContext(
+        profiles=ctx.profiles,
+        gaps_cfg=ctx.gaps_cfg.model_copy(update={"teach_via_chat": teach}),
+    )
+
+
+async def test_a_first_portal_missing_issue_is_held_while_teaching_is_on(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: the issue row of a PORTAL_MISSING gap waits 12 h for a probe."""
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, _teach_context(True), _portal_sighting())
+        hold = await _create_issue_hold_seconds(conn)
+    assert abs(hold - PORTAL_ISSUE_HOLD.total_seconds()) < 60
+
+
+async def test_a_portal_missing_issue_is_immediate_with_teaching_off(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: with teach_via_chat off nothing waits for a probe."""
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, _teach_context(False), _portal_sighting())
+        assert abs(await _create_issue_hold_seconds(conn)) < 60
+
+
+async def test_a_done_probe_opens_the_issue_now_and_queues_its_report(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: a done probe means no hold, and one probe_report row follows the issue row."""
+    report = {"fields": [], "note": "synthetic"}
+    async with db_pool.connection() as conn:
+        await taught_links.propose(conn, ISSUER_RUC_INT, HINT_URL, "yo")
+        await portal_probes.start(conn, ISSUER_RUC_INT, 1, None)
+        assert await portal_probes.finish(conn, ISSUER_RUC_INT, 1, "ok", report)
+        await raise_gap(conn, _teach_context(True), _portal_sighting())
+        hold = await _create_issue_hold_seconds(conn)
+        reports = await _probe_report_rows(conn)
+    assert abs(hold) < 60
+    assert len(reports) == 1
+    assert reports[0]["op"] == "probe_report"
+    assert reports[0]["fingerprint"] == GAP_FINGERPRINT
+    assert reports[0]["url"] == HINT_URL
+    assert reports[0]["report"] == report
+
+
+async def test_a_queued_probe_still_holds_the_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: only a done probe lifts the hold; a queued one keeps it."""
+    async with db_pool.connection() as conn:
+        await portal_probes.start(conn, ISSUER_RUC_INT, 1, None)
+        await raise_gap(conn, _teach_context(True), _portal_sighting())
+        hold = await _create_issue_hold_seconds(conn)
+        reports = await _probe_report_rows(conn)
+    assert abs(hold - PORTAL_ISSUE_HOLD.total_seconds()) < 60
+    assert reports == []
+
+
+async def test_a_portal_broken_issue_is_never_held(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: only PORTAL_MISSING waits; PORTAL_BROKEN opens at once."""
+    sighting = GapSighting(
+        kind="PORTAL_BROKEN",
+        parts=(BROKEN_PORTAL_KEY,),
+        subject=f"{BROKEN_PORTAL_KEY}",
+        invoice_id=None,
+        fields=_fields("PORTAL_BROKEN", BROKEN_FINGERPRINT),
+    )
+    async with db_pool.connection() as conn:
+        await raise_gap(conn, _teach_context(True), sighting)
+        assert abs(await _create_issue_hold_seconds(conn)) < 60
