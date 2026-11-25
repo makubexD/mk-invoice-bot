@@ -324,7 +324,7 @@ Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `src/invoiceb
 
 - D192: a candidate that fails with 429, 5xx or a connection dropped after it opened is busy: its server exists. The
   check stops there and offers it as `BR-F14_busy`, instead of a weaker guess. No retry in 9t1.
-- `BR-F14_busy`: `Leí esta dirección para {razon_social}. El sitio existe, pero ahora está caído:\n{url}\n¿Es correcta? Si
+- `BR-F14_busy`: `Leí esta dirección para {razon_social}, pero el sitio está caído ahora:\n{url}\n¿Es correcta? Si
 no, toca [✏️ Corregir].` (one line in code after each `\n`)
 - Roadmap: 9t3 before 9t2, and 9t3 analyzes and tries the site before the issue is created (owner 2026-11-25).
 

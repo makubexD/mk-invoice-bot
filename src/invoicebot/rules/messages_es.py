@@ -107,7 +107,7 @@ MESSAGES: dict[str, str] = {
         "¿Es correcta? Si no, toca [✏️ Corregir]."
     ),
     "BR-F14_busy": (
-        "Leí esta dirección para {razon_social}. El sitio existe, pero ahora está caído:\n"
+        "Leí esta dirección para {razon_social}, pero el sitio está caído ahora:\n"
         "{url}\n"
         "¿Es correcta? Si no, toca [✏️ Corregir]."
     ),
