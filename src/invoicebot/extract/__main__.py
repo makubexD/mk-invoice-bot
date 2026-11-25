@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 import yaml
 from pypdfium2 import PdfDocument
 
@@ -36,11 +37,12 @@ from invoicebot.config.models import Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
 from invoicebot.extract.image import ImageUnreadable, load_gray
 from invoicebot.extract.merge import merge
-from invoicebot.extract.ocr import preprocess, read_text
+from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
 from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 from invoicebot.extract.pdf import TooManyPages, open_pdf, page_text, render_gray, text_to_ocr
 from invoicebot.extract.qr import QrHit, read_invoice_qr
+from invoicebot.extract.url_strip import read_url_strip
 
 #: Exit code for a bad invocation or an unreadable rules file; the handler retries these (R-9.4).
 EXIT_FAILURE = 1
@@ -160,7 +162,8 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     try:
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
-        processed = preprocess(gray)
+        straight = deskew(gray)
+        processed = binarize(straight)
     except (ImageUnreadable, cv2.error, MemoryError):
         return _unreadable(ocr=False)
     try:
@@ -169,8 +172,25 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     except MemoryError:
         # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
         text, ocr_reading = None, None
+    if text is not None and ocr_reading is not None and ocr_reading.printed_url is None:
+        ocr_reading = _with_url_strip(straight, text, ocr_cfg, rules, ocr_reading)
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     return _payload(reading, hit, ocr_ran=text is not None)
+
+
+def _with_url_strip(
+    straight: np.ndarray,
+    text: OcrText,
+    ocr_cfg: Ocr,
+    rules: ParsingRules,
+    reading: Reading,
+) -> Reading:
+    """Return ``reading`` with the strip under the consult anchor re-read, or unchanged (D191)."""
+    try:
+        strip = read_url_strip(straight, text, rules, ocr_cfg)
+    except (MemoryError, cv2.error):
+        return reading
+    return reading if strip is None else replace(reading, url_strip=strip)
 
 
 def _read_pdf(data: bytes, options: _Options) -> dict[str, Any]:
