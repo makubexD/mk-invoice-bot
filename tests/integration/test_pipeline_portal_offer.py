@@ -22,9 +22,10 @@ from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.rules.messages_es import (
     BUTTON_APPROVE,
     BUTTON_DONT_KNOW,
-    BUTTON_NO,
+    BUTTON_FIX,
     BUTTON_REJECT,
-    BUTTON_YES,
+    BUTTON_THIS_ONE,
+    BUTTON_WRITE_PORTAL,
     MESSAGES,
     state_desc,
 )
@@ -122,13 +123,27 @@ async def _outbox(
 
 
 def _offer_buttons(invoice_id: int) -> list[dict[str, str]]:
-    """Return the button payload BR-F14's offer must carry (D189)."""
+    """Return the button payload BR-F14's offer must carry (D191)."""
     base = f"u{invoice_id}"
     return [
-        {"id": f"{base}:yes", "title": BUTTON_YES},
-        {"id": f"{base}:no", "title": BUTTON_NO},
+        {"id": f"{base}:yes", "title": BUTTON_THIS_ONE},
+        {"id": f"{base}:fix", "title": BUTTON_FIX},
         {"id": f"{base}:dk", "title": BUTTON_DONT_KNOW},
     ]
+
+
+def _ask_portal_buttons(invoice_id: int) -> list[dict[str, str]]:
+    """Return the button payload BR-F02's question must carry (D191)."""
+    base = f"u{invoice_id}"
+    return [
+        {"id": f"{base}:fix", "title": BUTTON_WRITE_PORTAL},
+        {"id": f"{base}:dk", "title": BUTTON_DONT_KNOW},
+    ]
+
+
+def _br_f15_buttons(invoice_id: int) -> list[dict[str, str]]:
+    """Return the button payload BR-F15's question must carry (D191)."""
+    return [{"id": f"u{invoice_id}:dk", "title": BUTTON_DONT_KNOW}]
 
 
 def _decision_buttons(version: int = 1) -> list[dict[str, str]]:
@@ -142,6 +157,11 @@ def _decision_buttons(version: int = 1) -> list[dict[str, str]]:
 def _br_f02_text() -> str:
     """Return BR-F02's question for ISSUER_RUC (BR-F02)."""
     return MESSAGES["BR-F02"].format(razon_social=RAZON_SOCIAL, ruc_emisor=ISSUER_RUC)
+
+
+def _br_f15_text() -> str:
+    """Return BR-F15's question for ISSUER_RUC (BR-F15)."""
+    return MESSAGES["BR-F15"].format(razon_social=RAZON_SOCIAL)
 
 
 def _button_press(profile_id: str, button_id: str) -> InboundMessage:
@@ -159,7 +179,7 @@ def _button_press(profile_id: str, button_id: str) -> InboundMessage:
 async def test_ask_portal_with_printed_url_offers_it_with_three_buttons(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F14: the printed URL wins over the QR one and is offered with three buttons."""
+    """D191, BR-F14: the printed URL wins over the QR one and is offered with three buttons."""
     reading = _reading(printed_url=PRINTED_URL, document_url=OTHER_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
@@ -173,14 +193,14 @@ async def test_ask_portal_with_printed_url_offers_it_with_three_buttons(
 async def test_ask_portal_with_sunat_document_url_asks_br_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F02: a QR link on SUNAT's host is not offered; the sender is asked for the portal."""
+    """D191, BR-F02: a QR link on SUNAT's host is not offered; the sender is asked for the portal."""
     reading = _reading(document_url=SUNAT_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
 
-    assert rows == [(_br_f02_text(), "BR-F02", [{"id": f"u{invoice_id}:dk", "title": "No sé"}])]
+    assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
 
 
 async def test_ask_portal_with_other_document_url_offers_it(
@@ -200,14 +220,14 @@ async def test_ask_portal_with_other_document_url_offers_it(
 async def test_ask_portal_with_no_url_asks_br_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D190, BR-F02: with no URL to offer the sender is asked for the portal with a [No sé] button."""
+    """D191, BR-F02: with no URL to offer the sender is asked for the portal with [✏️ Lo escribo] [No sé]."""
     reading = _reading()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
 
-    assert rows == [(_br_f02_text(), "BR-F02", [{"id": f"u{invoice_id}:dk", "title": "No sé"}])]
+    assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
 
 
 async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
@@ -235,25 +255,96 @@ async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
     assert owner_rows == [(owner_text, "BR-S06", _decision_buttons())]
 
 
-async def test_no_asks_br_f02_for_the_invoice(
+async def test_fix_on_br_f14_asks_br_f15(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F14: [No] asks BR-F02 for that invoice and teaches no link."""
+    """D191, BR-F15: [✏️ Corregir] on the newest BR-F14 asks BR-F15 with [No sé]."""
     setup = _setup()
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:no"), setup)
-        link = await taught_links.get(conn, ISSUER_RUC)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:fix"), setup)
         rows = await _outbox(conn, SENDER)
 
+    br_f15_rows = [row for row in rows if row[1] == "BR-F15"]
+    assert br_f15_rows == [(_br_f15_text(), "BR-F15", _br_f15_buttons(invoice_id))]
+
+
+async def test_write_portal_on_br_f02_asks_br_f15(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: [✏️ Lo escribo] on the newest BR-F02 asks BR-F15 with [No sé]."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:fix"), setup)
+        rows = await _outbox(conn, SENDER)
+
+    br_f15_rows = [row for row in rows if row[1] == "BR-F15"]
+    assert br_f15_rows == [(_br_f15_text(), "BR-F15", _br_f15_buttons(invoice_id))]
+
+
+async def test_fix_on_an_older_br_f14_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-S02: [✏️ Corregir] whose BR-F14 is no longer the newest answers BR-S02 and asks nothing."""
+    setup = _setup()
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await queue_message(
+            conn,
+            Addressee("whatsapp", SENDER),
+            "¿Confirmas el flujo?",
+            invoice_id=invoice_id,
+            rule_id="BR-R03",
+        )
+        before = await _outbox(conn, SENDER)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:fix"), setup)
+        after = await _outbox(conn, SENDER)
+        state = await _state(conn, invoice_id)
+
+    stale = MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(state))
+    assert after == [*before, (stale, "BR-S02", [])]
+
+
+async def test_dont_know_while_br_f15_is_newest_answers_br_f02_dont_know(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: [No sé] on BR-F15's question answers BR-F02_dont_know."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await set_state(conn, invoice_id, "FETCHING_DOCS")
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:fix"), setup)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:dk"), setup)
+        rows = await _outbox(conn, SENDER)
+
+    assert rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+
+
+async def test_old_no_press_is_logged_and_queues_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: a press with the removed ``:no`` action is logged and changes nothing."""
+    setup = _setup()
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        before = await _outbox(conn, SENDER)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:no"), setup)
+        after = await _outbox(conn, SENDER)
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert after == before
     assert link is None
-    assert rows[-1] == (
-        _br_f02_text(),
-        "BR-F02",
-        [{"id": f"u{invoice_id}:dk", "title": "No sé"}],
-    )
 
 
 async def test_dont_know_answers_br_f02_dont_know_manual(

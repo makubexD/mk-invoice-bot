@@ -69,8 +69,8 @@ from invoicebot.pipeline.manual_message import (
 from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
 from invoicebot.pipeline.questions import (
     RULE_DOCS_NEEDED,
+    ask_portal_buttons,
     docs_needed_buttons,
-    dont_know_button,
     retry_button,
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
@@ -549,7 +549,7 @@ async def _ask_for_portal(
         inputs.job.invoice_id,
         RULE_ASK_PORTAL,
         text,
-        (dont_know_button(inputs.job.invoice_id),),
+        ask_portal_buttons(inputs.job.invoice_id),
     )
 
 

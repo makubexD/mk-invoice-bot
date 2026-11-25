@@ -41,6 +41,8 @@ from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_DONT_KNOW,
+    BUTTON_WRITE_PORTAL,
     FETCH_NO_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     FETCH_WAITING,
@@ -1406,7 +1408,7 @@ async def test_reading_document_url_reaches_the_fetcher(
 async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D190, BR-F02: an unknown issuer's first exhausted invoice gets BR-F07, then BR-F02 with [No sé]."""
+    """D191, BR-F02: an unknown issuer's first exhausted invoice gets BR-F07, then BR-F02 and its buttons."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
@@ -1419,7 +1421,10 @@ async def test_teach_first_no_portal_exhaustion_queues_f07_then_f02(
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07", "BR-F02"]
     ask_text, _rule_id = outbox[1]
     assert ask_text == MESSAGES["BR-F02"].format(razon_social="este emisor", ruc_emisor=STORE_RUC)
-    assert buttons[1] == [{"id": f"u{invoice_id}:dk", "title": "No sé"}]
+    assert buttons[1] == [
+        {"id": f"u{invoice_id}:fix", "title": BUTTON_WRITE_PORTAL},
+        {"id": f"u{invoice_id}:dk", "title": BUTTON_DONT_KNOW},
+    ]
 
 
 async def test_teach_second_no_portal_exhaustion_of_the_issuer_queues_f07_only(

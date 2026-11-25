@@ -28,7 +28,9 @@ from invoicebot.rules.messages_es import (
     BUTTON_RETRY,
     BUTTON_SEND_PDF,
     BUTTON_TEACH_PORTAL,
+    BUTTON_THIS_ONE,
     BUTTON_VOID,
+    BUTTON_WRITE_PORTAL,
     BUTTON_YES,
     MESSAGES,
     buyer_desc,
@@ -64,10 +66,12 @@ RULE_CONFIRM = "BR-S10"
 #: The sources whose field was read from the printed document (D189): a required field
 #: from one of these makes the summary doubtful and worth its buttons.
 PRINTED_SOURCES = frozenset({"ocr", "llm"})
-#: BR-F14 and BR-F02's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:no`` and
-#: ``u<invoice_id>:dk`` (D189, D190). ``u`` starts no other id: invoice ids start with a
+#: BR-F14, BR-F02 and BR-F15's button ids: ``u<invoice_id>:yes``, ``u<invoice_id>:fix``
+#: and ``u<invoice_id>:dk`` (D191). ``u`` starts no other id: invoice ids start with a
 #: digit, payments with ``p`` and BR-S06 with ``t``.
 OFFER_BUTTON_PREFIX = "u"
+BUTTON_YES_SUFFIX = "yes"
+BUTTON_FIX_SUFFIX = "fix"
 BUTTON_DONT_KNOW_SUFFIX = "dk"
 
 #: An action applied to its invoice in the caller's transaction; the resolved press carries
@@ -192,13 +196,30 @@ def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
 
 
 def offer_press_id(invoice_id: int, suffix: str) -> str:
-    """Return a BR-F14 or BR-F02 press id: ``u<invoice_id>:<suffix>`` (D189, D190)."""
+    """Return a BR-F14, BR-F02 or BR-F15 press id: ``u<invoice_id>:<suffix>`` (D191)."""
     return f"{OFFER_BUTTON_PREFIX}{invoice_id}:{suffix}"
 
 
 def dont_know_button(invoice_id: int) -> Button:
-    """Return the [No sé] button BR-F14's offer and BR-F02's question carry (D190)."""
+    """Return the [No sé] button BR-F14, BR-F02 and BR-F15's questions carry (D191)."""
     return Button(id=offer_press_id(invoice_id, BUTTON_DONT_KNOW_SUFFIX), title=BUTTON_DONT_KNOW)
+
+
+def offer_buttons(invoice_id: int) -> list[Button]:
+    """Return BR-F14's [✅ Sí, es este], [✏️ Corregir] and [No sé] buttons, in that order (D191)."""
+    return [
+        Button(id=offer_press_id(invoice_id, BUTTON_YES_SUFFIX), title=BUTTON_THIS_ONE),
+        Button(id=offer_press_id(invoice_id, BUTTON_FIX_SUFFIX), title=BUTTON_FIX),
+        dont_know_button(invoice_id),
+    ]
+
+
+def ask_portal_buttons(invoice_id: int) -> list[Button]:
+    """Return BR-F02's [✏️ Lo escribo] and [No sé] buttons, in that order (D191)."""
+    return [
+        Button(id=offer_press_id(invoice_id, BUTTON_FIX_SUFFIX), title=BUTTON_WRITE_PORTAL),
+        dont_know_button(invoice_id),
+    ]
 
 
 def _edit_cancel(invoice_id: int, edit_title: str, cancel_title: str) -> list[Button]:
