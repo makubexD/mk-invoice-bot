@@ -16,6 +16,7 @@ from invoicebot.config.loader import load_config
 from invoicebot.config.models import Profile
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.net.guard import Resolver
+from invoicebot.net.taught_url import MAX_TAUGHT_URL_CHARS
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.portal_offer import ask_portal, handle_press
 from invoicebot.pipeline.teach import TeachSetup
@@ -29,7 +30,7 @@ from invoicebot.rules.messages_es import (
     MESSAGES,
     state_desc,
 )
-from invoicebot.store import taught_links
+from invoicebot.store import portal_candidates, taught_links
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 from invoicebot.store.taught_links import TaughtLink
 
@@ -38,7 +39,11 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 ISSUER_RUC = 20000000001
+#: A second synthetic RUC that owns an approved link in one test.
+OTHER_RUC = 20000000010
 PUBLIC_ADDRESS = "93.184.216.34"
+#: A private address the request guard refuses.
+PRIVATE_ADDRESS = "10.0.0.1"
 #: The URL printed on the ticket, which BR-F14 offers first (D189).
 PRINTED_URL = "https://portal.example.pe/consulta"
 #: A QR link on a host `qr_url` may not fetch, so BR-F14 may offer it (D189).
@@ -46,6 +51,15 @@ OTHER_URL = "https://otro.example.pe/comprobante"
 #: SUNAT's generic query page, which BR-F14 never offers (D189).
 SUNAT_URL = "https://e-consulta.sunat.gob.pe/cl-ti-itmrconsruc/consulta"
 RAZON_SOCIAL = "Tienda Example"
+#: The strip OCR read under ``CONSULT… EN``, garbled as a scan prints it (D191).
+URL_STRIP = "hitps.//sy.example pe/tiemda"
+STRIP_RAZON_SOCIAL = "TIENDA SOL S.A.C."
+#: What the strip repairs to with no approved host close enough (D191).
+REPAIRED_URL = "https://sy.example.pe/tienda"
+#: The approved host ``sy.example.pe`` repairs to; it belongs to another RUC (D191).
+APPROVED_HOST_URL = "https://sv.example.pe/tienda"
+#: A URL BR-F14 would offer if it recomputed instead of using the stored candidate.
+CHANGED_URL = "https://otro.example.pe/otro-comprobante"
 SENDER = "asistente"
 #: The owner profile is the example config's only admin (R-11.4).
 ADMIN = "yo"
@@ -61,6 +75,14 @@ class FakeResolver(Resolver):
         return [PUBLIC_ADDRESS]
 
 
+class PrivateResolver(Resolver):
+    """A ``Resolver`` that answers a private address, which the request guard refuses."""
+
+    async def resolve(self, host: str) -> list[str]:
+        """Return the fixed private address."""
+        return [PRIVATE_ADDRESS]
+
+
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
 async def clean_offer_tables(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
@@ -72,7 +94,7 @@ async def clean_offer_tables(
     yield
 
 
-def _setup() -> TeachSetup:
+def _setup(resolver: Resolver | None = None) -> TeachSetup:
     """Return a setup with the sender, the owner and a second admin profile."""
     cfg = load_config(EXAMPLE)
     owner = cfg.profiles[ADMIN]
@@ -81,20 +103,27 @@ def _setup() -> TeachSetup:
         OTHER_PROFILE: owner.model_copy(update={"name": "Segundo", "whatsapp": "51977777777"}),
         SENDER: cfg.profiles[SENDER],
     }
-    return TeachSetup(profiles=profiles, resolver=FakeResolver())
+    return TeachSetup(profiles=profiles, resolver=FakeResolver() if resolver is None else resolver)
 
 
 def _reading(
     *,
     printed_url: str | None = None,
     document_url: str | None = None,
+    url_strip: str | None = None,
+    razon_social: str = RAZON_SOCIAL,
 ) -> Reading:
     """Return a minimal reading for ISSUER_RUC with the URLs BR-F14 may offer."""
     fields: dict[str, Field] = {
-        "razon_social": Field(RAZON_SOCIAL, "qr", 1.0),
+        "razon_social": Field(razon_social, "qr", 1.0),
         "ruc_emisor": Field(str(ISSUER_RUC), "qr", 1.0),
     }
-    return Reading(fields=fields, document_url=document_url, printed_url=printed_url)
+    return Reading(
+        fields=fields,
+        document_url=document_url,
+        printed_url=printed_url,
+        url_strip=url_strip,
+    )
 
 
 async def _invoice_with_reading(conn: AsyncConnection[Any], profile_id: str, reading: Reading) -> int:
@@ -230,6 +259,93 @@ async def test_ask_portal_with_no_url_asks_br_f02(
     assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
 
 
+async def test_ask_portal_repairs_the_strip_and_stores_the_candidate(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: the garbled strip is repaired from the issuer name and offered, then stored."""
+    reading = _reading(url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=REPAIRED_URL)
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert candidate == REPAIRED_URL
+
+
+async def test_ask_portal_repairs_the_strip_against_an_approved_host(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: an approved host close to the strip's host replaces it in the offer."""
+    reading = _reading(url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
+    async with db_pool.connection() as conn:
+        await conn.execute(
+            """
+            INSERT INTO taught_links (ruc_emisor, url, profile_id, state, approved_at)
+            VALUES (%s, %s, %s, 'approved', now())
+            """,
+            (OTHER_RUC, APPROVED_HOST_URL, ADMIN),
+        )
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL)
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert candidate == APPROVED_HOST_URL
+
+
+async def test_ask_portal_with_a_strip_that_repairs_to_nothing_asks_br_f02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F02: a strip that is no portal address, with no QR link, asks BR-F02."""
+    reading = _reading(url_strip="no hay nada")
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
+    assert candidate is None
+
+
+async def test_ask_portal_printed_url_wins_over_the_strip(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: the printed URL is offered and stored even when the strip reads a portal."""
+    reading = _reading(printed_url=PRINTED_URL, url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=PRINTED_URL)
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert candidate == PRINTED_URL
+
+
+async def test_ask_portal_with_a_qr_link_too_long_to_teach_asks_br_f02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F02: a QR link longer than a teachable URL cannot be the candidate, so BR-F02 is asked."""
+    prefix = "https://otro.example.pe/"
+    reading = _reading(document_url=prefix + "a" * (MAX_TAUGHT_URL_CHARS + 1 - len(prefix)))
+    assert len(reading.document_url or "") == MAX_TAUGHT_URL_CHARS + 1
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
+    assert candidate is None
+
+
 async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
@@ -253,6 +369,49 @@ async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
     assert link == TaughtLink(ISSUER_RUC, PRINTED_URL, SENDER, "proposed")
     assert sender_rows[-1] == (MESSAGES["BR-S06"], "BR-S06", [])
     assert owner_rows == [(owner_text, "BR-S06", _decision_buttons())]
+
+
+async def test_yes_teaches_the_stored_candidate_after_the_reading_changes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-S06: [Sí] proposes the URL BR-F14 stored, not one recomputed from the reading."""
+    setup = _setup()
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await save_reading(conn, invoice_id, _reading(document_url=CHANGED_URL))
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        owner_rows = await _outbox(conn, ADMIN)
+
+    owner_text = MESSAGES["BR-S06_owner"].format(
+        sender="Asistente",
+        razon_social=RAZON_SOCIAL,
+        ruc_emisor=ISSUER_RUC,
+        url=PRINTED_URL,
+    )
+    assert link == TaughtLink(ISSUER_RUC, PRINTED_URL, SENDER, "proposed")
+    assert owner_rows == [(owner_text, "BR-S06", _decision_buttons())]
+
+
+async def test_yes_with_a_private_resolver_asks_br_f15_retry_and_teaches_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: [Sí] whose stored candidate resolves private asks BR-F15 again and teaches nothing."""
+    setup = _setup(PrivateResolver())
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+        owner_rows = await _outbox(conn, ADMIN)
+
+    assert link is None
+    assert sender_rows[-1] == (MESSAGES["BR-F15_retry"], "BR-F15", _br_f15_buttons(invoice_id))
+    assert owner_rows == []
 
 
 async def test_fix_on_br_f14_asks_br_f15(
