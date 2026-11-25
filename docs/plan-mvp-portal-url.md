@@ -312,6 +312,72 @@ Amended by the owner on 2026-11-25, after the first live run (3 redirects and 4 
 which used 3 or 4 redirects and 2.7 to 5.1 s): 8 s per candidate and 5 redirects, 20 s in all. The typed URL over BR-F14,
 `total=…` and the second link are waived. The photo is sent once more on the new image.
 
+Second run, 2026-11-25 (image `2852ea97f9d4`): `sy.ecomprobantes.pe` answers 503 on and off (19 of 30 tries with curl), so
+the limits were not the cause of that run. Owner: choose the best approach; a slow site must not slow the others. Hence
+steps 13 to 16, with no background retries (a 503 already proves the server exists; retrying belongs to 9t3), and 9t3
+comes before 9t2.
+
+## Step 13: D192 and the "site is down" text `[inline: user-facing copy and the decision record]`
+
+Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `src/invoicebot/rules/messages_es.py`,
+`docs/plan-mvp.md`.
+
+- D192: a candidate that fails with 429, 5xx or a connection dropped after it opened is busy: its server exists. The
+  check stops there and offers it as `BR-F14_busy`, instead of a weaker guess. No retry in 9t1.
+- `BR-F14_busy`: `Leí esta dirección para {razon_social}. El sitio existe, pero ahora está caído:\n{url}\n¿Es correcta? Si
+no, toca [✏️ Corregir].` (one line in code after each `\n`)
+- Roadmap: 9t3 before 9t2, and 9t3 analyzes and tries the site before the issue is created (owner 2026-11-25).
+
+Test: `uv run pytest -q tests/unit/test_rules_parity.py tests/unit/test_messages_es.py tests/unit/test_docs.py`
+
+## Step 14: The probe tells a busy address from no answer `[worker]`
+
+Files: `src/invoicebot/net/url_probe.py`, `tests/unit/test_net_url_probe.py`, `src/invoicebot/pipeline/portal_check.py`.
+
+- `@dataclass(frozen=True) class Probed: url: str; busy: bool`. `first_answering(http, urls) -> Probed | None`: the first
+  URL that answers (`busy=False`) or is busy (`busy=True`), whichever comes first in order; the rest are not tried. Busy
+  is 429, 500 to 599, `httpx.ReadError` or `httpx.RemoteProtocolError`, on the URL or any hop. All else stays no answer.
+- One INFO line per call, `probe finished`, with `extra` `outcome` (`answered`, `busy`, `none`), `tried` and `reasons` (per
+  tried URL: the status, the exception class name, the refusal value or `TimeoutError`). Never a URL or host.
+- `portal_check.py`: only the call site, so it type-checks: it keeps today's behavior by treating a busy result as None.
+
+Test cases (docstrings `R-5.10, D192`); existing ones compare with `Probed(url, False)`, and the 500 case moves to busy:
+
+- 429, 500, 502, 503 → `Probed(PORTAL, True)`; 403 and 404 → None.
+- `ReadError`, `RemoteProtocolError` → busy; `ConnectError`, `ReadTimeout`, `GuardBlocked` → the next URL is tried.
+- 503 on the second hop of a redirect → `Probed(PORTAL, True)`.
+- `[PORTAL busy, OTHER 200]` → `Probed(PORTAL, True)` and OTHER is never requested.
+- `[PORTAL 404, OTHER 503]` → `Probed(OTHER, True)`.
+- The log has one `probe finished` INFO record with the outcome, the count and the reasons, and no URL or host, for an
+  answered, a busy and a none call, and when the total deadline passes.
+
+Test: `uv run pytest -q tests/unit/test_net_url_probe.py && uv run mypy src`
+
+## Step 15: The check offers a busy address with its own text `[worker]`
+
+Files: `src/invoicebot/pipeline/portal_check.py`, `src/invoicebot/pipeline/portal_offer.py`,
+`tests/integration/test_pipeline_portal_check.py`.
+
+- `portal_offer.py`: `MESSAGE_BUSY = "BR-F14_busy"` next to `MESSAGE_UNVERIFIED`. `_record` offers a busy result with it
+  (rule BR-F14, same buttons), an answer as today, and None as today. Update both docstrings.
+
+Test cases (docstrings `BR-F14, D192`):
+
+- First candidate 503 → one `BR-F14_busy` message with that URL and the three buttons; no other candidate is requested.
+- First candidate 404, second 503 → `BR-F14_busy` with the second.
+- [Sí, es este] on a `BR-F14_busy` offer proposes the link as it does on BR-F14.
+- All 404 → `BR-F14_unverified` (existing test still passes).
+
+Test: `uv run pytest -q tests/integration/test_pipeline_portal_check.py && uv run mypy src`
+
+## Step 16: Live check again `[inline: needs the owner's chat]`
+
+Deploy, send the PEBSA photo, tap [🔗]. BR-F14 with the address that answers or `BR-F14_busy` passes, matched with the
+logged reasons. Record every row in `specs/spikes/portal-guess.md` ("Live check 9t1"), the waived ones and both earlier
+runs included, then cancel the test invoice. [Aprobar] is not pressed.
+
+Test: every row passes or is waived by the owner.
+
 ## Finish
 
 `py-code-reviewer` and `py-security-auditor` (new outbound requests from untrusted text). Move this plan to
