@@ -10,7 +10,16 @@ import numpy as np
 import pytest
 
 from invoicebot.config.models import Ocr
-from invoicebot.extract.ocr import OcrText, OcrWord, parse_tsv, preprocess, read_text
+from invoicebot.extract.ocr import (
+    OcrBox,
+    OcrText,
+    OcrWord,
+    binarize,
+    deskew,
+    parse_tsv,
+    preprocess,
+    read_text,
+)
 
 # Synthetic RUC from tests/synthetic_rucs.txt. No real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
@@ -48,8 +57,14 @@ TSV = "\n".join(
     )
 )
 EXPECTED_LINES = (
-    (OcrWord(text="TOTAL", confidence=1.0), OcrWord(text="S/ 12.50", confidence=0.0)),
-    (OcrWord(text="RUC", confidence=0.965), OcrWord(text="20000000001", confidence=0.88)),
+    (
+        OcrWord(text="TOTAL", confidence=1.0, box=OcrBox(60, 260, 60, 40)),
+        OcrWord(text="S/ 12.50", confidence=0.0, box=OcrBox(140, 260, 200, 40)),
+    ),
+    (
+        OcrWord(text="RUC", confidence=0.965, box=OcrBox(60, 100, 60, 40)),
+        OcrWord(text="20000000001", confidence=0.88, box=OcrBox(140, 100, 200, 40)),
+    ),
 )
 
 
@@ -59,7 +74,7 @@ def _canvas(width: int = WIDTH, height: int = HEIGHT) -> np.ndarray:
 
 
 def test_read_text_put_text_image_returns_both_lines() -> None:
-    """R-2.3: Tesseract reads the RUC and the total drawn on a clean photo."""
+    """D191, R-2.3: Tesseract reads the drawn lines, each word carrying a box with a width."""
     image = _canvas()
     cv2.putText(image, RUC_TEXT, (TEXT_LEFT, FIRST_LINE_TOP), FONT, FONT_SCALE, BLACK, FONT_THICKNESS)
     cv2.putText(image, TOTAL_TEXT, (TEXT_LEFT, SECOND_LINE_TOP), FONT, FONT_SCALE, BLACK, FONT_THICKNESS)
@@ -70,6 +85,8 @@ def test_read_text_put_text_image_returns_both_lines() -> None:
     lines = [" ".join(word.text for word in line) for line in result.lines]
     assert any(RUC_TEXT in line for line in lines)
     assert any(TOTAL_TEXT in line for line in lines)
+    words = [word for line in result.lines for word in line]
+    assert all(word.box is not None and word.box.width > 0 for word in words)
 
 
 def test_read_text_blank_image_yields_no_words() -> None:
@@ -108,7 +125,12 @@ def test_read_text_fake_tesseract_tsv_returns_words(monkeypatch: pytest.MonkeyPa
     result = read_text(_canvas(100, 100), OCR_CONFIG, command=FAKE_COMMAND)
 
     assert result == OcrText(
-        lines=((OcrWord(text="RUC", confidence=0.965), OcrWord(text="20000000001", confidence=0.88)),)
+        lines=(
+            (
+                OcrWord(text="RUC", confidence=0.965, box=OcrBox(60, 100, 60, 40)),
+                OcrWord(text="20000000001", confidence=0.88, box=OcrBox(140, 100, 200, 40)),
+            ),
+        )
     )
 
 
@@ -128,4 +150,42 @@ def test_parse_tsv_non_numeric_row_is_skipped() -> None:
         )
     )
 
-    assert parse_tsv(tsv).lines == ((OcrWord(text="KEPT", confidence=0.965),),)
+    assert parse_tsv(tsv).lines == ((OcrWord(text="KEPT", confidence=0.965, box=OcrBox(60, 100, 60, 40)),),)
+
+
+def test_parse_tsv_word_row_carries_box_and_bottom() -> None:
+    """D191: a word row's left, top, width and height become its box, whose bottom is top + height."""
+    tsv = "\n".join(
+        (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+            "5\t1\t1\t1\t1\t1\t10\t20\t30\t8\t96\tWORD",
+        )
+    )
+
+    word = parse_tsv(tsv).lines[0][0]
+
+    assert word.box == OcrBox(10, 20, 30, 8)
+    assert word.box is not None
+    assert word.box.bottom == 28
+
+
+def test_parse_tsv_non_numeric_top_is_skipped_line_kept() -> None:
+    """D191: a word row whose top is not an integer is skipped and its line's other words kept."""
+    tsv = "\n".join(
+        (
+            "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+            "5\t1\t1\t1\t1\t1\t60\t100\t60\t40\t96\tKEPT",
+            "5\t1\t1\t1\t1\t2\t60\tx\t200\t40\t88\tDROPPED",
+        )
+    )
+
+    assert parse_tsv(tsv).lines == ((OcrWord(text="KEPT", confidence=0.96, box=OcrBox(60, 100, 60, 40)),),)
+
+
+def test_preprocess_equals_binarize_of_deskew() -> None:
+    """D191: ``preprocess`` is exactly the binarisation of the deskewed image."""
+    image = _canvas()
+    cv2.putText(image, RUC_TEXT, (TEXT_LEFT, FIRST_LINE_TOP), FONT, FONT_SCALE, BLACK, FONT_THICKNESS)
+    cv2.putText(image, TOTAL_TEXT, (TEXT_LEFT, SECOND_LINE_TOP), FONT, FONT_SCALE, BLACK, FONT_THICKNESS)
+
+    assert np.array_equal(preprocess(image), binarize(deskew(image)))

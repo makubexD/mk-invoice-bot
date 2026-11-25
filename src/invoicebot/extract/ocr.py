@@ -52,6 +52,10 @@ TSV_WORD_LEVEL = "5"
 TSV_BLOCK = 2
 TSV_PARAGRAPH = 3
 TSV_LINE = 4
+TSV_LEFT = 6
+TSV_TOP = 7
+TSV_WIDTH = 8
+TSV_HEIGHT = 9
 TSV_CONFIDENCE = 10
 TSV_TEXT = 11
 TSV_MIN_COLUMNS = 12
@@ -61,11 +65,27 @@ MAX_CONFIDENCE = 1.0
 
 
 @dataclass(frozen=True)
+class OcrBox:
+    """A word's bounding box in the preprocessed image, in pixels."""
+
+    left: int
+    top: int
+    width: int
+    height: int
+
+    @property
+    def bottom(self) -> int:
+        """Return the y coordinate of the box's lower edge."""
+        return self.top + self.height
+
+
+@dataclass(frozen=True)
 class OcrWord:
-    """One word Tesseract read, with its confidence in the range 0..1."""
+    """One word Tesseract read, with its confidence in the range 0..1 and its box, if known."""
 
     text: str
     confidence: float
+    box: OcrBox | None = None
 
 
 @dataclass(frozen=True)
@@ -77,10 +97,14 @@ class OcrText:
 
 def preprocess(gray: np.ndarray) -> np.ndarray:
     """Deskew, equalise and binarise ``gray`` before OCR (S0.3)."""
-    straightened = _deskew(gray)
+    return binarize(deskew(gray))
+
+
+def binarize(straight: np.ndarray) -> np.ndarray:
+    """Equalise the deskewed image with CLAHE, then apply the adaptive threshold."""
     equalised = cast(
         np.ndarray,
-        cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE).apply(straightened),
+        cv2.createCLAHE(clipLimit=CLAHE_CLIP_LIMIT, tileGridSize=CLAHE_TILE_SIZE).apply(straight),
     )
     return cast(
         np.ndarray,
@@ -168,9 +192,15 @@ def parse_tsv(tsv: str) -> OcrText:
         try:
             key = (int(fields[TSV_BLOCK]), int(fields[TSV_PARAGRAPH]), int(fields[TSV_LINE]))
             confidence = _confidence(fields[TSV_CONFIDENCE])
+            box = OcrBox(
+                left=int(fields[TSV_LEFT]),
+                top=int(fields[TSV_TOP]),
+                width=int(fields[TSV_WIDTH]),
+                height=int(fields[TSV_HEIGHT]),
+            )
         except ValueError:
             continue
-        lines.setdefault(key, []).append(OcrWord(text=text, confidence=confidence))
+        lines.setdefault(key, []).append(OcrWord(text=text, confidence=confidence, box=box))
     return OcrText(lines=tuple(tuple(words) for words in lines.values()))
 
 
@@ -180,7 +210,7 @@ def _confidence(conf: str) -> float:
     return min(max(value, MIN_CONFIDENCE), MAX_CONFIDENCE)
 
 
-def _deskew(gray: np.ndarray) -> np.ndarray:
+def deskew(gray: np.ndarray) -> np.ndarray:
     """Rotate the image so the median Hough line lies horizontal, or leave it unchanged."""
     binary = cast(
         np.ndarray,
