@@ -1,12 +1,13 @@
 """Try the portal addresses a ticket may mean and offer one (BR-F14, BR-F15, D192).
 
 :func:`make_portal_check_handler` builds the handler of the ``portal_check`` job step. It
-derives the addresses the ticket may mean, asks which one answers outside any transaction,
-and in one transaction offers it as BR-F14; when none answers it offers the first guess as
-``BR-F14_unverified``; a strip that yields no address at all falls back to the QR link, or
-asks BR-F15 with the unread strip. The offer is stored so [Sí] teaches exactly the URL the
-sender saw (D191). An invoice whose state left ``FETCHING_DOCS``/``MANUAL_REQUIRED``
-meanwhile, or one with no reading, writes nothing and ends the job quietly.
+derives the addresses the ticket may mean, asks which one answers or is busy outside any
+transaction, and in one transaction offers it as BR-F14; a busy address is offered as
+``BR-F14_busy``; when none answers it offers the first guess as ``BR-F14_unverified``; a
+strip that yields no address at all falls back to the QR link, or asks BR-F15 with the
+unread strip. The offer is stored so [Sí] teaches exactly the URL the sender saw (D191). An
+invoice whose state left ``FETCHING_DOCS``/``MANUAL_REQUIRED`` meanwhile, or one with no
+reading, writes nothing and ends the job quietly.
 """
 
 from __future__ import annotations
@@ -21,10 +22,11 @@ from psycopg import AsyncConnection
 
 from invoicebot.extract.fields import Reading
 from invoicebot.net.taught_url import taught_url_refusal
-from invoicebot.net.url_probe import first_answering
+from invoicebot.net.url_probe import Probed, first_answering
 from invoicebot.pipeline.outgoing import Addressee
 from invoicebot.pipeline.portal_guess import MAX_CANDIDATES, candidate_urls
 from invoicebot.pipeline.portal_offer import (
+    MESSAGE_BUSY,
     MESSAGE_UNVERIFIED,
     ask_unread,
     offer_candidate,
@@ -61,8 +63,8 @@ def make_portal_check_handler(pool: Pool, http: httpx.AsyncClient) -> Handler:
     It reads the invoice, its reading and the approved hosts, then probes the candidate
     addresses with no connection held. In one transaction it locks the row, rereads it
     and writes nothing when the state left ``FETCHING_DOCS``/``MANUAL_REQUIRED``; otherwise
-    it offers the answering URL, the first guess as unverified, the QR link, or asks
-    BR-F15 with the unread strip.
+    it offers the answering URL as BR-F14, a busy one as ``BR-F14_busy``, the first guess
+    as unverified, the QR link, or asks BR-F15 with the unread strip.
     """
 
     async def handle(job: Job) -> None:
@@ -72,9 +74,8 @@ def make_portal_check_handler(pool: Pool, http: httpx.AsyncClient) -> Handler:
             return
         candidates = _candidates(check)
         probed = await first_answering(http, candidates) if candidates else None
-        answering = probed.url if probed is not None and not probed.busy else None
         async with pool.connection() as conn, conn.transaction():
-            await _record(conn, check, candidates, answering)
+            await _record(conn, check, candidates, probed)
         logger.info(
             "step done",
             extra={
@@ -130,19 +131,31 @@ async def _record(
     conn: AsyncConnection[Any],
     check: _Check,
     candidates: tuple[str, ...],
-    answering: str | None,
+    probed: Probed | None,
 ) -> None:
     """Offer the portal in the caller's transaction, or write nothing when the state moved (D192).
 
-    It locks the row first: an invoice cancelled or settled after :func:`_read`, or one
-    moved to another state, is left untouched and nothing is queued.
+    A busy probe is offered as ``BR-F14_busy`` and an answering one as BR-F14; without a
+    probe the first guess is offered unverified, then the QR link, then BR-F15. It locks
+    the row first: an invoice cancelled or settled after :func:`_read`, or one moved to
+    another state, is left untouched and nothing is queued.
     """
     await lock_invoice(conn, check.invoice_id)
     head = await load_invoice_head(conn, check.invoice_id)
     if head is None or head.state not in _CHECKED_STATES:
         return
-    if answering is not None:
-        await offer_candidate(conn, check.addressee, check.invoice_id, check.reading, answering)
+    if probed is not None and probed.busy:
+        await offer_candidate(
+            conn,
+            check.addressee,
+            check.invoice_id,
+            check.reading,
+            probed.url,
+            message=MESSAGE_BUSY,
+        )
+        return
+    if probed is not None:
+        await offer_candidate(conn, check.addressee, check.invoice_id, check.reading, probed.url)
         return
     if candidates:
         await offer_candidate(

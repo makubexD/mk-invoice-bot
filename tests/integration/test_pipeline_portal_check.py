@@ -149,6 +149,17 @@ def _answering(*answer_urls: str) -> tuple[httpx.MockTransport, list[str]]:
     return httpx.MockTransport(handler), requested
 
 
+def _statuses(statuses: dict[str, int]) -> tuple[httpx.MockTransport, list[str]]:
+    """Return a transport that answers each URL with its status, 404 otherwise, recording every URL."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        return httpx.Response(statuses.get(str(request.url), 404))
+
+    return httpx.MockTransport(handler), requested
+
+
 def _refusing() -> tuple[httpx.MockTransport, list[str]]:
     """Return a transport that fails every request with ConnectError and records the URLs."""
     requested: list[str] = []
@@ -271,12 +282,72 @@ async def test_no_candidate_answering_offers_the_first_as_unverified(
     assert candidate == candidates[0]
 
 
+async def test_first_candidate_busy_is_offered_with_its_own_text(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a first candidate that is busy is offered as BR-F14_busy with three buttons."""
+    candidates = _candidates()
+    transport, requested = _statuses({candidates[0]: 503})
+    invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
+
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn:
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+    expected = MESSAGES["BR-F14_busy"].format(razon_social=RAZON_SOCIAL, url=candidates[0])
+    assert requested == [candidates[0]]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, candidates[0]))]
+    assert len(rows[0][2]) == 3
+    assert candidate == candidates[0]
+
+
+async def test_first_not_answering_second_busy_offers_the_second(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a busy second candidate is offered as BR-F14_busy after the first gives no answer."""
+    candidates = _candidates()
+    assert len(candidates) >= 2
+    transport, requested = _statuses({candidates[1]: 503})
+    invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
+
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn:
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+    expected = MESSAGES["BR-F14_busy"].format(razon_social=RAZON_SOCIAL, url=candidates[1])
+    assert requested == [candidates[0], candidates[1]]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, candidates[1]))]
+    assert candidate == candidates[1]
+
+
 async def test_yes_on_the_unverified_offer_proposes_that_url(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """BR-F14, D192: [Sí] on the unverified offer proposes exactly the URL it showed."""
     candidates = _candidates()
     transport, _ = _answering()
+    invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await handle_press(
+            conn,
+            _button_press(SENDER, f"u{invoice_id}:{yes_press_suffix(candidates[0])}"),
+            _setup(),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, candidates[0], SENDER, "proposed")
+
+
+async def test_yes_on_the_busy_offer_proposes_that_url(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: [Sí] on the busy offer proposes exactly the URL it showed."""
+    candidates = _candidates()
+    transport, _ = _statuses({candidates[0]: 503})
     invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
     await _run(db_pool, invoice_id, transport)
 

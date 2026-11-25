@@ -60,6 +60,8 @@ RULE_WRITE_PORTAL = "BR-F15"
 MESSAGE_BR_F15_RETRY = "BR-F15_retry"
 #: BR-F14's text when the guessed addresses answered nothing (BR-F14, D192).
 MESSAGE_UNVERIFIED = "BR-F14_unverified"
+#: BR-F14's text when the address exists but its server is down (BR-F14, D192).
+MESSAGE_BUSY = "BR-F14_busy"
 #: BR-F15's text when the ticket's strip is no address at all (BR-F15, D192).
 MESSAGE_UNREAD = "BR-F15_unread"
 #: The questions each press answers when its rule is the invoice's newest (BR-F14, BR-F02, BR-F15, D191).
