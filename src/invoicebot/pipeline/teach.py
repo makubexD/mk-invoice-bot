@@ -2,10 +2,11 @@
 
 :func:`teach` validates the sender's link with the request guard, stores it as
 ``proposed`` and asks every admin to approve or reject it. An approved link is
-never replaced, an invalid one repeats BR-F02, and a second proposal while one
-is waiting thanks the sender without asking the owner again. :func:`handle_press`
-applies the owner's [Aprobar] or [Rechazar] decision and puts an approved link
-on the gap's issue (D118).
+never replaced, an invalid one repeats BR-F02, and a newer, different link
+replaces the one that waits and asks the admins again, while the same link again
+only thanks the sender. :func:`handle_press` applies the owner's [Aprobar] or
+[Rechazar] decision and puts an approved link on the gap's issue (D118); a press
+on a replaced proposal answers BR-S06_stale (D192).
 """
 
 from __future__ import annotations
@@ -60,10 +61,14 @@ NOT_QUESTIONS = frozenset({RULE_STALE_BUTTON, RULE_DOCS_NEEDED, RULE_DONT_KNOW, 
 RULE_APPROVED = "BR-S06_approved"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
 RULE_REJECTED = "BR-S06_rejected"
+#: The pressing admin's answer when a newer link replaced the proposal (BR-S06, D192).
+RULE_DECISION_STALE = "BR-S06_stale"
 #: The proposer's notice when the owner approves their link (BR-S06, D190).
 RULE_SENDER_APPROVED = "BR-S06_sender_approved"
 #: The proposer's notice when the owner rejects their link (BR-S06, D190).
 RULE_SENDER_REJECTED = "BR-S06_sender_rejected"
+#: A link that waits for the owner's decision (BR-S06).
+STATE_PROPOSED = "proposed"
 #: An approved link is used as it is and is never replaced (BR-S06).
 STATE_APPROVED = "approved"
 #: BR-S06's button ids: ``t<ruc>v<version>:ok`` and ``t<ruc>v<version>:no`` (D118, D137).
@@ -110,7 +115,9 @@ async def teach(
     """Propose a taught portal link and ask the owner to approve it (BR-S06).
 
     An approved link only thanks the sender; an invalid one raises ``TaughtUrlError``.
-    The caller owns the transaction, so the link and both messages commit together.
+    A newer, different link replaces the one waiting for the owner and asks the admins
+    again, while the same link again only thanks the sender. The caller owns the
+    transaction, so the link and both messages commit together.
     """
     existing = await taught_links.get(conn, ruc_emisor)
     if existing is not None and existing.state == STATE_APPROVED:
@@ -159,13 +166,14 @@ async def handle_press(
     """Decide a proposed portal link from the owner's [Aprobar] or [Rechazar] (BR-S06, D118).
 
     Only an admin profile's press counts: a malformed id or any other profile is logged
-    and changes nothing. A press with no proposed link, such as a second
-    press, changes nothing either. Approval stores the link as the PORTAL_MISSING gap's
-    hint and puts it on the gap's issue, as a comment when the issue exists and in the
-    pending ``create_issue`` row's fields when it does not. Every decision answers the
-    pressing admin with BR-S06_approved or BR-S06_rejected, and tells the proposer
-    when someone else pressed and the proposer has a preferred channel. The caller
-    owns the transaction.
+    and changes nothing. A press on a proposal a newer link replaced answers
+    BR-S06_stale; any other press with no proposed link at its version, such as a
+    second press, changes nothing either. Approval stores the link as the
+    PORTAL_MISSING gap's hint and puts it on the gap's issue, as a comment when the
+    issue exists and in the pending ``create_issue`` row's fields when it does not.
+    Every decision answers the pressing admin with BR-S06_approved or BR-S06_rejected,
+    and tells the proposer when someone else pressed and the proposer has a preferred
+    channel. The caller owns the transaction.
     """
     match = None if msg.button_id is None else re.fullmatch(_PRESS_PATTERN, msg.button_id)
     profile = setup.profiles.get(msg.profile_id)
@@ -177,6 +185,7 @@ async def handle_press(
     approved = match.group(3) == BUTTON_OK_SUFFIX
     link = await taught_links.decide(conn, ruc_emisor, version, approved)
     if link is None:
+        await _answer_stale_press(conn, msg, ruc_emisor)
         return
     if approved:
         await _record_hint(conn, setup, ruc_emisor, link.url)
@@ -188,6 +197,27 @@ async def handle_press(
         rule_id=rule_id,
     )
     await _notify_proposer(conn, setup, link, msg.profile_id, ruc_emisor, approved)
+
+
+async def _answer_stale_press(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    ruc_emisor: int,
+) -> None:
+    """Tell the pressing admin a newer link replaced the proposal they pressed (BR-S06, D192).
+
+    Only a link that still waits for the owner answers; a decided link, or none, stays
+    silent as a second press always did. The caller owns the transaction.
+    """
+    link = await taught_links.get(conn, ruc_emisor)
+    if link is None or link.state != STATE_PROPOSED:
+        return
+    await queue_message(
+        conn,
+        Addressee(msg.channel, msg.profile_id),
+        MESSAGES[RULE_DECISION_STALE].format(ruc_emisor=ruc_emisor),
+        rule_id=RULE_DECISION_STALE,
+    )
 
 
 async def _notify_proposer(

@@ -66,11 +66,11 @@ async def propose(
     url: str,
     profile_id: str,
 ) -> int | None:
-    """Store ``url`` as proposed, or replace a rejected one (BR-S06); does not commit.
+    """Store ``url`` as proposed, or replace a rejected or different proposed link (BR-S06, D192).
 
-    Returns the proposal's version, or None when a proposed or approved link is
-    already there: the first proposal waits for the owner and an approved link is
-    not replaced.
+    Returns the proposal's version, or None when the same URL is already proposed or
+    the link is approved: a newer, different link replaces the one that waits for the
+    owner, while an approved link is not replaced. Does not commit.
     """
     cur = await conn.execute(
         """
@@ -81,6 +81,7 @@ async def propose(
             state = 'proposed', approved_at = NULL,
             version = taught_links.version + 1, at = now()
         WHERE taught_links.state = 'rejected'
+           OR (taught_links.state = 'proposed' AND taught_links.url <> EXCLUDED.url)
         RETURNING version
         """,
         (ruc_emisor, url, profile_id),
