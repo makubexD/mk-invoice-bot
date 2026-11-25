@@ -42,3 +42,21 @@ aggregates are recorded here; no other ticket's URL.
 Deskewed gray, full width, six bands under the anchor (offsets 0, 0.15, 0.3 and heights 1.6, 1.8 word heights,
 from the median of the anchor words), 3× `INTER_CUBIC`, `eng`, `--psm 7`, the read with the highest mean word
 confidence. Plan steps 3, 4 and 6 were edited to match.
+
+## Live check
+
+Date: 2026-11-25 (12:57 AM, Lima). Host: `invoicebot-live`, image `c5cc7e9f0d85`. Channel: the owner's Telegram.
+
+| Check                                               | Result                                               |
+| --------------------------------------------------- | ---------------------------------------------------- |
+| Ticket photo, BR-F13, [🔗]                          | pass: BR-F14 with the repaired URL and three buttons |
+| [✏️ Corregir]                                       | not run                                              |
+| A typed non-URL gives `BR-F15_retry`                | not run                                              |
+| The typed address is echoed as BR-F14               | not run                                              |
+| [✅ Sí, es este] gives BR-S06 and the owner's alert | pass, on the first offer                             |
+| The owner's decision                                | [Aprobar]; the confirmation arrived                  |
+| Cancel the test invoice                             | not confirmed                                        |
+
+Correction: the printed host is `sy`, not `sv` as the findings above assume. On 2026-11-25 `sy.ecomprobantes.pe/pebsa`
+answered 200 and `sv.ecomprobantes.pe` did not resolve, so the repaired URL was exact and the findings' edit
+distances count one edit too many for reads that had `sy`.
