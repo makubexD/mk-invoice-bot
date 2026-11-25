@@ -8,13 +8,17 @@ from invoicebot.extract.merge import merge
 OCR_CONFIDENCE = 0.7
 DOCUMENT_URL = "https://example.test/invoice"
 PRINTED_URL = "https://portal.example.pe/consulta"
+URL_STRIP = "hitps.//sy.example pe/tiemda"
 
 
 def _reading(
-    fields: dict[str, Field], document_url: str | None = None, printed_url: str | None = None
+    fields: dict[str, Field],
+    document_url: str | None = None,
+    printed_url: str | None = None,
+    url_strip: str | None = None,
 ) -> Reading:
     """Return a reading built from already-parsed fields."""
-    return Reading(fields=fields, document_url=document_url, printed_url=printed_url)
+    return Reading(fields=fields, document_url=document_url, printed_url=printed_url, url_strip=url_strip)
 
 
 def _ocr_field(value: str, confidence: float = OCR_CONFIDENCE, flag: Flag | None = None) -> Field:
@@ -107,6 +111,16 @@ def test_merge_without_qr_keeps_the_ocr_printed_url() -> None:
     ocr = _reading({"total": _ocr_field("12.50")}, printed_url=PRINTED_URL)
 
     assert merge(ocr, None).printed_url == PRINTED_URL
+
+
+def test_merge_keeps_the_ocr_url_strip() -> None:
+    """D191: a merged reading keeps the OCR reading's URL strip."""
+    merged = merge(
+        _reading({"total": _ocr_field("12.50")}, url_strip=URL_STRIP),
+        _reading({"total": _qr_field("12.50")}),
+    )
+
+    assert merged.url_strip == URL_STRIP
 
 
 def test_merge_keeps_tipo_inferred_when_both_readers_inferred_it() -> None:

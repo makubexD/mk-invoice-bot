@@ -17,8 +17,8 @@ def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
     """Return the OCR and QR readings merged into one (D81, R-2.6).
 
     ``document_url`` is the QR's when it carries one, else the OCR's, and ``printed_url``
-    is always the OCR's, the only reader that reads the address printed on the ticket.
-    Fields are ordered OCR first, then the ones only the QR has.
+    and ``url_strip`` are always the OCR's, the only reader that reads the address printed
+    on the ticket. Fields are ordered OCR first, then the ones only the QR has.
     """
     if ocr is None:
         return Reading(fields={}, document_url=None) if qr is None else qr
@@ -38,6 +38,7 @@ def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
         fields=fields,
         document_url=qr.document_url if qr.document_url is not None else ocr.document_url,
         printed_url=ocr.printed_url,
+        url_strip=ocr.url_strip,
     )
 
 

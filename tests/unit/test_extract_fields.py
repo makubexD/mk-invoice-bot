@@ -10,6 +10,7 @@ from invoicebot.extract.fields import Field, Flag, Reading, reading_from_json, r
 
 #: From tests/synthetic_rucs.txt; no real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
+URL_STRIP = "hitps.//sy.example pe/tiemda"
 
 
 def _reading() -> Reading:
@@ -91,6 +92,39 @@ def test_reading_with_printed_url_round_trips() -> None:
 def test_reading_without_printed_url_reads_as_none() -> None:
     """D189: a reading stored before ``printed_url`` existed loads with it None."""
     assert reading_from_json(_payload()).printed_url is None
+
+
+def test_reading_with_url_strip_round_trips() -> None:
+    """D191: a reading with a URL strip survives the JSON round trip unchanged."""
+    reading = Reading(
+        fields={"total": Field(value="49.90", source="ocr", confidence=1.0)},
+        document_url=None,
+        url_strip=URL_STRIP,
+    )
+
+    payload = reading_to_json(reading)
+
+    assert payload["url_strip"] == URL_STRIP
+    assert reading_from_json(payload) == reading
+
+
+def test_reading_without_url_strip_reads_as_none() -> None:
+    """D191: a reading stored before ``url_strip`` existed loads with it None."""
+    assert reading_from_json(_payload()).url_strip is None
+
+
+@pytest.mark.parametrize(
+    "url_strip",
+    [
+        "a\nb",
+        "",
+        "a" * 121,
+    ],
+)
+def test_reading_from_json_rejects_a_url_strip_of_the_wrong_shape(url_strip: object) -> None:
+    """D191: a ``url_strip`` that is not 1 to 120 URL characters or null raises ValueError."""
+    with pytest.raises(ValueError, match="url_strip"):
+        reading_from_json({**_payload(), "url_strip": url_strip})
 
 
 @pytest.mark.parametrize(
