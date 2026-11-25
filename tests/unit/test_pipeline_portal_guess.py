@@ -81,3 +81,29 @@ def test_repair_url_refuses_a_url_over_the_cap() -> None:
 def test_repair_url_keeps_the_host_after_a_broken_scheme(strip: str, expected: str) -> None:
     """D191, BR-F14: a scheme that lost its marks is dropped, and a host starting with h is kept."""
     assert repair_url(strip, None, frozenset()) == expected
+
+
+@pytest.mark.parametrize(
+    ("strip", "expected"),
+    [
+        ("harps: sv.example.pe/x", "https://sv.example.pe/x"),
+        ("htips sv.example.pe/x", "https://sv.example.pe/x"),
+        ("hotel.example.pe/x", "https://hotel.example.pe/x"),
+        ("hotel example.pe/x", "https://hotel.example.pe/x"),
+        ("portal.example.corn/x", "https://portal.example.com/x"),
+        ("portal.example.corn.pe", "https://portal.example.com.pe"),
+        ("portal.example.compe/x", "https://portal.example.com.pe/x"),
+        ("wwv.example.pe/x", "https://www.example.pe/x"),
+        ("https://portal.example.pe/tienda.", "https://portal.example.pe/tienda"),
+        ("sv.example. pe/x", "https://sv.example.pe/x"),
+        ("https://e-consulta.sunat.gob.pe/x", None),
+    ],
+)
+def test_repair_url_fixes_more_ocr_slips(strip: str, expected: str | None) -> None:
+    """D192: a garbled scheme, a mangled label or a trailing path period is repaired or refused."""
+    assert repair_url(strip, None, EMPTY_HOSTS) == expected
+
+
+def test_repair_url_keeps_a_label_that_only_contains_corn() -> None:
+    """D192: a label such as popcorn is not rewritten to com."""
+    assert repair_url("popcorn.example.pe/x", None, EMPTY_HOSTS) == "https://popcorn.example.pe/x"
