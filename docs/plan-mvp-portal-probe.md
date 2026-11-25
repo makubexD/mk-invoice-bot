@@ -198,6 +198,17 @@ Test: `uv run pytest -q tests/integration/test_browser_probe_form.py`
 
 Files: `src/invoicebot/fetchers/browser/probe_fill.py` (new), `tests/integration/test_browser_probe_fill.py` (new).
 
+Send it as two runs (step 7 timed out as one):
+
+- 8a, files `probe_controls.py`, `probe_form.py`, `probe_values.py` (new), `tests/integration/test_browser_probe_values.py`
+  (new): `PageForm`/`FormRead` gain `required_unmatched`: a visible enabled required (or `aria-required`) control of the
+  form's group with no value name, no selector, past the field cap, or of a type not read today (textarea, radio,
+  checkbox); an unmatched select with one real option does not count. `plan_fills(page, fields, invoice)` decides every
+  value before anything is typed, None when one has no match (`tipo` as text input, no `tipo_option`, a select with no
+  equal option); raw options are read from the page and picked by index; a text `fecha` without placeholder is
+  `dd/mm/yyyy`. `apply_fills(page, fills)` types them.
+- 8b, the rest, in `probe_fill.py`.
+
 - `async def probe(page, request) -> ProbeReport`: `read_form`; stop with its outcome, with `captcha`, or with
   `unmatched_field` when a visible `required` field has no value name, a `tipo` select has no `tipo_option`, or `submit`
   is missing. A select with one real option is left as it is. While filling, every non-`GET` request to a host other
