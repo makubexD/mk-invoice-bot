@@ -1,4 +1,4 @@
-"""Ask for the issuer's portal, offering a URL from the ticket first (BR-F14, BR-F02, BR-F15, D191)."""
+"""Ask for the issuer's portal, offering a URL from the ticket first (BR-F14, BR-F02, BR-F15, D191, D192)."""
 
 from __future__ import annotations
 
@@ -53,6 +53,10 @@ RULE_PORTAL_OFFER = "BR-F14"
 RULE_WRITE_PORTAL = "BR-F15"
 #: BR-F15's message when the sender's address cannot be taught (BR-F15, D191).
 MESSAGE_BR_F15_RETRY = "BR-F15_retry"
+#: BR-F14's text when the guessed addresses answered nothing (BR-F14, D192).
+MESSAGE_UNVERIFIED = "BR-F14_unverified"
+#: BR-F15's text when the ticket's strip is no address at all (BR-F15, D192).
+MESSAGE_UNREAD = "BR-F15_unread"
 #: The questions each press answers when its rule is the invoice's newest (BR-F14, BR-F02, BR-F15, D191).
 _ANSWERED_QUESTIONS = {
     BUTTON_YES_SUFFIX: (RULE_PORTAL_OFFER,),
@@ -67,7 +71,7 @@ _PRESS_PATTERN = (
 
 
 def offer_url(reading: Reading, known_hosts: frozenset[str]) -> str | None:
-    """Return the URL BR-F14 offers: the printed one, the repaired strip, else the QR link (D191).
+    """Return the URL BR-F14 offers: the printed one, the repaired strip, else the QR link (D191, D192).
 
     The strip under ``CONSULT… EN`` is repaired against the approved hosts when it was
     read; one that repairs to nothing leaves the QR link to offer. A QR link that could
@@ -79,6 +83,15 @@ def offer_url(reading: Reading, known_hosts: frozenset[str]) -> str | None:
         repaired = repair_url(reading.url_strip, reading.value("razon_social"), known_hosts)
         if repaired is not None:
             return repaired
+    return qr_offer(reading)
+
+
+def qr_offer(reading: Reading) -> str | None:
+    """Return the reading's QR link when BR-F14 may teach it, else None (D192).
+
+    A missing link, or one that could not be taught such as SUNAT's generic query
+    page, is not offered.
+    """
     document_url = reading.document_url
     if document_url is None or taught_url_refusal(document_url) is not None:
         return None
@@ -109,14 +122,17 @@ async def offer_candidate(
     invoice_id: int,
     reading: Reading,
     url: str,
+    *,
+    message: str = RULE_PORTAL_OFFER,
 ) -> None:
-    """Store ``url`` as the invoice's candidate, then offer it as BR-F14 (BR-F14, D191).
+    """Store ``url`` as the invoice's candidate, then offer it as BR-F14 (BR-F14, D191, D192).
 
     The candidate is stored first so [Sí] teaches exactly the URL the sender saw.
-    The caller owns the transaction.
+    ``message`` picks the text from :data:`MESSAGES`; the rule id, the buttons and the
+    stored candidate stay BR-F14's. The caller owns the transaction.
     """
     await portal_candidates.save(conn, invoice_id, url)
-    text = MESSAGES[RULE_PORTAL_OFFER].format(
+    text = MESSAGES[message].format(
         razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
         url=url,
     )
@@ -127,6 +143,35 @@ async def offer_candidate(
         invoice_id=invoice_id,
         rule_id=RULE_PORTAL_OFFER,
         buttons=offer_buttons(invoice_id, url),
+    )
+
+
+async def ask_unread(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+    reading: Reading,
+    strip: str,
+) -> None:
+    """Ask BR-F15 with the strip that was no address, or queue nothing without a RUC (BR-F15, D192).
+
+    A reading without an issuer could never be taught, so it logs and queues nothing,
+    as :func:`_ask_br_f02` does. The caller owns the transaction.
+    """
+    if reading.value("ruc_emisor") is None:
+        logger.info("ignored BR-F15 question without an issuer", extra={"profile_id": addressee.profile_id})
+        return
+    text = MESSAGES[MESSAGE_UNREAD].format(
+        strip=strip,
+        razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
+    )
+    await queue_message(
+        conn,
+        addressee,
+        text,
+        invoice_id=invoice_id,
+        rule_id=RULE_WRITE_PORTAL,
+        buttons=[dont_know_button(invoice_id)],
     )
 
 
