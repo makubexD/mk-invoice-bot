@@ -8,14 +8,14 @@ A **hit** is a decoded code that `parse_qr_payload` accepts. Each hit was also c
 
 The 10 PDFs of the owner's 2026 sample folders, rendered at 150 dpi in grayscale, put through each distortion, then downscaled to 1600 px on the long side and saved as JPEG at quality 75 (WhatsApp size).
 
-| Distortion | Hits |
-|---|---|
-| downscale only | 7 / 10 |
-| 5–15° tilt | 7 / 10 |
-| uneven light | 7 / 10 |
-| Gaussian blur (7×7, σ 2) | 1 / 10 |
-| tilt + light + blur | 0 / 10 |
-| **All** | **22 / 50 (44 %)** |
+| Distortion               | Hits               |
+| ------------------------ | ------------------ |
+| downscale only           | 7 / 10             |
+| 5–15° tilt               | 7 / 10             |
+| uneven light             | 7 / 10             |
+| Gaussian blur (7×7, σ 2) | 1 / 10             |
+| tilt + light + blur      | 0 / 10             |
+| **All**                  | **22 / 50 (44 %)** |
 
 - Decoder: zxing for all 22 hits; OpenCV added none. Variant: `original` 21, `upscaled_3x` 1.
 - Median time per image 0.29 s, maximum 0.90 s.
@@ -30,13 +30,13 @@ The 10 PDFs of the owner's 2026 sample folders, rendered at 150 dpi in grayscale
 
 6 photos of paper receipts sent through WhatsApp (900 × 1600 px). That is short of the 10 that S0.2 asks for, so these numbers are provisional.
 
-| | |
-|---|---|
-| Images | 6 |
-| Hits | 3 (50 %) |
-| Decoder | zxing 3, OpenCV 0 |
-| Variant | `original` 2, `upscaled_2x` 1 |
-| Median time per image | 0.31 s (maximum 1.36 s) |
+|                       |                               |
+| --------------------- | ----------------------------- |
+| Images                | 6                             |
+| Hits                  | 3 (50 %)                      |
+| Decoder               | zxing 3, OpenCV 0             |
+| Variant               | `original` 2, `upscaled_2x` 1 |
+| Median time per image | 0.31 s (maximum 1.36 s)       |
 
 The 3 misses:
 

@@ -6,16 +6,16 @@ re-check went through the console channel (same profile).
 
 ## What each item showed
 
-| Item | Result |
-|---|---|
-| Cropped or blurry photo → BR-E01 names read and missing fields | **Not reproduced live.** Every photo kept a readable QR, so the QR gave every required field. Covered by the integration tests; repeated in the 9s live run. |
-| [Editar] → the missing lines; answers → routed summary | Not reached (needs BR-E01). |
-| Routed summary | As specified: `Emisor: PEBSA COMBUSTIBLES S.A. (RUC …)`, `🔎 Leído de: QR`, `➡️ RK Export (Drive)`, `SUMMARY_MOVING`, [✏️ Corregir] [✖️ Anular]. |
-| Same invoice again → BR-E04 | As specified: `Este comprobante ya lo registré el 23/11 (#15): PEBSA COMBUSTIBLES S.A. (RUC …), S/ 160.41.` + [Ver #15]; the new invoice (#16) was cancelled as a duplicate. |
-| [Ver #15] | Answered like `/estado 15`: state, then `Último aviso (BR-R01): …` with the summary as it was sent. |
-| `/cancelar` without an id, then with one | `COMMAND_NEEDS_ID`, then `🚫 Cancelado: …` |
-| `/estado` alone, `/pendientes` | Five newest, then `Para ver uno: /estado 12`; `/pendientes` lists #9, #10, #13. **Finding:** every row said `emisor sin leer`, see below. |
-| Rehearsal clean-up | Console invoices #1–#7 and #11 cancelled with `rehearse send --text "/cancelar <id>"`. |
+| Item                                                           | Result                                                                                                                                                                       |
+| -------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cropped or blurry photo → BR-E01 names read and missing fields | **Not reproduced live.** Every photo kept a readable QR, so the QR gave every required field. Covered by the integration tests; repeated in the 9s live run.                 |
+| [Editar] → the missing lines; answers → routed summary         | Not reached (needs BR-E01).                                                                                                                                                  |
+| Routed summary                                                 | As specified: `Emisor: PEBSA COMBUSTIBLES S.A. (RUC …)`, `🔎 Leído de: QR`, `➡️ RK Export (Drive)`, `SUMMARY_MOVING`, [✏️ Corregir] [✖️ Anular].                             |
+| Same invoice again → BR-E04                                    | As specified: `Este comprobante ya lo registré el 23/11 (#15): PEBSA COMBUSTIBLES S.A. (RUC …), S/ 160.41.` + [Ver #15]; the new invoice (#16) was cancelled as a duplicate. |
+| [Ver #15]                                                      | Answered like `/estado 15`: state, then `Último aviso (BR-R01): …` with the summary as it was sent.                                                                          |
+| `/cancelar` without an id, then with one                       | `COMMAND_NEEDS_ID`, then `🚫 Cancelado: …`                                                                                                                                   |
+| `/estado` alone, `/pendientes`                                 | Five newest, then `Para ver uno: /estado 12`; `/pendientes` lists #9, #10, #13. **Finding:** every row said `emisor sin leer`, see below.                                    |
+| Rehearsal clean-up                                             | Console invoices #1–#7 and #11 cancelled with `rehearse send --text "/cancelar <id>"`.                                                                                       |
 
 ## Findings
 

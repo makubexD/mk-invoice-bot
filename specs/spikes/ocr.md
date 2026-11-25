@@ -21,37 +21,37 @@ Run on 2026-11-13 with Tesseract 5 (`-l spa --oem 1`) from the host's `tesseract
 
 The first run's regexes read the serie's digits literally. Tesseract reads the digit `0` as the letter `O` in 3 of the 4 photo series (`FOO1`), so every preprocessed variant scored `serie` 0 / 4. The table below maps `O Q D → 0` and `I L → 1` in the serie's last three characters. The finding below explains it.
 
-| Variant | Photos: required | Photos: all six | Renders: required | Median s | Max s |
-|---|---|---|---|---|---|
-| `none` | 16 / 24 (67 %) | 0 / 4 | 41 % | 1.6 | 2.4 |
-| `clahe_thr` | 17 / 24 (71 %) | 0 / 4 | 34 % | 2.0 | 2.4 |
-| **`clahe_thr` + deskew** | **19 / 24 (79 %)** | **1 / 4** | **49 %** | 5.2 | 7.2 |
-| `clahe_thr` + deskew + warp | 19 / 24 (79 %) | 1 / 4 | 41 % | 3.7 | 5.7 |
+| Variant                     | Photos: required   | Photos: all six | Renders: required | Median s | Max s |
+| --------------------------- | ------------------ | --------------- | ----------------- | -------- | ----- |
+| `none`                      | 16 / 24 (67 %)     | 0 / 4           | 41 %              | 1.6      | 2.4   |
+| `clahe_thr`                 | 17 / 24 (71 %)     | 0 / 4           | 34 %              | 2.0      | 2.4   |
+| **`clahe_thr` + deskew**    | **19 / 24 (79 %)** | **1 / 4**       | **49 %**          | 5.2      | 7.2   |
+| `clahe_thr` + deskew + warp | 19 / 24 (79 %)     | 1 / 4           | 41 %              | 3.7      | 5.7   |
 
 Times are the photo set's. The renders took a median of 0.8 to 2.7 s, with a maximum of 4.3 s. Run to run, the medians move by about 1 s with the parallel load, so read them as rough.
 
 **Per field**, for the chosen variant:
 
-| Field | Photos | Renders |
-|---|---|---|
-| `ruc_emisor` | 3 / 4 | 21 / 50 |
-| `tipo` | 4 / 4 | 39 / 50 |
-| `serie` | 3 / 4 | 26 / 50 |
-| `numero` | 3 / 4 | 22 / 50 |
-| `fecha_emision` | 2 / 4 | 21 / 50 |
-| `total` | 4 / 4 | 18 / 50 |
-| `base` | – | 9 / 50 |
-| `service_charge` | – | 1 / 35 |
+| Field            | Photos | Renders |
+| ---------------- | ------ | ------- |
+| `ruc_emisor`     | 3 / 4  | 21 / 50 |
+| `tipo`           | 4 / 4  | 39 / 50 |
+| `serie`          | 3 / 4  | 26 / 50 |
+| `numero`         | 3 / 4  | 22 / 50 |
+| `fecha_emision`  | 2 / 4  | 21 / 50 |
+| `total`          | 4 / 4  | 18 / 50 |
+| `base`           | –      | 9 / 50  |
+| `service_charge` | –      | 1 / 35  |
 
 **Renders by distortion** (required fields, chosen variant against `none`):
 
-| Distortion | `clahe_thr` + deskew | `none` |
-|---|---|---|
-| downscale only | 73 % | 92 % |
-| 5–15° tilt | 63 % | 13 % |
-| uneven light | 68 % | 60 % |
-| Gaussian blur | 18 % | 38 % |
-| tilt + light + blur | 22 % | 0 % |
+| Distortion          | `clahe_thr` + deskew | `none` |
+| ------------------- | -------------------- | ------ |
+| downscale only      | 73 %                 | 92 %   |
+| 5–15° tilt          | 63 %                 | 13 %   |
+| uneven light        | 68 %                 | 60 %   |
+| Gaussian blur       | 18 %                 | 38 %   |
+| tilt + light + blur | 22 %                 | 0 %    |
 
 ## PSM 6
 
@@ -78,11 +78,11 @@ PSM 6 is worse on the photos for every variant: 42 to 62 %, against 67 to 79 % w
 
 Run on 2026-11-13 with the real helper (`python -m invoicebot.extract`, QR cascade, the chosen preprocessing, Tesseract PSM 4, `config/parsing_rules.yaml`, then the D81 merge). The images ran one at a time, as under the heavy-work slot, on the same 8-core laptop. Truth and normalisation are as in **Method**. Aggregates only.
 
-| Set | Required fields right | All six right | `ROUTING` / BR-E01 | Median s | Max s |
-|---|---|---|---|---|---|
-| Photos with truth (4) | 24 / 24 (100 %) | 4 / 4 | 4 / 0 | 2.5 | 3.9 |
-| Photos without truth (2) | – | – | 0 / 2 | | |
-| Renders (50) | 179 / 300 (60 %) | 12 / 50 | 28 / 22 | 1.8 | 2.6 |
+| Set                      | Required fields right | All six right | `ROUTING` / BR-E01 | Median s | Max s |
+| ------------------------ | --------------------- | ------------- | ------------------ | -------- | ----- |
+| Photos with truth (4)    | 24 / 24 (100 %)       | 4 / 4         | 4 / 0              | 2.5      | 3.9   |
+| Photos without truth (2) | –                     | –             | 0 / 2              |          |       |
+| Renders (50)             | 179 / 300 (60 %)      | 12 / 50       | 28 / 22            | 1.8      | 2.6   |
 
 Times include Python start-up; the photo column covers all 6 photos.
 

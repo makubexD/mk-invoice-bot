@@ -47,15 +47,15 @@ confidence. Plan steps 3, 4 and 6 were edited to match.
 
 Date: 2026-11-25 (12:57 AM, Lima). Host: `invoicebot-live`, image `c5cc7e9f0d85`. Channel: the owner's Telegram.
 
-| Check                                               | Result                                               |
-| --------------------------------------------------- | ---------------------------------------------------- |
-| Ticket photo, BR-F13, [🔗]                          | pass: BR-F14 with the repaired URL and three buttons |
-| [✏️ Corregir]                                       | not run                                              |
-| A typed non-URL gives `BR-F15_retry`                | not run                                              |
-| The typed address is echoed as BR-F14               | not run                                              |
-| [✅ Sí, es este] gives BR-S06 and the owner's alert | pass, on the first offer                             |
-| The owner's decision                                | [Aprobar]; the confirmation arrived                  |
-| Cancel the test invoice                             | not confirmed                                        |
+| Check                                               | Result                                                       |
+| --------------------------------------------------- | ------------------------------------------------------------ |
+| Ticket photo, BR-F13, [🔗]                          | pass: BR-F14 with the repaired URL and three buttons         |
+| [✏️ Corregir]                                       | waived by the owner (2026-11-25); integration tests cover it |
+| A typed non-URL gives `BR-F15_retry`                | waived by the owner (2026-11-25); integration tests cover it |
+| The typed address is echoed as BR-F14               | waived by the owner (2026-11-25); integration tests cover it |
+| [✅ Sí, es este] gives BR-S06 and the owner's alert | pass, on the first offer                                     |
+| The owner's decision                                | [Aprobar]; the confirmation arrived                          |
+| Cancel the test invoice                             | not confirmed                                                |
 
 Correction: the printed host is `sy`, not `sv` as the findings above assume. On 2026-11-25 `sy.ecomprobantes.pe/pebsa`
 answered 200 and `sv.ecomprobantes.pe` did not resolve, so the repaired URL was exact and the findings' edit

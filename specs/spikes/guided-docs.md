@@ -5,16 +5,16 @@ Channel: the owner's Telegram. Tickets: the PEBSA ticket (QR), sent four times a
 
 ## What each item showed
 
-| Item | Result |
-|---|---|
-| QR-only ticket → summary with no buttons | As specified: #21, #22, #23 `🧾 Factura F001-12367 …`, `🔎 Leído de: QR`, `➡️ RK Export (Drive)`, `⏳ Lo estoy archivando.`, no buttons. |
-| Same invoice again → BR-E04 | #20 named #12 and was cancelled as a duplicate; `/cancelar 12` answered that #12 is already in a batch. |
-| First mailbox wait → BR-F13 | As specified: `⏳ Comprobante #21: me falta el PDF para archivarlo.`, `Ya busqué: • Portal del comercio: no lo conozco`, `Vuelvo a mirar el correo a las 05:15.` (Lima time, correct), [📎 Te envío el PDF] [🔗 Enseñar el portal] [⏳ Espero el correo]. |
-| [🔗] → BR-F14 with the printed URL | **Not reached.** Every press (#21, #22, #23) answered BR-F02: the reading had no `printed_url`, see the findings. |
-| [Sí] → the owner's BR-S06 alert | Not reached (needs BR-F14, or a typed answer to BR-F02, which was not sent). |
-| [⏳] and [📎] | Not run live; covered by `tests/integration/test_pipeline_docs_help.py`. |
-| OCR-filled required field → [Corregir] [Anular] | Not run live: every ticket kept a readable QR. Covered by the integration tests. |
-| Bare `/cancelar`, `/reprocesar` → buttons; `/estado` | Not run live; the owner cancelled with `/cancelar <id>`. Covered by `tests/integration/test_commands.py`. |
+| Item                                                 | Result                                                                                                                                                                                                                                                    |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| QR-only ticket → summary with no buttons             | As specified: #21, #22, #23 `🧾 Factura F001-12367 …`, `🔎 Leído de: QR`, `➡️ RK Export (Drive)`, `⏳ Lo estoy archivando.`, no buttons.                                                                                                                  |
+| Same invoice again → BR-E04                          | #20 named #12 and was cancelled as a duplicate; `/cancelar 12` answered that #12 is already in a batch.                                                                                                                                                   |
+| First mailbox wait → BR-F13                          | As specified: `⏳ Comprobante #21: me falta el PDF para archivarlo.`, `Ya busqué: • Portal del comercio: no lo conozco`, `Vuelvo a mirar el correo a las 05:15.` (Lima time, correct), [📎 Te envío el PDF] [🔗 Enseñar el portal] [⏳ Espero el correo]. |
+| [🔗] → BR-F14 with the printed URL                   | **Not reached.** Every press (#21, #22, #23) answered BR-F02: the reading had no `printed_url`, see the findings.                                                                                                                                         |
+| [Sí] → the owner's BR-S06 alert                      | Not reached (needs BR-F14, or a typed answer to BR-F02, which was not sent).                                                                                                                                                                              |
+| [⏳] and [📎]                                        | Not run live; covered by `tests/integration/test_pipeline_docs_help.py`.                                                                                                                                                                                  |
+| OCR-filled required field → [Corregir] [Anular]      | Not run live: every ticket kept a readable QR. Covered by the integration tests.                                                                                                                                                                          |
+| Bare `/cancelar`, `/reprocesar` → buttons; `/estado` | Not run live; the owner cancelled with `/cancelar <id>`. Covered by `tests/integration/test_commands.py`.                                                                                                                                                 |
 
 ## Findings
 

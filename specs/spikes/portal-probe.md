@@ -23,3 +23,11 @@ Date: 2026-11-25. Read-only GETs with `curl`; no form was submitted and no invoi
   probably the same software. D99 deferred captchas while that was the only image-captcha site; this is the second.
 - The last fallback, `sunat_sol`, has code (S10.1) but is in no chain: S0.4 has not shown that SOL gives a received
   invoice's files (D153).
+
+## Owner decisions (2026-11-25)
+
+- 9t runs next, ahead of 9w and 9x. On a captcha the bot sends the owner its image, the owner types the answer, and
+  the session goes on, inside the site too, to find how its file is downloaded.
+- What the first visit learns (landing steps, field mapping, captcha, result page, downloads) is registered in the
+  site's settings and in the issue, so the next invoice of that site reuses it.
+- SUNAT: no scraping of SUNAT pages. The owner has tokens for an official API; reviewing what it returns comes later.
