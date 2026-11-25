@@ -106,6 +106,11 @@ MESSAGES: dict[str, str] = {
         "{url}\n"
         "¿Es correcta? Si no, toca [✏️ Corregir]."
     ),
+    "BR-F14_busy": (
+        "Leí esta dirección para {razon_social}. El sitio existe, pero ahora está caído:\n"
+        "{url}\n"
+        "¿Es correcta? Si no, toca [✏️ Corregir]."
+    ),
     "BR-F15": (
         "Escríbeme la dirección del portal de {razon_social} tal como aparece en el ticket, "
         "por ejemplo https://portal.ejemplo.pe/tienda"
