@@ -35,6 +35,7 @@ from invoicebot.routing.router import compile_rules
 from invoicebot.rules.messages_es import (
     BUTTON_CANCEL,
     BUTTON_EDIT,
+    EDIT_INVALID,
     EDIT_LATE,
     MESSAGES,
     UNKNOWN_ISSUER,
@@ -338,6 +339,14 @@ async def _queue_br_f02(
     text = MESSAGES["BR-F02"].format(razon_social="Tienda Example", ruc_emisor=ruc_emisor)
     await queue_message(
         conn, Addressee("whatsapp", profile_id), text, invoice_id=invoice_id, rule_id="BR-F02"
+    )
+
+
+async def _queue_br_f15(conn: AsyncConnection[Any], profile_id: str, invoice_id: int) -> None:
+    """Queue BR-F15 for the invoice's sender, as [✏️ Corregir] does (BR-F15, D192)."""
+    text = MESSAGES["BR-F15"].format(razon_social="Tienda Example")
+    await queue_message(
+        conn, Addressee("whatsapp", profile_id), text, invoice_id=invoice_id, rule_id="BR-F15"
     )
 
 
@@ -1694,3 +1703,181 @@ async def test_br_f02_url_without_teach_roles_is_not_taken(
 
     assert result.status == "stored"
     assert link is None
+
+
+async def test_br_f15_total_edit_is_applied_not_answered(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: total=118 while BR-F15 is newest edits the invoice and sends no retry."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text="total=118")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        total = await _field(conn, invoice_id, "total")
+        replies = await _replies(conn, profile_id)
+
+    assert result.invoice_id == invoice_id
+    assert total == ("118", "user")
+    assert MESSAGES["BR-F15_retry"] not in [text for text, _rule_id in replies]
+
+
+async def test_br_f15_bad_ruc_edit_answers_its_own_error(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: ruc=123 answers BR-E02 while BR-F15 is newest, not BR-F15_retry."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text="ruc=123")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        replies = await _replies(conn, profile_id)
+
+    assert result.invoice_id == invoice_id
+    assert replies[-1] == (MESSAGES["BR-E02"].format(ruc="123"), "BR-E02")
+    assert MESSAGES["BR-F15_retry"] not in [text for text, _rule_id in replies]
+
+
+async def test_br_f15_motivo_override_is_stored_not_answered(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: motivo=almuerzo while BR-F15 is newest stores the override, no retry."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text="motivo=almuerzo")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        flow = await _flow_data(conn, invoice_id)
+        replies = await _replies(conn, profile_id)
+
+    assert result.invoice_id == invoice_id
+    assert flow["overrides"] == {"motivo": "almuerzo"}
+    assert MESSAGES["BR-F15_retry"] not in [text for text, _rule_id in replies]
+
+
+async def test_br_f15_url_is_echoed_as_br_f14_not_treated_as_an_edit(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: a typed URL with a query string is echoed as BR-F14, not an edit error."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    url = "https://portal.example.pe/?ruc=2"
+    msg = _message(profile_id, external_id=_external_id(), text=url)
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        candidate = await portal_candidates.get(conn, invoice_id)
+        total = await _field(conn, invoice_id, "total")
+        replies = await _replies(conn, profile_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=UNKNOWN_ISSUER, url=url)
+    assert result.invoice_id is None
+    assert candidate == url
+    assert total == ("49.90", "qr")
+    assert replies[-1] == (expected, "BR-F14")
+    assert EDIT_INVALID.format(line=url) not in [text for text, _rule_id in replies]
+
+
+async def test_br_f15_unknown_key_still_gets_the_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: color=rojo is an unknown key, not an edit, so BR-F15_retry is sent."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text="color=rojo")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        total = await _field(conn, invoice_id, "total")
+        replies = await _replies(conn, profile_id)
+
+    assert result.invoice_id is None
+    assert total == ("49.90", "qr")
+    assert replies[-1] == (MESSAGES["BR-F15_retry"], "BR-F15")
+
+
+async def test_br_f15_free_text_still_gets_the_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F15, D192: hola is no edit, so BR-F15's question repeats with BR-F15_retry."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(
+        db_pool, profile_id, "MANUAL_REQUIRED", _reading(await _today(db_pool)), rule_id="BR-F07"
+    )
+    async with db_pool.connection() as conn:
+        await _queue_br_f15(conn, profile_id, invoice_id)
+    msg = _message(profile_id, external_id=_external_id(), text="hola")
+
+    async with db_pool.connection() as conn:
+        result = await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=_teach_roles(profile_id),
+        )
+        total = await _field(conn, invoice_id, "total")
+        replies = await _replies(conn, profile_id)
+
+    assert result.invoice_id is None
+    assert total == ("49.90", "qr")
+    assert replies[-1] == (MESSAGES["BR-F15_retry"], "BR-F15")

@@ -18,9 +18,10 @@ from invoicebot.extract.fields import Field, Reading
 from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import MAX_TAUGHT_URL_CHARS
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.portal_offer import ask_portal, handle_press
+from invoicebot.pipeline.portal_offer import answer, ask_portal, handle_press, offer_candidate
 from invoicebot.pipeline.questions import yes_press_suffix
-from invoicebot.pipeline.teach import TeachSetup
+from invoicebot.pipeline.steps import PORTAL_CHECK_STEP
+from invoicebot.pipeline.teach import RULE_PORTAL_CHECKING, TeachSetup
 from invoicebot.rules.messages_es import (
     BUTTON_APPROVE,
     BUTTON_DONT_KNOW,
@@ -55,12 +56,12 @@ RAZON_SOCIAL = "Tienda Example"
 #: The strip OCR read under ``CONSULT… EN``, garbled as a scan prints it (D191).
 URL_STRIP = "hitps.//sy.example pe/tiemda"
 STRIP_RAZON_SOCIAL = "TIENDA SOL S.A.C."
-#: What the strip repairs to with no approved host close enough (D191).
-REPAIRED_URL = "https://sy.example.pe/tienda"
 #: The approved host ``sy.example.pe`` repairs to; it belongs to another RUC (D191).
 APPROVED_HOST_URL = "https://sv.example.pe/tienda"
 #: A URL BR-F14 would offer if it recomputed instead of using the stored candidate.
 CHANGED_URL = "https://otro.example.pe/otro-comprobante"
+#: The valid link a sender types over BR-F14 as the correction (D192).
+TYPED_URL = "https://b.example.pe/portal"
 SENDER = "asistente"
 #: The owner profile is the example config's only admin (R-11.4).
 ADMIN = "yo"
@@ -152,6 +153,12 @@ async def _outbox(
     return [(str(text), rule_id, cast(list[dict[str, str]], buttons)) for text, rule_id, buttons in rows]
 
 
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the invoice's job steps, oldest first."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
+
+
 def _yes_id(invoice_id: int) -> str:
     """Return the [Sí] press id of the offer of ``PRINTED_URL``."""
     return f"u{invoice_id}:{yes_press_suffix(PRINTED_URL)}"
@@ -211,18 +218,33 @@ def _button_press(profile_id: str, button_id: str) -> InboundMessage:
     )
 
 
-async def test_ask_portal_with_printed_url_offers_it_with_three_buttons(
+def _text_message(profile_id: str, text: str) -> InboundMessage:
+    """Build a canonical free-text message from ``profile_id``."""
+    return InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        text=text,
+        received_at=datetime.now(UTC),
+    )
+
+
+async def test_ask_portal_with_a_printed_url_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F14: the printed URL wins over the QR one and is offered with three buttons."""
+    """BR-F14, D192: a printed URL queues the notice and one check, with no candidate."""
     reading = _reading(printed_url=PRINTED_URL, document_url=OTHER_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=PRINTED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, PRINTED_URL))]
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
+    assert candidate is None
 
 
 async def test_ask_portal_with_sunat_document_url_asks_br_f02(
@@ -241,50 +263,55 @@ async def test_ask_portal_with_sunat_document_url_asks_br_f02(
 async def test_ask_portal_with_other_document_url_offers_it(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D189, BR-F14: a QR link outside SUNAT's host is offered when nothing is printed."""
+    """BR-F14, D192: a QR link outside SUNAT's host is offered at once, with no check queued."""
     reading = _reading(document_url=OTHER_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
+        jobs = await _jobs(conn, invoice_id)
 
     expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=OTHER_URL)
     assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, OTHER_URL))]
+    assert jobs == []
 
 
 async def test_ask_portal_with_no_url_asks_br_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F02: with no URL to offer the sender is asked for the portal with [✏️ Lo escribo] [No sé]."""
+    """BR-F14, D192: with no URL to offer the sender is asked for the portal and no check is queued."""
     reading = _reading()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
+        jobs = await _jobs(conn, invoice_id)
 
     assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
+    assert jobs == []
 
 
-async def test_ask_portal_repairs_the_strip_and_stores_the_candidate(
+async def test_ask_portal_with_a_strip_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F14: the garbled strip is repaired from the issuer name and offered, then stored."""
+    """BR-F14, D192: a strip queues the notice and one check, with no candidate."""
     reading = _reading(url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=REPAIRED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, REPAIRED_URL))]
-    assert candidate == REPAIRED_URL
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
+    assert candidate is None
 
 
-async def test_ask_portal_repairs_the_strip_against_an_approved_host(
+async def test_ask_portal_with_a_strip_and_an_approved_host_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F14: an approved host close to the strip's host replaces it in the offer."""
+    """BR-F14, D192: a strip is checked even when an approved host is close to it, and stores no candidate."""
     reading = _reading(url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
     async with db_pool.connection() as conn:
         await conn.execute(
@@ -298,54 +325,62 @@ async def test_ask_portal_repairs_the_strip_against_an_approved_host(
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, APPROVED_HOST_URL))]
-    assert candidate == APPROVED_HOST_URL
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
+    assert candidate is None
 
 
-async def test_ask_portal_with_a_strip_that_repairs_to_nothing_asks_br_f02(
+async def test_ask_portal_with_a_strip_that_repairs_to_nothing_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F02: a strip that is no portal address, with no QR link, asks BR-F02."""
+    """BR-F14, D192: a strip that is no portal address still queues the notice and one check."""
     reading = _reading(url_strip="no hay nada")
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    assert rows == [(_br_f02_text(), "BR-F02", _ask_portal_buttons(invoice_id))]
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
     assert candidate is None
 
 
-async def test_ask_portal_with_an_unrepairable_strip_offers_the_qr_link(
+async def test_ask_portal_with_an_unrepairable_strip_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F14: a strip that repairs to nothing does not hide the QR's own link."""
+    """BR-F14, D192: a strip that repairs to nothing queues the check instead of offering the QR link."""
     reading = _reading(document_url=CHANGED_URL, url_strip="no hay nada")
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    assert candidate == CHANGED_URL
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
+    assert candidate is None
 
 
-async def test_ask_portal_printed_url_wins_over_the_strip(
+async def test_ask_portal_with_a_printed_url_and_a_strip_queues_the_check(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D191, BR-F14: the printed URL is offered and stored even when the strip reads a portal."""
+    """BR-F14, D192: a printed URL and a strip queue one notice and one check, storing no candidate."""
     reading = _reading(printed_url=PRINTED_URL, url_strip=URL_STRIP, razon_social=STRIP_RAZON_SOCIAL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
 
-    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=PRINTED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, PRINTED_URL))]
-    assert candidate == PRINTED_URL
+    assert rows == [(MESSAGES[RULE_PORTAL_CHECKING], RULE_PORTAL_CHECKING, [])]
+    assert jobs == [PORTAL_CHECK_STEP]
+    assert candidate is None
 
 
 async def test_ask_portal_with_a_qr_link_too_long_to_teach_asks_br_f02(
@@ -373,7 +408,7 @@ async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
@@ -398,7 +433,7 @@ async def test_yes_teaches_the_stored_candidate_after_the_reading_changes(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await save_reading(conn, invoice_id, _reading(document_url=CHANGED_URL))
         await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
@@ -422,7 +457,7 @@ async def test_yes_with_a_private_resolver_asks_br_f15_retry_and_teaches_nothing
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
@@ -441,7 +476,7 @@ async def test_fix_on_br_f14_asks_br_f15(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:fix"), setup)
         rows = await _outbox(conn, SENDER)
 
@@ -473,7 +508,7 @@ async def test_fix_on_an_older_br_f14_is_stale(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await queue_message(
             conn,
             Addressee("whatsapp", SENDER),
@@ -515,7 +550,7 @@ async def test_old_no_press_is_logged_and_queues_nothing(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         before = await _outbox(conn, SENDER)
         await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:no"), setup)
         after = await _outbox(conn, SENDER)
@@ -533,7 +568,7 @@ async def test_dont_know_answers_br_f02_dont_know_manual(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:dk"), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         rows = await _outbox(conn, SENDER)
@@ -625,7 +660,7 @@ async def test_press_from_another_profile_changes_nothing(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         before = await _outbox(conn, SENDER)
         await handle_press(conn, _button_press(OTHER_PROFILE, _yes_id(invoice_id)), setup)
         after = await _outbox(conn, SENDER)
@@ -645,7 +680,7 @@ async def test_press_after_a_newer_question_is_stale(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await queue_message(
             conn,
             Addressee("whatsapp", SENDER),
@@ -675,7 +710,7 @@ async def test_yes_still_answers_after_another_invoices_br_f13(
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         other_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await queue_message(
             conn, Addressee("whatsapp", SENDER), "BR-F13 docs needed", invoice_id=other_id, rule_id="BR-F13"
         )
@@ -700,8 +735,8 @@ async def test_yes_on_an_older_offer_is_stale_and_teaches_nothing(
     reading = _reading(printed_url=PRINTED_URL)
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, _reading(printed_url=CHANGED_URL))
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, CHANGED_URL)
         await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), _setup())
         link = await taught_links.get(conn, ISSUER_RUC)
         rows = await _outbox(conn, SENDER)
@@ -719,7 +754,7 @@ async def test_press_after_yes_is_stale(
     yes = f"u{{}}:{yes_press_suffix(PRINTED_URL)}"
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
-        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
         await handle_press(conn, _button_press(SENDER, yes.format(invoice_id)), _setup())
         await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:{suffix}"), _setup())
         rows = await _outbox(conn, SENDER)
@@ -743,3 +778,182 @@ async def test_ask_portal_with_an_unteachable_qr_link_asks_br_f02(
         rows = await _outbox(conn, SENDER)
 
     assert [row[1] for row in rows] == ["BR-F02"]
+
+
+async def test_typing_a_url_over_br_f14_offers_it_and_the_old_yes_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a typed link replaces the offer, so the earlier [Sí] only answers BR-S02."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        handled = await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
+        after = await _outbox(conn, SENDER)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        owner_rows = await _outbox(conn, ADMIN)
+        state = await _state(conn, invoice_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=TYPED_URL)
+    stale = MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(state))
+    assert handled is True
+    assert rows[-1] == (expected, "BR-F14", _offer_buttons(invoice_id, TYPED_URL))
+    assert candidate == TYPED_URL
+    assert after == [*rows, (stale, "BR-S02", [])]
+    assert link is None
+    assert owner_rows == []
+
+
+async def test_yes_after_typing_a_url_teaches_the_typed_url(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: [Sí] on the replaced offer proposes the URL the sender typed."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:{yes_press_suffix(TYPED_URL)}"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, TYPED_URL, SENDER, "proposed")
+
+
+async def test_typed_url_that_resolves_private_asks_br_f15_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a typed link the guard refuses asks BR-F15 again and leaves the candidate."""
+    setup = _setup(PrivateResolver())
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        handled = await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is True
+    assert rows[-1] == (MESSAGES["BR-F15_retry"], "BR-F15", _br_f15_buttons(invoice_id))
+    assert candidate == PRINTED_URL
+
+
+async def test_typed_url_with_a_bad_port_asks_br_f15_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a typed link whose port is out of range asks BR-F15 again and leaves the candidate."""
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        handled = await answer(conn, _setup(), _text_message(SENDER, "https://x.example.pe:99999/"))
+        rows = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is True
+    assert rows[-1] == (MESSAGES["BR-F15_retry"], "BR-F15", _br_f15_buttons(invoice_id))
+    assert candidate == PRINTED_URL
+
+
+async def test_text_that_is_not_a_url_leaves_br_f14_open(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: other text is not an answer, so nothing is queued and the candidate stays."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        before = await _outbox(conn, SENDER)
+        handled = await answer(conn, setup, _text_message(SENDER, "hola"))
+        after = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is False
+    assert after == before
+    assert candidate == PRINTED_URL
+
+
+async def test_typed_url_on_a_done_invoice_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a settled invoice takes no correction, so nothing is queued."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        await set_state(conn, invoice_id, "DONE")
+        before = await _outbox(conn, SENDER)
+        handled = await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        after = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is False
+    assert after == before
+    assert candidate == PRINTED_URL
+
+
+async def test_typed_url_after_the_candidate_was_deleted_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: with the candidate consumed, the open BR-F14 takes no correction."""
+    setup = _setup()
+    reading = _reading()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await offer_candidate(conn, Addressee("whatsapp", SENDER), invoice_id, reading, PRINTED_URL)
+        await portal_candidates.delete(conn, invoice_id)
+        before = await _outbox(conn, SENDER)
+        handled = await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        after = await _outbox(conn, SENDER)
+        candidate = await portal_candidates.get(conn, invoice_id)
+
+    assert handled is False
+    assert after == before
+    assert candidate is None
+
+
+async def test_a_typed_url_after_the_check_answers_the_pending_br_f02_of_another_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: the check's notice asks nothing, so a typed URL answers the pending BR-F02."""
+    setup = _setup()
+    pending_reading = _reading()
+    strip_reading = _reading(url_strip=URL_STRIP)
+    async with db_pool.connection() as conn:
+        pending_id = await _invoice_with_reading(conn, SENDER, pending_reading)
+        checked_id = await _invoice_with_reading(conn, SENDER, strip_reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), pending_id, pending_reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), checked_id, strip_reading)
+        handled = await answer(conn, setup, _text_message(SENDER, TYPED_URL))
+        rows = await _outbox(conn, SENDER)
+        jobs = await _jobs(conn, checked_id)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=TYPED_URL)
+    assert handled is True
+    assert rows[-1] == (expected, "BR-F14", _offer_buttons(pending_id, TYPED_URL))
+    assert jobs == [PORTAL_CHECK_STEP]
+
+
+async def test_ask_portal_rolls_back_the_notice_and_the_job_with_the_caller(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a transaction that rolls back leaves no notice and no check."""
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+    async with db_pool.connection() as conn:
+        with pytest.raises(RuntimeError, match="rollback"):
+            async with conn.transaction():
+                await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+                raise RuntimeError("rollback")
+        rows = await _outbox(conn, SENDER)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert rows == []
+    assert jobs == []

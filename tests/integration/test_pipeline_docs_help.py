@@ -27,6 +27,8 @@ from invoicebot.pipeline.questions import (
     TEACH_PORTAL_ACTION,
     WAIT_MAIL_ACTION,
 )
+from invoicebot.pipeline.steps import PORTAL_CHECK_STEP
+from invoicebot.pipeline.teach import RULE_PORTAL_CHECKING
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES, state_desc
@@ -204,6 +206,12 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     return [(rule_id, str(text)) for rule_id, text in await cur.fetchall()]
 
 
+async def _jobs(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
+    """Return the invoice's job steps, oldest first."""
+    cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+    return [str(step) for (step,) in await cur.fetchall()]
+
+
 async def _attempts(conn: AsyncConnection[Any], invoice_id: int) -> list[str]:
     """Return the invoice's recorded fetch attempts, oldest first."""
     cur = await conn.execute(
@@ -264,17 +272,14 @@ async def test_wait_mail_answers_and_keeps_the_invoice_fetching(
 
 
 @pytest.mark.parametrize(
-    ("printed_url", "rule_id", "text"),
+    ("printed_url", "rule_id", "text", "queued_steps"),
     [
-        (
-            PRINTED_URL,
-            RULE_PORTAL_OFFER,
-            MESSAGES[RULE_PORTAL_OFFER].format(razon_social=RAZON_SOCIAL, url=PRINTED_URL),
-        ),
+        (PRINTED_URL, RULE_PORTAL_CHECKING, MESSAGES[RULE_PORTAL_CHECKING], [PORTAL_CHECK_STEP]),
         (
             None,
             RULE_ASK_PORTAL,
             MESSAGES[RULE_ASK_PORTAL].format(razon_social=RAZON_SOCIAL, ruc_emisor=ISSUER_RUC),
+            [],
         ),
     ],
 )
@@ -283,8 +288,9 @@ async def test_teach_portal_offers_the_printed_url_or_asks_for_it(
     printed_url: str | None,
     rule_id: str,
     text: str,
+    queued_steps: list[str],
 ) -> None:
-    """D189, BR-F13: [🔗] queues BR-F14 for the printed URL and BR-F02 when the reading has none."""
+    """BR-F14, D192: [🔗] queues BR-F14_checking and the check for a printed URL, else BR-F02."""
     profile_id = _profile()
     invoice_id = await _invoice(db_pool, profile_id, reading=_portal_reading(printed_url))
     await _ask_docs(db_pool, profile_id, invoice_id)
@@ -293,9 +299,36 @@ async def test_teach_portal_offers_the_printed_url_or_asks_for_it(
     async with db_pool.connection() as conn:
         invoice = await _invoice_row(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
 
     assert invoice == (FETCHING_DOCS, None)
     assert outbox == [ASKED, (rule_id, text)]
+    assert jobs == queued_steps
+
+
+async def test_a_second_teach_portal_press_on_the_same_br_f13_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D192: a second [🔗] on the same BR-F13 answers BR-S02 and queues no second check."""
+    profile_id = _profile()
+    invoice_id = await _invoice(db_pool, profile_id, reading=_portal_reading(PRINTED_URL))
+    await _ask_docs(db_pool, profile_id, invoice_id)
+    await _handle(db_pool, _press(invoice_id, TEACH_PORTAL_ACTION, profile_id))
+    await _handle(db_pool, _press(invoice_id, TEACH_PORTAL_ACTION, profile_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    stale = MESSAGES[RULE_STALE_BUTTON].format(id=invoice_id, state_desc=state_desc(FETCHING_DOCS))
+    assert invoice == (FETCHING_DOCS, None)
+    assert outbox == [
+        ASKED,
+        (RULE_PORTAL_CHECKING, MESSAGES[RULE_PORTAL_CHECKING]),
+        (RULE_STALE_BUTTON, stale),
+    ]
+    assert jobs == [PORTAL_CHECK_STEP]
 
 
 async def test_send_pdf_on_a_delivering_invoice_is_stale(

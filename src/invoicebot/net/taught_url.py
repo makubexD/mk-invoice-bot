@@ -84,7 +84,12 @@ def taught_url_refusal(url: str) -> GuardReason | TaughtUrlReason | None:
     parts = urlsplit(url)
     if parts.fragment:
         return TaughtUrlReason.FRAGMENT
-    return _host_refusal(parts.hostname or "", parts.port)
+    try:
+        port = parts.port
+    except ValueError:
+        # urlsplit reads the port lazily: one out of range or not a number raises only here.
+        return TaughtUrlReason.BAD_PORT
+    return _host_refusal(parts.hostname or "", port)
 
 
 def _host_refusal(host: str, port: int | None) -> TaughtUrlReason | None:

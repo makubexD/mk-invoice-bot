@@ -1,4 +1,7 @@
-"""Ask for the issuer's portal, offering a URL from the ticket first (BR-F14, BR-F02, BR-F15, D191)."""
+"""Ask for the issuer's portal: a ticket's address queues the check, a QR link is offered.
+
+BR-F14, BR-F02, BR-F15, D191, D192.
+"""
 
 from __future__ import annotations
 
@@ -18,7 +21,6 @@ from invoicebot.net.taught_url import (
     taught_url_refusal,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
-from invoicebot.pipeline.portal_guess import repair_url
 from invoicebot.pipeline.questions import (
     BUTTON_DONT_KNOW_SUFFIX,
     BUTTON_FIX_SUFFIX,
@@ -30,19 +32,22 @@ from invoicebot.pipeline.questions import (
     yes_press_suffix,
 )
 from invoicebot.pipeline.questions import OFFER_BUTTON_PREFIX as OFFER_BUTTON_PREFIX
+from invoicebot.pipeline.steps import PORTAL_CHECK_STEP
 from invoicebot.pipeline.teach import (
     NOT_QUESTIONS,
     RULE_ASK_PORTAL,
     RULE_DONT_KNOW,
+    RULE_PORTAL_CHECKING,
     TeachContext,
     TeachSetup,
     dont_know_reply,
     teach,
 )
 from invoicebot.queue import outbox
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES, UNKNOWN_ISSUER
 from invoicebot.states import SETTLED
-from invoicebot.store import portal_candidates, taught_links
+from invoicebot.store import portal_candidates
 from invoicebot.store.invoices import load_invoice_head, load_reading
 
 logger = logging.getLogger(__name__)
@@ -53,6 +58,12 @@ RULE_PORTAL_OFFER = "BR-F14"
 RULE_WRITE_PORTAL = "BR-F15"
 #: BR-F15's message when the sender's address cannot be taught (BR-F15, D191).
 MESSAGE_BR_F15_RETRY = "BR-F15_retry"
+#: BR-F14's text when the guessed addresses answered nothing (BR-F14, D192).
+MESSAGE_UNVERIFIED = "BR-F14_unverified"
+#: BR-F14's text when the address exists but its server is down (BR-F14, D192).
+MESSAGE_BUSY = "BR-F14_busy"
+#: BR-F15's text when the ticket's strip is no address at all (BR-F15, D192).
+MESSAGE_UNREAD = "BR-F15_unread"
 #: The questions each press answers when its rule is the invoice's newest (BR-F14, BR-F02, BR-F15, D191).
 _ANSWERED_QUESTIONS = {
     BUTTON_YES_SUFFIX: (RULE_PORTAL_OFFER,),
@@ -66,19 +77,12 @@ _PRESS_PATTERN = (
 )
 
 
-def offer_url(reading: Reading, known_hosts: frozenset[str]) -> str | None:
-    """Return the URL BR-F14 offers: the printed one, the repaired strip, else the QR link (D191).
+def qr_offer(reading: Reading) -> str | None:
+    """Return the reading's QR link when BR-F14 may teach it, else None (D192).
 
-    The strip under ``CONSULT… EN`` is repaired against the approved hosts when it was
-    read; one that repairs to nothing leaves the QR link to offer. A QR link that could
-    not be taught, such as SUNAT's generic query page, is not offered.
+    A missing link, or one that could not be taught such as SUNAT's generic query
+    page, is not offered.
     """
-    if reading.printed_url is not None:
-        return reading.printed_url
-    if reading.url_strip is not None:
-        repaired = repair_url(reading.url_strip, reading.value("razon_social"), known_hosts)
-        if repaired is not None:
-            return repaired
     document_url = reading.document_url
     if document_url is None or taught_url_refusal(document_url) is not None:
         return None
@@ -91,12 +95,24 @@ async def ask_portal(
     invoice_id: int,
     reading: Reading,
 ) -> None:
-    """Offer the reading's URL as BR-F14, or ask BR-F02 when there is none (BR-F14, BR-F02).
+    """Queue the portal check for a ticket address, or offer the QR link at once (BR-F14, BR-F02, D192).
 
-    BR-F02's question is queued against ``invoice_id`` so the sender's typed answer
-    reaches :func:`answer`. The caller owns the transaction.
+    A reading whose printed URL or strip may name the portal queues BR-F14_checking and
+    the ``portal_check`` job in the caller's transaction. Without either, BR-F14 offers
+    the QR link, or BR-F02 asks for the portal against ``invoice_id`` so the sender's
+    typed answer reaches :func:`answer`. The caller owns the transaction.
     """
-    url = offer_url(reading, await taught_links.approved_hosts(conn))
+    if reading.printed_url is not None or reading.url_strip is not None:
+        await queue_message(
+            conn,
+            addressee,
+            MESSAGES[RULE_PORTAL_CHECKING],
+            invoice_id=invoice_id,
+            rule_id=RULE_PORTAL_CHECKING,
+        )
+        await enqueue(conn, invoice_id, PORTAL_CHECK_STEP)
+        return
+    url = qr_offer(reading)
     if url is None:
         await _ask_br_f02(conn, addressee, invoice_id, reading)
         return
@@ -109,14 +125,17 @@ async def offer_candidate(
     invoice_id: int,
     reading: Reading,
     url: str,
+    *,
+    message: str = RULE_PORTAL_OFFER,
 ) -> None:
-    """Store ``url`` as the invoice's candidate, then offer it as BR-F14 (BR-F14, D191).
+    """Store ``url`` as the invoice's candidate, then offer it as BR-F14 (BR-F14, D191, D192).
 
     The candidate is stored first so [Sí] teaches exactly the URL the sender saw.
-    The caller owns the transaction.
+    ``message`` picks the text from :data:`MESSAGES`; the rule id, the buttons and the
+    stored candidate stay BR-F14's. The caller owns the transaction.
     """
     await portal_candidates.save(conn, invoice_id, url)
-    text = MESSAGES[RULE_PORTAL_OFFER].format(
+    text = MESSAGES[message].format(
         razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
         url=url,
     )
@@ -127,6 +146,35 @@ async def offer_candidate(
         invoice_id=invoice_id,
         rule_id=RULE_PORTAL_OFFER,
         buttons=offer_buttons(invoice_id, url),
+    )
+
+
+async def ask_unread(
+    conn: AsyncConnection[Any],
+    addressee: Addressee,
+    invoice_id: int,
+    reading: Reading,
+    strip: str,
+) -> None:
+    """Ask BR-F15 with the strip that was no address, or queue nothing without a RUC (BR-F15, D192).
+
+    A reading without an issuer could never be taught, so it logs and queues nothing,
+    as :func:`_ask_br_f02` does. The caller owns the transaction.
+    """
+    if reading.value("ruc_emisor") is None:
+        logger.info("ignored BR-F15 question without an issuer", extra={"profile_id": addressee.profile_id})
+        return
+    text = MESSAGES[MESSAGE_UNREAD].format(
+        strip=strip,
+        razon_social=reading.value("razon_social") or UNKNOWN_ISSUER,
+    )
+    await queue_message(
+        conn,
+        addressee,
+        text,
+        invoice_id=invoice_id,
+        rule_id=RULE_WRITE_PORTAL,
+        buttons=[dont_know_button(invoice_id)],
     )
 
 
@@ -181,14 +229,16 @@ async def answer(
     setup: TeachSetup,
     msg: InboundMessage,
 ) -> bool:
-    """Answer the sender's newest BR-F15 or BR-F02 question with their free text (R-11.4, D191).
+    """Answer the sender's newest BR-F14, BR-F15 or BR-F02 question (R-11.4, D191, D192).
 
     BR-F15 takes any text, but only a link once the question was answered "no
     sé"; a settled invoice takes none: "no sé" answers BR-F02_dont_know, a link the request guard
     accepts is echoed as BR-F14 with the invoice's candidate stored, and anything else
-    repeats BR-F15. BR-F02 takes only "no sé" or one ``https`` URL, echoed the same way;
-    any other text is left to the edit paths. Returns True when the text was handled, so
-    the caller does not run the usual edit/override paths.
+    repeats BR-F15. BR-F14 takes only one ``https`` URL, and only while its candidate still
+    waits on an invoice that is not settled: the URL is the correction and is echoed as the
+    new BR-F14, replacing the candidate. BR-F02 takes only "no sé" or one ``https`` URL,
+    echoed the same way; any other text over BR-F14 or BR-F02 is left to the edit paths. Returns
+    True when the text was handled, so the caller does not run the usual edit/override paths.
     """
     question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
     if question is None:
@@ -199,6 +249,8 @@ async def answer(
             return False
         await _answer_br_f15(conn, setup, msg, invoice_id)
         return True
+    if rule_id == RULE_PORTAL_OFFER:
+        return await _answer_br_f14(conn, setup, msg, invoice_id)
     if rule_id != RULE_ASK_PORTAL:
         return False
     return await _answer_br_f02(conn, setup, msg, invoice_id)
@@ -323,6 +375,30 @@ async def _answer_br_f15(
         await dont_know_reply(conn, addressee, invoice_id)
         return
     await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+
+
+async def _answer_br_f14(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    msg: InboundMessage,
+    invoice_id: int,
+) -> bool:
+    """Answer BR-F14 with a typed link, leaving any other text to the edit paths (BR-F14, D192).
+
+    The link is the correction only while the offer still waits: the invoice exists and is
+    not settled, and its candidate was not consumed. The shape check comes first, so any
+    other text costs no query.
+    """
+    if not looks_like_url(msg.text):
+        return False
+    head = await load_invoice_head(conn, invoice_id)
+    if head is None or head.state in SETTLED:
+        return False
+    if await portal_candidates.get(conn, invoice_id) is None:
+        return False
+    addressee = Addressee(msg.channel, msg.profile_id)
+    await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+    return True
 
 
 async def _answer_br_f02(

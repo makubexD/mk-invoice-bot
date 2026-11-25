@@ -100,6 +100,17 @@ MESSAGES: dict[str, str] = {
     "BR-F13_upload": "Envíame el PDF aquí, como archivo, y lo completo.",
     "BR-F13_wait": "Listo. Sigo revisando tu correo y te aviso cuando llegue el PDF.",
     "BR-F14": "¿Es este el portal de {razon_social}?\n{url}",
+    "BR-F14_checking": "Reviso la dirección impresa en el ticket y te la muestro en un momento.",
+    "BR-F14_unverified": (
+        "Leí esta dirección para {razon_social}, pero no me responde:\n"
+        "{url}\n"
+        "¿Es correcta? Si no, toca [✏️ Corregir]."
+    ),
+    "BR-F14_busy": (
+        "Leí esta dirección para {razon_social}, pero el sitio está caído ahora:\n"
+        "{url}\n"
+        "¿Es correcta? Si no, toca [✏️ Corregir]."
+    ),
     "BR-F15": (
         "Escríbeme la dirección del portal de {razon_social} tal como aparece en el ticket, "
         "por ejemplo https://portal.ejemplo.pe/tienda"
@@ -107,6 +118,10 @@ MESSAGES: dict[str, str] = {
     "BR-F15_retry": (
         "No reconozco eso como la dirección de un portal. Escríbela completa, "
         "por ejemplo https://portal.ejemplo.pe/tienda, o toca [No sé]."
+    ),
+    "BR-F15_unread": (
+        "En el ticket leí «{strip}», pero no es una dirección completa. "
+        "Escríbeme la dirección del portal de {razon_social} tal como aparece, o toca [No sé]."
     ),
     "BR-F07": (
         "❗ No pude obtener el XML/PDF de {serie}-{numero}. Intenté:\n"
@@ -194,6 +209,10 @@ MESSAGES: dict[str, str] = {
     "BR-S06_sender_rejected": (
         "El administrador no aprobó el portal que enviaste para RUC {ruc_emisor}. "
         "Si tienes el PDF, envíamelo aquí."
+    ),
+    "BR-S06_stale": (
+        "Ese enlace de RUC {ruc_emisor} ya fue reemplazado por uno más nuevo; "
+        "decide en el aviso más reciente."
     ),
     "BR-S07": "No encontré el comprobante #{id}.",
     "BR-S08": (

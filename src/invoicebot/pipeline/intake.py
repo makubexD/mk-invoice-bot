@@ -299,11 +299,12 @@ async def _store_with_overrides(
 
     A text starting with ``/`` is a command and is answered before anything else
     (R-10.1). A text that answers the sender's newest BR-F15 or BR-F02 question is taken
-    by the portal answer (R-11.4, D191). Otherwise it may hold both ``campo=valor`` edits
-    when ``parse_edits`` finds fields or errors, and ``motivo``/``descripcion`` overrides
-    (D70, D90, D97). Each is applied independently to the invoice it targets, and the
-    result names the invoice the edits first touched. A pdf/xml upload is linked to the
-    stuck invoice it belongs to
+    by the portal answer, unless it is an edit (R-11.4, D191, D192): it holds
+    ``campo=valor`` fields, a known field whose value was rejected, or a
+    ``motivo``/``descripcion`` override (D70, D90, D97). An unknown key (an error with no field) is not an
+    edit and still reaches the portal answer. Each edit and override is applied
+    independently to the invoice it targets, and the result names the invoice the edits
+    first touched. A pdf/xml upload is linked to the stuck invoice it belongs to
     (R-1.5); another attachment kind, or a text with neither, changes nothing.
     """
     if msg.attachments:
@@ -312,13 +313,14 @@ async def _store_with_overrides(
     if command is not None:
         await handle_command(conn, msg, command[0], command[1], context=_command_context(roles, timezone))
         return IntakeResult(status="stored", invoice_id=None)
-    if roles.teach is not None and await answer(conn, roles.teach, msg):
-        return IntakeResult(status="stored", invoice_id=None)
     edits = parse_edits(msg.text)
+    overrides = parse_overrides(msg.text)
+    is_edit = bool(edits.fields or overrides) or any(error.field is not None for error in edits.errors)
+    if roles.teach is not None and not is_edit and await answer(conn, roles.teach, msg):
+        return IntakeResult(status="stored", invoice_id=None)
     invoice_id = None
     if edits.fields or edits.errors:
         invoice_id = await apply_edits(conn, msg, edits)
-    overrides = parse_overrides(msg.text)
     if overrides:
         invoice_id = await apply_overrides(conn, msg, overrides) or invoice_id
     return IntakeResult(status="stored", invoice_id=invoice_id)

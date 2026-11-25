@@ -53,6 +53,8 @@ GOOD_URL = "https://portal.example.pe/consulta"
 OTHER_URL = "https://portal.example.pe/otra"
 RAZON_SOCIAL = "Tienda Example"
 SENDER = "asistente"
+#: Another non-admin sender, built from SENDER's profile, for a replaced link (D192).
+OTHER_SENDER = "asistente2"
 #: The owner profile is the example config's only admin (R-11.4).
 ADMIN = "yo"
 #: The ops repo an approved link is commented onto when GitHub is enabled (D118).
@@ -102,6 +104,14 @@ def _context() -> TeachContext:
     )
 
 
+def _context_with_sender(profile_id: str) -> TeachContext:
+    """Return a context whose sender is another non-admin profile (D192)."""
+    ctx = _context()
+    profile = ctx.profiles[SENDER].model_copy(update={"name": "Asistente Dos", "whatsapp": "51988888887"})
+    profiles: dict[str, Profile] = {**ctx.profiles, profile_id: profile}
+    return TeachContext(profiles=profiles, sender=Addressee("whatsapp", profile_id), resolver=ctx.resolver)
+
+
 async def _outbox(
     conn: AsyncConnection[Any],
     recipient: str,
@@ -118,6 +128,14 @@ async def _outbox(
     )
     rows = await cur.fetchall()
     return [(str(text), rule_id, cast(list[dict[str, str]], buttons)) for text, rule_id, buttons in rows]
+
+
+async def _version(conn: AsyncConnection[Any]) -> int:
+    """Return the issuer's taught link version."""
+    cur = await conn.execute("SELECT version FROM taught_links WHERE ruc_emisor = %s", (ISSUER_RUC,))
+    row = await cur.fetchone()
+    assert row is not None
+    return int(row[0])
 
 
 def _decision_buttons(version: int = 1) -> list[dict[str, str]]:
@@ -173,24 +191,57 @@ async def test_propose_invalid_link_raises_and_queues_nothing(
     assert owner_rows == []
 
 
-async def test_propose_second_link_while_proposed_asks_no_admin_again(
+async def test_propose_same_link_while_proposed_asks_no_admin_again(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-S06: a second proposal while one is proposed thanks the sender and asks nobody."""
+    """BR-S06, D192: the same link proposed again while it waits thanks the sender and asks nobody."""
     ctx = _context()
     async with db_pool.connection() as conn:
         await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, GOOD_URL)
         await conn.execute("DELETE FROM outbox")
-        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, OTHER_URL)
+        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, GOOD_URL)
         link = await taught_links.get(conn, ISSUER_RUC)
+        version = await _version(conn)
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, "yo")
         second_rows = await _outbox(conn, "segundo")
 
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert version == 1
     assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
     assert owner_rows == []
     assert second_rows == []
+
+
+async def test_propose_newer_different_link_replaces_the_waiting_one(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D192: a newer, different link replaces the waiting one and asks each admin again."""
+    first = _context()
+    second = _context_with_sender(OTHER_SENDER)
+    async with db_pool.connection() as conn:
+        await teach(conn, first, ISSUER_RUC, RAZON_SOCIAL, GOOD_URL)
+        await teach(conn, second, ISSUER_RUC, RAZON_SOCIAL, OTHER_URL)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        version = await _version(conn)
+        sender_rows = await _outbox(conn, OTHER_SENDER)
+        owner_rows = await _outbox(conn, "yo")
+        second_admin_rows = await _outbox(conn, "segundo")
+
+    expected_owner = MESSAGES["BR-S06_owner"].format(
+        sender="Asistente Dos",
+        razon_social=RAZON_SOCIAL,
+        ruc_emisor=ISSUER_RUC,
+        url=OTHER_URL,
+    )
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "proposed")
+    assert version == 2
+    assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
+    assert owner_rows == [
+        (_owner_text(), "BR-S06", _decision_buttons()),
+        (expected_owner, "BR-S06", _decision_buttons(2)),
+    ]
+    assert second_admin_rows == owner_rows
 
 
 async def test_propose_link_for_approved_issuer_changes_nothing(
@@ -983,7 +1034,10 @@ async def test_press_current_proposal_version_approves_it(
 async def test_press_older_proposal_version_changes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-S06: after [Rechazar], a press of the first proposal leaves the new one proposed (D137)."""
+    """BR-S06: after [Rechazar], a press of the first proposal leaves the new one proposed (D137).
+
+    The press answers BR-S06_stale (D192).
+    """
     async with db_pool.connection() as conn:
         first = await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER)
         assert first is not None
@@ -996,8 +1050,32 @@ async def test_press_older_proposal_version_changes_nothing(
         link = await taught_links.get(conn, ISSUER_RUC)
         admin_rows = await _outbox(conn, ADMIN)
 
+    expected = MESSAGES["BR-S06_stale"].format(ruc_emisor=ISSUER_RUC)
     assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
-    assert admin_rows == []
+    assert admin_rows == [(expected, "BR-S06_stale", [])]
+
+
+async def test_press_replacement_version_approves_the_new_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D192: [Aprobar] on the version that replaced another approves the newer link."""
+    second = _context_with_sender(OTHER_SENDER)
+    async with db_pool.connection() as conn:
+        await teach(conn, _context(), ISSUER_RUC, RAZON_SOCIAL, GOOD_URL)
+        await teach(conn, second, ISSUER_RUC, RAZON_SOCIAL, OTHER_URL)
+        assert await _version(conn) == 2
+        await conn.execute("DELETE FROM outbox")
+        await handle_press(
+            conn,
+            _press(ADMIN, approved=True, version=2),
+            TeachSetup(profiles=second.profiles, resolver=second.resolver),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+        admin_rows = await _outbox(conn, ADMIN)
+
+    expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "approved")
+    assert admin_rows == [(expected, "BR-S06_approved", [])]
 
 
 async def test_press_unversioned_button_id_is_not_handled(

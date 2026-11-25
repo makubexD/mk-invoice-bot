@@ -32,6 +32,8 @@ from invoicebot.app import (
     _google_tokens,
     _laptop_secrets,
     _log_reload_failure,
+    _no_cookies,
+    _portal_handlers,
     _secret_problem,
     _sol_fetcher,
     _sol_secrets,
@@ -42,7 +44,7 @@ from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
-from invoicebot.pipeline.steps import DELIVER_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import DELIVER_STEP, PORTAL_CHECK_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.runtime_config import ConfigRejected
@@ -323,6 +325,22 @@ def test_sunat_validation_on_with_secrets_registers_the_recheck_step(tmp_path: P
     assert secrets.enabled
     handlers = _validation_handlers(cfg, cast(Any, None), cast(Any, None), secrets)
     assert set(handlers) == {VALIDATE_STEP, SUNAT_RECHECK_STEP}
+
+
+def test_no_cookies_jar_keeps_nothing() -> None:
+    """R-5.10, D192: a cookie a guessed host sets is not kept by the probe's client."""
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, headers={"set-cookie": "a=b; Path=/"}))
+    with httpx.Client(transport=transport, cookies=_no_cookies()) as client:
+        client.get("https://portal.example.pe/")
+
+        assert len(client.cookies.jar) == 0
+
+
+def test_portal_check_step_is_registered() -> None:
+    """D192: the portal handlers hold the portal check step and no other."""
+    handlers = _portal_handlers(cast(Any, None), cast(Any, None))
+
+    assert set(handlers) == {PORTAL_CHECK_STEP}
 
 
 def test_google_secret_view_declares_only_the_client_secret() -> None:
