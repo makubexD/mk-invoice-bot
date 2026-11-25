@@ -386,10 +386,10 @@ async def _run_handler_with_reading(
         error=None,
     )
 
-    async def _fake_run_helper(*_args: Any, **_kwargs: Any) -> _HelperResult:
+    async def _fake_run_extract_helper(*_args: Any, **_kwargs: Any) -> _HelperResult:
         return result
 
-    monkeypatch.setattr(extract_module, "_run_helper", _fake_run_helper)
+    monkeypatch.setattr(extract_module, "run_extract_helper", _fake_run_extract_helper)
     await _run_handler(pool, invoice_id)
 
 

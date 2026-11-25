@@ -68,7 +68,7 @@ def _browser_env(tmpdir: str) -> dict[str, str]:
 
 
 def _image_env() -> dict[str, str]:
-    """Return the env :func:`invoicebot.pipeline.extract._run_helper` gives the helper."""
+    """Return the env :func:`invoicebot.pipeline.extract.run_extract_helper` gives the helper."""
     return extract_helper_env(load_config(CONFIG / "example.yaml").limits.media)
 
 
