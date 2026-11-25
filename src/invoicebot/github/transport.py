@@ -4,7 +4,8 @@ A ``create_issue`` row first lists the repo's gap issues, at most five pages, an
 reuses the issue whose body carries the row fingerprint's hidden marker, so a
 lost database row does not open a second issue. Otherwise it renders the typed
 issue text and creates one. A ``comment`` row posts a taught portal link to an
-existing issue. A ``close_issue`` row comments on the issue and closes it. The
+existing issue. A ``probe_report`` row posts a portal probe's field table and draft
+YAML the same way (D193). A ``close_issue`` row comments on the issue and closes it. The
 daily write budget, a token failure (BR-D05), a 5xx, a timeout and a rejected
 token reschedule the row with :class:`SendLater`; only a 4xx that a retry cannot
 fix, or a payload that can never be sent, raises :class:`PermanentSendError`.
@@ -19,8 +20,10 @@ from datetime import timedelta
 from typing import Any, Protocol
 
 import httpx
+from pydantic import ValidationError
 
 from invoicebot.fetchers.base import FetchReason
+from invoicebot.fetchers.browser.probe_protocol import ProbeReport
 from invoicebot.github.app_token import GITHUB_API_BASE_URL, GitHubTokenError
 from invoicebot.github.issue_text import (
     CLOSE_COMMENT,
@@ -29,6 +32,7 @@ from invoicebot.github.issue_text import (
     render_hint_comment,
     render_issue,
 )
+from invoicebot.github.probe_text import render_probe
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 
 #: Every GitHub request uses the same timeout as the other outbound transports.
@@ -109,7 +113,7 @@ def make_github_transport(
 async def _transport(client: _Client, row: OutboxRow) -> str | None:
     """Send one row: a create-issue write, a comment, or a close on an existing issue."""
     op = row.payload.get("op")
-    if op not in ("create_issue", "comment", "close_issue"):
+    if op not in ("create_issue", "comment", "probe_report", "close_issue"):
         raise PermanentSendError(f"unknown github op: {op!r}")
     if await client.hooks.writes_today() >= client.budget:
         raise SendLater(BUDGET_DELAY, "budget")
@@ -123,11 +127,29 @@ async def _transport(client: _Client, row: OutboxRow) -> str | None:
         await _close_issue(client, token, number)
         return None
     fingerprint = _payload_text(row.payload, "fingerprint")
+    if op == "probe_report":
+        body = _probe_body(row.payload)
+        issue_url = await _comment_issue_url(client, fingerprint, row.payload)
+        await _post_comment(client, await _access_token(client), issue_url, body)
+        return None
     hint_url = _payload_text(row.payload, "hint_url")
     issue_url = await _comment_issue_url(client, fingerprint, row.payload)
     token = await _access_token(client)
     await _comment(client, token, issue_url, hint_url)
     return None
+
+
+def _probe_body(payload: dict[str, Any]) -> str:
+    """Render a probe_report payload, failing permanently when it can never be sent (D193)."""
+    url = _payload_text(payload, "url")
+    try:
+        report = ProbeReport.model_validate(payload.get("report"))
+    except ValidationError:
+        raise PermanentSendError("github probe report is invalid") from None
+    body = render_probe(url, report)
+    if body is None:
+        raise PermanentSendError("github probe report fails R-11.12")
+    return body
 
 
 async def _comment_issue_url(client: _Client, fingerprint: str, payload: dict[str, Any]) -> str:
@@ -235,10 +257,15 @@ async def _create_issue(client: _Client, token: str, fingerprint: str, fields: I
 
 async def _comment(client: _Client, token: str, issue_url: str, hint_url: str) -> None:
     """Post the taught portal link as a code-fenced comment (R-11.12, D118)."""
-    number = _issue_number(issue_url)
     body = render_hint_comment(hint_url)
     if body is None:
         raise PermanentSendError("github hint url fails R-11.12")
+    await _post_comment(client, token, issue_url, body)
+
+
+async def _post_comment(client: _Client, token: str, issue_url: str, body: str) -> None:
+    """Post ``body`` as a comment on the issue at ``issue_url``."""
+    number = _issue_number(issue_url)
     await _send(
         client,
         token,

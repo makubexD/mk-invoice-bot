@@ -454,3 +454,67 @@ async def test_close_issue_server_error_on_the_patch_reschedules() -> None:
     assert raised.value.delay == timedelta(minutes=15)
     assert raised.value.reason == "github 502"
     assert [request.method for request in requests] == ["GET", "PATCH"]
+
+
+def _probe_payload(**overrides: Any) -> dict[str, Any]:
+    """Return a probe_report row payload with a minimal valid report, with ``overrides`` applied."""
+    payload: dict[str, Any] = {
+        "op": "probe_report",
+        "fingerprint": FINGERPRINT,
+        "url": "https://portal.example.pe/consulta?x=1",
+        "report": {"outcome": "no_form"},
+    }
+    return {**payload, **overrides}
+
+
+async def test_probe_report_posts_one_comment() -> None:
+    """R-11.12, D193: a probe_report row posts the rendered text to its issue."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(201, json={})
+
+    payload = _probe_payload(issue_url=f"{ISSUE_URL}/42")
+    result = await _run(handler, payload, Recorder())
+
+    assert result is None
+    assert len(requests) == 1
+    assert str(requests[0].url) == f"{ISSUES_URL}/42/comments"
+    body = json.loads(requests[0].content)["body"]
+    assert body.startswith("**Sonda del portal:** no_form")
+    assert "url: https://portal.example.pe/consulta\n" in body
+    assert "x=1" not in body
+
+
+async def test_probe_report_without_an_issue_yet_waits_without_a_request() -> None:
+    """R-11.12, D193: a probe_report row whose issue is still being created reschedules as a comment does."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("a pending issue makes no request")
+
+    recorder = Recorder(issue_url=None)
+    with pytest.raises(SendLater) as raised:
+        await _run(handler, _probe_payload(), recorder)
+
+    assert raised.value.reason == "issue pending"
+    assert recorder.issue_url_calls == [FINGERPRINT]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _probe_payload(report={"outcome": "nonsense"}),
+        _probe_payload(report={"outcome": "ok", "submit": "not a selector"}),
+        _probe_payload(report="not an object"),
+        _probe_payload(url="http://portal.example.pe/x"),
+    ],
+)
+async def test_probe_report_that_can_never_be_sent_is_permanent(payload: dict[str, Any]) -> None:
+    """R-11.12, D193: an invalid report, or a URL the text refuses, is permanent."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("an invalid report makes no request")
+
+    with pytest.raises(PermanentSendError):
+        await _run(handler, payload, Recorder(issue_url=f"{ISSUE_URL}/42"))

@@ -60,7 +60,7 @@ def render_issue(gap: IssueFields) -> tuple[str, str]:
     details = _details(gap)
     if details:
         sections.append("\n".join(details))
-    url = _safe_url(gap.hint_url)
+    url = safe_url(gap.hint_url)
     if url:
         sections.append(f"```\n{url}\n```")
     sections.append(issue_marker(gap.fingerprint))
@@ -74,7 +74,7 @@ def issue_marker(fingerprint: str) -> str:
 
 def render_hint_comment(hint_url: str) -> str | None:
     """Render a taught portal link as a code-fenced comment, or None when it fails R-11.12."""
-    url = _safe_url(hint_url)
+    url = safe_url(hint_url)
     if not url:
         return None
     return f"```\n{url}\n```"
@@ -140,7 +140,7 @@ def _marker(fingerprint: str) -> str:
     return _keep(fingerprint, _MARKER_PUNCTUATION)
 
 
-def _safe_url(value: str | None) -> str:
+def safe_url(value: str | None) -> str:
     """Return the URL reduced to ``https://host/path`` when it passes R-11.12, else ``""``."""
     if not value:
         return ""
