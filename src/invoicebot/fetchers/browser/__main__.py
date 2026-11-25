@@ -30,8 +30,10 @@ from invoicebot.fetchers.browser.protocol import (
 from invoicebot.fetchers.browser.session import (
     browse,
     emit,
+    guarded_result,
     limit_resources,
     output,
+    portal_options,
     read_request,
 )
 
@@ -63,13 +65,13 @@ def _read_request() -> HelperRequest:
 async def _run_browser(request: HelperRequest, chromium_sandbox: bool) -> None:
     """Launch Chromium behind the guard proxy and print the result (S10.1, D147)."""
     portal = request.portal
-    result = await browse(
-        portal,
+    result, block = await browse(
+        portal_options(portal),
         request.page_timeout_ms,
         lambda page: fill_and_download(page, portal, request.invoice, request.out_dir, request.max_bytes),
         chromium_sandbox=chromium_sandbox,
     )
-    emit(output(result))
+    emit(output(guarded_result(result, block)))
 
 
 if __name__ == "__main__":

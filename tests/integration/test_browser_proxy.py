@@ -12,7 +12,6 @@ from typing import Any
 import pytest_asyncio
 from playwright.async_api import Browser, async_playwright
 
-from invoicebot.config.models import Portal
 from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.proxy import GuardProxy
 from invoicebot.fetchers.browser.session import (
@@ -355,11 +354,6 @@ def _refuse_evil(addresses: Iterable[str]) -> GuardReason | None:
     return GuardReason.PRIVATE_ADDRESS if _REFUSED_ADDRESS in addresses else None
 
 
-def _portal() -> Portal:
-    """A minimal portal; only the launch flags depend on it here."""
-    return Portal(key="synthetic", adapter="generic_form")
-
-
 @dataclass
 class _EvilSite:
     """The server on the refused address, counting every connection it receives."""
@@ -452,7 +446,7 @@ async def browser(browser_proxy: GuardProxy) -> AsyncIterator[Browser]:
     """A headless Chromium launched with the helper's options through the proxy."""
     async with async_playwright() as playwright:
         launched = await playwright.chromium.launch(
-            **launch_options(_portal(), browser_proxy.port, chromium_sandbox=False)
+            **launch_options(allow_images=False, proxy_port=browser_proxy.port, chromium_sandbox=False)
         )
         try:
             yield launched
