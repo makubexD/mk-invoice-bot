@@ -1,11 +1,11 @@
-"""Tests for the portal URL repaired from a URL strip (BR-F14, D191)."""
+"""Tests for the candidate URLs read from a URL strip (BR-F14, D191, D192)."""
 
 from __future__ import annotations
 
 import pytest
 
 from invoicebot.extract.fields import MAX_PRINTED_URL_CHARS
-from invoicebot.pipeline.portal_guess import MAX_CANDIDATES, candidate_urls, repair_url
+from invoicebot.pipeline.portal_guess import MAX_CANDIDATES, candidate_urls
 
 ISSUER = "TIENDA SOL S.A.C."
 EMPTY_HOSTS: frozenset[str] = frozenset()
@@ -19,7 +19,7 @@ EMPTY_HOSTS: frozenset[str] = frozenset()
             "hitps.//sy.example pe/tiemda",
             ISSUER,
             frozenset({"sv.example.pe"}),
-            "https://sv.example.pe/tienda",
+            "https://sy.example.pe/tienda",
         ),
         (
             "hitps.//sy.example pe/tiemda",
@@ -38,14 +38,14 @@ EMPTY_HOSTS: frozenset[str] = frozenset()
         ("hitps.//portal.example pe/tiemda", None, EMPTY_HOSTS, "https://portal.example.pe/tiemda"),
     ],
 )
-def test_repair_url_returns_the_repaired_portal_url(
+def test_candidate_urls_returns_the_repaired_portal_url(
     strip: str,
     issuer_name: str | None,
     known_hosts: frozenset[str],
     expected: str,
 ) -> None:
     """D191: the strip's host, known hosts and issuer name repair it into the offered URL."""
-    assert repair_url(strip, issuer_name, known_hosts) == expected
+    assert candidate_urls(strip, issuer_name, known_hosts)[0] == expected
 
 
 @pytest.mark.parametrize(
@@ -57,15 +57,15 @@ def test_repair_url_returns_the_repaired_portal_url(
         "   ",
     ],
 )
-def test_repair_url_refuses_a_strip_that_is_not_a_portal(strip: str) -> None:
+def test_candidate_urls_returns_nothing_for_a_refused_strip(strip: str) -> None:
     """D191: a top level outside the accepted ones, SUNAT's host, punycode or blank is refused."""
-    assert repair_url(strip, None, EMPTY_HOSTS) is None
+    assert candidate_urls(strip, None, EMPTY_HOSTS) == ()
 
 
-def test_repair_url_refuses_a_url_over_the_cap() -> None:
+def test_candidate_urls_returns_nothing_for_a_url_over_the_cap() -> None:
     """D191: a repaired URL longer than MAX_PRINTED_URL_CHARS is not offered."""
     strip = "hitps.//portal.example.pe/" + "a" * MAX_PRINTED_URL_CHARS
-    assert repair_url(strip, None, EMPTY_HOSTS) is None
+    assert candidate_urls(strip, None, EMPTY_HOSTS) == ()
 
 
 @pytest.mark.parametrize(
@@ -78,9 +78,9 @@ def test_repair_url_refuses_a_url_over_the_cap() -> None:
         ("hub.pe/otro.com/x", "https://hub.pe/otro.com/x"),
     ],
 )
-def test_repair_url_keeps_the_host_after_a_broken_scheme(strip: str, expected: str) -> None:
+def test_candidate_urls_keeps_the_host_after_a_broken_scheme(strip: str, expected: str) -> None:
     """D191, BR-F14: a scheme that lost its marks is dropped, and a host starting with h is kept."""
-    assert repair_url(strip, None, frozenset()) == expected
+    assert candidate_urls(strip, None, frozenset())[0] == expected
 
 
 @pytest.mark.parametrize(
@@ -96,17 +96,16 @@ def test_repair_url_keeps_the_host_after_a_broken_scheme(strip: str, expected: s
         ("wwv.example.pe/x", "https://www.example.pe/x"),
         ("https://portal.example.pe/tienda.", "https://portal.example.pe/tienda"),
         ("sv.example. pe/x", "https://sv.example.pe/x"),
-        ("https://e-consulta.sunat.gob.pe/x", None),
     ],
 )
-def test_repair_url_fixes_more_ocr_slips(strip: str, expected: str | None) -> None:
+def test_candidate_urls_fixes_more_ocr_slips(strip: str, expected: str) -> None:
     """D192: a garbled scheme, a mangled label or a trailing path period is repaired or refused."""
-    assert repair_url(strip, None, EMPTY_HOSTS) == expected
+    assert candidate_urls(strip, None, EMPTY_HOSTS)[0] == expected
 
 
-def test_repair_url_keeps_a_label_that_only_contains_corn() -> None:
+def test_candidate_urls_keeps_a_label_that_only_contains_corn() -> None:
     """D192: a label such as popcorn is not rewritten to com."""
-    assert repair_url("popcorn.example.pe/x", None, EMPTY_HOSTS) == "https://popcorn.example.pe/x"
+    assert candidate_urls("popcorn.example.pe/x", None, EMPTY_HOSTS)[0] == "https://popcorn.example.pe/x"
 
 
 def test_candidate_urls_puts_the_issuer_repair_then_the_read_path_before_the_known_host() -> None:

@@ -1,8 +1,8 @@
-"""Turn the strip under a ticket's ``CONSULT… EN`` line into the URL BR-F14 offers (D191).
+"""Turn the strip under a ticket's ``CONSULT… EN`` line into the candidate URLs BR-F14 tries (D191, D192).
 
 The strip is OCR text, so its host may carry spaces or commas where a dot was printed, a
-garbled scheme, and a misspelled path segment. The repair only proposes an address; it is
-still checked by :func:`invoicebot.extract.fields.is_printed_url` before it is offered.
+garbled scheme, and a misspelled path segment. The candidates are tried before one is offered
+(D192), and every one is still checked by :func:`invoicebot.extract.fields.is_printed_url`.
 """
 
 from __future__ import annotations
@@ -66,16 +66,6 @@ _REPEATED_DOTS_PATTERN = re.compile(r"\.{2,}")
 _PATH_SEGMENT_CHARS_PATTERN = re.compile(r"[^a-z0-9._~-]", re.IGNORECASE)
 #: One issuer-name word: a run of letters and digits (D191).
 _NAME_WORD_PATTERN = re.compile(r"[a-z0-9]+")
-
-
-def repair_url(strip: str, issuer_name: str | None, known_hosts: frozenset[str]) -> str | None:
-    """Return the portal URL the strip most likely means, or None when it is not one (BR-F14, D191, D192)."""
-    host_part, _, path_part = _strip_scheme(strip.lower().strip()).partition("/")
-    host = _repair_host(host_part, known_hosts)
-    segments = _path_segments(path_part, issuer_name)
-    suffix = f"/{'/'.join(segments)}" if segments else ""
-    url = f"https://{host}{suffix}"
-    return url if _is_portal_url(host, url) else None
 
 
 def candidate_urls(text: str, issuer_name: str | None, known_hosts: frozenset[str]) -> tuple[str, ...]:
@@ -205,11 +195,6 @@ def _drop_garbled_scheme(match: re.Match[str]) -> str:
     return match.group(0)
 
 
-def _repair_host(host_part: str, known_hosts: frozenset[str]) -> str:
-    """Return the host with OCR separators and labels repaired and the closest known host (D191, D192)."""
-    return _closest_known_host(_repair_host_read(host_part), known_hosts)
-
-
 def _repair_host_read(host_part: str) -> str:
     """Return the host with OCR separators and labels repaired, before any known host (D191, D192)."""
     host = _HOST_SEPARATOR_PATTERN.sub(".", host_part)
@@ -237,14 +222,6 @@ def _closest_known_host(host: str, known_hosts: frozenset[str]) -> str:
         if ratio >= HOST_MATCH_MIN_RATIO and (best is None or ratio > best[0]):
             best = (ratio, known)
     return host if best is None else best[1]
-
-
-def _path_segments(path_part: str, issuer_name: str | None) -> list[str]:
-    """Return the cleaned path segments, with the last repaired from the issuer name (D191, D192)."""
-    segments = _read_segments(path_part)
-    if segments and issuer_name is not None:
-        segments[-1] = _repair_segment(segments[-1], _issuer_words(issuer_name))
-    return segments
 
 
 def _read_segments(path_part: str) -> list[str]:
