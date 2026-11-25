@@ -60,3 +60,35 @@ Date: 2026-11-25 (12:57 AM, Lima). Host: `invoicebot-live`, image `c5cc7e9f0d85`
 Correction: the printed host is `sy`, not `sv` as the findings above assume. On 2026-11-25 `sy.ecomprobantes.pe/pebsa`
 answered 200 and `sv.ecomprobantes.pe` did not resolve, so the repaired URL was exact and the findings' edit
 distances count one edit too many for reads that had `sy`.
+
+## Live check 9t1
+
+Date: 2026-11-25 (9:28 to 11:18 AM, Lima). Host: `invoicebot-live`. Channel: the owner's Telegram. PEBSA ticket, strip
+read as `htins.//sy.ecomprobantes.pe/pehsa`. The link approved in the 9v check was removed first, since an issuer with a
+taught link gets no [🔗].
+
+| Check                                         | Image          | Result                                                                             |
+| --------------------------------------------- | -------------- | ---------------------------------------------------------------------------------- |
+| [🔗] and the "Reviso la dirección…" notice    | `49f22dec743a` | pass                                                                               |
+| BR-F14 with the address that answers          | `49f22dec743a` | fail: `BR-F14_unverified` after 5.2 s, with the right URL; no reason was logged    |
+| Same, with 8 s and 5 redirects                | `2852ea97f9d4` | fail: `BR-F14_unverified` after 6.4 s, with the right URL; no reason was logged    |
+| Same, with busy told from no answer (step 14) | `8c14b1f9b3f5` | pass: `BR-F14_busy` with the right URL after 3.8 s; logged `busy`, `["ReadError"]` |
+| [✏️ Corregir], a typed URL echoed as BR-F14   | all three      | pass                                                                               |
+| [Sí, es este], then [Aprobar]                 | all three      | pass; the link is stored and nothing else happens (9t3)                            |
+| A URL typed straight over BR-F14              | none           | waived by the owner; integration tests cover it                                    |
+| `total=…` while BR-F15 is open                | none           | waived by the owner; integration tests cover it                                    |
+| A second link replacing the waiting one       | none           | waived by the owner; integration tests cover it                                    |
+| Cancel the test invoices                      | all three      | pass: #27 to #31 cancelled                                                         |
+
+"The address that answers" was never seen in the chat: in the live container the same check returned the URL in 2.9 s and
+2.7 s on the first image, and failed in two other tries.
+
+Findings:
+
+- `sy.ecomprobantes.pe` is unstable: 19 of 30 spaced requests with curl (HTTP/2 and HTTP/1.1) got 503, and a traced
+  request got `ReadError`. When it works it takes 3 redirects, once 4, and 2.7 to 5.1 s without connection reuse. The
+  measurements ran after the two failures and may have added load.
+- The sender copied an address with an ASP.NET session id, `(S(…))`, and it was approved. An approved link goes into the
+  gap's public issue when the gap exists (none did). 9t3 must not publish or reuse a session address, and "va en el
+  issue" is not true when there is no gap.
+- `BR-F14_busy` read "S.A..": reworded after the run, not seen live.
