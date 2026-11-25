@@ -27,8 +27,8 @@ Decision this plan proposes (step 1):
   - **Candidates.** `portal_guess.candidate_urls` repairs OCR slips and returns at most 8 URLs, best first. The host as
     read comes before a close approved host (owner). Path case is kept first and lowered second.
   - **Trying.** [🔗] with a printed URL or a strip answers `BR-F14_checking` and queues a `portal_check` job. The job
-    sends plain `GET`s through the request guard: `https`, default port, public address, no SUNAT host, at most 3
-    redirects with each hop checked the same way, no body read, no cookies, 4 s per candidate and 20 s in all, one at a
+    sends plain `GET`s through the request guard: `https`, default port, public address, no SUNAT host, at most 5
+    redirects with each hop checked the same way, no body read, no cookies, 8 s per candidate and 20 s in all, one at a
     time. Status 200 to 299 after redirects counts as an answer. Replaces D191's "the bot never fetches the guess".
   - **Offer.** The first candidate that answers is offered as BR-F14. When none answers, the first candidate is shown as
     `BR-F14_unverified` (rule BR-F14, same buttons: the site may just be down). A strip that gives no candidate is shown
@@ -191,12 +191,12 @@ Files: `src/invoicebot/net/url_probe.py` (new), `tests/unit/test_net_url_probe.p
 
 - Docstring: say which of a few guessed addresses answers, reading no body (R-5.10, D192).
 - `async def first_answering(http: httpx.AsyncClient, urls: Sequence[str]) -> str | None`: the caller passes a client over
-  `GuardedTransport`. Tries `urls` in order, one at a time, at most `PROBE_TIMEOUT_S = 4.0` each and
+  `GuardedTransport`. Tries `urls` in order, one at a time, at most `PROBE_TIMEOUT_S = 8.0` each and
   `PROBE_TOTAL_S = 20.0` in all (`asyncio.timeout`); returns the first URL that answers (the URL given, not where it
   redirects), else None.
 - One try: refuse when `taught_url_refusal(url)` is not None; a streamed `GET` with the
   headers `Accept: text/html` and `Accept-Encoding: identity`, never reading the body; a 3xx with a `location` goes on
-  to `urljoin(current, location)`, at most `MAX_PROBE_REDIRECTS = 3`, each hop refused by the same check; 200 to 299
+  to `urljoin(current, location)`, at most `MAX_PROBE_REDIRECTS = 5`, each hop refused by the same check; 200 to 299
   answers; any other status does not. Build each request with `http.build_request` and delete its `cookie` header
   before `http.send(request, stream=True, follow_redirects=False)`; close the response unread. The shared client's
   cookie jar is not cleared.
@@ -307,6 +307,10 @@ ticket, [🔗], the notice, then BR-F14 with the address that answers and the se
 Then cancel the test invoice.
 
 Test: every row passes or is waived by the owner.
+
+Amended by the owner on 2026-11-25, after the first live run (3 redirects and 4 s were too tight for PEBSA's portal,
+which used 3 or 4 redirects and 2.7 to 5.1 s): 8 s per candidate and 5 redirects, 20 s in all. The typed URL over BR-F14,
+`total=…` and the second link are waived. The photo is sent once more on the new image.
 
 ## Finish
 
