@@ -32,6 +32,9 @@ STRIP_HEIGHTS = (1.6, 1.8)
 #: Tesseract language and page segmentation for a one-line read (spike).
 STRIP_LANG = "eng"
 STRIP_PSM = 7
+#: Seconds one band may take, so six bands on top of the main OCR stay inside the helper's own
+#: timeout and a slow re-read never costs the reading (R-9.2).
+STRIP_TIMEOUT_S = 2
 #: Runs of characters that are not URL characters; each becomes one space (D191).
 URL_STRIP_JUNK = re.compile(r"[^A-Za-z0-9.:/_~%-]+")
 
@@ -112,7 +115,8 @@ def read_url_strip(
     boxes = strip_boxes(anchor, image_width, image_height)
     if not boxes:
         return None
-    read_cfg = ocr_cfg.model_copy(update={"lang": STRIP_LANG, "psm": STRIP_PSM})
+    timeout_s = min(ocr_cfg.timeout_s, STRIP_TIMEOUT_S)
+    read_cfg = ocr_cfg.model_copy(update={"lang": STRIP_LANG, "psm": STRIP_PSM, "timeout_s": timeout_s})
     best_words: tuple[OcrWord, ...] | None = None
     best_confidence = -1.0
     for box in boxes:

@@ -172,3 +172,20 @@ def test_read_url_strip_tallest_crop_with_highest_confidence_wins(rules: Parsing
     )
 
     assert result == "hitps.//crop108"
+
+
+def test_read_url_strip_caps_each_band_at_the_strip_timeout(
+    rules: ParsingRules, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D191, R-9.2: every band is read as one English line under the strip's own short timeout."""
+    configs: list[Ocr] = []
+
+    def record(_image: np.ndarray, cfg: Ocr, _command: object) -> None:
+        configs.append(cfg)
+
+    monkeypatch.setattr(url_strip_module, "read_text", record)
+    image = np.full((HEIGHT, WIDTH), WHITE, dtype=np.uint8)
+
+    assert read_url_strip(image, _anchor_text(), rules, OCR_CONFIG) is None
+    assert configs
+    assert {(cfg.lang, cfg.psm, cfg.timeout_s) for cfg in configs} == {("eng", 7, 2)}
