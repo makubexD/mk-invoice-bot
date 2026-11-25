@@ -22,6 +22,7 @@ from invoicebot.states import (
     CANCELLED,
     EDITABLE,
     FAILED,
+    FETCHING_DOCS,
     MANUAL_REQUIRED,
     NEEDS_RULE,
     PENDING_USER,
@@ -155,6 +156,27 @@ async def load_invoice_head(conn: AsyncConnection[Any], invoice_id: int) -> Invo
         profile_id=str(row[1]),
         origin_channel=cast(ChannelName, row[2]),
     )
+
+
+async def issuer_ruc(conn: AsyncConnection[Any], invoice_id: int) -> int | None:
+    """Return the invoice's issuer RUC, or None when it has none or does not exist (D193)."""
+    cur = await conn.execute("SELECT ruc_emisor FROM invoices WHERE id = %s", (invoice_id,))
+    row = await cur.fetchone()
+    return None if row is None or row[0] is None else int(row[0])
+
+
+async def newest_waiting_invoice(conn: AsyncConnection[Any], ruc_emisor: int) -> int | None:
+    """Return the issuer's newest invoice still waiting for documents, or None (D193).
+
+    Waiting means ``FETCHING_DOCS`` or ``MANUAL_REQUIRED``; newest is the highest id, as
+    ids grow with arrival. Does not commit.
+    """
+    cur = await conn.execute(
+        "SELECT id FROM invoices WHERE ruc_emisor = %s AND state = ANY(%s) ORDER BY id DESC LIMIT 1",
+        (ruc_emisor, [FETCHING_DOCS, MANUAL_REQUIRED]),
+    )
+    row = await cur.fetchone()
+    return None if row is None else int(row[0])
 
 
 async def lock_invoice(conn: AsyncConnection[Any], invoice_id: int) -> None:

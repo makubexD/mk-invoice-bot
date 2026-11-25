@@ -27,9 +27,9 @@ from invoicebot.config.models import Config, Flow
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice
 from invoicebot.fetchers.browser.probe_protocol import ProbeOutcome, ProbeReport
 from invoicebot.fetchers.portal_probe import Probe
-from invoicebot.gaps.kinds import fingerprint
+from invoicebot.gaps.kinds import portal_gap_fingerprint
 from invoicebot.net.taught_url import without_session
-from invoicebot.pipeline.fetch import PORTAL_MISSING, fetch_invoice, run_after_delay
+from invoicebot.pipeline.fetch import fetch_invoice, run_after_delay
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.outgoing import queue_admin_alert
 from invoicebot.pipeline.probe_files import PdfReader, pdf_matches
@@ -170,7 +170,7 @@ async def _abandon(pool: Pool, probe: portal_probes.PortalProbe, invoice_id: int
             conn, probe.ruc_emisor, probe.link_version, report.outcome.value, report.model_dump(mode="json")
         )
         if finished:
-            await outbox.release_issue(conn, _gap_fingerprint(probe.ruc_emisor))
+            await outbox.release_issue(conn, portal_gap_fingerprint(probe.ruc_emisor))
 
 
 async def _probed(deps: ProbeDeps, target: _Target, out_dir: Path) -> Probe:
@@ -213,9 +213,9 @@ async def _conclude(
     stored_report = report.model_copy(update={"files": ()}).model_dump(mode="json")
     if not await portal_probes.finish(conn, ruc, current.link_version, report.outcome.value, stored_report):
         return False
-    gap_fingerprint = _gap_fingerprint(ruc)
-    await outbox.release_issue(conn, gap_fingerprint)
-    await _queue_report(conn, deps.cfg, gap_fingerprint, target.url, stored_report)
+    issue_key = portal_gap_fingerprint(ruc)
+    await outbox.release_issue(conn, issue_key)
+    await _queue_report(conn, deps.cfg, issue_key, target.url, stored_report)
     filed = waiting_state is not None and _covers(target.flow, probe.files)
     if filed and waiting_state is not None:
         await _file(conn, invoice_id, probe.files, waiting_state)
@@ -228,11 +228,6 @@ async def _retry_later(conn: AsyncConnection[Any], job: Job, current: portal_pro
     await portal_probes.count_try(conn, current.ruc_emisor, current.link_version)
     run_after = await run_after_delay(conn, PROBE_RETRY_DELAYS[current.tries])
     await enqueue(conn, job.invoice_id, PORTAL_PROBE_STEP, run_after)
-
-
-def _gap_fingerprint(ruc_emisor: int) -> str:
-    """Return the fingerprint of the issuer's PORTAL_MISSING gap (R-11.2)."""
-    return fingerprint(PORTAL_MISSING, str(ruc_emisor))
 
 
 async def _queue_report(

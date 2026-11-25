@@ -2,7 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
 from uuid import uuid4
@@ -27,6 +27,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.portal_offer import answer
 from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
 from invoicebot.pipeline.questions import yes_press_suffix
+from invoicebot.pipeline.steps import PORTAL_PROBE_STEP
 from invoicebot.pipeline.teach import NOT_QUESTIONS, TeachContext, TeachSetup, handle_press, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
@@ -38,7 +39,8 @@ from invoicebot.rules.messages_es import (
     MESSAGES,
     UNKNOWN_ISSUER,
 )
-from invoicebot.store import portal_candidates, taught_links
+from invoicebot.states import DONE, FETCHING_DOCS, MANUAL_REQUIRED
+from invoicebot.store import portal_candidates, portal_probes, taught_links
 from invoicebot.store.gaps import get_gap
 from invoicebot.store.invoices import create_invoice, save_reading, set_state
 from invoicebot.store.taught_links import TaughtLink
@@ -62,6 +64,8 @@ GITHUB_REPO = "owner/mk-invoice-bot-ops"
 #: The synthetic issue the PORTAL_MISSING gap was reported to.
 ISSUE_URL = "https://github.com/owner/mk-invoice-bot-ops/issues/7"
 GAP_FINGERPRINT = fingerprint("PORTAL_MISSING", str(ISSUER_RUC))
+#: How long the gap's create_issue row is held before the probe or a "no" releases it (D193).
+HELD = timedelta(hours=12)
 #: How long a lock wait or a released lock may take before the test calls it a hang.
 LOCK_WAIT_TIMEOUT_S = 5.0
 MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
@@ -85,6 +89,9 @@ async def clean_teach_tables(
         await conn.execute("DELETE FROM invoice_gaps")
         await conn.execute("DELETE FROM gaps")
         await conn.execute("DELETE FROM outbox")
+        await conn.execute("DELETE FROM portal_probes")
+        await conn.execute("DELETE FROM jobs WHERE step = %s", (PORTAL_PROBE_STEP,))
+        await conn.execute("UPDATE invoices SET ruc_emisor = NULL WHERE ruc_emisor = %s", (ISSUER_RUC,))
     yield
 
 
@@ -258,7 +265,7 @@ async def test_propose_newer_different_link_replaces_the_waiting_one(
         ruc_emisor=ISSUER_RUC,
         url=OTHER_URL,
     )
-    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "proposed")
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "proposed", 2)
     assert version == 2
     assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
     assert owner_rows == [
@@ -286,7 +293,7 @@ async def test_propose_link_for_approved_issuer_changes_nothing(
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, "yo")
 
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
     assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
     assert owner_rows == []
 
@@ -301,7 +308,7 @@ async def test_store_propose_replaces_a_rejected_row(
         assert await taught_links.propose(conn, ISSUER_RUC, OTHER_URL, SENDER) == 2
         link = await taught_links.get(conn, ISSUER_RUC)
 
-    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed", 2)
 
 
 @pytest.mark.parametrize("approved", [True, False])
@@ -747,7 +754,7 @@ async def test_press_approve_marks_the_link_and_the_gap_hint(
         admin_rows = await _outbox(conn, ADMIN)
 
     expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
     assert gap is not None
     assert gap.hint_url == GOOD_URL
     assert admin_rows == [(expected, "BR-S06_approved", [])]
@@ -953,7 +960,7 @@ async def test_press_second_press_changes_nothing(
         gap = await get_gap(conn, GAP_FINGERPRINT)
 
     assert before == after == 1
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
     assert gap is not None
     assert gap.hint_url == GOOD_URL
 
@@ -993,7 +1000,7 @@ async def test_press_reject_sets_rejected_and_a_later_teach_proposes_again(
     expected = MESSAGES["BR-S06_rejected"].format(ruc_emisor=ISSUER_RUC)
     assert rejected == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "rejected")
     assert admin_rows == [(expected, "BR-S06_rejected", [])]
-    assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+    assert reproposed == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed", 2)
 
 
 async def test_press_approve_notifies_the_other_proposer(
@@ -1007,7 +1014,7 @@ async def test_press_approve_notifies_the_other_proposer(
         sender_rows = await _outbox(conn, SENDER)
 
     expected = MESSAGES["BR-S06_sender_approved"].format(ruc_emisor=ISSUER_RUC)
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
     assert sender_rows == [(expected, "BR-S06_sender_approved", [])]
 
 
@@ -1052,7 +1059,7 @@ async def test_press_current_proposal_version_approves_it(
         await handle_press(conn, _press(ADMIN, approved=True, version=version), _setup())
         link = await taught_links.get(conn, ISSUER_RUC)
 
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
 
 
 async def test_press_older_proposal_version_changes_nothing(
@@ -1075,7 +1082,7 @@ async def test_press_older_proposal_version_changes_nothing(
         admin_rows = await _outbox(conn, ADMIN)
 
     expected = MESSAGES["BR-S06_stale"].format(ruc_emisor=ISSUER_RUC)
-    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed")
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, SENDER, "proposed", 2)
     assert admin_rows == [(expected, "BR-S06_stale", [])]
 
 
@@ -1098,7 +1105,7 @@ async def test_press_replacement_version_approves_the_new_link(
         admin_rows = await _outbox(conn, ADMIN)
 
     expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
-    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, OTHER_URL, OTHER_SENDER, "approved", 2)
     assert admin_rows == [(expected, "BR-S06_approved", [])]
 
 
@@ -1134,7 +1141,7 @@ async def test_press_through_intake_approves_without_an_invoice(
 
     assert result.status == "stored"
     assert result.invoice_id is None
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved", 1)
     assert gap is not None
     assert gap.hint_url == GOOD_URL
 
@@ -1212,3 +1219,141 @@ async def test_portal_command_with_an_unsafe_link_answers_its_help(
 
     assert link is None
     assert [row[0] for row in rows] == [HELP_PORTAL]
+
+
+async def _waiting_invoice(conn: AsyncConnection[Any], state: str) -> int:
+    """Create an invoice of ISSUER_RUC in ``state`` and return its id."""
+    invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+    await set_state(conn, invoice_id, state, rule_id="BR-F07")
+    return invoice_id
+
+
+async def _hold_issue(conn: AsyncConnection[Any]) -> None:
+    """Queue the gap's create_issue row and hold it, as a new portal gap does (D193)."""
+    row_id = await outbox.add(
+        conn, "github", GITHUB_REPO, {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": {}}
+    )
+    await outbox.hold(conn, row_id, HELD)
+
+
+async def _issue_held(conn: AsyncConnection[Any]) -> bool:
+    """Return True while the create_issue row still waits more than an hour."""
+    cur = await conn.execute(
+        "SELECT run_after > now() + interval '1 hour' FROM outbox WHERE payload_json->>'op' = 'create_issue'"
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return bool(row[0])
+
+
+async def _probe_jobs(conn: AsyncConnection[Any]) -> list[int]:
+    """Return the invoice id of every portal_probe job, oldest first."""
+    cur = await conn.execute("SELECT invoice_id FROM jobs WHERE step = %s ORDER BY id", (PORTAL_PROBE_STEP,))
+    return [int(row[0]) for row in await cur.fetchall()]
+
+
+async def _propose_and_hold(conn: AsyncConnection[Any]) -> None:
+    """Propose GOOD_URL for ISSUER_RUC and hold the gap's issue row."""
+    assert await taught_links.propose(conn, ISSUER_RUC, GOOD_URL, SENDER) is not None
+    await _hold_issue(conn)
+
+
+@pytest.mark.parametrize("state", [MANUAL_REQUIRED, FETCHING_DOCS])
+async def test_press_approve_with_a_waiting_invoice_starts_the_probe(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    state: str,
+) -> None:
+    """BR-S06, D193: [Aprobar] with a waiting invoice queues one probe job and the probe row."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _waiting_invoice(conn, state)
+        await _propose_and_hold(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        jobs = await _probe_jobs(conn)
+        probe = await portal_probes.get(conn, ISSUER_RUC)
+        admin_rows = await _outbox(conn, ADMIN)
+        held = await _issue_held(conn)
+
+    expected = MESSAGES["BR-S06_approved_probe"].format(ruc_emisor=ISSUER_RUC)
+    assert jobs == [invoice_id]
+    assert probe is not None
+    assert (probe.state, probe.link_version, probe.invoice_id) == ("queued", 1, invoice_id)
+    assert admin_rows == [(expected, "BR-S06_approved_probe", [])]
+    assert held is True
+
+
+async def test_press_approve_probes_the_newest_waiting_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D193: with two waiting invoices the one with the higher id is probed."""
+    async with db_pool.connection() as conn:
+        await _waiting_invoice(conn, MANUAL_REQUIRED)
+        newest = await _waiting_invoice(conn, FETCHING_DOCS)
+        await _propose_and_hold(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        jobs = await _probe_jobs(conn)
+
+    assert jobs == [newest]
+
+
+async def test_press_approve_without_a_waiting_invoice_releases_the_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D193: with only a DONE invoice [Aprobar] queues no job, answers BR-S06_approved, releases."""
+    async with db_pool.connection() as conn:
+        await _waiting_invoice(conn, DONE)
+        await _propose_and_hold(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        jobs = await _probe_jobs(conn)
+        probe = await portal_probes.get(conn, ISSUER_RUC)
+        admin_rows = await _outbox(conn, ADMIN)
+        held = await _issue_held(conn)
+
+    expected = MESSAGES["BR-S06_approved"].format(ruc_emisor=ISSUER_RUC)
+    assert jobs == []
+    assert probe is None
+    assert admin_rows == [(expected, "BR-S06_approved", [])]
+    assert held is False
+
+
+async def test_press_reject_queues_no_job_and_releases_the_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D193: [Rechazar] queues no probe and releases the held issue."""
+    async with db_pool.connection() as conn:
+        await _waiting_invoice(conn, MANUAL_REQUIRED)
+        await _propose_and_hold(conn)
+        await handle_press(conn, _press(ADMIN, approved=False), _setup())
+        jobs = await _probe_jobs(conn)
+        held = await _issue_held(conn)
+
+    assert jobs == []
+    assert held is False
+
+
+async def test_second_approve_press_queues_no_second_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D193: a second [Aprobar] finds no proposed link and queues no second probe job."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _waiting_invoice(conn, MANUAL_REQUIRED)
+        await _propose_and_hold(conn)
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        await handle_press(conn, _press(ADMIN, approved=True), _setup())
+        jobs = await _probe_jobs(conn)
+
+    assert jobs == [invoice_id]
+
+
+async def test_dont_know_releases_the_issuers_issue(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S06, D193: "no sé" releases the held issue of the invoice's issuer."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _waiting_invoice(conn, FETCHING_DOCS)
+        await _hold_issue(conn)
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        handled = await answer(conn, _setup(), _message(SENDER, "no sé"))
+        held = await _issue_held(conn)
+
+    assert handled is True
+    assert held is False
