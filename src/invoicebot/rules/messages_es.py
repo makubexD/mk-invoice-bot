@@ -106,6 +106,11 @@ MESSAGES: dict[str, str] = {
         "{url}\n"
         "¿Es correcta? Si no, toca [✏️ Corregir]."
     ),
+    "BR-F14_other_host": (
+        "En el ticket leí {read_host}, pero responde otra dirección para {razon_social}:\n"
+        "{url}\n"
+        "¿Es correcta? Si no, toca [✏️ Corregir]."
+    ),
     "BR-F14_busy": (
         "Leí esta dirección para {razon_social}, pero el sitio está caído ahora:\n"
         "{url}\n"
@@ -200,7 +205,15 @@ MESSAGES: dict[str, str] = {
     "BR-S06_owner": (
         "🔗 {sender} propone este portal para {razon_social} (RUC {ruc_emisor}): {url}. ¿Lo uso?"
     ),
-    "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}; va en el issue.",
+    "BR-S06_approved": "✅ Guardé el portal de RUC {ruc_emisor}.",
+    "BR-S06_approved_probe": (
+        "✅ Guardé el portal de RUC {ruc_emisor}. Lo abro ahora y te cuento qué encuentro."
+    ),
+    "BR-S06_probe_filed": "✅ Abrí el portal de RUC {ruc_emisor} y archivé el comprobante #{id}.",
+    "BR-S06_probe_form": (
+        "🔎 Abrí el portal de RUC {ruc_emisor}: {outcome_desc}. El borrador va en el issue."
+    ),
+    "BR-S06_probe_failed": "⚠️ No pude revisar el portal de RUC {ruc_emisor}: {outcome_desc}.",
     "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
     "BR-S06_sender_approved": (
         "✅ El administrador aprobó el portal que enviaste para RUC {ruc_emisor}. "
@@ -281,6 +294,21 @@ KIND_SUBJECT: dict[str, str] = {
     "TEMPLATE_INVALID": "{flow}/{sink}",
     "PARSER_MISS": "RUC {ruc_emisor}",
     "UNROUTED_BUYER": "RUC {num_doc_adq}",
+}
+
+#: ``{outcome_desc}`` in BR-S06's probe answers, by ``ProbeOutcome`` value (D193).
+PROBE_OUTCOME_DESC: dict[str, str] = {
+    "ok": "descargué archivos, pero no alcanzan para archivarlo",
+    "captcha": "pide un captcha que no puedo resolver",
+    "unmatched_field": "pide un dato que no tengo",
+    "login_only": "pide usuario y contraseña",
+    "no_form": "no encontré el formulario de consulta",
+    "other_host": "lleva a otro sitio",
+    "not_found": "no encontró el comprobante",
+    "no_download": "no encontré qué descargar",
+    "busy": "el sitio está caído",
+    "guard_blocked": "lleva a una dirección que no puedo abrir",
+    "technical": "ocurrió un error técnico",
 }
 
 STATE_DESC: dict[str, str] = {

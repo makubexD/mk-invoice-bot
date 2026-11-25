@@ -313,10 +313,11 @@ Files: `src/invoicebot/queue/outbox.py`, `src/invoicebot/pipeline/gaps.py`, `tes
 fingerprint) -> int` sets `run_after = now()` on the pending `create_issue` row of that fingerprint with `attempts = 0`
   and no `last_error`. `PORTAL_ISSUE_HOLD = timedelta(hours=12)` in `gaps.py`: a `PORTAL_MISSING` `create_issue` row
   waits that long when `gaps.teach_via_chat` is on and no `portal_probes` row of the RUC is `done`; every other kind
-  stays immediate.
+  stays immediate. With a `done` probe, the new `create_issue` row is followed by its `probe_report` row (a step 13
+  op, which waits for the issue as a comment does), so a gap raised after the probe still gets the report.
 
 Test cases (docstrings `R-11.5, D193`): first raise with teach on → `run_after` 12 h ahead; teach off → now; a `done`
-probe → now; `PORTAL_BROKEN` → now; `release_issue` → now, returns 1; again for a sent row → 0; a row that failed once
+probe → now, plus one `probe_report` row; `PORTAL_BROKEN` → now; `release_issue` → now, returns 1; again for a sent row → 0; a row that failed once
 keeps its backoff.
 
 Test: `uv run pytest -q tests/integration/test_pipeline_gaps.py tests/integration/test_outbox.py`
