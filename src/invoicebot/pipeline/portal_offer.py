@@ -11,7 +11,13 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import InboundMessage
 from invoicebot.extract.fields import Reading
-from invoicebot.net.taught_url import MAX_TAUGHT_URL_CHARS, TaughtUrlError, check_taught_url
+from invoicebot.net.taught_url import (
+    MAX_TAUGHT_URL_CHARS,
+    TaughtUrlError,
+    check_taught_url,
+    is_dont_know,
+    looks_like_url,
+)
 from invoicebot.pipeline.outgoing import Addressee, queue_message, queue_stale
 from invoicebot.pipeline.portal_guess import repair_url
 from invoicebot.pipeline.questions import (
@@ -87,7 +93,7 @@ async def ask_portal(
     """Offer the reading's URL as BR-F14, or ask BR-F02 when there is none (BR-F14, BR-F02).
 
     BR-F02's question is queued against ``invoice_id`` so the sender's typed answer
-    reaches :func:`invoicebot.pipeline.teach.answer`. The caller owns the transaction.
+    reaches :func:`answer`. The caller owns the transaction.
     """
     url = offer_url(reading, await taught_links.approved_hosts(conn))
     if url is None:
@@ -163,6 +169,31 @@ async def handle_press(
         await _ask_br_f15(conn, addressee, invoice_id, reading)
     else:
         await dont_know_reply(conn, addressee, invoice_id)
+
+
+async def answer(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    msg: InboundMessage,
+) -> bool:
+    """Answer the sender's newest BR-F15 or BR-F02 question with their free text (R-11.4, D191).
+
+    BR-F15 takes any text: "no sé" answers BR-F02_dont_know, a link the request guard
+    accepts is echoed as BR-F14 with the invoice's candidate stored, and anything else
+    repeats BR-F15. BR-F02 takes only "no sé" or one ``https`` URL, echoed the same way;
+    any other text is left to the edit paths. Returns True when the text was handled, so
+    the caller does not run the usual edit/override paths.
+    """
+    question = await outbox.last_question(conn, msg.profile_id, NOT_QUESTIONS)
+    if question is None:
+        return False
+    rule_id, invoice_id = question
+    if rule_id == RULE_WRITE_PORTAL:
+        await _answer_br_f15(conn, setup, msg, invoice_id)
+        return True
+    if rule_id != RULE_ASK_PORTAL:
+        return False
+    return await _answer_br_f02(conn, setup, msg, invoice_id)
 
 
 async def _teach_offer(
@@ -251,6 +282,61 @@ async def _ask_br_f15_retry(
         rule_id=RULE_WRITE_PORTAL,
         buttons=[dont_know_button(invoice_id)],
     )
+
+
+async def _answer_br_f15(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    msg: InboundMessage,
+    invoice_id: int,
+) -> None:
+    """Answer BR-F15: "no sé" answers BR-F02_dont_know and any other text is always handled (BR-F15, D191)."""
+    addressee = Addressee(msg.channel, msg.profile_id)
+    if is_dont_know(msg.text):
+        await dont_know_reply(conn, addressee, invoice_id)
+        return
+    await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+
+
+async def _answer_br_f02(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    msg: InboundMessage,
+    invoice_id: int,
+) -> bool:
+    """Answer BR-F02 with "no sé" or a URL, leaving any other text to the edit paths (BR-F02, D191)."""
+    addressee = Addressee(msg.channel, msg.profile_id)
+    if is_dont_know(msg.text):
+        await dont_know_reply(conn, addressee, invoice_id)
+        return True
+    if not looks_like_url(msg.text):
+        return False
+    await _offer_typed_url(conn, setup, addressee, invoice_id, msg.text)
+    return True
+
+
+async def _offer_typed_url(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    addressee: Addressee,
+    invoice_id: int,
+    text: str,
+) -> None:
+    """Echo a typed link as BR-F14, or ask BR-F15 again when the guard refuses it (BR-F14, BR-F15, D191).
+
+    A reading without an issuer could never be taught, so it logs and offers nothing.
+    """
+    try:
+        url = await check_taught_url(text, setup.resolver)
+    except TaughtUrlError:
+        await _ask_br_f15_retry(conn, addressee, invoice_id)
+        return
+    reading = await load_reading(conn, invoice_id)
+    ruc_emisor = None if reading is None else reading.value("ruc_emisor")
+    if reading is None or ruc_emisor is None:
+        logger.info("ignored portal answer without an issuer", extra={"profile_id": addressee.profile_id})
+        return
+    await offer_candidate(conn, addressee, invoice_id, reading, url)
 
 
 def _is_sunat_url(url: str) -> bool:

@@ -32,12 +32,18 @@ from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, claim
 from invoicebot.routing.router import compile_rules
-from invoicebot.rules.messages_es import BUTTON_CANCEL, BUTTON_EDIT, EDIT_LATE, MESSAGES, state_desc
-from invoicebot.store import taught_links
+from invoicebot.rules.messages_es import (
+    BUTTON_CANCEL,
+    BUTTON_EDIT,
+    EDIT_LATE,
+    MESSAGES,
+    UNKNOWN_ISSUER,
+    state_desc,
+)
+from invoicebot.store import portal_candidates, taught_links
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, lock_invoice, save_reading, set_state
 from invoicebot.store.messages import link_message_to_invoice, store_inbound
-from invoicebot.store.taught_links import TaughtLink
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -1484,10 +1490,10 @@ async def test_confirming_invoice_is_not_matched(
     assert jobs == []
 
 
-async def test_br_f02_url_teaches_the_portal(
+async def test_br_f02_url_is_echoed_as_br_f14(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: a URL after BR-F02 stores a proposed link and answers BR-S06."""
+    """D191: a URL after BR-F02 stores the candidate and echoes BR-F14, teaching nothing yet."""
     profile_id = _profile()
     issuer = _issuer()
     invoice_id = await _invoice_in(
@@ -1511,12 +1517,15 @@ async def test_br_f02_url_teaches_the_portal(
             roles=_teach_roles(profile_id),
         )
         link = await taught_links.get(conn, int(issuer))
+        candidate = await portal_candidates.get(conn, invoice_id)
         replies = await _replies(conn, profile_id)
 
+    expected = MESSAGES["BR-F14"].format(razon_social=UNKNOWN_ISSUER, url=GOOD_URL)
     assert result.status == "stored"
     assert result.invoice_id is None
-    assert link == TaughtLink(int(issuer), GOOD_URL, profile_id, "proposed")
-    assert replies[-1] == (MESSAGES["BR-S06"], "BR-S06")
+    assert link is None
+    assert candidate == GOOD_URL
+    assert replies[-1] == (expected, "BR-F14")
 
 
 async def test_br_f02_dont_know_answers_and_stores_nothing(

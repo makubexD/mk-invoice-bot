@@ -18,16 +18,27 @@ from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.net.guard import Resolver
+from invoicebot.pipeline.commands import CommandContext, handle_command
 from invoicebot.pipeline.gaps import issue_opened
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.teach import TeachContext, TeachSetup, answer, handle_press, teach
+from invoicebot.pipeline.portal_offer import answer
+from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
+from invoicebot.pipeline.teach import NOT_QUESTIONS, TeachContext, TeachSetup, handle_press, teach
 from invoicebot.queue import outbox
-from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES
-from invoicebot.store import taught_links
+from invoicebot.rules.messages_es import (
+    BUTTON_APPROVE,
+    BUTTON_DONT_KNOW,
+    BUTTON_FIX,
+    BUTTON_REJECT,
+    BUTTON_THIS_ONE,
+    MESSAGES,
+    UNKNOWN_ISSUER,
+)
+from invoicebot.store import portal_candidates, taught_links
 from invoicebot.store.gaps import get_gap
-from invoicebot.store.invoices import create_invoice, save_reading
+from invoicebot.store.invoices import create_invoice, save_reading, set_state
 from invoicebot.store.taught_links import TaughtLink
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -262,6 +273,29 @@ async def _ask_for_portal(conn: AsyncConnection[Any], profile_id: str, invoice_i
     )
 
 
+async def _ask_to_write(conn: AsyncConnection[Any], profile_id: str, invoice_id: int) -> None:
+    """Queue BR-F15 for the invoice's sender, as [✏️ Corregir] does (BR-F15, D191)."""
+    text = MESSAGES["BR-F15"].format(razon_social=RAZON_SOCIAL)
+    await queue_message(
+        conn, Addressee("whatsapp", profile_id), text, invoice_id=invoice_id, rule_id="BR-F15"
+    )
+
+
+def _offer_buttons(invoice_id: int) -> list[dict[str, str]]:
+    """Return the button payload BR-F14's echo must carry (D191)."""
+    base = f"u{invoice_id}"
+    return [
+        {"id": f"{base}:yes", "title": BUTTON_THIS_ONE},
+        {"id": f"{base}:fix", "title": BUTTON_FIX},
+        {"id": f"{base}:dk", "title": BUTTON_DONT_KNOW},
+    ]
+
+
+def _dont_know_button(invoice_id: int) -> list[dict[str, str]]:
+    """Return the button payload BR-F15's repeated question must carry (D191)."""
+    return [{"id": f"u{invoice_id}:dk", "title": BUTTON_DONT_KNOW}]
+
+
 def _message(profile_id: str, text: str) -> InboundMessage:
     """Build a canonical text message from profile_id."""
     return InboundMessage(
@@ -328,21 +362,83 @@ async def _github_rows(conn: AsyncConnection[Any]) -> list[dict[str, Any]]:
     return [cast(dict[str, Any], payload) for (payload,) in await cur.fetchall()]
 
 
-async def test_answer_url_proposes_the_link(
+async def test_answer_url_on_br_f15_echoes_br_f14(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: a URL after BR-F02 stores a proposed link and answers BR-S06."""
+    """D191, BR-F15: a typed link is stored as the candidate and echoed as BR-F14 with three buttons."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_to_write(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        sender_rows = await _outbox(conn, SENDER)
+
+    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=GOOD_URL)
+    assert handled is True
+    assert link is None
+    assert candidate == GOOD_URL
+    assert sender_rows[-1] == (expected, "BR-F14", _offer_buttons(invoice_id))
+
+
+async def test_answer_non_url_on_br_f15_repeats_the_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: any text that is no address answers BR-F15_retry and keeps BR-F15 the question."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_to_write(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, "mañana te lo paso"))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        sender_rows = await _outbox(conn, SENDER)
+        question = await outbox.last_question(conn, SENDER, NOT_QUESTIONS)
+
+    assert handled is True
+    assert link is None
+    assert candidate is None
+    assert sender_rows[-1] == (MESSAGES["BR-F15_retry"], "BR-F15", _dont_know_button(invoice_id))
+    assert question == ("BR-F15", invoice_id)
+
+
+async def test_answer_dont_know_on_br_f15_answers_br_f02_dont_know(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: "no sé" on BR-F15 stores nothing and answers BR-F02_dont_know while fetching."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await set_state(conn, invoice_id, "FETCHING_DOCS")
+        await _ask_to_write(conn, SENDER, invoice_id)
+        handled = await answer(conn, setup, _message(SENDER, "no sé"))
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+
+    assert handled is True
+    assert link is None
+    assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know"], "BR-F02_dont_know", [])
+
+
+async def test_answer_url_on_br_f02_echoes_br_f14(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F02: a URL after BR-F02 is echoed as BR-F14 and teaches nothing yet."""
     setup = _setup()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
         await _ask_for_portal(conn, SENDER, invoice_id)
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
         sender_rows = await _outbox(conn, SENDER)
 
+    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=GOOD_URL)
     assert handled is True
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
-    assert sender_rows[-1] == (MESSAGES["BR-S06"], "BR-S06", [])
+    assert link is None
+    assert candidate == GOOD_URL
+    assert sender_rows[-1] == (expected, "BR-F14", _offer_buttons(invoice_id))
 
 
 async def test_answer_url_still_answers_br_f02_after_another_invoices_br_f13(
@@ -359,12 +455,16 @@ async def test_answer_url_still_answers_br_f02_after_another_invoices_br_f13(
         )
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        sender_rows = await _outbox(conn, SENDER)
 
     assert handled is True
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert link is None
+    assert candidate == GOOD_URL
+    assert sender_rows[-1][1] == "BR-F14"
 
 
-async def test_answer_url_after_dont_know_still_proposes_the_link(
+async def test_answer_url_after_dont_know_still_answers_br_f02(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """R-11.4, D190: a URL typed after the "no sé" answer still answers BR-F02."""
@@ -375,9 +475,11 @@ async def test_answer_url_after_dont_know_still_proposes_the_link(
         assert await answer(conn, setup, _message(SENDER, "no sé")) is True
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
 
     assert handled is True
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert link is None
+    assert candidate == GOOD_URL
 
 
 async def test_answer_url_still_answers_br_f02_after_another_invoices_br_s03(
@@ -394,9 +496,11 @@ async def test_answer_url_still_answers_br_f02_after_another_invoices_br_s03(
         )
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
 
     assert handled is True
-    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert link is None
+    assert candidate == GOOD_URL
 
 
 async def test_answer_dont_know_stores_nothing(
@@ -416,7 +520,7 @@ async def test_answer_dont_know_stores_nothing(
     assert sender_rows[-1] == (MESSAGES["BR-F02_dont_know_manual"], "BR-F02_dont_know", [])
 
 
-async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(
+async def test_answer_text_on_br_f02_is_not_handled(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """R-11.4: any other text after BR-F02 is not handled and answers nothing."""
@@ -424,7 +528,7 @@ async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
         await _ask_for_portal(conn, SENDER, invoice_id)
-        handled = await answer(conn, setup, _message(SENDER, "serie=F001"))
+        handled = await answer(conn, setup, _message(SENDER, "total 12.50"))
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
 
@@ -433,7 +537,7 @@ async def test_answer_ignores_a_text_that_is_not_a_url_or_dont_know(
     assert [rule_id for _text, rule_id, _buttons in sender_rows] == ["BR-F02"]
 
 
-async def test_answer_ignores_a_url_when_the_newest_question_is_not_br_f02(
+async def test_answer_ignores_a_url_when_the_newest_question_is_not_br_f02_or_br_f15(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
     """R-11.4: a URL after a different newest question is not taken as a portal."""
@@ -449,24 +553,30 @@ async def test_answer_ignores_a_url_when_the_newest_question_is_not_br_f02(
         )
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
 
     assert handled is False
     assert link is None
+    assert [rule_id for _text, rule_id, _buttons in sender_rows] == ["BR-R03"]
 
 
-async def test_answer_ignores_a_url_without_an_issuer_in_the_reading(
+async def test_answer_url_without_an_issuer_is_consumed_and_offers_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: a URL whose invoice reading has no ruc_emisor is not handled."""
+    """R-11.4, D191: a URL whose invoice reading has no ruc_emisor is consumed and offers nothing."""
     setup = _setup()
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading(ruc_emisor=None))
         await _ask_for_portal(conn, SENDER, invoice_id)
         handled = await answer(conn, setup, _message(SENDER, GOOD_URL))
         link = await taught_links.get(conn, ISSUER_RUC)
+        candidate = await portal_candidates.get(conn, invoice_id)
+        sender_rows = await _outbox(conn, SENDER)
 
-    assert handled is False
+    assert handled is True
     assert link is None
+    assert candidate is None
+    assert [rule_id for _text, rule_id, _buttons in sender_rows] == ["BR-F02"]
 
 
 async def test_answer_with_no_question_does_nothing(
@@ -480,6 +590,55 @@ async def test_answer_with_no_question_does_nothing(
 
     assert handled is False
     assert link is None
+
+
+async def test_answer_echo_then_yes_teaches_it_to_the_owner(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F14: [✅ Sí, es este] on the echo proposes exactly the URL the sender saw."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_for_portal(conn, SENDER, invoice_id)
+        await answer(conn, setup, _message(SENDER, GOOD_URL))
+        await handle_offer_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+        owner_rows = await _outbox(conn, ADMIN)
+
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert sender_rows[-1] == (MESSAGES["BR-S06"], "BR-S06", [])
+    assert owner_rows == [(_owner_text(), "BR-S06", _decision_buttons())]
+
+
+async def test_portal_command_still_proposes_at_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D191: /portal proposes the link at once, with no echo in between."""
+    setup = _setup()
+    async with db_pool.connection() as conn:
+        await handle_command(
+            conn,
+            _message(SENDER, f"/portal {ISSUER_RUC} {GOOD_URL}"),
+            "portal",
+            f"{ISSUER_RUC} {GOOD_URL}",
+            context=CommandContext(
+                admins=frozenset(), timezone="America/Lima", reprocess_min_interval_s=0, teach=setup
+            ),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+        sender_rows = await _outbox(conn, SENDER)
+        owner_rows = await _outbox(conn, ADMIN)
+
+    expected_owner = MESSAGES["BR-S06_owner"].format(
+        sender="Asistente",
+        razon_social=UNKNOWN_ISSUER,
+        ruc_emisor=ISSUER_RUC,
+        url=GOOD_URL,
+    )
+    assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "proposed")
+    assert sender_rows == [(MESSAGES["BR-S06"], "BR-S06", [])]
+    assert owner_rows == [(expected_owner, "BR-S06", _decision_buttons())]
 
 
 # BR-S06's [Aprobar] and [Rechazar] (D118)
