@@ -131,8 +131,24 @@ async def test_first_answering_refuses_a_redirect_target(target: str) -> None:
     assert requested == [PORTAL]
 
 
-async def test_first_answering_stops_after_three_redirects() -> None:
-    """R-5.10, D192: the first URL and three hops are requested, and a fourth target is not."""
+async def test_first_answering_follows_five_redirects() -> None:
+    """R-5.10, D192: a page reached on the fifth redirect answers with the URL given."""
+    requested: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if len(requested) > 5:
+            return httpx.Response(200)
+        return httpx.Response(302, headers={"location": f"https://portal.example.pe/hop{len(requested)}"})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        assert await first_answering(client, [PORTAL]) == PORTAL
+
+    assert len(requested) == 6
+
+
+async def test_first_answering_stops_after_five_redirects() -> None:
+    """R-5.10, D192: the first URL and five hops are requested, and a sixth target is not."""
     requested: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -147,6 +163,8 @@ async def test_first_answering_stops_after_three_redirects() -> None:
         "https://portal.example.pe/hop1",
         "https://portal.example.pe/hop2",
         "https://portal.example.pe/hop3",
+        "https://portal.example.pe/hop4",
+        "https://portal.example.pe/hop5",
     ]
 
 

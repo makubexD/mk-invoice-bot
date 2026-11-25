@@ -209,7 +209,7 @@ Test cases (docstrings start with `R-5.10, D192`), over `httpx.MockTransport`:
 - 302 to another public `https` URL answering 200 → the first URL given.
 - 302 to `http://…`, to `https://127.0.0.1/`, to `https://e-consulta.sunat.gob.pe/`, to `https://x.example.pe:8443/` →
   None, and the target is never requested.
-- Four redirects → None after the first URL and three hops. A 302 without `location` → None.
+- Six redirects → None after the first URL and five hops; five redirects then 200 → the URL given. A 302 without `location` → None.
 - A transport raising `GuardBlocked`, `ConnectError`, `ReadTimeout` → the next URL is tried.
 - A hop that hangs past a patched `PROBE_TIMEOUT_S` → the next URL is tried; a patched `PROBE_TOTAL_S` → None.
 - A body stream that raises when read → still an answer (the body is not read).

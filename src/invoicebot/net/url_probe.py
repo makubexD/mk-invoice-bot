@@ -20,11 +20,11 @@ from invoicebot.net.taught_url import taught_url_refusal
 logger = logging.getLogger(__name__)
 
 #: Longest one candidate may take, its redirect hops included (D192).
-PROBE_TIMEOUT_S = 4.0
+PROBE_TIMEOUT_S = 8.0
 #: Longest the whole probe may take, every candidate included (D192).
 PROBE_TOTAL_S = 20.0
 #: Redirect hops followed from one candidate before it counts as no answer (D192).
-MAX_PROBE_REDIRECTS = 3
+MAX_PROBE_REDIRECTS = 5
 #: Redirect statuses whose ``location`` is followed; any other 3xx is no answer (D192).
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 #: The probe asks for an HTML page and refuses a compressed body it never reads.
