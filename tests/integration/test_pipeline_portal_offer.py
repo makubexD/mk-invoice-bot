@@ -19,6 +19,7 @@ from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import MAX_TAUGHT_URL_CHARS
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.portal_offer import ask_portal, handle_press
+from invoicebot.pipeline.questions import yes_press_suffix
 from invoicebot.pipeline.teach import TeachSetup
 from invoicebot.rules.messages_es import (
     BUTTON_APPROVE,
@@ -151,11 +152,16 @@ async def _outbox(
     return [(str(text), rule_id, cast(list[dict[str, str]], buttons)) for text, rule_id, buttons in rows]
 
 
-def _offer_buttons(invoice_id: int) -> list[dict[str, str]]:
+def _yes_id(invoice_id: int) -> str:
+    """Return the [Sí] press id of the offer of ``PRINTED_URL``."""
+    return f"u{invoice_id}:{yes_press_suffix(PRINTED_URL)}"
+
+
+def _offer_buttons(invoice_id: int, url: str) -> list[dict[str, str]]:
     """Return the button payload BR-F14's offer must carry (D191)."""
     base = f"u{invoice_id}"
     return [
-        {"id": f"{base}:yes", "title": BUTTON_THIS_ONE},
+        {"id": f"{base}:{yes_press_suffix(url)}", "title": BUTTON_THIS_ONE},
         {"id": f"{base}:fix", "title": BUTTON_FIX},
         {"id": f"{base}:dk", "title": BUTTON_DONT_KNOW},
     ]
@@ -216,7 +222,7 @@ async def test_ask_portal_with_printed_url_offers_it_with_three_buttons(
         rows = await _outbox(conn, SENDER)
 
     expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=PRINTED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, PRINTED_URL))]
 
 
 async def test_ask_portal_with_sunat_document_url_asks_br_f02(
@@ -243,7 +249,7 @@ async def test_ask_portal_with_other_document_url_offers_it(
         rows = await _outbox(conn, SENDER)
 
     expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=OTHER_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, OTHER_URL))]
 
 
 async def test_ask_portal_with_no_url_asks_br_f02(
@@ -271,7 +277,7 @@ async def test_ask_portal_repairs_the_strip_and_stores_the_candidate(
         candidate = await portal_candidates.get(conn, invoice_id)
 
     expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=REPAIRED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, REPAIRED_URL))]
     assert candidate == REPAIRED_URL
 
 
@@ -294,7 +300,7 @@ async def test_ask_portal_repairs_the_strip_against_an_approved_host(
         candidate = await portal_candidates.get(conn, invoice_id)
 
     expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, APPROVED_HOST_URL))]
     assert candidate == APPROVED_HOST_URL
 
 
@@ -338,7 +344,7 @@ async def test_ask_portal_printed_url_wins_over_the_strip(
         candidate = await portal_candidates.get(conn, invoice_id)
 
     expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=PRINTED_URL)
-    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id))]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, PRINTED_URL))]
     assert candidate == PRINTED_URL
 
 
@@ -368,7 +374,7 @@ async def test_yes_teaches_the_offered_url_and_alerts_the_owner(
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, ADMIN)
@@ -394,7 +400,7 @@ async def test_yes_teaches_the_stored_candidate_after_the_reading_changes(
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         await save_reading(conn, invoice_id, _reading(document_url=CHANGED_URL))
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         owner_rows = await _outbox(conn, ADMIN)
 
@@ -417,7 +423,7 @@ async def test_yes_with_a_private_resolver_asks_br_f15_retry_and_teaches_nothing
     async with db_pool.connection() as conn:
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, ADMIN)
@@ -599,7 +605,7 @@ async def test_yes_after_br_f02_is_stale_and_teaches_nothing(
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         before = await _outbox(conn, SENDER)
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         after = await _outbox(conn, SENDER)
         link = await taught_links.get(conn, ISSUER_RUC)
         owner_rows = await _outbox(conn, ADMIN)
@@ -621,7 +627,7 @@ async def test_press_from_another_profile_changes_nothing(
         invoice_id = await _invoice_with_reading(conn, SENDER, reading)
         await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
         before = await _outbox(conn, SENDER)
-        await handle_press(conn, _button_press(OTHER_PROFILE, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(OTHER_PROFILE, _yes_id(invoice_id)), setup)
         after = await _outbox(conn, SENDER)
         link = await taught_links.get(conn, ISSUER_RUC)
         owner_rows = await _outbox(conn, ADMIN)
@@ -648,7 +654,7 @@ async def test_press_after_a_newer_question_is_stale(
             rule_id="BR-R03",
         )
         before = await _outbox(conn, SENDER)
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         after = await _outbox(conn, SENDER)
         link = await taught_links.get(conn, ISSUER_RUC)
         owner_rows = await _outbox(conn, ADMIN)
@@ -673,7 +679,7 @@ async def test_yes_still_answers_after_another_invoices_br_f13(
         await queue_message(
             conn, Addressee("whatsapp", SENDER), "BR-F13 docs needed", invoice_id=other_id, rule_id="BR-F13"
         )
-        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
 
     assert link == TaughtLink(ISSUER_RUC, PRINTED_URL, SENDER, "proposed")
@@ -685,3 +691,55 @@ async def _state(conn: AsyncConnection[Any], invoice_id: int) -> str:
     row = await cur.fetchone()
     assert row is not None
     return str(row[0])
+
+
+async def test_yes_on_an_older_offer_is_stale_and_teaches_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-S02: [Sí] on an earlier BR-F14 never teaches the URL a later BR-F14 offered."""
+    reading = _reading(printed_url=PRINTED_URL)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, _reading(printed_url=CHANGED_URL))
+        await handle_press(conn, _button_press(SENDER, _yes_id(invoice_id)), _setup())
+        link = await taught_links.get(conn, ISSUER_RUC)
+        rows = await _outbox(conn, SENDER)
+
+    assert link is None
+    assert rows[-1][1] == "BR-S02"
+
+
+@pytest.mark.parametrize("suffix", [yes_press_suffix(PRINTED_URL), "fix", "dk"])
+async def test_press_after_yes_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], suffix: str
+) -> None:
+    """D191, BR-S02: once [Sí] proposed the URL, no button of that BR-F14 acts again."""
+    reading = _reading(printed_url=PRINTED_URL)
+    yes = f"u{{}}:{yes_press_suffix(PRINTED_URL)}"
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        await handle_press(conn, _button_press(SENDER, yes.format(invoice_id)), _setup())
+        await handle_press(conn, _button_press(SENDER, f"u{invoice_id}:{suffix}"), _setup())
+        rows = await _outbox(conn, SENDER)
+        owner_rows = await _outbox(conn, ADMIN)
+
+    assert [row[1] for row in rows[-2:]] == ["BR-S06", "BR-S02"]
+    assert len(owner_rows) == 1
+
+
+@pytest.mark.parametrize(
+    "url", ["https://xn--prtal-9ta.pe/a", "https://portal.example.pe:8443/a", "https://portal.example.pe/a b"]
+)
+async def test_ask_portal_with_an_unteachable_qr_link_asks_br_f02(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], url: str
+) -> None:
+    """D191, BR-F14: a QR link that could not be taught is never offered."""
+    reading = _reading(document_url=url)
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, reading)
+        await ask_portal(conn, Addressee("whatsapp", SENDER), invoice_id, reading)
+        rows = await _outbox(conn, SENDER)
+
+    assert [row[1] for row in rows] == ["BR-F02"]

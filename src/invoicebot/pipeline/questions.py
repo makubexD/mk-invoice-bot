@@ -6,6 +6,7 @@ carry the answer back, with ids ``"<invoice_id>:<action>[:<choice>:<menu>]"`` (R
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -195,6 +196,10 @@ def docs_needed_buttons(invoice_id: int, offer_portal: bool) -> list[Button]:
     return buttons
 
 
+#: Hex characters of the offered URL's SHA-256 in [Sí]'s id (D191).
+URL_DIGEST_CHARS = 12
+
+
 def offer_press_id(invoice_id: int, suffix: str) -> str:
     """Return a BR-F14, BR-F02 or BR-F15 press id: ``u<invoice_id>:<suffix>`` (D191)."""
     return f"{OFFER_BUTTON_PREFIX}{invoice_id}:{suffix}"
@@ -205,10 +210,15 @@ def dont_know_button(invoice_id: int) -> Button:
     return Button(id=offer_press_id(invoice_id, BUTTON_DONT_KNOW_SUFFIX), title=BUTTON_DONT_KNOW)
 
 
-def offer_buttons(invoice_id: int) -> list[Button]:
+def yes_press_suffix(url: str) -> str:
+    """Return [Sí]'s suffix, which names the offered URL so an older offer's [Sí] is stale (D191)."""
+    return f"{BUTTON_YES_SUFFIX}:{hashlib.sha256(url.encode()).hexdigest()[:URL_DIGEST_CHARS]}"
+
+
+def offer_buttons(invoice_id: int, url: str) -> list[Button]:
     """Return BR-F14's [✅ Sí, es este], [✏️ Corregir] and [No sé] buttons, in that order (D191)."""
     return [
-        Button(id=offer_press_id(invoice_id, BUTTON_YES_SUFFIX), title=BUTTON_THIS_ONE),
+        Button(id=offer_press_id(invoice_id, yes_press_suffix(url)), title=BUTTON_THIS_ONE),
         Button(id=offer_press_id(invoice_id, BUTTON_FIX_SUFFIX), title=BUTTON_FIX),
         dont_know_button(invoice_id),
     ]

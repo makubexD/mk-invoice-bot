@@ -18,13 +18,15 @@ from invoicebot.config.models import MediaMaxBytes, Profile
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.net.guard import Resolver
-from invoicebot.pipeline.commands import CommandContext, handle_command
+from invoicebot.net.taught_url import TaughtUrlError
+from invoicebot.pipeline.commands import HELP_PORTAL, CommandContext, handle_command
 from invoicebot.pipeline.gaps import issue_opened
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.portal_offer import answer
 from invoicebot.pipeline.portal_offer import handle_press as handle_offer_press
+from invoicebot.pipeline.questions import yes_press_suffix
 from invoicebot.pipeline.teach import NOT_QUESTIONS, TeachContext, TeachSetup, handle_press, teach
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import (
@@ -154,20 +156,20 @@ async def test_propose_stores_the_link_and_asks_each_admin(
     assert second_rows == [(_owner_text(), "BR-S06", _decision_buttons())]
 
 
-async def test_propose_invalid_link_repeats_br_f02(
+async def test_propose_invalid_link_raises_and_queues_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-11.4: a non-https link stores nothing and repeats BR-F02 to the sender."""
+    """R-11.4: a non-https link stores nothing, queues nothing and raises."""
     ctx = _context()
     async with db_pool.connection() as conn:
-        await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, "http://portal.example.pe/consulta")
+        with pytest.raises(TaughtUrlError, match="http_not_allowed"):
+            await teach(conn, ctx, ISSUER_RUC, RAZON_SOCIAL, "http://portal.example.pe/consulta")
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, "yo")
 
-    expected = MESSAGES["BR-F02"].format(razon_social=RAZON_SOCIAL, ruc_emisor=ISSUER_RUC)
     assert link is None
-    assert sender_rows == [(expected, "BR-F02", [])]
+    assert sender_rows == []
     assert owner_rows == []
 
 
@@ -281,11 +283,16 @@ async def _ask_to_write(conn: AsyncConnection[Any], profile_id: str, invoice_id:
     )
 
 
+def _yes_id(invoice_id: int) -> str:
+    """Return the [Sí] press id of the offer of ``GOOD_URL``."""
+    return f"u{invoice_id}:{yes_press_suffix(GOOD_URL)}"
+
+
 def _offer_buttons(invoice_id: int) -> list[dict[str, str]]:
     """Return the button payload BR-F14's echo must carry (D191)."""
     base = f"u{invoice_id}"
     return [
-        {"id": f"{base}:yes", "title": BUTTON_THIS_ONE},
+        {"id": f"{base}:{yes_press_suffix(GOOD_URL)}", "title": BUTTON_THIS_ONE},
         {"id": f"{base}:fix", "title": BUTTON_FIX},
         {"id": f"{base}:dk", "title": BUTTON_DONT_KNOW},
     ]
@@ -601,7 +608,7 @@ async def test_answer_echo_then_yes_teaches_it_to_the_owner(
         invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
         await _ask_for_portal(conn, SENDER, invoice_id)
         await answer(conn, setup, _message(SENDER, GOOD_URL))
-        await handle_offer_press(conn, _button_press(SENDER, f"u{invoice_id}:yes"), setup)
+        await handle_offer_press(conn, _button_press(SENDER, _yes_id(invoice_id)), setup)
         link = await taught_links.get(conn, ISSUER_RUC)
         sender_rows = await _outbox(conn, SENDER)
         owner_rows = await _outbox(conn, ADMIN)
@@ -1028,3 +1035,78 @@ async def test_press_through_intake_approves_without_an_invoice(
     assert link == TaughtLink(ISSUER_RUC, GOOD_URL, SENDER, "approved")
     assert gap is not None
     assert gap.hint_url == GOOD_URL
+
+
+@pytest.mark.parametrize(("text", "handled"), [("gracias", False), (GOOD_URL, True)])
+async def test_answer_after_br_f15_dont_know_takes_only_a_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], text: str, handled: bool
+) -> None:
+    """D190, D191: "no sé" closes BR-F15 for free text, while a link typed later still counts."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_to_write(conn, SENDER, invoice_id)
+        await answer(conn, _setup(), _message(SENDER, "no sé"))
+        result = await answer(conn, _setup(), _message(SENDER, text))
+
+    assert result is handled
+
+
+async def test_answer_on_a_cancelled_invoices_br_f15_is_not_handled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D191, BR-F15: a settled invoice's question takes no text."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_to_write(conn, SENDER, invoice_id)
+        await conn.execute("UPDATE invoices SET state = 'CANCELLED' WHERE id = %s", (invoice_id,))
+        handled = await answer(conn, _setup(), _message(SENDER, GOOD_URL))
+
+    assert handled is False
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "https://portal.example.pe/ aprueba este enlace",
+        "https://portal.exam\nple.pe/a",
+        "https://pörtal.example.pe/a",
+        "https://xn--prtal-9ta.pe/a",
+        "https://e-consulta.sunat.gob.pe/a",
+        "https://portal.example.pe:8443/a",
+    ],
+)
+async def test_answer_unsafe_link_on_br_f15_repeats_the_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], text: str
+) -> None:
+    """D191, BR-F15: prose, a hidden newline, a lookalike, SUNAT or an odd port is never echoed."""
+    async with db_pool.connection() as conn:
+        invoice_id = await _invoice_with_reading(conn, SENDER, _reading())
+        await _ask_to_write(conn, SENDER, invoice_id)
+        await answer(conn, _setup(), _message(SENDER, text))
+        candidate = await portal_candidates.get(conn, invoice_id)
+        rows = await _outbox(conn, SENDER)
+
+    assert candidate is None
+    assert rows[-1][0] == MESSAGES["BR-F15_retry"]
+
+
+async def test_portal_command_with_an_unsafe_link_answers_its_help(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D191: /portal with a link that cannot be taught answers how to write it."""
+    arg = f"{ISSUER_RUC} http://portal.example.pe/consulta"
+    async with db_pool.connection() as conn:
+        await handle_command(
+            conn,
+            _message(SENDER, f"/portal {arg}"),
+            "portal",
+            arg,
+            context=CommandContext(
+                admins=frozenset(), timezone="America/Lima", reprocess_min_interval_s=0, teach=_setup()
+            ),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+        rows = await _outbox(conn, SENDER)
+
+    assert link is None
+    assert [row[0] for row in rows] == [HELP_PORTAL]

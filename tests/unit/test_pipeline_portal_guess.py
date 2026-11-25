@@ -66,3 +66,18 @@ def test_repair_url_refuses_a_url_over_the_cap() -> None:
     """D191: a repaired URL longer than MAX_PRINTED_URL_CHARS is not offered."""
     strip = "hitps.//portal.example.pe/" + "a" * MAX_PRINTED_URL_CHARS
     assert repair_url(strip, None, EMPTY_HOSTS) is None
+
+
+@pytest.mark.parametrize(
+    ("strip", "expected"),
+    [
+        ("https: //sv.example.pe/x", "https://sv.example.pe/x"),
+        ("https: sv.example.pe/x", "https://sv.example.pe/x"),
+        ("https sv.example.pe/x", "https://sv.example.pe/x"),
+        ("hub.pe/tienda", "https://hub.pe/tienda"),
+        ("hub.pe/otro.com/x", "https://hub.pe/otro.com/x"),
+    ],
+)
+def test_repair_url_keeps_the_host_after_a_broken_scheme(strip: str, expected: str) -> None:
+    """D191, BR-F14: a scheme that lost its marks is dropped, and a host starting with h is kept."""
+    assert repair_url(strip, None, frozenset()) == expected

@@ -114,7 +114,7 @@ class Reading:
 
 def reading_to_json(reading: Reading) -> dict[str, Any]:
     """Render a reading as the JSON object the helper and ``fields_json`` carry (R-2.6)."""
-    return {
+    payload: dict[str, Any] = {
         "fields": {
             name: {
                 "value": field.value,
@@ -126,8 +126,11 @@ def reading_to_json(reading: Reading) -> dict[str, Any]:
         },
         "document_url": reading.document_url,
         "printed_url": reading.printed_url,
-        "url_strip": reading.url_strip,
     }
+    if reading.url_strip is not None:
+        # Written only when read: the previous release refuses the key (rollback, D191).
+        payload["url_strip"] = reading.url_strip
+    return payload
 
 
 def is_printed_url(value: object) -> bool:

@@ -22,7 +22,7 @@ from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.models import Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.net.guard import Resolver
-from invoicebot.net.taught_url import TaughtUrlError, check_taught_url
+from invoicebot.net.taught_url import check_taught_url
 from invoicebot.pipeline.failed import RULE_DEAD
 from invoicebot.pipeline.outgoing import (
     RULE_STALE_BUTTON,
@@ -109,25 +109,14 @@ async def teach(
 ) -> None:
     """Propose a taught portal link and ask the owner to approve it (BR-S06).
 
-    An approved link only thanks the sender; an invalid one repeats BR-F02.
+    An approved link only thanks the sender; an invalid one raises ``TaughtUrlError``.
     The caller owns the transaction, so the link and both messages commit together.
     """
     existing = await taught_links.get(conn, ruc_emisor)
     if existing is not None and existing.state == STATE_APPROVED:
         await queue_message(conn, ctx.sender, MESSAGES[RULE_TEACH], rule_id=RULE_TEACH)
         return
-    try:
-        url = await check_taught_url(raw_url, ctx.resolver)
-    except TaughtUrlError:
-        await queue_message(
-            conn,
-            ctx.sender,
-            MESSAGES[RULE_ASK_PORTAL].format(
-                razon_social=razon_social or UNKNOWN_ISSUER, ruc_emisor=ruc_emisor
-            ),
-            rule_id=RULE_ASK_PORTAL,
-        )
-        return
+    url = await check_taught_url(raw_url, ctx.resolver)
     proposed = await taught_links.propose(conn, ruc_emisor, url, ctx.sender.profile_id)
     await queue_message(conn, ctx.sender, MESSAGES[RULE_TEACH], rule_id=RULE_TEACH)
     if proposed is not None:

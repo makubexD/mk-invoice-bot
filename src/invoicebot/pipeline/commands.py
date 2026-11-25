@@ -20,6 +20,7 @@ from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.channels.buttons import command_button_id
 from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
+from invoicebot.net.taught_url import TaughtUrlError
 from invoicebot.pipeline.actions import cancel_invoice
 from invoicebot.pipeline.deliver import FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
@@ -500,17 +501,20 @@ async def _portal(
         await _reply(conn, msg, None, HELP_PORTAL)
         return
     ruc, url = parts
-    await teach(
-        conn,
-        TeachContext(
-            profiles=context.teach.profiles,
-            sender=Addressee(msg.channel, msg.profile_id),
-            resolver=context.teach.resolver,
-        ),
-        int(ruc),
-        None,
-        url,
-    )
+    try:
+        await teach(
+            conn,
+            TeachContext(
+                profiles=context.teach.profiles,
+                sender=Addressee(msg.channel, msg.profile_id),
+                resolver=context.teach.resolver,
+            ),
+            int(ruc),
+            None,
+            url,
+        )
+    except TaughtUrlError:
+        await _reply(conn, msg, None, HELP_PORTAL)
 
 
 def _is_ruc(token: str) -> bool:

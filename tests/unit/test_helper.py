@@ -93,21 +93,22 @@ def test_photo_with_printed_url_does_not_re_read_the_strip(
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
     assert payload["reading"]["printed_url"] == PRINTED_URL
-    assert payload["reading"]["url_strip"] is None
+    assert "url_strip" not in payload["reading"]
 
 
-def test_photo_re_read_cv2_error_keeps_the_reading_without_a_strip(
-    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+@pytest.mark.parametrize("error", [cv2.error("boom"), MemoryError()])
+def test_photo_re_read_error_keeps_the_reading_without_a_strip(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules, error: Exception
 ) -> None:
-    """D191: a re-read that raises a cv2 error keeps the reading, without a strip."""
+    """D191: a re-read that fails or runs out of memory keeps the reading, without a strip."""
     _fake_ocr(monkeypatch, _ocr_reading())
 
     def explode(*_args: object) -> str:
-        raise cv2.error("boom")
+        raise error
 
     monkeypatch.setattr(helper, "read_url_strip", explode)
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert payload["reading"]["url_strip"] is None
+    assert "url_strip" not in payload["reading"]
     assert payload["reading"]["fields"]["ruc_emisor"]["value"] == SYNTHETIC_RUC

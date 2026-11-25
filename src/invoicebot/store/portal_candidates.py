@@ -19,6 +19,8 @@ SAVE_SQL = """
 
 #: The read: the invoice's candidate, or no row when BR-F14 never offered one (D191).
 GET_SQL = "SELECT url FROM portal_candidates WHERE invoice_id = %s"
+#: The delete: an answered offer leaves nothing for an old button to act on (D191).
+DELETE_SQL = "DELETE FROM portal_candidates WHERE invoice_id = %s"
 
 
 async def save(conn: AsyncConnection[Any], invoice_id: int, url: str) -> None:
@@ -37,3 +39,11 @@ async def get(conn: AsyncConnection[Any], invoice_id: int) -> str | None:
     cur = await conn.execute(GET_SQL, (invoice_id,))
     row = await cur.fetchone()
     return None if row is None else cast(str, row[0])
+
+
+async def delete(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Forget ``invoice_id``'s candidate once [Sí] proposed it (D191).
+
+    Does not commit.
+    """
+    await conn.execute(DELETE_SQL, (invoice_id,))

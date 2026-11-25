@@ -23,7 +23,7 @@ NAME_MATCH_MIN_RATIO = 0.75
 ACCEPTED_TLDS = frozenset({"pe", "com", "net", "org"})
 
 #: A leading garbled or real scheme, dropped before the host is read (D191).
-_SCHEME_PATTERN = re.compile(r"^h\S{2,5}?[:;.,]*[/\\|]+")
+_SCHEME_PATTERN = re.compile(r"^(?:h[^\s./]{2,5}(?:[\s:;.,]+[/\\|]+|[/\\|]{2,})|https?[\s:;.,]+)\s*")
 #: The separators OCR leaves where a dot was printed, repaired to a dot (D191).
 _HOST_SEPARATOR_PATTERN = re.compile(r"[\s,;]+")
 #: The characters a host may keep (D191).

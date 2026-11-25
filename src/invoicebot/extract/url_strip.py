@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 import statistics
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -38,6 +39,13 @@ STRIP_TIMEOUT_S = 2
 #: Runs of characters that are not URL characters; each becomes one space (D191).
 URL_STRIP_JUNK = re.compile(r"[^A-Za-z0-9.:/_~%-]+")
 
+#: Seconds all bands may take together; the read stops at the first band past it (R-9.2).
+STRIP_TOTAL_S = 8.0
+#: What an address line keeps even when garbled: ``//``, or a separator before a top level. Any
+#: other line may be a name or an amount and is dropped (R-9.16, D191).
+_ADDRESS_SHAPE = re.compile(r"//|[./\s](?:pe|com|net|org)\b", re.IGNORECASE)
+#: Taller words are not a consult line, and their bands would be most of the photo (R-9.2).
+_MAX_WORD_HEIGHT = 100
 _MIN_WORD_HEIGHT = 1
 _MIN_BOX_HEIGHT = 1
 
@@ -53,7 +61,7 @@ class Anchor:
 def find_anchor(text: OcrText, pattern: re.Pattern[str]) -> Anchor | None:
     """Return the first line matching ``pattern`` as an anchor, or ``None`` (D191).
 
-    A matching line whose words lack a box, or whose median word height is under one pixel,
+    A matching line whose words lack a box, or whose median word height is out of range,
     gives no usable anchor.
     """
     for line in text.lines:
@@ -65,7 +73,7 @@ def find_anchor(text: OcrText, pattern: re.Pattern[str]) -> Anchor | None:
                 return None
             boxes.append(word.box)
         word_height = statistics.median_low(box.height for box in boxes)
-        if word_height < _MIN_WORD_HEIGHT:
+        if not _MIN_WORD_HEIGHT <= word_height <= _MAX_WORD_HEIGHT:
             return None
         return Anchor(bottom=statistics.median_low(box.bottom for box in boxes), word_height=word_height)
     return None
@@ -106,7 +114,8 @@ def read_url_strip(
 
     ``straight`` is the deskewed gray image the word boxes refer to. Each band is cropped,
     upscaled and read as one line; the read with the highest mean word confidence wins (ties:
-    the first). ``None`` when there is no anchor, no band or no read.
+    the first). ``None`` when there is no anchor, no band, no read or
+    the read is not an address.
     """
     anchor = find_anchor(text, rules.anchor_pattern)
     if anchor is None:
@@ -119,7 +128,10 @@ def read_url_strip(
     read_cfg = ocr_cfg.model_copy(update={"lang": STRIP_LANG, "psm": STRIP_PSM, "timeout_s": timeout_s})
     best_words: tuple[OcrWord, ...] | None = None
     best_confidence = -1.0
+    deadline = time.monotonic() + STRIP_TOTAL_S
     for box in boxes:
+        if time.monotonic() > deadline:
+            break
         crop = straight[box.top : box.bottom, box.left : box.left + box.width]
         if crop.size == 0:
             continue
@@ -136,4 +148,5 @@ def read_url_strip(
             best_words = words
     if best_words is None:
         return None
-    return clean_strip(" ".join(word.text for word in best_words))
+    strip = clean_strip(" ".join(word.text for word in best_words))
+    return strip if strip is not None and _ADDRESS_SHAPE.search(strip) else None

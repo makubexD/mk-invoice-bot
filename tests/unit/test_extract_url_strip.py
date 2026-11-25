@@ -189,3 +189,44 @@ def test_read_url_strip_caps_each_band_at_the_strip_timeout(
     assert read_url_strip(image, _anchor_text(), rules, OCR_CONFIG) is None
     assert configs
     assert {(cfg.lang, cfg.psm, cfg.timeout_s) for cfg in configs} == {("eng", 7, 2)}
+
+
+@pytest.mark.parametrize("line", ["JUAN PEREZ 45678912", "TOTAL S/ 118.00", "EJEMPLO S.A.C."])
+def test_read_url_strip_line_that_is_no_address_returns_none(
+    rules: ParsingRules, monkeypatch: pytest.MonkeyPatch, line: str
+) -> None:
+    """R-9.16, D191: a name or an amount under the anchor is never kept."""
+    read = OcrText(lines=(tuple(OcrWord(text=word, confidence=0.9) for word in line.split()),))
+    monkeypatch.setattr(url_strip_module, "read_text", lambda *_args: read)
+    image = np.full((HEIGHT, WIDTH), WHITE, dtype=np.uint8)
+
+    assert read_url_strip(image, _anchor_text(), rules, OCR_CONFIG) is None
+
+
+def test_read_url_strip_past_its_deadline_stops_reading(
+    rules: ParsingRules, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R-9.2, D191: no band is read once the strip's total time is spent."""
+    reads: list[object] = []
+    monkeypatch.setattr(url_strip_module, "STRIP_TOTAL_S", -1.0)
+    monkeypatch.setattr(url_strip_module, "read_text", lambda *args: reads.append(args))
+
+    assert (
+        read_url_strip(np.full((HEIGHT, WIDTH), WHITE, dtype=np.uint8), _anchor_text(), rules, OCR_CONFIG)
+        is None
+    )
+    assert reads == []
+
+
+def test_find_anchor_giant_words_returns_none(rules: ParsingRules) -> None:
+    """R-9.2, D191: words too tall for a consult line give no anchor, so no photo-sized band is read."""
+    text = OcrText(
+        lines=(
+            (
+                OcrWord(text="CONSULTADO", confidence=0.9, box=OcrBox(10, 100, 80, 400)),
+                OcrWord(text="EN:", confidence=0.9, box=OcrBox(100, 100, 80, 400)),
+            ),
+        )
+    )
+
+    assert find_anchor(text, rules.anchor_pattern) is None
