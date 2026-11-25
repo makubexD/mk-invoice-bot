@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 from psycopg import AsyncConnection
 
@@ -46,6 +47,17 @@ async def get(conn: AsyncConnection[Any], ruc_emisor: int) -> TaughtLink | None:
     if row is None:
         return None
     return TaughtLink(ruc_emisor=row[0], url=row[1], profile_id=row[2], state=row[3])
+
+
+async def approved_hosts(conn: AsyncConnection[Any]) -> frozenset[str]:
+    """Return the lowercase hostnames of every approved link (D191); does not commit.
+
+    A URL ``urlsplit`` cannot give a hostname for is skipped.
+    """
+    cur = await conn.execute("SELECT url FROM taught_links WHERE state = 'approved'")
+    rows = await cur.fetchall()
+    hosts = (urlsplit(row[0]).hostname for row in rows)
+    return frozenset(host for host in hosts if host is not None)
 
 
 async def propose(

@@ -40,6 +40,7 @@ EXPECTED_TABLES = {
     "payments",
     "padron",
     "pending_actions",
+    "portal_candidates",
     "taught_links",
     "upload_rejections",
 }
