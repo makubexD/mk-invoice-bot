@@ -6,7 +6,10 @@ The extract handler starts this module as ``python -m invoicebot.extract <max_px
 trailing arguments the input is a photo, which keeps the original call working. The file's bytes
 arrive on stdin and the helper never opens a path under the data root (D158). It loads the
 input once, reads its SUNAT QR, reads its text and parses the fields with the configured rules,
-then merges both readings (D81). A text-layer PDF is parsed directly and its fields carry the
+then merges both readings (D81). A photo whose first read misses a required field is read again
+on the plain deskewed photo, then on that photo upscaled, then on the upscaled photo in block
+mode, then on a crop of the receipt, within the OCR budget (D198).
+A text-layer PDF is parsed directly and its fields carry the
 ``pdf`` source; a PDF without enough text is rendered on page 1 and read as a photo (R-2.15).
 It writes exactly one JSON object to stdout: ``{"reading": {...} | null, "variant": ...,
 "decoder": ..., "ocr": bool, "error": null | "unreadable" | "too_many_pages"}``, where ``ocr``
@@ -24,6 +27,8 @@ from __future__ import annotations
 import json
 import resource
 import sys
+import time
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -35,14 +40,14 @@ from pypdfium2 import PdfDocument
 
 from invoicebot.config.models import Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
-from invoicebot.extract.image import ImageUnreadable, load_gray
+from invoicebot.extract.image import ImageUnreadable, crop_receipt, load_gray
 from invoicebot.extract.merge import merge
 from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
 from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 from invoicebot.extract.pdf import TooManyPages, open_pdf, page_text, render_gray, text_to_ocr
 from invoicebot.extract.qr import QrHit, read_invoice_qr
-from invoicebot.extract.url_strip import read_url_strip
+from invoicebot.extract.url_strip import STRIP_TIMEOUT_S, read_url_strip
 
 #: Exit code for a bad invocation or an unreadable rules file; the handler retries these (R-9.4).
 EXIT_FAILURE = 1
@@ -59,6 +64,15 @@ UNUSED_PDF_OPTION = 0
 UNREADABLE = "unreadable"
 #: The helper's value for "the PDF has too many pages" (BR-E07, R-2.15).
 TOO_MANY_PAGES = "too_many_pages"
+#: Seconds of OCR budget below which a retry read is not started (D198).
+MIN_RETRY_S = 1.0
+#: The upscaled plain retry scales the deskewed photo by this factor, capped so its long side stays within
+#: ``UPSCALE_MAX_SIDE`` pixels (D198).
+UPSCALE_FACTOR = 2.0
+UPSCALE_MAX_SIDE = 4000
+#: The page segmentation mode of the block-mode retry read of the upscaled photo; it reads the page as one
+#: uniform block of text, which can catch what the configured mode splits wrongly (D198).
+RETRY_PSM = 6
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
 #: codecs before it decodes one pixel, and its thread pool reserves more per core, so a
 #: 512 MiB cap makes every decode fail to allocate. This value leaves headroom over the
@@ -158,7 +172,8 @@ def _read_invoice(data: bytes, options: _Options) -> dict[str, Any]:
 
 
 def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> dict[str, Any]:
-    """Read one photo from its bytes and return the helper result (R-2.1, R-2.13)."""
+    """Read one photo from its bytes and return the helper result (R-2.1, R-2.13, D198)."""
+    started = time.monotonic()
     try:
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
@@ -172,10 +187,134 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     except MemoryError:
         # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
         text, ocr_reading = None, None
+    qr_reading = None if hit is None else hit.reading
+    text, ocr_reading, source = _retries(
+        gray, ocr_cfg, rules, started, (text, ocr_reading, straight), qr_reading
+    )
     if text is not None and ocr_reading is not None and ocr_reading.printed_url is None:
-        ocr_reading = _with_url_strip(straight, text, ocr_cfg, rules, ocr_reading)
-    reading = merge(ocr_reading, None if hit is None else hit.reading)
+        ocr_reading = _with_url_strip(source, text, ocr_cfg, rules, ocr_reading)
+    reading = merge(ocr_reading, qr_reading)
     return _payload(reading, hit, ocr_ran=text is not None)
+
+
+def _missing_count(ocr: Reading | None, qr: Reading | None) -> int:
+    """Return how many required fields the OCR and QR readings together lack (D198).
+
+    A field the QR reading has is not missing; no reading at all lacks every field.
+    """
+    return len(merge(ocr, qr).missing_required())
+
+
+#: One retry read: the image to read, its deskewed image and the PSM to read it with
+#: (``None`` is the configured one).
+_Candidate = tuple[np.ndarray, np.ndarray, int | None]
+
+
+def _crop_candidates(gray: np.ndarray) -> Iterator[_Candidate]:
+    """Yield the (image to read, deskewed image, psm) candidates of the receipt crop of ``gray`` (D198).
+
+    Nothing is yielded when the crop finds no receipt (it keeps the shape of ``gray``) or fails.
+    The binarized crop comes first, then the deskewed crop as it is.
+    """
+    try:
+        crop = crop_receipt(gray)
+        if crop.shape == gray.shape:
+            return
+        straight = deskew(crop)
+    except (cv2.error, MemoryError):
+        return
+    try:
+        binarized = binarize(straight)
+    except (cv2.error, MemoryError):
+        pass
+    else:
+        yield binarized, straight, None
+    yield straight, straight, None
+
+
+def _upscaled_candidates(straight: np.ndarray) -> Iterator[_Candidate]:
+    """Yield ``straight`` upscaled twice, or nothing when it cannot grow (D198).
+
+    The first candidate uses the configured PSM and the second ``RETRY_PSM``; the photo is resized once.
+
+    The factor is ``UPSCALE_FACTOR``, capped so the long side stays within ``UPSCALE_MAX_SIDE``; a
+    factor of 1 or less, or a failed resize, yields nothing.
+    """
+    height, width = straight.shape[:2]
+    factor = min(UPSCALE_FACTOR, UPSCALE_MAX_SIDE / max(height, width))
+    if factor <= 1:
+        return
+    size = (round(width * factor), round(height * factor))
+    try:
+        upscaled = cv2.resize(straight, size, interpolation=cv2.INTER_CUBIC)
+    except (cv2.error, MemoryError):
+        return
+    # The upscaled image is its own deskewed image: the strip re-read needs the read's coordinates.
+    yield upscaled, upscaled, None
+    yield upscaled, upscaled, RETRY_PSM
+
+
+def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[_Candidate]:
+    """Yield the (image to read, deskewed image, psm) candidates to retry, in order, lazily (D198).
+
+    The plain deskewed photo comes first, then the upscaled one, then the upscaled one in block
+    mode, then the crop; the last three are only computed when they are asked for.
+    """
+    yield straight, straight, None
+    yield from _upscaled_candidates(straight)
+    yield from _crop_candidates(gray)
+
+
+def _read_candidate(
+    image: np.ndarray, ocr_cfg: Ocr, rules: ParsingRules, left: float, psm: int | None
+) -> tuple[OcrText | None, Reading | None] | None:
+    """Return the text and reading of ``image`` read in ``left`` seconds, or ``None`` on failure.
+
+    ``psm`` is the page segmentation mode; ``None`` is the configured one (D198).
+    """
+    try:
+        text = read_text(image, ocr_cfg, timeout_s=left, psm=psm)
+        return text, None if text is None else parse_ocr(text, rules).reading
+    except (cv2.error, MemoryError):
+        return None
+
+
+def _left(budget: float, started: float) -> float:
+    """Return the seconds of ``budget`` left after ``started`` (D198)."""
+    return budget - (time.monotonic() - started)
+
+
+def _retries(
+    gray: np.ndarray,
+    ocr_cfg: Ocr,
+    rules: ParsingRules,
+    started: float,
+    first: tuple[OcrText | None, Reading | None, np.ndarray],
+    qr_reading: Reading | None,
+) -> tuple[OcrText | None, Reading | None, np.ndarray]:
+    """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198).
+
+    While the best reading misses a required field, the candidates run in order, each only with
+    at least ``MIN_RETRY_S`` of the retry budget left after ``started`` (the helper's start) and
+    with only that time. The budget is ``ocr_cfg.timeout_s`` less ``STRIP_TIMEOUT_S``, kept for
+    the strip re-read that follows. The best has the fewest missing required fields once merged
+    with ``qr_reading``, a tie keeping the earlier reading; the reading kept is the OCR one,
+    unmerged. ``first`` carries the deskewed image it came from.
+    """
+    best = first
+    candidates = _candidates(gray, first[2])
+    budget = ocr_cfg.timeout_s - STRIP_TIMEOUT_S
+    # Time is checked before a candidate is built, so a skipped crop is never made, and again after,
+    # so the time the build took is not handed to the read.
+    while _missing_count(best[1], qr_reading) > 0 and _left(budget, started) >= MIN_RETRY_S:
+        candidate = next(candidates, None)
+        left = _left(budget, started)
+        if candidate is None or left < MIN_RETRY_S:
+            break
+        read = _read_candidate(candidate[0], ocr_cfg, rules, left, candidate[2])
+        if read is not None and _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
+            best = (*read, candidate[1])
+    return best
 
 
 def _with_url_strip(

@@ -3,7 +3,7 @@
 Synthetic set (`tests/golden`, from `scripts/accuracy_report.py --set tests/golden --write`); the private set's
 numbers come with the live check (`docs/archive/plan-mvp-read-more.md` § "Deferred: live check").
 
-- Date: 2026-11-16
+- Date: 2026-11-26
 - Set size: 12 pair(s)
 - QR rate: 100.0%
 - OCR-only required-field rate: 100.0%

@@ -3,8 +3,11 @@
 
 Usage: ``make_golden.py --seed N --count K --out DIR``. Each receipt is a canvas of
 ``cv2.putText`` labels in the layout ``config/parsing_rules.yaml`` reads, an optional SUNAT
-QR drawn by zxing-cpp, and a mild photo distortion. The same seed writes byte-identical
-files. RUCs come only from ``tests/synthetic_rucs.txt`` (R-9.17), so a generated set passes
+QR drawn by zxing-cpp, and a mild photo distortion. Every ``BACKGROUND_EVERY``-th receipt is then
+pasted onto a larger canvas of dark diagonal stripes with noise, as a photo taken on a busy table
+is (D198); the background reuses the receipt's own noise seed, so it costs no extra random draw
+and the other receipts are unchanged. The same seed writes byte-identical files.
+RUCs come only from ``tests/synthetic_rucs.txt`` (R-9.17), so a generated set passes
 ``scripts/check_fixtures.py`` once that allowlist sits beside it.
 """
 
@@ -76,6 +79,13 @@ MAX_ANGLE = 1.2
 BLUR_KERNEL = (3, 3)
 BLUR_SIGMA = 0.6
 NOISE_STD = 3.0
+BACKGROUND_EVERY = 3
+BACKGROUND_SCALE = 1.4
+STRIPE_PERIOD = 48
+STRIPE_WIDTH = 20
+STRIPE_DARK = 40
+STRIPE_LIGHT = 90
+BACKGROUND_NOISE_STD = 12.0
 
 
 @dataclass(frozen=True)
@@ -287,12 +297,37 @@ def _distort(image: np.ndarray, angle: float, noise_seed: int) -> np.ndarray:
     return np.clip(blurred.astype(np.float64) + noise, 0, WHITE).astype(np.uint8)
 
 
-def _photo(receipt: _Receipt, rng: random.Random) -> np.ndarray:
+def _striped_background(height: int, width: int, noise_seed: int) -> np.ndarray:
+    """Return dark diagonal stripes with noise, ``height`` by ``width`` (D198)."""
+    rows, cols = np.indices((height, width))
+    on_stripe = (rows + cols) % STRIPE_PERIOD < STRIPE_WIDTH
+    stripes = np.where(on_stripe, STRIPE_LIGHT, STRIPE_DARK).astype(np.float64)
+    noise = np.random.default_rng(noise_seed).normal(0.0, BACKGROUND_NOISE_STD, stripes.shape)
+    return np.clip(stripes + noise, 0, WHITE).astype(np.uint8)
+
+
+def _on_background(photo: np.ndarray, noise_seed: int) -> np.ndarray:
+    """Return ``photo`` centred on a :data:`BACKGROUND_SCALE` larger striped canvas.
+
+    Pasted after the distortion, so the receipt's edge stays as sharp as a real sheet on a table.
+    """
+    height, width = photo.shape
+    big_height, big_width = round(height * BACKGROUND_SCALE), round(width * BACKGROUND_SCALE)
+    canvas = _striped_background(big_height, big_width, noise_seed)
+    top, left = (big_height - height) // 2, (big_width - width) // 2
+    canvas[top : top + height, left : left + width] = photo
+    return canvas
+
+
+def _photo(receipt: _Receipt, rng: random.Random, busy_background: bool) -> np.ndarray:
     """Return the finished, distorted JPEG-ready image for ``receipt``."""
     canvas = _draw_text(_receipt_lines(receipt))
     if receipt.has_qr:
         canvas = _add_qr(canvas, _qr_payload(receipt))
-    return _distort(canvas, rng.uniform(-MAX_ANGLE, MAX_ANGLE), rng.getrandbits(32))
+    angle = rng.uniform(-MAX_ANGLE, MAX_ANGLE)
+    noise_seed = rng.getrandbits(32)
+    photo = _distort(canvas, angle, noise_seed)
+    return _on_background(photo, noise_seed) if busy_background else photo
 
 
 def _expected(receipt: _Receipt) -> dict[str, object]:
@@ -313,10 +348,12 @@ def _expected(receipt: _Receipt) -> dict[str, object]:
     return {"has_qr": receipt.has_qr, "fields": fields}
 
 
-def _write_pair(out: Path, name: str, receipt: _Receipt, rng: random.Random) -> None:
+def _write_pair(out: Path, name: str, receipt: _Receipt, rng: random.Random, busy_background: bool) -> None:
     """Write ``<name>.jpg`` and its D127 ``<name>.json`` into ``out``."""
     image_path = out / f"{name}.jpg"
-    written = cv2.imwrite(str(image_path), _photo(receipt, rng), [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+    written = cv2.imwrite(
+        str(image_path), _photo(receipt, rng, busy_background), [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+    )
     if not written:
         raise OSError(f"could not write {image_path}")
     expected_path = out / f"{name}.json"
@@ -335,7 +372,7 @@ def generate(seed: int, count: int, out: Path) -> list[Path]:
     written: list[Path] = []
     for index in range(count):
         name = f"receipt-{index:03d}"
-        _write_pair(out, name, _make_receipt(rng, rucs), rng)
+        _write_pair(out, name, _make_receipt(rng, rucs), rng, index % BACKGROUND_EVERY == 0)
         written.append(out / f"{name}.jpg")
     return written
 
