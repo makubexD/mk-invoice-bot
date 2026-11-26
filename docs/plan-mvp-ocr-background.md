@@ -10,7 +10,7 @@ on a wood-grain table ended in BR-E01 "No puedo leer este comprobante". Traced s
 - **OCR:** `binarize` (CLAHE + adaptive threshold) turns the wood grain and the papers around the receipt into dense
   black streaks; Tesseract (`psm 4`) then splits the page into broken columns and the parser finds no field at all.
 - The same photo without `binarize` reads serie, numero, tipo, total and IGV, but takes the buyer's RUC as the issuer:
-  the issuer line came out as `RUC! 20486765454`, which the anchored RUC pattern refuses (`[:.]?`), so the buyer's
+  the issuer line came out as `RUC!` followed by the store's RUC, which the anchored RUC pattern refuses (`[:.]?`), so the buyer's
   `RUC: …` line was the first anchored match.
 
 No extract code changed since 11-25; #35 (same restaurant, dark plain background) read fine the same day.
