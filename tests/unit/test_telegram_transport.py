@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 import pytest
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Link, OutboundMessage
 from invoicebot.channels.telegram.client import TelegramClient, TelegramError
 from invoicebot.channels.telegram.transport import (
     CALLBACK_DATA_MAX_BYTES,
@@ -123,6 +123,43 @@ async def test_three_buttons_become_three_one_button_rows_in_order() -> None:
             [{"text": "Notas", "callback_data": "1:pick:2"}],
         ]
     }
+
+
+async def test_a_button_and_a_link_give_the_callback_row_then_the_url_row() -> None:
+    """D194: a message with one button and one link shows the button first, then the link as a URL button."""
+    msg = _message(
+        text="📧 Revisa el correo",
+        buttons=[Button(id="1:send", title="Enviar")],
+        links=[Link(title="📂 Abrir carpeta", url="https://x.example/f")],
+    )
+    async with _transport() as (transport, sent):
+        await transport(_row(msg))
+
+    assert sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Enviar", "callback_data": "1:send"}],
+            [{"text": "📂 Abrir carpeta", "url": "https://x.example/f"}],
+        ]
+    }
+
+
+async def test_only_a_link_still_gets_reply_markup() -> None:
+    """D194: a message with a link and no buttons carries the link as its only URL button row."""
+    msg = _message(links=[Link(title="📂 Abrir carpeta", url="https://x.example/f")])
+    async with _transport() as (transport, sent):
+        await transport(_row(msg))
+
+    assert sent[0]["reply_markup"]["inline_keyboard"] == [
+        [{"text": "📂 Abrir carpeta", "url": "https://x.example/f"}]
+    ]
+
+
+async def test_no_links_and_no_buttons_send_no_reply_markup() -> None:
+    """D194: a message with neither links nor buttons goes out without reply_markup, as before."""
+    async with _transport() as (transport, sent):
+        await transport(_row(_message()))
+
+    assert "reply_markup" not in sent[0]
 
 
 async def test_the_returned_id_is_the_chat_and_message_ids() -> None:

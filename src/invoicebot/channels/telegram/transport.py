@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
 from typing import Any
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Link, OutboundMessage
 from invoicebot.channels.telegram.client import OK_STATUS, TelegramClient, TelegramError
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.queue.retry import MAX_BACKOFF_MINUTES, RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
@@ -107,8 +107,9 @@ def _payload(msg: OutboundMessage, chat_id: int) -> dict[str, Any]:
     if _text_length(msg.text) > TEXT_MAX_CHARS:
         raise PermanentSendError(f"Telegram text is over {TEXT_MAX_CHARS} UTF-16 code units")
     payload: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
-    if msg.buttons:
-        payload["reply_markup"] = {"inline_keyboard": _keyboard(msg.buttons)}
+    keyboard = _keyboard(msg.buttons) + _link_rows(msg.links)
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
     return payload
 
 
@@ -120,3 +121,8 @@ def _keyboard(buttons: list[Button]) -> list[list[dict[str, str]]]:
             raise PermanentSendError(f"Telegram callback data is over {CALLBACK_DATA_MAX_BYTES} bytes")
         rows.append([{"text": button.title, "callback_data": button.id}])
     return rows
+
+
+def _link_rows(links: list[Link]) -> list[list[dict[str, str]]]:
+    """Lay each link out as one URL button row under the reply buttons (D194)."""
+    return [[{"text": link.title, "url": link.url}] for link in links]
