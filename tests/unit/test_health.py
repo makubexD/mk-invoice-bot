@@ -14,6 +14,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 import invoicebot.app
+import invoicebot.auth.providers
 from invoicebot.app import create_app, lifespan
 from invoicebot.secrets import SECRET_ENV_SUFFIXES, SecretStore
 
@@ -113,6 +114,7 @@ def test_lifespan_without_age_identity_disables_the_inbox_fetcher(
     # store and a token source nothing calls keep startup going so the fetch wiring runs.
     monkeypatch.setattr(invoicebot.app, "_load_secrets", lambda _settings: SecretStore(SECRET_VALUES))
     monkeypatch.setattr(invoicebot.app, "build_token_provider", lambda *_args: _NoToken())
+    monkeypatch.setattr(invoicebot.auth.providers, "build_token_provider", lambda *_args: _NoToken())
     # Google refresh tokens also need the identity (D128); flow A delivery is not under test here.
     monkeypatch.setattr(invoicebot.app, "_google_tokens", lambda *_args: defaultdict(_NoToken))
     # configure_logging replaces the root handlers, which would hide the records from caplog.

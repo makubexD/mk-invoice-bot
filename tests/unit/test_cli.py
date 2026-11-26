@@ -7,8 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.cli import main
 from invoicebot.config.loader import load_directory
+from invoicebot.ops.forget import ForgetRefused, ForgetRequest
+from invoicebot.settings import Settings
+from invoicebot.sinks.onedrive import GraphError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config" / "example.yaml"
@@ -176,3 +180,122 @@ def test_portal_test_output_holds_no_sample_value(
     for value in (STORE_RUC, SERIE, NUMERO, TOTAL):
         assert value not in output
     assert str(sample) not in output
+
+
+class _FakePool:
+    """A pool stand-in: the forget command only opens and closes it."""
+
+    async def open(self, wait: bool = False) -> None:
+        """Accept the open call without a database."""
+
+    async def close(self) -> None:
+        """Accept the close call without a database."""
+
+
+def _patch_forget(
+    monkeypatch: pytest.MonkeyPatch, outcome: list[str] | Exception
+) -> list[tuple[bool, bool, bool, bool]]:
+    """Fake the pool, the drive and ``forget``; return what each call received."""
+    monkeypatch.setenv("CONFIG_PATH", str(CONFIG_PATH))
+    monkeypatch.setenv("DATABASE_URL", "postgresql://unused")
+    calls: list[tuple[bool, bool, bool, bool]] = []
+
+    async def fake_forget(pool: object, data_dir: object, drive: object, request: ForgetRequest) -> list[str]:
+        calls.append((drive is not None, request.drive, request.purge, request.apply))
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr("invoicebot.cli.create_pool", lambda url: _FakePool())
+    monkeypatch.setattr("invoicebot.cli.personal_drive", lambda settings, cfg, http: object())
+    monkeypatch.setattr("invoicebot.cli.forget", fake_forget)
+    return calls
+
+
+def test_invoice_forget_defaults_change_nothing(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: ``invoice forget 34`` asks for a dry run without the drive and prints the lines."""
+    calls = _patch_forget(monkeypatch, ["would delete 2 file(s)"])
+
+    code = main(["invoice", "forget", "34"])
+
+    assert code == 0
+    assert calls == [(False, False, False, False)]
+    assert "would delete 2 file(s)" in capsys.readouterr().out
+
+
+def test_invoice_forget_flags_are_passed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D196: ``--drive --purge --yes`` reach ``forget`` as true and the drive is built."""
+    calls = _patch_forget(monkeypatch, [])
+
+    code = main(["invoice", "forget", "34", "--drive", "--purge", "--yes"])
+
+    assert code == 0
+    assert calls == [(True, True, True, True)]
+
+
+def test_invoice_forget_refused_exits_two(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a refusal exits 2 with its reason on stderr."""
+    _patch_forget(monkeypatch, ForgetRefused("not terminal"))
+
+    code = main(["invoice", "forget", "34"])
+
+    assert code == 2
+    assert "not terminal" in capsys.readouterr().err
+
+
+def test_invoice_forget_auth_required_exits_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a missing Microsoft sign-in exits 1 and names the auth command."""
+    _patch_forget(monkeypatch, AuthRequired("personal"))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    assert code == 1
+    assert "auth-microsoft --account personal" in capsys.readouterr().err
+
+
+def test_invoice_forget_graph_error_exits_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a Graph failure exits 1 with one stderr line and no traceback."""
+    _patch_forget(monkeypatch, GraphError(500))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert err.startswith("the OneDrive delete failed:")
+    assert len(err.splitlines()) == 1
+
+
+def test_invoice_forget_late_refusal_prints_done_lines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a refusal after the drive delete prints the done lines on stdout and exits 2."""
+    _patch_forget(monkeypatch, ForgetRefused("x", done=("drive: deleted /a",)))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "drive: deleted /a" in captured.out
+    assert "x" in captured.err
+
+
+def test_invoice_forget_needs_database_url(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: without DATABASE_URL the command is a parser error."""
+    monkeypatch.setenv("CONFIG_PATH", str(CONFIG_PATH))
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["invoice", "forget", "34"], settings=Settings(database_url=None))
+
+    assert exit_info.value.code == 2
+    assert "DATABASE_URL" in capsys.readouterr().err

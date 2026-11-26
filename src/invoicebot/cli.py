@@ -60,6 +60,7 @@ from invoicebot.auth.providers import (
     google_scopes_for,
     google_token_path,
     microsoft_accounts,
+    personal_drive,
     scopes_for,
 )
 from invoicebot.channels.telegram.client import (
@@ -89,6 +90,7 @@ from invoicebot.config.models import (
 )
 from invoicebot.fetchers.base import FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
+from invoicebot.ops.forget import ForgetRefused, ForgetRequest, forget
 from invoicebot.pipeline.commands import menu_entries
 from invoicebot.pipeline.deliver import DELIVER_STEP
 from invoicebot.pipeline.intake_config import intake_settings
@@ -99,6 +101,7 @@ from invoicebot.settings import Settings
 from invoicebot.sinks.google_api import GoogleError
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
+from invoicebot.sinks.onedrive import GraphError, GraphTransient
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
 from invoicebot.text import normalize_email
@@ -175,8 +178,8 @@ def main(
         return _google_setup(parser, resolved, cfg, args, http_transport)
     if args.command == "telegram":
         return _telegram(parser, resolved, cfg, args, show, http_transport)
-    if args.command == "rehearse":
-        return _rehearse(parser, resolved, cfg, args)
+    if args.command in {"rehearse", "invoice"}:
+        return _database_command(parser, resolved, cfg, args, http_transport)
     directory = load_directory(resolved.config_path.parent)
     return _portal_test(parser, directory, cfg, args.key, args.sample, helper_command)
 
@@ -247,6 +250,22 @@ def _parser() -> argparse.ArgumentParser:
         default=0,
         help="print only rows with an id above this (default 0)",
     )
+    invoice = subparsers.add_parser("invoice", help="operate on one stored invoice (D196)")
+    invoice_sub = invoice.add_subparsers(dest="invoice_command", required=True)
+    forget_parser = invoice_sub.add_parser(
+        "forget",
+        help="forget a terminal invoice; without --yes it only lists what would change and changes nothing",
+    )
+    forget_parser.add_argument("invoice_id", type=int, help="the invoice's id")
+    forget_parser.add_argument(
+        "--drive", action="store_true", help="also delete its folder on the personal OneDrive"
+    )
+    forget_parser.add_argument(
+        "--purge", action="store_true", help="also delete its host files and database rows"
+    )
+    forget_parser.add_argument(
+        "--yes", action="store_true", help="apply the change; without it nothing changes"
+    )
     return parser
 
 
@@ -281,6 +300,70 @@ def _auth_microsoft(
     count = asyncio.run(_resume_pending_auth(settings.database_url, MICROSOFT, account))
     sys.stdout.write(f"resumed {count} invoice(s)\n")
     return 0
+
+
+def _database_command(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Dispatch the commands that work on the live database: ``rehearse`` and ``invoice`` (D165, D196)."""
+    if args.command == "rehearse":
+        return _rehearse(parser, settings, cfg, args)
+    return _invoice_forget(parser, settings, cfg, args, transport)
+
+
+def _invoice_forget(
+    parser: argparse.ArgumentParser,
+    settings: Settings,
+    cfg: Config,
+    args: argparse.Namespace,
+    transport: httpx.AsyncBaseTransport | None,
+) -> int:
+    """Run ``invoice forget``: print what it did, or what it would do without ``--yes`` (D196).
+
+    A refusal exits 2 with its reason on stderr (and any part already done on stdout); a missing
+    Microsoft sign-in or a failed OneDrive delete exits 1.
+    """
+    if settings.database_url is None:
+        parser.error("DATABASE_URL must be set to forget an invoice")
+    request = ForgetRequest(invoice_id=args.invoice_id, drive=args.drive, purge=args.purge, apply=args.yes)
+    try:
+        lines = asyncio.run(_run_forget(settings, settings.database_url, cfg, request, transport))
+    except ForgetRefused as error:
+        for line in error.done:
+            sys.stdout.write(line + "\n")
+        sys.stderr.write(f"{error}\n")
+        return 2
+    except AuthRequired:
+        sys.stderr.write("the personal OneDrive needs a sign-in: run auth-microsoft --account personal\n")
+        return 1
+    except (GraphError, GraphTransient) as error:
+        sys.stderr.write(f"the OneDrive delete failed: {error}\n")
+        return 1
+    for line in lines:
+        sys.stdout.write(line + "\n")
+    return 0
+
+
+async def _run_forget(
+    settings: Settings,
+    database_url: str,
+    cfg: Config,
+    request: ForgetRequest,
+    transport: httpx.AsyncBaseTransport | None,
+) -> list[str]:
+    """Open the pool and, with ``--drive``, the personal drive; run the forget (D196)."""
+    pool = create_pool(database_url)
+    await pool.open(wait=True)
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=cfg.microsoft.timeout_s) as http:
+            drive = personal_drive(settings, cfg, http) if request.drive else None
+            return await forget(pool, settings.data_dir, drive, request)
+    finally:
+        await pool.close()
 
 
 def _auth_google(
