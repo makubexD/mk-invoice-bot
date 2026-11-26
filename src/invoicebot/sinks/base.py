@@ -134,6 +134,25 @@ class FolderDrive(Protocol):
         ...
 
 
+class FolderLinks(Protocol):
+    """The browser link of one item on a drive, for the console's links (D194).
+
+    Invariants every implementation keeps:
+
+    - it returns the item's browser link exactly as Graph gives it, never a
+      share or sharing link: reading it creates no permission.
+    """
+
+    async def web_url(self, path: str) -> str:
+        """Return the browser link of the item at ``path`` (D194).
+
+        Raises:
+            FolderMissing: the item at ``path`` does not exist.
+            GraphError: the answer carries no HTTPS ``webUrl``.
+        """
+        ...
+
+
 class RowSheet(Protocol):
     """The rows one delivery sink needs from a spreadsheet.
 
