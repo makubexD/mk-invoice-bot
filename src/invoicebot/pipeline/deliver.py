@@ -15,7 +15,9 @@ transient Graph error during an automatic send propagates and leaves the batch `
 the retry treats it as a crashed send: the batch fails, BR-D03 reports it, and the mail is
 never resent (D89). Before the send (filing, Excel upload) a transient error is simply retried.
 A receipt mode follows the same sending-first order, then leaves the batch ``prepared`` with
-its laptop job id recorded and no message to the sender (R-7.14, D108).
+its laptop job id recorded and no message to the sender (R-7.14, D108). A mailer on
+``send: review`` that the owner has not yet reviewed posts the mail to the chat instead:
+a ``review`` batch, BR-D19 and the attachments as documents, nothing sent (D194).
 
 :func:`make_resend_handler` builds the two handlers BR-D11's buttons enqueue. Both act on
 an invoice that was already delivered, rebuild its delivery with the saved folder and
@@ -58,7 +60,13 @@ from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
-from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
+from invoicebot.pipeline.actions import (
+    HOLD_ACTION,
+    NOT_ARRIVED_ACTION,
+    SEND_ACTION,
+    SENT_ACTION,
+    send_not_confirmed,
+)
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.outgoing import (
     Addressee,
@@ -79,13 +87,23 @@ from invoicebot.pipeline.pending_auth import (
     RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
 )
 from invoicebot.pipeline.questions import retry_button
+from invoicebot.pipeline.review import (
+    REVIEW_BATCH_STATE,
+    REVIEWED_KEY,
+    RULE_REVIEW,
+    queue_review_documents,
+    review_text,
+    write_review_files,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_HOLD,
     BUTTON_NOT_ARRIVED,
+    BUTTON_SEND,
     BUTTON_SENT,
     KIND_SUBJECT,
     LINK_TITLE_FOLDER,
@@ -332,8 +350,15 @@ async def _deliver(
     sinks: _Sinks,
     prepared: _Values,
 ) -> tuple[_Delivery, str]:
-    """Prepare the delivery and hand it to the flow's first mail mode (R-7.7)."""
+    """Prepare the delivery and hand it to the flow's first mail mode (R-7.7).
+
+    A mailer on ``send: review`` posts the mail for review instead, until the owner's
+    [Enviar] has set ``reviewed`` in the flow data (D194).
+    """
     delivery = await _prepare(context, invoice, sinks, prepared)
+    if sinks.mailer.send == "review" and invoice.flow_data.get(REVIEWED_KEY) is not True:
+        await _review(context, delivery, prepared)
+        return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
     return delivery, mode_name
@@ -658,6 +683,41 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
             _Reply(RULE_BATCHED, text, [button], _folder_links(delivery)),
         )
         await _close_fixed_gap(conn, context, delivery.invoice_id)
+
+
+async def _review(context: DeliverContext, delivery: _Delivery, prepared: _Values) -> None:
+    """Post the built mail for the owner to check, sending nothing (D194, D88, D89).
+
+    The attachments are written first; a retry rewrites them, which is harmless. One
+    transaction then opens the ``review`` batch (reusing an earlier ``prepared`` or
+    ``failed`` one), moves the invoice to ``BATCHED`` with BR-D19 and queues the
+    attachments as documents, then BR-D19 with [Enviar], [Cancelar] and the folder link.
+    A retry after that commit finds the invoice ``BATCHED`` and the handler does nothing.
+    A batch a previous attempt left ``sending`` is never posted or sent again: it fails
+    with BR-D03, as in the automatic mode (D89).
+    """
+    invoice_id = delivery.invoice_id
+    documents = await write_review_files(context.data_dir, invoice_id, delivery.mail.attachments)
+    buttons = [
+        Button(id=button_id(invoice_id, SEND_ACTION), title=BUTTON_SEND),
+        Button(id=button_id(invoice_id, HOLD_ACTION), title=BUTTON_HOLD),
+    ]
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, invoice_id):
+            return
+        if await get_batch_state(conn, invoice_id) == SENDING_BATCH_STATE:
+            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
+            return
+        batch_id = await open_batch(conn, invoice_id, delivery.flow_name, REVIEW_BATCH_STATE)
+        await set_batch_state(conn, batch_id, REVIEW_BATCH_STATE)
+        await set_state(conn, invoice_id, BATCHED, rule_id=RULE_REVIEW)
+        addressee = Addressee(delivery.head.origin_channel, delivery.head.profile_id)
+        await queue_review_documents(conn, addressee, invoice_id, documents)
+        text = review_text(prepared.values, delivery.mail)
+        await _notify(
+            conn, delivery.head, invoice_id, _Reply(RULE_REVIEW, text, buttons, _folder_links(delivery))
+        )
+        await _close_fixed_gap(conn, context, invoice_id)
 
 
 def _draft_reply(delivery: _Delivery) -> tuple[str, Button]:

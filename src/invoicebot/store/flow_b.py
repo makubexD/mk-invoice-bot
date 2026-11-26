@@ -11,8 +11,8 @@ from typing import Any, Literal, cast, get_args
 from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 
-#: The states a newly opened batch may start in (R-7.5, R-7.8).
-BatchState = Literal["prepared", "sending"]
+#: The states a newly opened batch may start in (R-7.5, R-7.8, D194).
+BatchState = Literal["prepared", "sending", "review"]
 
 
 async def load_flow_data(conn: AsyncConnection[Any], invoice_id: int) -> dict[str, Any]:

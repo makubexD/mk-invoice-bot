@@ -110,6 +110,10 @@ SENT_ACTION = "sent"
 NOT_ARRIVED_ACTION = "not_arrived"
 #: BR-D11's [Ya llegó] action (R-7.8).
 ARRIVED_ACTION = "arrived"
+#: BR-D19's [Enviar] action: send the reviewed mail (D194).
+SEND_ACTION = "send"
+#: BR-D19's [Cancelar] action: hold the mail and keep the invoice filed (D194).
+HOLD_ACTION = "hold"
 #: BR-D11's two resend choices (R-7.14, R-7.8, D109).
 VIA_LAPTOP_ACTION = "via_laptop"
 SELF_SEND_ACTION = "self_send"
