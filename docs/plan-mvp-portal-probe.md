@@ -390,12 +390,61 @@ host, other path → BR-F14; [Sí] on it proposes the URL; `_portal_handlers` ho
 
 Test: `uv run pytest -q tests/integration/test_pipeline_portal_check.py tests/unit/test_app.py && uv run mypy src`
 
-## Step 18: Live check `[inline: needs the owner's chat]`
+## Step 18: A submit button with no id or name `[worker]`
 
-Deploy with `deploy/deploy-live.sh`, remove the PEBSA link approved in 9t1, send its photo, teach the link, press
-[Aprobar]. Expected: `BR-S06_approved_probe`, then `captcha` (the spike shows an image captcha) and the issue with the
-draft and no invoice data; or `busy` with its retries. Then the La Leña site, if the owner
-agrees, with one of its real invoices, for the `ok` path. Record the rows in `specs/spikes/portal-probe.md` and cancel the test invoices.
+Amended by the owner on 2026-11-25, after the first La Leña run: its one `<button type="submit">Buscar comprobante</button>`
+has no `id` and no `name`, so `_locate` found no selector, `submit` was None and the probe ended as `unmatched_field`
+with every field matched.
+
+Files: `src/invoicebot/fetchers/browser/probe_protocol.py`, `src/invoicebot/fetchers/browser/probe_controls.py`,
+`tests/integration/test_browser_probe_controls.py`, `tests/unit/test_github_probe_text.py`.
+
+- `SELECTOR_PATTERN` also accepts exactly `button[type='submit']` and `input[type='submit']`.
+- `_submit`: when the winner is a submit control and neither `#id` nor `[name=...]` is unique, try
+  `button[type='submit']`, then `input[type='submit']`, and return the first that matches exactly one element on the
+  page; else None, as today.
+
+Test cases (docstrings `R-11.12, D193`): a form whose only submit is a `<button type="submit">` with no id or name →
+`button[type='submit']`; the same with `<input type="submit" value="Buscar">` → `input[type='submit']`; two forms, each
+with an unnamed submit button → None; a submit with a unique id → `#id` (unchanged); `ProbeReport` accepts
+`button[type='submit']` and rejects `button[type=submit]`; `render_probe` with that submit → the YAML holds
+`submit: button[type='submit']` and passes R-11.12.
+
+Test: `uv run pytest -q tests/integration/test_browser_probe_controls.py tests/unit/test_github_probe_text.py tests/unit/test_browser_probe_protocol.py && uv run mypy src`
+
+## Step 19: Say what stopped the probe `[inline: user-facing copy]`
+
+Amended by the owner on 2026-11-25: "pide un dato que no tengo" does not say which field, and a missing button is not a
+missing field.
+
+Files: `src/invoicebot/fetchers/browser/probe_protocol.py`, `src/invoicebot/fetchers/browser/probe_fill.py`,
+`src/invoicebot/fetchers/browser/probe_controls.py`, `src/invoicebot/fetchers/browser/probe_values.py`,
+`src/invoicebot/pipeline/portal_probe.py`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/github/probe_text.py`,
+their tests.
+
+- New outcome `no_submit`: the form has no submit control the probe can name. Chat: "no encontré su botón de búsqueda".
+- `ProbeReport.stopped_at`: the label of the field that stopped an `unmatched_field` probe (the first required control
+  left out, else the first field `plan_fills` cannot fill), or its selector when it has no label; same length cap and
+  characters as a field label. Chat: `no sé llenar el campo «{stopped_at}»`. Issue: the outcome line names it too.
+- The BR-S06 probe answer no longer says the draft "va en el issue" when no issue exists yet: "Guardo el borrador para el
+  issue del portal."
+
+Test cases (docstrings `BR-S06, R-11.12, D193`): no submit → `no_submit`; a required textarea labelled "Comentario" →
+`unmatched_field` with `stopped_at` "Comentario"; a text field mapped to `tipo` → `stopped_at` its label; the chat text
+and the issue line for each; with and without an existing gap, the closing sentence.
+
+Test: `uv run pytest -q tests/integration/test_browser_probe_form.py tests/integration/test_browser_probe_values.py tests/integration/test_pipeline_portal_probe.py tests/unit/test_github_probe_text.py && uv run mypy src`
+
+## Step 20: Live check `[inline: needs the owner's chat]`
+
+Deploy with `deploy/deploy-live.sh`. Already run on 2026-11-25 (image `d68b2f4261dc`), kept as rows: PEBSA's link with
+its session id cleaned, `BR-S06_approved_probe`, then `captcha`, with every field mapped; the La Leña ticket gave no
+[🔗] (anchor "ingresando a" and an address over two lines: a 9t2 finding); the first La Leña probe stopped on the unnamed
+submit. Now, with La Leña's store file still out of the live config: remove La Leña's taught link and probe row, then teach the link again for #34 and press [Aprobar]. Expected:
+`unmatched_field` naming «Tipo comprobante» (an Ant Design list, not a `<select>`) and a draft with
+`submit: button[type='submit']`; `ok` if it gets through. Then put La Leña's store file back, restart, and `/reprocesar
+34` so the configured portal files it in place of cancelled #12. Record the rows in `specs/spikes/portal-probe.md` and
+cancel the test invoice #32.
 
 Test: every row passes or is waived by the owner.
 
