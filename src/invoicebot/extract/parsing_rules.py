@@ -68,6 +68,7 @@ class ParsingRules(BaseModel):
     amount_value: ValuePattern
     amounts: dict[str, tuple[KeywordPattern, ...]]
     printed_url_anchor: str
+    buyer_label: KeywordPattern
 
     _amount_patterns: dict[str, tuple[re.Pattern[str], ...]] = PrivateAttr()
     _anchor_pattern: re.Pattern[str] = PrivateAttr()

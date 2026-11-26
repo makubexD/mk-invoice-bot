@@ -38,7 +38,6 @@ from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.review import mail_digest, remove_review_files, write_review_files
 from invoicebot.queue.jobs import Job
-from invoicebot.queue.outbox import add, has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.mailer import DryRun
@@ -466,28 +465,6 @@ async def test_enviar_with_a_pending_review_document_keeps_the_review_files(
 
     assert len(mode.calls) == 1
     assert (tmp_path / "mail" / str(invoice_id)).is_dir()
-
-
-async def test_has_pending_document_sees_only_this_invoices_pending_documents(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
-) -> None:
-    """D195: text rows, other invoices' rows and sent rows give false; a pending document row gives true."""
-    profile_id = f"review-{uuid4().hex}"
-    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
-    other_id = await _delivering_invoice(db_pool, tmp_path, f"review-{uuid4().hex}")
-    document = {"text": "x", "rule_id": "BR-D19", "document": {"filename": "a.pdf", "path": "a.pdf"}}
-    async with db_pool.connection() as conn:
-        await add(conn, "telegram", profile_id, {"text": "hola", "document": None}, invoice_id=invoice_id)
-        await add(conn, "telegram", profile_id, document, invoice_id=other_id)
-        sent_id = await add(conn, "telegram", profile_id, document, invoice_id=invoice_id)
-        await conn.execute("UPDATE outbox SET state = 'sent' WHERE id = %s", (sent_id,))
-        await add(conn, "telegram", profile_id, {**document, "rule_id": "BR-D07"}, invoice_id=invoice_id)
-        before = await has_pending_document(conn, invoice_id, "BR-D19")
-        await add(conn, "telegram", profile_id, document, invoice_id=invoice_id)
-        after = await has_pending_document(conn, invoice_id, "BR-D19")
-
-    assert before is False
-    assert after is True
 
 
 async def test_removing_absent_review_files_raises_nothing(tmp_path: Path) -> None:

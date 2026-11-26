@@ -35,6 +35,8 @@ from invoicebot.sunat_origins import is_sunat_host
 WORD_SEPARATOR = " "
 LINE_SEPARATOR = "\n"
 RUC_DOCUMENT_TYPE = "6"
+#: Lines after a buyer label whose RUC still belongs to the buyer (D198).
+BUYER_LINES = 2
 SERIE_FIX_LENGTH = 3
 SERIE_DIGIT_FIXES = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1"}
 AMOUNT_SEPARATOR = "."
@@ -160,24 +162,35 @@ def _add_rucs(
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> None:
-    """Add the issuer RUC and, when a second valid RUC is printed, the buyer (R-2.4)."""
+    """Add the issuer and buyer RUCs; a RUC under a buyer label is never the issuer's (R-2.4, D198)."""
     found = _ruc_matches(searched, spans, rules)
-    if not found:
-        return
-    fields["ruc_emisor"] = _ocr_field(*found[0])
-    if len(found) > 1:
-        value, confidence = found[1]
-        fields["num_doc_adq"] = _ocr_field(value, confidence)
-        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, confidence, flag="inferred")
+    buyers = [(value, confidence) for value, confidence, is_buyer in found if is_buyer]
+    others = [(value, confidence) for value, confidence, is_buyer in found if not is_buyer]
+    if others:
+        fields["ruc_emisor"] = _ocr_field(*others[0])
+    buyer = buyers[0] if buyers else (others[1] if len(others) > 1 else None)
+    if buyer is not None:
+        fields["num_doc_adq"] = _ocr_field(*buyer)
+        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer[1], flag="inferred")
+
+
+def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
+    """Return the line numbers of buyer-label lines and the :data:`BUYER_LINES` lines after each (D198)."""
+    numbers: set[int] = set()
+    for number, line in enumerate(searched.split(LINE_SEPARATOR)):
+        if rules.buyer_label.search(line):
+            numbers.update(range(number, number + BUYER_LINES + 1))
+    return numbers
 
 
 def _ruc_matches(
     searched: str,
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
-) -> list[tuple[str, float]]:
-    """Return the distinct valid RUCs, keyword-anchored matches first, each in text order."""
-    found: list[tuple[str, float]] = []
+) -> list[tuple[str, float, bool]]:
+    """Return the distinct valid RUCs with a buyer-line flag, anchored matches first, each in text order."""
+    buyer_lines = _buyer_line_numbers(searched, rules)
+    found: list[tuple[str, float, bool]] = []
     seen: set[str] = set()
     for pattern in rules.ruc:
         for match in _matches(pattern, searched):
@@ -185,7 +198,8 @@ def _ruc_matches(
             if value in seen or not is_valid_ruc(value):
                 continue
             seen.add(value)
-            found.append((value, _confidence(spans, *match.span("value"))))
+            line = searched.count(LINE_SEPARATOR, 0, match.start("value"))
+            found.append((value, _confidence(spans, *match.span("value")), line in buyer_lines))
     return found
 
 

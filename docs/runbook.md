@@ -254,6 +254,10 @@ roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each st
 9. **Lost owning account.** Create a new bot (steps 2–7) and tell every sender the new username. The old bot is no
    longer reachable.
 
+**Photos that read well (BR-E01, D198).** A receipt photographed on a plain, dark background reads best; wood grain,
+patterned cloth or other papers around it make OCR harder. In Telegram a photo sent as a file (📎 → File) keeps its
+full size, while a normal photo is resized to about 1080 px, which can leave the QR too small to read.
+
 ## 12. Switch a flow's mail between review and auto (D194)
 
 A flow's mailer sink has `send: review` or `send: auto` (the default). With `review`, `deliver` files the folder and
