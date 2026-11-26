@@ -268,7 +268,41 @@ Cases (docstrings start with `D198:`):
 
 Test: `uv run pytest -q tests/unit/test_helper.py`
 
-## Step 14: private photos, deploy and #37 again `[inline: private samples and the live bot]`
+## Step 14: D198, a block-mode read of the upscaled photo `[inline: spec text from the second live resend, owner GO]`
+
+With the upscaled read live (`33231598f5bf`), #37's photo read five fields locally but still no date: Tesseract's
+`psm 4` drops the line between the dashed rules. `psm 6` (one uniform block) on the same ×2 photo read every required
+field, each matching the printed receipt, in about 4 s. The owner wants the bot to read it with no typing.
+
+Files: `specs/05-open-questions.md`.
+
+- D198's **Retries**: after the upscaled read, the same upscaled photo is read again with page segmentation mode 6
+  (a module constant), before the crop.
+
+Test: `npx prettier --check specs/05-open-questions.md`
+
+## Step 15: the block-mode candidate `[worker]`
+
+Files: `src/invoicebot/extract/ocr.py`, `src/invoicebot/extract/__main__.py`, `tests/unit/test_extract_ocr.py`,
+`tests/unit/test_helper.py`.
+
+- `read_text` gains a keyword `psm: int | None = None` that overrides `ocr_cfg.psm` when given, like `timeout_s`.
+- `__main__.py`: `RETRY_PSM = 6` (module constant, D198; no config key, YAGNI: the step 14 spec text names it as a
+  constant). A candidate becomes `(image, deskewed image, psm or None)`; `_upscaled_candidates` yields the upscaled
+  image twice, first with `None` (the configured psm), then with `RETRY_PSM`, resizing once. `_read_candidate` passes
+  the psm to `read_text`.
+
+Cases (docstrings start with `D198:`):
+
+1. `read_text(..., psm=6)` puts `6` after `--psm` in the argv, not `ocr_cfg.psm` (fake command, as the existing
+   tests do).
+2. Helper: first, plain and upscaled reads missing a field, the block-mode read complete: four reads, the fourth with
+   `psm=6` on the same upscaled image, kept, `crop_receipt` not called.
+3. The step 7, 11 and 13 cases still pass; update read counts only where the new candidate now runs.
+
+Test: `uv run pytest -q tests/unit/test_extract_ocr.py tests/unit/test_helper.py`
+
+## Step 16: private photos, deploy and #37 again `[inline: private samples and the live bot]`
 
 Files: `specs/spikes/ocr-background.md` (new).
 
