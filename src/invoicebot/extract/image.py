@@ -1,4 +1,4 @@
-"""Decode an invoice photo and yield the variants the QR readers try (R-1.11, D78).
+"""Decode an invoice photo, crop it to the receipt and yield the QR reader variants (R-1.11, D78, D198).
 
 ``cv2`` is imported at module top because lint forbids imports inside functions. The
 ``heavy-in-helper-only`` import contract keeps this module out of the bot process: only the
@@ -21,6 +21,11 @@ ROTATIONS: tuple[tuple[str, int], ...] = (
 )
 SHARPEN_KERNEL = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
 UNREADABLE_MESSAGE = "bytes are not a decodable image"
+BLUR_KERNEL = (5, 5)
+CLOSE_KERNEL = (25, 25)
+CROP_MARGIN = 0.02
+MIN_RECEIPT_SHARE = 0.20
+MAX_RECEIPT_SHARE = 0.95
 
 
 class ImageUnreadable(ValueError):
@@ -46,6 +51,33 @@ def load_gray(data: bytes, max_px: int) -> np.ndarray:
     if long_side <= max_px:
         return gray
     return _resized(gray, max_px / long_side)
+
+
+def crop_receipt(gray: np.ndarray) -> np.ndarray:
+    """Crop ``gray`` to the bright receipt on a busy background (D198).
+
+    Returns ``gray`` unchanged when no bright blob covers between ``MIN_RECEIPT_SHARE`` and
+    ``MAX_RECEIPT_SHARE`` of the image: it is then either not found or already filling the frame.
+    """
+    blurred = cast(np.ndarray, cv2.GaussianBlur(gray, BLUR_KERNEL, 0))
+    _, binary = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, CLOSE_KERNEL)
+    closed = cast(np.ndarray, cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel))
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return gray
+
+    x, y, width, height = cv2.boundingRect(max(contours, key=cv2.contourArea))
+    image_height, image_width = gray.shape[:2]
+    share = width * height / (image_width * image_height)
+    if not MIN_RECEIPT_SHARE <= share <= MAX_RECEIPT_SHARE:
+        return gray
+
+    margin_x, margin_y = round(width * CROP_MARGIN), round(height * CROP_MARGIN)
+    return gray[
+        max(0, y - margin_y) : min(image_height, y + height + margin_y),
+        max(0, x - margin_x) : min(image_width, x + width + margin_x),
+    ]
 
 
 def variants(gray: np.ndarray) -> Iterator[tuple[str, np.ndarray]]:

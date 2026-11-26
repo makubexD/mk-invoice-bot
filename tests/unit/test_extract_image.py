@@ -102,3 +102,64 @@ def test_variants_is_lazy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert name == "upscaled_2x"
     assert calls == [2.0]
     stream.close()
+
+
+RECEIPT_SIZE = (600, 1200)  # width, height
+RECEIPT_ORIGIN = (200, 300)  # x, y
+PHOTO_SIZE = (1080, 1920)  # width, height
+STRIPE_DARK = 50
+STRIPE_PERIOD = 40
+MAX_CROP_GROWTH = 1.15
+
+
+def _text_on_white(width: int, height: int) -> np.ndarray:
+    """Return a white ``width`` x ``height`` page with a few lines of black text."""
+    page = np.full((height, width), 255, dtype=np.uint8)
+    for row in range(10, height - 20, 60):
+        cv2.putText(page, "FACTURA 0001", (10, row), cv2.FONT_HERSHEY_SIMPLEX, 1.0, 0, 2)
+    return page
+
+
+def _striped_photo() -> np.ndarray:
+    """Return a photo-sized background of dark diagonal stripes."""
+    width, height = PHOTO_SIZE
+    cols, rows = np.meshgrid(np.arange(width), np.arange(height))
+    stripes = (cols + rows) % STRIPE_PERIOD < STRIPE_PERIOD // 2
+    return np.where(stripes, STRIPE_DARK, STRIPE_DARK // 2).astype(np.uint8)
+
+
+def test_crop_receipt_on_striped_background_keeps_receipt_with_small_margin() -> None:
+    """D198: a receipt on a dark striped table is cropped with at most 15 % extra per side."""
+    photo = _striped_photo()
+    width, height = RECEIPT_SIZE
+    x, y = RECEIPT_ORIGIN
+    photo[y : y + height, x : x + width] = _text_on_white(width, height)
+
+    crop = image.crop_receipt(photo)
+
+    crop_height, crop_width = crop.shape
+    assert width <= crop_width <= width * MAX_CROP_GROWTH
+    assert height <= crop_height <= height * MAX_CROP_GROWTH
+    assert (crop == 255).sum() >= (photo[y : y + height, x : x + width] == 255).sum()
+
+
+def test_crop_receipt_receipt_filling_frame_is_unchanged() -> None:
+    """D198: a page that fills the frame is returned as it came."""
+    page = _text_on_white(600, 800)
+
+    assert image.crop_receipt(page).shape == page.shape
+
+
+def test_crop_receipt_small_blob_is_unchanged() -> None:
+    """D198: a white square under 20 % of the image is not taken for the receipt."""
+    photo = _striped_photo()
+    photo[500:650, 400:550] = 255
+
+    assert image.crop_receipt(photo).shape == photo.shape
+
+
+def test_crop_receipt_uniform_gray_is_unchanged() -> None:
+    """D198: an image with nothing to find is returned as it came."""
+    gray = np.full((400, 300), 128, dtype=np.uint8)
+
+    assert image.crop_receipt(gray).shape == gray.shape
