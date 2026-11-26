@@ -67,6 +67,7 @@ from invoicebot.pipeline.actions import (
     SENT_ACTION,
     send_not_confirmed,
 )
+from invoicebot.pipeline.done import MAIL_INVOICE_KEY, MAIL_TO_KEY, RULE_DONE, done_text
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.outgoing import (
     Addressee,
@@ -103,6 +104,7 @@ from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.outbox import has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BUTTON_HOLD,
@@ -361,8 +363,10 @@ async def _deliver(
     A mailer on ``send: review`` posts the mail for review instead, until the owner's
     [Enviar] has set ``reviewed`` in the flow data and the mail rebuilt now is the mail the
     owner saw, by its digest (D194). Once the mode's completion has committed, the send, the
-    draft or the laptop job holds the attachments, so the review files are removed, and a
-    reviewed delivery clears ``reviewed`` so the next delivery posts a new review (D194).
+    draft or the laptop job holds the attachments, so the review files are removed, unless a
+    review document is still waiting to send: that keeps them for the daily housekeeping
+    sweep (D195). A reviewed delivery clears ``reviewed`` so the next delivery posts a new
+    review (D194).
     """
     delivery = await _prepare(context, invoice, sinks, prepared)
     reviewed = sinks.mailer.send == "review"
@@ -371,7 +375,10 @@ async def _deliver(
         return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
-    await remove_review_files(context.data_dir, delivery.invoice_id)
+    async with context.pool.connection() as conn:
+        waiting = await has_pending_document(conn, delivery.invoice_id, RULE_REVIEW)
+    if not waiting:
+        await remove_review_files(context.data_dir, delivery.invoice_id)
     if reviewed:
         async with context.pool.connection() as conn, conn.transaction():
             await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})
@@ -649,6 +656,15 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         prepared.values,
         _attachments(sinks.excel.output, excel, sinks.folder, prepared.values, invoice.pdf, invoice.xml),
     )
+    async with context.pool.connection() as conn, conn.transaction():
+        await merge_flow_data(
+            conn,
+            invoice.job.invoice_id,
+            {
+                MAIL_TO_KEY: list(mail.to),
+                MAIL_INVOICE_KEY: [prepared.values["serie"], prepared.values["numero"]],
+            },
+        )
     return _Delivery(
         invoice_id=invoice.job.invoice_id,
         head=invoice.head,
@@ -840,7 +856,7 @@ async def _automatic(
             delivery.invoice_id,
             _Reply(
                 mode.done_rule,
-                MESSAGES[mode.done_rule].format(folder=delivery.folder),
+                await _done_reply_text(conn, delivery, mode.done_rule),
                 _done_buttons(delivery.invoice_id, mode.done_rule),
                 _folder_links(delivery),
             ),
@@ -850,6 +866,13 @@ async def _automatic(
 
     for path in photos:
         await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+async def _done_reply_text(conn: AsyncConnection[Any], delivery: _Delivery, rule_id: str) -> str:
+    """Return the completion text: BR-D10 names the invoice and the To address (D195), the rest the folder."""
+    if rule_id == RULE_DONE:
+        return await done_text(conn, delivery.invoice_id)
+    return MESSAGES[rule_id].format(folder=delivery.folder)
 
 
 async def _handed_off(

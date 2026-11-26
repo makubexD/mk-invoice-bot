@@ -85,6 +85,26 @@ async def test_send_message_posts_to_the_token_path_and_returns_ids() -> None:
     assert json.loads(requests[0].content) == {"chat_id": -100, "text": "hola"}
 
 
+async def test_edit_reply_markup_posts_the_keyboard_to_edit_message_reply_markup() -> None:
+    """D195: edit_reply_markup POSTs editMessageReplyMarkup with the chat, message and keyboard."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": True})
+
+    async with _make_client(handler) as client:
+        await client.edit_reply_markup(1, 2, [])
+
+    assert len(requests) == 1
+    assert requests[0].url.path == f"/bot{TOKEN}/editMessageReplyMarkup"
+    assert json.loads(requests[0].content) == {
+        "chat_id": 1,
+        "message_id": 2,
+        "reply_markup": {"inline_keyboard": []},
+    }
+
+
 async def test_send_message_raises_with_the_retry_delay_on_429() -> None:
     """R-1.7: a 429 answer raises TelegramError with its status, code, description and retry_after."""
 

@@ -32,6 +32,7 @@ from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
 from invoicebot.pipeline.docs_help import send_pdf, teach_portal, wait_mail
+from invoicebot.pipeline.done import RULE_DONE, done_text
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
@@ -128,8 +129,6 @@ VIA_LAPTOP_ACTION = "via_laptop"
 SELF_SEND_ACTION = "self_send"
 
 RULE_SENT = "BR-D08"
-#: BR-D10: the invoice is filed and its mail was sent (spec 06).
-RULE_DONE = "BR-D10"
 #: BR-D11: the mail's delivery is not confirmed, so the sender is asked (spec 06).
 RULE_NOT_CONFIRMED = "BR-D11"
 #: BR-D20: [Cancelar] held the reviewed mail (D194).
@@ -525,8 +524,7 @@ async def _arrived(
         await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
         await set_state(conn, invoice_id, DONE, rule_id=RULE_DONE)
         photos = tuple(await take_photo_paths(conn, invoice_id))
-    folder = (await load_flow_data(conn, invoice_id))["folder"]
-    await _reply(conn, msg, invoice_id, RULE_DONE, MESSAGES[RULE_DONE].format(folder=folder))
+    await _reply(conn, msg, invoice_id, RULE_DONE, await done_text(conn, invoice_id))
     return photos
 
 

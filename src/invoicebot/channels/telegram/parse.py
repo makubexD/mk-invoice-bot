@@ -3,7 +3,9 @@
 The update body is untrusted: every field is checked and a malformed update
 yields an empty result rather than raising. Senders outside the profile index
 are reported only through their keyed :func:`sender_hash` digest, and a button
-press is reported so the ingress can acknowledge it (D177).
+press is reported so the ingress can acknowledge it (D177). An accepted press
+also reports the message it pressed and that message's URL buttons, so the
+ingress can settle the keyboard (D195); a rejected or malformed one reports none.
 """
 
 from __future__ import annotations
@@ -13,7 +15,9 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from invoicebot.channels.base import Attachment, InboundMessage
+from pydantic import ValidationError
+
+from invoicebot.channels.base import Attachment, InboundMessage, Link
 from invoicebot.channels.media_limits import document_kind
 from invoicebot.channels.profiles import ProfileIndex, sender_role
 from invoicebot.channels.sender_hash import sender_hash
@@ -26,12 +30,22 @@ _COMMAND_AT_BOT_PATTERN = re.compile(r"^/([A-Za-z0-9_]+)@[A-Za-z0-9_]+")
 
 
 @dataclass(frozen=True)
+class SettledKeyboard:
+    """The pressed message and the URL buttons to keep on it (D195)."""
+
+    chat_id: int
+    message_id: int
+    url_rows: list[list[dict[str, str]]]
+
+
+@dataclass(frozen=True)
 class ParsedUpdate:
-    """Messages accepted from one update, the digests of rejected senders and the presses to ack."""
+    """Messages accepted from one update, rejected senders' digests, presses to ack and to settle (D195)."""
 
     messages: list[InboundMessage]
     unknown_senders: list[str]
     callback_query_ids: list[str]
+    settled: list[SettledKeyboard]
 
 
 @dataclass(frozen=True)
@@ -118,6 +132,7 @@ def _parse_message(
         ],
         unknown_senders=[],
         callback_query_ids=[],
+        settled=[],
     )
 
 
@@ -165,7 +180,38 @@ def _parse_callback(
         ],
         unknown_senders=[],
         callback_query_ids=[query_id],
+        settled=[SettledKeyboard(chat_id, message_id, _url_rows(message))],
     )
+
+
+def _url_rows(message: object) -> list[list[dict[str, str]]]:
+    """Return the URL buttons of a pressed message's keyboard, row by row, never raising (D195)."""
+    markup = message.get("reply_markup") if isinstance(message, dict) else None
+    rows = markup.get("inline_keyboard") if isinstance(markup, dict) else None
+    if not isinstance(rows, list):
+        return []
+    kept = [_url_buttons(row) for row in rows if isinstance(row, list)]
+    return [row for row in kept if row]
+
+
+def _url_buttons(row: list[Any]) -> list[dict[str, str]]:
+    """Return the buttons of one row that are links the outbox would accept (D194, D195)."""
+    buttons: list[dict[str, str]] = []
+    for button in row:
+        text = _str_field(button, "text")
+        url = _str_field(button, "url")
+        if text is not None and url is not None and _is_link(text, url):
+            buttons.append({"text": text, "url": url})
+    return buttons
+
+
+def _is_link(title: str, url: str) -> bool:
+    """Return True when ``Link`` accepts the title and url."""
+    try:
+        Link(title=title, url=url)
+    except ValidationError:
+        return False
+    return True
 
 
 def _content(message: dict[str, Any]) -> _Content | None:
@@ -264,12 +310,12 @@ def _received_at(value: object) -> datetime | None:
 def _unknown_sender(sender_hash_key: str, sender_id: int) -> ParsedUpdate:
     """Report an allowlist miss only through its keyed digest (R-1.2)."""
     digest = sender_hash(sender_hash_key, str(sender_id))
-    return ParsedUpdate(messages=[], unknown_senders=[digest], callback_query_ids=[])
+    return ParsedUpdate(messages=[], unknown_senders=[digest], callback_query_ids=[], settled=[])
 
 
 def _empty() -> ParsedUpdate:
     """Return the result for an update that carries nothing canonical."""
-    return ParsedUpdate(messages=[], unknown_senders=[], callback_query_ids=[])
+    return ParsedUpdate(messages=[], unknown_senders=[], callback_query_ids=[], settled=[])
 
 
 def _file_size(data: object) -> int:

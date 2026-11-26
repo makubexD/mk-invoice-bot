@@ -12,7 +12,7 @@ from invoicebot.channels.base import Attachment, InboundMessage
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.sender_hash import sender_hash
 from invoicebot.channels.telegram.client import GETFILE_MAX_BYTES
-from invoicebot.channels.telegram.parse import ParsedUpdate, parse_update
+from invoicebot.channels.telegram.parse import ParsedUpdate, SettledKeyboard, parse_update
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 
@@ -24,7 +24,7 @@ HASH_KEY = "synthetic-hash-key"
 EPOCH = 1700000000
 RECEIVED_AT = datetime(2023, 11, 14, 22, 13, 20, tzinfo=UTC)
 NOW = datetime(2026, 11, 23, 12, 0, tzinfo=UTC)
-EMPTY = ParsedUpdate(messages=[], unknown_senders=[], callback_query_ids=[])
+EMPTY = ParsedUpdate(messages=[], unknown_senders=[], callback_query_ids=[], settled=[])
 
 
 @pytest.fixture(scope="module")
@@ -122,6 +122,7 @@ def test_text_message_becomes_canonical_message(index: ProfileIndex) -> None:
         ],
         unknown_senders=[],
         callback_query_ids=[],
+        settled=[],
     )
 
 
@@ -255,3 +256,60 @@ def test_string_date_is_dropped(index: ProfileIndex) -> None:
 def test_malformed_update_shape_is_empty(index: ProfileIndex) -> None:
     """R-1.7: an update whose message is not an object yields nothing and does not raise."""
     assert _parse({"update_id": 1, "message": []}, index) == EMPTY
+
+
+def _pressed(index: ProfileIndex, markup: object = None, *, sender: int = OWNER_USER_ID) -> ParsedUpdate:
+    update = _callback_update(sender=sender, chat_id=sender)
+    if markup is not None:
+        update["callback_query"]["message"]["reply_markup"] = markup
+    return _parse(update, index)
+
+
+def _keyboard(*rows: list[dict[str, str]]) -> dict[str, Any]:
+    return {"inline_keyboard": list(rows)}
+
+
+OPEN_FOLDER = {"text": "\U0001f4c2 Abrir carpeta", "url": "https://example.com/f"}
+
+
+def test_press_keeps_only_the_url_buttons(index: ProfileIndex) -> None:
+    """D195: a press settles its message and keeps the URL buttons."""
+    markup = _keyboard(
+        [{"text": "Enviar", "callback_data": "x"}, {"text": "Cancelar", "callback_data": "y"}],
+        [OPEN_FOLDER],
+    )
+    parsed = _pressed(index, markup)
+    assert parsed.settled == [SettledKeyboard(CHAT_ID, 1, [[OPEN_FOLDER]])]
+
+
+def test_press_on_callback_only_keyboard_keeps_no_rows(index: ProfileIndex) -> None:
+    """D195: a keyboard of callback buttons leaves no URL rows."""
+    parsed = _pressed(index, _keyboard([{"text": "Enviar", "callback_data": "x"}]))
+    assert parsed.settled == [SettledKeyboard(CHAT_ID, 1, [])]
+
+
+def test_press_without_reply_markup_keeps_no_rows(index: ProfileIndex) -> None:
+    """D195: a pressed message without a keyboard still settles, with no URL rows."""
+    assert _pressed(index).settled == [SettledKeyboard(CHAT_ID, 1, [])]
+
+
+def test_press_drops_a_non_https_url_button(index: ProfileIndex) -> None:
+    """D195: a URL button the outbox would refuse (http) is dropped."""
+    markup = _keyboard([{"text": "Abrir", "url": "http://example.com"}])
+    assert _pressed(index, markup).settled == [SettledKeyboard(CHAT_ID, 1, [])]
+
+
+@pytest.mark.parametrize("markup", ["nope", {"inline_keyboard": ["x"]}, {"inline_keyboard": "x"}])
+def test_press_with_malformed_reply_markup_keeps_no_rows(index: ProfileIndex, markup: object) -> None:
+    """D195: a malformed keyboard never raises and yields no URL rows."""
+    assert _pressed(index, markup).settled == [SettledKeyboard(CHAT_ID, 1, [])]
+
+
+def test_unknown_sender_press_settles_nothing(index: ProfileIndex) -> None:
+    """D195: a press from an unknown sender settles nothing."""
+    assert _pressed(index, sender=UNKNOWN_USER_ID).settled == []
+
+
+def test_text_message_settles_nothing(index: ProfileIndex) -> None:
+    """D195: a text message settles nothing."""
+    assert _parse(_update(_message(text="hola")), index).settled == []

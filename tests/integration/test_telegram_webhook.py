@@ -150,9 +150,14 @@ def _text_update(user_id: int, *, message_id: int = 1) -> dict[str, Any]:
     }
 
 
-def _callback_update(user_id: int, *, query_id: str) -> dict[str, Any]:
-    """Return one button press from ``user_id``."""
-    return {
+KEPT_ROW = [{"text": "Abrir", "url": "https://example.com/doc"}]
+
+
+def _callback_update(
+    user_id: int, *, query_id: str, keyboard: list[list[dict[str, str]]] | None = None
+) -> dict[str, Any]:
+    """Return one button press from ``user_id`` on a message carrying ``keyboard``."""
+    update: dict[str, Any] = {
         "update_id": 1,
         "callback_query": {
             "id": query_id,
@@ -161,6 +166,9 @@ def _callback_update(user_id: int, *, query_id: str) -> dict[str, Any]:
             "message": {"message_id": 1, "chat": {"id": user_id, "type": "private"}},
         },
     }
+    if keyboard is not None:
+        update["callback_query"]["message"]["reply_markup"] = {"inline_keyboard": keyboard}
+    return update
 
 
 def _body(payload: dict[str, Any]) -> bytes:
@@ -251,7 +259,94 @@ async def test_callback_query_is_answered_once(db_pool: Pool) -> None:
         response = await _post(client, _body(_callback_update(sender.user_id, query_id=query_id)))
 
     assert response.status_code == 200
-    assert bot.calls == [("answerCallbackQuery", {"callback_query_id": query_id})]
+    assert bot.calls == [
+        ("answerCallbackQuery", {"callback_query_id": query_id}),
+        (
+            "editMessageReplyMarkup",
+            {"chat_id": sender.user_id, "message_id": 1, "reply_markup": {"inline_keyboard": []}},
+        ),
+    ]
+
+
+async def test_stored_press_edits_the_keyboard_keeping_the_url_buttons(db_pool: Pool) -> None:
+    """D195: a stored press is acknowledged, then the keyboard is edited to the kept URL row."""
+    sender = _sender()
+    bot = _bot()
+    query_id = f"cbq-{uuid4().hex}"
+    keyboard = [[{"text": "Confirmar", "callback_data": "12:confirm"}], KEPT_ROW]
+    async with _client(db_pool, sender, bot) as client:
+        response = await _post(
+            client, _body(_callback_update(sender.user_id, query_id=query_id, keyboard=keyboard))
+        )
+
+    assert response.status_code == 200
+    assert bot.calls == [
+        ("answerCallbackQuery", {"callback_query_id": query_id}),
+        (
+            "editMessageReplyMarkup",
+            {"chat_id": sender.user_id, "message_id": 1, "reply_markup": {"inline_keyboard": [KEPT_ROW]}},
+        ),
+    ]
+
+
+async def test_press_is_not_settled_when_intake_answers_503(
+    db_pool: Pool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D195: when intake does not answer 200 neither the acknowledgement nor the keyboard edit is sent."""
+    sender = _sender()
+    bot = _bot()
+
+    async def moved(conn: AsyncConnection[Any], msg: Any, **kwargs: Any) -> None:
+        raise StateMoved(1, "EXTRACT_FAILED", "CANCELLED")
+
+    monkeypatch.setattr("invoicebot.api.intake_route.handle_inbound", moved)
+    async with _client(db_pool, sender, bot) as client:
+        response = await _post(
+            client,
+            _body(_callback_update(sender.user_id, query_id=f"cbq-{uuid4().hex}", keyboard=[KEPT_ROW])),
+        )
+
+    assert response.status_code == 503
+    assert bot.calls == []
+
+
+async def test_failed_keyboard_edit_still_returns_200_and_logs_one_warning(
+    db_pool: Pool, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D195: an editMessageReplyMarkup answering 400 is logged once and the update still gets 200."""
+    sender = _sender()
+    bot = _bot()
+    handler = bot.handler
+
+    async def edit_fails(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/editMessageReplyMarkup"):
+            bot.status = 400
+        return await handler(request)
+
+    monkeypatch.setattr(bot, "handler", edit_fails)
+    with caplog.at_level(logging.WARNING, logger="invoicebot.api.telegram_webhook"):
+        async with _client(db_pool, sender, bot) as client:
+            response = await _post(
+                client,
+                _body(_callback_update(sender.user_id, query_id=f"cbq-{uuid4().hex}", keyboard=[KEPT_ROW])),
+            )
+
+    assert response.status_code == 200
+    assert [call[0] for call in bot.calls] == ["answerCallbackQuery", "editMessageReplyMarkup"]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "editMessageReplyMarkup failed" in warnings[0].getMessage()
+
+
+async def test_text_message_edits_no_keyboard(db_pool: Pool) -> None:
+    """D195: a plain text message never calls editMessageReplyMarkup."""
+    sender = _sender()
+    bot = _bot()
+    async with _client(db_pool, sender, bot) as client:
+        response = await _post(client, _body(_text_update(sender.user_id)))
+
+    assert response.status_code == 200
+    assert all(name != "editMessageReplyMarkup" for name, _ in bot.calls)
 
 
 async def test_failed_acknowledgement_still_returns_200(

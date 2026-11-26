@@ -69,8 +69,6 @@ async def write_review_files(
 
 async def remove_review_files(data_dir: Path, invoice_id: int) -> None:
     """Delete the invoice's review directory and its files; an absent one is accepted (D194)."""
-    # shortcut: a document row still pending then fails as missing; the owner already
-    # saw the files and pressed [Enviar].
     await asyncio.to_thread(_remove_tree, review_dir(data_dir, invoice_id))
 
 

@@ -23,6 +23,7 @@ from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import Mail
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import ARRIVED_ACTION, SELF_SEND_ACTION, VIA_LAPTOP_ACTION
+from invoicebot.pipeline.done import MAIL_TO_KEY
 from invoicebot.pipeline.laptop import RECEIPT_MAX_BYTES, check_overdue, poll_receipts
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
@@ -52,6 +53,8 @@ RECEIPTS = f"{ROOT}/_outbox/receipts"
 FOLDER = "2026-11-Support_1_LaLena"
 SERIE = "F001"
 NUMERO = "15160"
+MAIL_TO = ["rrhh@example.com"]
+DONE_TEXT = MESSAGES["BR-D10"].format(serie=SERIE, numero=NUMERO, folder=FOLDER, to="rrhh@example.com")
 FECHA = date(2026, 11, 5)
 SENT_AT = "2026-11-16T10:00:00+00:00"
 ERROR_TEXT = "Outlook no está disponible"
@@ -162,7 +165,9 @@ async def _prepared_invoice(
         await save_reading(conn, invoice_id, _reading())
         await set_flow(conn, invoice_id, FLOW)
         await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
-        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, "folder_path": f"{ROOT}/{FOLDER}"})
+        await merge_flow_data(
+            conn, invoice_id, {"folder": FOLDER, MAIL_TO_KEY: MAIL_TO, "folder_path": f"{ROOT}/{FOLDER}"}
+        )
         batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
         await set_batch_state(conn, batch_id, "prepared")
         await add_mail_job(conn, job_id, invoice_id)
@@ -179,7 +184,9 @@ async def _prepared_invoice_without_flow(
         invoice_id = await create_invoice(conn, profile_id, "whatsapp")
         await save_reading(conn, invoice_id, _reading())
         await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
-        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, "folder_path": f"{ROOT}/{FOLDER}"})
+        await merge_flow_data(
+            conn, invoice_id, {"folder": FOLDER, MAIL_TO_KEY: MAIL_TO, "folder_path": f"{ROOT}/{FOLDER}"}
+        )
         batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
         await set_batch_state(conn, batch_id, "prepared")
         await add_mail_job(conn, job_id, invoice_id)
@@ -247,7 +254,7 @@ async def _receipt_row(conn: AsyncConnection[Any], job_id: str) -> tuple[Any, An
 async def test_a_sent_receipt_completes_the_batch_with_br_d10(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-7.8, R-7.14, BR-D10: a sent receipt closes the batch, files DONE and queues folder_status."""
+    """BR-D10, D195: a sent receipt closes the batch, files DONE and queues folder_status."""
     profile_id = f"laptop-{uuid4().hex}"
     job_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
@@ -265,7 +272,7 @@ async def test_a_sent_receipt_completes_the_batch_with_br_d10(
     assert invoice == ("DONE", "BR-D10")
     assert batch_state == "sent"
     assert jobs == ["folder_status"]
-    assert outbox == [(MESSAGES["BR-D10"].format(folder=FOLDER), "BR-D10", [])]
+    assert outbox == [(DONE_TEXT, "BR-D10", [])]
     assert receipt_at is not None
     assert receipt_error is None
     assert not photo.exists()
@@ -496,7 +503,7 @@ async def test_a_forged_receipt_is_not_applied_nor_deleted(
 async def test_a_sent_receipt_on_a_sent_batch_stamps_the_job_and_queues_br_d10(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8, R-7.14: a late sent receipt on a sent batch only stamps the job and queues BR-D10."""
+    """BR-D10, D195: a late sent receipt on a sent batch only stamps the job and queues BR-D10."""
     profile_id = f"laptop-{uuid4().hex}"
     job_id = uuid4().hex
     invoice_id = await _prepared_invoice(db_pool, profile_id, job_id)
@@ -517,7 +524,7 @@ async def test_a_sent_receipt_on_a_sent_batch_stamps_the_job_and_queues_br_d10(
     assert invoice == ("BATCHED", "BR-D07")
     assert batch_state == "sent"
     assert jobs == []
-    assert outbox == [(MESSAGES["BR-D10"].format(folder=FOLDER), "BR-D10", [])]
+    assert outbox == [(DONE_TEXT, "BR-D10", [])]
     assert receipt[0] is not None
     assert receipt[1] is None
     assert _path(name) not in drive.files

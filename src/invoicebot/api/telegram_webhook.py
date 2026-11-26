@@ -1,4 +1,4 @@
-"""Telegram webhook route: secret check and intake (R-1.7, R-1.8, D173, D177).
+"""Telegram webhook route: secret check and intake (R-1.7, R-1.8, D173, D177, D195).
 
 The body is untrusted: the ``X-Telegram-Bot-Api-Secret-Token`` header is
 compared with the configured secret before the body is read, so an
@@ -8,7 +8,10 @@ as JSON. Senders outside the profile index are only ever logged through their
 keyed digest. A button press is acknowledged with
 ``answerCallbackQuery`` right after it is stored (D177); that call is an
 acknowledgement, not a message, so it bypasses the outbox and a failure is
-logged and ignored.
+logged and ignored. Once the press is stored and acknowledged, the pressed
+message's keyboard is edited so its callback buttons go and its URL buttons
+stay (D195); like the acknowledgement, that edit is not a message, so it
+bypasses the outbox and a failure is logged and ignored.
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from fastapi import APIRouter, Request, Response
 from invoicebot.api.intake_route import IntakeDeps, intake, parse_json, read_body
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.channels.telegram.client import TelegramClient, TelegramError
-from invoicebot.channels.telegram.parse import parse_update
+from invoicebot.channels.telegram.parse import SettledKeyboard, parse_update
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +85,8 @@ def make_router(deps: TelegramWebhookDeps) -> APIRouter:
         if response.status_code == 200:
             for query_id in parsed.callback_query_ids:
                 await _answer_callback_query(deps.client, query_id)
+            for settled in parsed.settled:
+                await _settle_keyboard(deps.client, settled)
         return response
 
     return router
@@ -94,3 +99,12 @@ async def _answer_callback_query(client: TelegramClient, query_id: str) -> None:
             await client.answer_callback_query(query_id)
     except (TelegramError, TimeoutError) as exc:
         logger.warning("answerCallbackQuery failed", extra={"error_type": type(exc).__name__})
+
+
+async def _settle_keyboard(client: TelegramClient, settled: SettledKeyboard) -> None:
+    """Drop the pressed message's callback buttons, logging and ignoring a failure (D195)."""
+    try:
+        async with asyncio.timeout(ANSWER_TIMEOUT_SECONDS):
+            await client.edit_reply_markup(settled.chat_id, settled.message_id, settled.url_rows)
+    except (TelegramError, TimeoutError) as exc:
+        logger.warning("editMessageReplyMarkup failed", extra={"error_type": type(exc).__name__})

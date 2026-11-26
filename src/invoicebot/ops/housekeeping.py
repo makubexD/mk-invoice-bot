@@ -1,7 +1,10 @@
-"""Daily housekeeping: stale jobs and the temp folders of finished invoices (R-9.7, S12.4).
+"""Daily housekeeping: stale jobs and the folders of finished invoices (R-9.7, S12.4, D195).
 
 A download lives in ``<data_dir>/tmp/<invoice_id>/`` until its invoice is done
 with it. Once the invoice is terminal, or no longer exists, the folder can go.
+Review files live in ``<data_dir>/mail/<invoice_id>/`` and follow the same rule,
+except while a review document row still waits in the outbox (D195); the
+``mail/<id>.eml`` dry-run drafts are files and are never touched.
 Jobs left behind by an invoice that can no longer move are deleted too. The
 daily loop schedules this; the module never runs on its own.
 """
@@ -15,6 +18,9 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
+from invoicebot.pipeline.review import RULE_REVIEW
+from invoicebot.queue.outbox import has_pending_document
+from invoicebot.sinks.mailer import MAIL_DIRECTORY
 from invoicebot.states import TERMINAL
 from invoicebot.store.db import Pool
 from invoicebot.store.retention import delete_stale_jobs
@@ -23,24 +29,29 @@ logger = logging.getLogger(__name__)
 
 
 async def housekeep(pool: Pool, data_dir: Path) -> None:
-    """Delete stale jobs and the tmp folders of terminal or unknown invoices (R-9.7, S12.4).
+    """Delete stale jobs and the tmp and mail folders of terminal or unknown invoices (R-9.7, S12.4, D195).
 
-    The jobs are deleted in one transaction. A tmp entry is removed only when
-    its name is an invoice id in a terminal state or one no invoice has; any
-    other name is left alone. Logs one INFO line with both counts.
+    The jobs are deleted in one transaction. A folder is removed only when its
+    name is an invoice id in a terminal state or one no invoice has; any other
+    name is left alone, and a mail folder stays while a review document row is
+    pending. Logs one INFO line with the counts.
     """
     async with pool.connection() as conn, conn.transaction():
         jobs = await delete_stale_jobs(conn)
-    tmp_dirs = await _remove_stale_tmp(pool, data_dir)
-    logger.info("housekeeping done", extra={"jobs": jobs, "tmp_dirs": tmp_dirs})
+    tmp_dirs = await _remove_stale(pool, data_dir / TMP_DIRECTORY, "tmp")
+    mail_dirs = await _remove_stale(pool, data_dir / MAIL_DIRECTORY, "mail", RULE_REVIEW)
+    logger.info("housekeeping done", extra={"jobs": jobs, "tmp_dirs": tmp_dirs, "mail_dirs": mail_dirs})
 
 
 #: The largest invoice id Postgres can hold (``bigint``); a longer name is not an invoice's folder.
 _MAX_INVOICE_ID = 2**63 - 1
 
 
-async def _remove_stale_tmp(pool: Pool, data_dir: Path) -> int:
-    """Remove the tmp folders whose invoice is terminal or unknown (R-9.7), returning how many.
+async def _remove_stale(pool: Pool, root: Path, kind: str, pending_rule: str | None = None) -> int:
+    """Remove the folders under ``root`` of terminal or unknown invoices (R-9.7, D195), returning the count.
+
+    ``kind`` names the root in the warning. A folder whose invoice still has a
+    pending document of ``pending_rule`` is kept, checked in the same transaction.
 
     Only the terminal invoices' rows are locked, in id order, while their folders
     are removed, so a concurrent retry cannot move one of them into a download
@@ -48,14 +59,7 @@ async def _remove_stale_tmp(pool: Pool, data_dir: Path) -> int:
     folder that cannot be removed is skipped and counted in one warning, so one
     bad entry never stops the rest.
     """
-    root = data_dir / TMP_DIRECTORY
-    if not root.is_dir():
-        return 0
-    folders = {
-        int(entry.name): entry
-        for entry in root.iterdir()
-        if _is_invoice_id(entry.name) and entry.is_dir() and not entry.is_symlink()
-    }
+    folders = await asyncio.to_thread(_invoice_folders, root)
     if not folders:
         return 0
     removed = failed = 0
@@ -64,6 +68,8 @@ async def _remove_stale_tmp(pool: Pool, data_dir: Path) -> int:
         unknown = [invoice_id for invoice_id in folders if invoice_id not in states]
         terminal = [invoice_id for invoice_id, state in states.items() if state in TERMINAL]
         for invoice_id in unknown + await _lock_terminal(conn, terminal):
+            if pending_rule is not None and await has_pending_document(conn, invoice_id, pending_rule):
+                continue
             try:
                 await asyncio.to_thread(shutil.rmtree, folders[invoice_id])
             except OSError:
@@ -71,8 +77,19 @@ async def _remove_stale_tmp(pool: Pool, data_dir: Path) -> int:
             else:
                 removed += 1
     if failed:
-        logger.warning("tmp folders not removed", extra={"tmp_dirs": failed})
+        logger.warning("folders not removed", extra={"root": kind, "dirs": failed})
     return removed
+
+
+def _invoice_folders(root: Path) -> dict[int, Path]:
+    """Map invoice id to its real folder among the entries of ``root``; empty when ``root`` is missing."""
+    if not root.is_dir():
+        return {}
+    return {
+        int(entry.name): entry
+        for entry in root.iterdir()
+        if _is_invoice_id(entry.name) and entry.is_dir() and not entry.is_symlink()
+    }
 
 
 def _is_invoice_id(name: str) -> bool:

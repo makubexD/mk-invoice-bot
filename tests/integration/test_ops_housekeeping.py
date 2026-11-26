@@ -1,6 +1,7 @@
 """Integration tests for the daily housekeeping task (R-9.7, S12.4)."""
 
 import asyncio
+import json
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -10,7 +11,8 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.ops.housekeeping import housekeep
-from invoicebot.states import CANCELLED, DONE, FAILED, FETCHING_DOCS
+from invoicebot.pipeline.review import RULE_REVIEW
+from invoicebot.states import BATCHED, CANCELLED, DONE, FAILED, FETCHING_DOCS
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -221,3 +223,78 @@ async def test_housekeep_deletes_expired_jobs_of_terminal_invoices_only(
             assert await _job_exists(conn, active_job)
     finally:
         await _delete_invoices(db_pool, [cancelled_id, active_id])
+
+
+async def _mail_case(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], state: str, *, pending_review: bool = False
+) -> int:
+    """Insert an invoice in ``state`` (with a pending review document row on request) and return its id."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await _insert_invoice(conn, state)
+        if pending_review:
+            await conn.execute(
+                """
+                INSERT INTO outbox (channel, "to", invoice_id, payload_json, state)
+                VALUES ('console', 'x', %s, %s::jsonb, 'pending')
+                """,
+                (invoice_id, json.dumps({"document": "a.pdf", "rule_id": RULE_REVIEW})),
+            )
+    return invoice_id
+
+
+async def _cleanup_mail(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> None:
+    """Delete the outbox rows and the invoice a mail test created."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute("DELETE FROM outbox WHERE invoice_id = %s", (invoice_id,))
+    await _delete_invoices(pool, [invoice_id])
+
+
+@pytest.mark.parametrize(
+    ("state", "pending_review", "kept"),
+    [(DONE, False, False), (BATCHED, False, True), (DONE, True, True)],
+)
+async def test_housekeep_mail_dir_follows_state_and_pending_review(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    state: str,
+    pending_review: bool,
+    kept: bool,
+) -> None:
+    """R-9.7, D195: a mail dir goes when terminal, stays when held or a review document waits."""
+    invoice_id = await _mail_case(db_pool, state, pending_review=pending_review)
+    folder = tmp_path / "mail" / str(invoice_id)
+    folder.mkdir(parents=True)
+    try:
+        await housekeep(db_pool, tmp_path)
+
+        assert folder.exists() is kept
+    finally:
+        await _cleanup_mail(db_pool, invoice_id)
+
+
+async def test_housekeep_leaves_a_mail_eml_draft_file(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7, D195: the dry-run ``mail/<id>.eml`` of a DONE invoice is a file and stays."""
+    invoice_id = await _mail_case(db_pool, DONE)
+    draft = tmp_path / "mail" / f"{invoice_id}.eml"
+    draft.parent.mkdir(parents=True)
+    draft.write_text("draft")
+    try:
+        await housekeep(db_pool, tmp_path)
+
+        assert draft.is_file()
+    finally:
+        await _cleanup_mail(db_pool, invoice_id)
+
+
+async def test_housekeep_removes_the_mail_dir_of_an_unknown_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """R-9.7, D195: a mail dir named for an invoice no row has is removed."""
+    folder = tmp_path / "mail" / str(UNKNOWN_ID)
+    folder.mkdir(parents=True)
+
+    await housekeep(db_pool, tmp_path)
+
+    assert not folder.exists()

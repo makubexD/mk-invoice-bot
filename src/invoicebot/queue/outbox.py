@@ -150,6 +150,27 @@ async def hold(conn: AsyncConnection[Any], outbox_id: int, delay: timedelta) -> 
     )
 
 
+async def has_pending_document(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> bool:
+    """Return whether a row of the invoice still waits to send a document of ``rule_id`` (D195).
+
+    A held or backed-off row stays ``pending`` (only ``run_after`` moves), so ``pending``
+    alone means "will be sent". The review files must stay until it goes. Does not commit.
+    """
+    cur = await conn.execute(
+        """
+        SELECT EXISTS (
+            SELECT 1 FROM outbox
+            WHERE invoice_id = %(invoice_id)s AND state = 'pending'
+              AND payload_json->>'document' IS NOT NULL
+              AND payload_json->>'rule_id' = %(rule_id)s
+        )
+        """,
+        {"invoice_id": invoice_id, "rule_id": rule_id},
+    )
+    row = await cur.fetchone()
+    return row is not None and bool(row[0])
+
+
 async def release_issue(conn: AsyncConnection[Any], fingerprint: str) -> int:
     """Make a held ``create_issue`` row of ``fingerprint`` due now and return the row count (D193).
 

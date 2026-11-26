@@ -876,6 +876,73 @@ async def test_a_permanent_folder_link_error_still_completes_the_delivery_withou
     assert flow_data["folder_url"] == ""
 
 
+def _sink_to(cfg: Config) -> str:
+    """Return the mailer sink's To addresses as BR-D10 prints them (D195)."""
+    sink = next(s for s in cfg.flows[FLOW].sinks if isinstance(s, MailerSink))
+    return ", ".join(sink.to)
+
+
+async def test_graph_done_names_the_invoice_and_the_to_addresses(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D10, D195: a Graph send ends DONE naming the serie-numero and the sink's To addresses."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    to = _sink_to(cfg)
+    assert invoice == ("DONE", "BR-D10")
+    assert outbox[0][0] == (
+        f"✅ {SERIE}-{NUMERO} archivada en {FOLDER_PREFIX}{flow_data['seq']}_{COMERCIO}. "
+        f"Outlook aceptó el correo para {to}."
+    )
+
+
+async def test_delivery_saves_the_mail_to_addresses(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D10, D195: after a delivery flow_data["mail_to"] equals the sink's to."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+    sink = next(s for s in cfg.flows[FLOW].sinks if isinstance(s, MailerSink))
+    assert flow_data["mail_to"] == list(sink.to)
+
+
+async def test_done_text_names_the_xml_serie_numero_when_the_photo_lacks_them(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D10, R-7.4, D195: a photo without serie or numero reports the XML's, as the mail does."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    photo = _reading()
+    gaps = Reading(
+        fields={k: v for k, v in photo.fields.items() if k not in ("serie", "numero")}, document_url=None
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, gaps)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert flow_data["mail_invoice"] == ["F001", "15160"]
+    assert outbox[0][0].startswith("✅ F001-15160 archivada en ")
+
+
 async def test_graph_sends_once_and_closes_as_done(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
@@ -898,7 +965,9 @@ async def test_graph_sends_once_and_closes_as_done(
     assert invoice == ("DONE", "BR-D10")
     assert batch_state == "sent"
     assert [call[0] for call in mode.calls] == [invoice_id]
-    assert outbox == [(MESSAGES["BR-D10"].format(folder=folder), "BR-D10", [])]
+    assert outbox == [
+        (MESSAGES["BR-D10"].format(serie=SERIE, numero=NUMERO, folder=folder, to=_sink_to(cfg)), "BR-D10", [])
+    ]
     assert not photo.exists()
     assert photo_path is None
 
