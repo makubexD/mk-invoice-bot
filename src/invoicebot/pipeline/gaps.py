@@ -21,6 +21,7 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import Gaps, Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.github.issue_text import IssueFields
+from invoicebot.net.taught_url import without_session
 from invoicebot.pipeline.outgoing import queue_admin_alert
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import GAP_DIGEST_LINE, KIND_DESC, MESSAGES
@@ -268,8 +269,9 @@ async def _queue_issue(
     if held:
         await outbox.hold(conn, issue_id, PORTAL_ISSUE_HOLD)
     if probe is not None and probe.report is not None:
-        link = await taught_links.get(conn, probe.ruc_emisor)
-        if link is not None:
+        # Only the link the probe opened, still approved at its version, goes in the issue (R-11.4).
+        url = await taught_links.approved_url(conn, probe.ruc_emisor, probe.link_version)
+        if url is not None:
             await outbox.add(
                 conn,
                 "github",
@@ -277,7 +279,7 @@ async def _queue_issue(
                 {
                     "op": "probe_report",
                     "fingerprint": gap_fingerprint,
-                    "url": link.url,
+                    "url": without_session(url),
                     "report": probe.report,
                 },
             )

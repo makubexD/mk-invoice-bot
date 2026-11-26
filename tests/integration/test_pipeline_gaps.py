@@ -630,9 +630,11 @@ async def test_a_done_probe_opens_the_issue_now_and_queues_its_report(
     """R-11.5, D193: a done probe means no hold, and one probe_report row follows the issue row."""
     report = {"fields": [], "note": "synthetic"}
     async with db_pool.connection() as conn:
-        await taught_links.propose(conn, ISSUER_RUC_INT, HINT_URL, "yo")
-        await portal_probes.start(conn, ISSUER_RUC_INT, 1, None)
-        assert await portal_probes.finish(conn, ISSUER_RUC_INT, 1, "ok", report)
+        version = await taught_links.propose(conn, ISSUER_RUC_INT, HINT_URL, "yo")
+        assert version is not None
+        assert await taught_links.decide(conn, ISSUER_RUC_INT, version, approved=True) is not None
+        await portal_probes.start(conn, ISSUER_RUC_INT, version, None)
+        assert await portal_probes.finish(conn, ISSUER_RUC_INT, version, "ok", report)
         await raise_gap(conn, _teach_context(True), _portal_sighting())
         hold = await _create_issue_hold_seconds(conn)
         reports = await _probe_report_rows(conn)
@@ -642,6 +644,20 @@ async def test_a_done_probe_opens_the_issue_now_and_queues_its_report(
     assert reports[0]["fingerprint"] == GAP_FINGERPRINT
     assert reports[0]["url"] == HINT_URL
     assert reports[0]["report"] == report
+
+
+async def test_a_done_probe_of_an_unapproved_link_queues_no_report(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.4, D193: a link not approved at the probe's version never reaches the issue."""
+    async with db_pool.connection() as conn:
+        version = await taught_links.propose(conn, ISSUER_RUC_INT, HINT_URL, "yo")
+        assert version is not None
+        await portal_probes.start(conn, ISSUER_RUC_INT, version, None)
+        assert await portal_probes.finish(conn, ISSUER_RUC_INT, version, "ok", {"fields": []})
+        await raise_gap(conn, _teach_context(True), _portal_sighting())
+        reports = await _probe_report_rows(conn)
+    assert reports == []
 
 
 async def test_a_queued_probe_still_holds_the_issue(

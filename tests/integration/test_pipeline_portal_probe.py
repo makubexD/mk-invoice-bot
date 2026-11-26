@@ -277,10 +277,13 @@ async def test_matching_pdf_that_covers_the_flow_is_filed(
 async def test_pdf_that_does_not_match_is_not_filed(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D193: a lone PDF that reads as another invoice leaves the state alone and answers probe_form."""
+    """D193: a lone PDF of another invoice is not_found, leaves the state alone and answers probe_form."""
     invoice_id = await _world(db_pool)
     await _handler(db_pool, FakeProber(), tmp_path, matching=False)(_job(invoice_id))
     async with db_pool.connection() as conn:
+        probe = await portal_probes.get(conn, ISSUER_RUC)
+        assert probe is not None
+        assert probe.outcome == "not_found"
         assert await _state(conn, invoice_id) == MANUAL_REQUIRED
         assert await _jobs(conn, invoice_id, DELIVER_STEP) == []
         assert await _file_kinds(conn, invoice_id) == []
@@ -512,21 +515,40 @@ async def test_job_without_a_queued_probe_ends_quietly(
     assert _leftovers(tmp_path, invoice_id) == []
 
 
-async def test_prober_exception_deletes_the_folder_and_is_raised(
+async def test_prober_exception_ends_the_probe_and_leaves_the_invoice_waiting(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D193: a prober that raises leaves no file behind and the error reaches the queue."""
+    """D193, BR-S03: a prober that raises ends the probe as technical; the invoice keeps waiting."""
     invoice_id = await _world(db_pool)
     prober = FakeProber(error=RuntimeError("synthetic probe failure"))
-    with pytest.raises(RuntimeError, match="synthetic probe failure"):
-        await _handler(db_pool, prober, tmp_path)(_job(invoice_id))
+    await _handler(db_pool, prober, tmp_path)(_job(invoice_id))
     async with db_pool.connection() as conn:
-        assert await _rules(conn) == []
-        assert await _issue_held(conn)
+        assert await _state(conn, invoice_id) == MANUAL_REQUIRED
+        assert await _rules(conn) == ["BR-S06_probe_failed"]
+        assert not await _issue_held(conn)
         probe = await portal_probes.get(conn, ISSUER_RUC)
     assert probe is not None
-    assert probe.state == "queued"
+    assert (probe.state, probe.outcome) == ("done", "technical")
     assert _leftovers(tmp_path, invoice_id) == []
+
+
+async def test_link_no_longer_approved_ends_the_probe_without_opening_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D193, R-11.4: a link no longer approved ends the probe as technical and releases the issue."""
+    invoice_id = await _world(db_pool)
+    async with db_pool.connection() as conn:
+        await conn.execute("UPDATE taught_links SET state = 'rejected'")
+    prober = FakeProber()
+    await _handler(db_pool, prober, tmp_path)(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        assert await _state(conn, invoice_id) == MANUAL_REQUIRED
+        assert await _rules(conn) == []
+        assert not await _issue_held(conn)
+        probe = await portal_probes.get(conn, ISSUER_RUC)
+    assert probe is not None
+    assert (probe.state, probe.outcome) == ("done", "technical")
+    assert prober.urls == []
 
 
 async def test_probe_uses_the_approved_link_without_a_session(

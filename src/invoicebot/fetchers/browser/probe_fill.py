@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
-from playwright.async_api import Download, Page, Route
+from playwright.async_api import Download, Page, Route, WebSocketRoute
 from playwright.async_api import Error as PlaywrightError
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from pydantic import BaseModel, ConfigDict, Field
@@ -33,6 +33,8 @@ from invoicebot.fetchers.browser.probe_protocol import (
 from invoicebot.fetchers.browser.probe_values import apply_fills, plan_fills
 from invoicebot.fetchers.browser.protocol import HelperFile, error_class_of
 
+#: How a closed WebSocket is noted among the blocked requests (D193).
+_WEBSOCKET = "WEBSOCKET"
 #: How often the result page is read while it settles (D193).
 _POLL_MS = 200
 _NOT_FOUND_PHRASES = ("no se encontr", "no existe")
@@ -213,21 +215,30 @@ def _stopped(run: _Run, outcome: ProbeOutcome, field_name: str | None) -> ProbeR
 
 
 async def _guard(page: Page, approved_host: str, blocked: list[str]) -> None:
-    """Abort every non-GET request to a host other than the approved one (D193).
+    """From the first fill on, abort every request and WebSocket to a host other than the approved one (D193).
 
-    Each abort is noted in *blocked* by method only, never by URL.
+    Once invoice values are in the page, a GET form, a navigation or page script could carry them
+    anywhere, so no method is let through to another host. Each abort is noted in *blocked* by
+    method only, never by URL.
     """
 
     async def handle(route: Route) -> None:
         request = route.request
-        host = (urlsplit(request.url).hostname or "").lower()
-        if request.method != "GET" and not is_approved_host(host, approved_host):
+        if is_approved_host((urlsplit(request.url).hostname or "").lower(), approved_host):
+            await route.fallback()
+        else:
             blocked.append(request.method)
             await route.abort()
+
+    async def handle_socket(socket: WebSocketRoute) -> None:
+        if is_approved_host((urlsplit(socket.url).hostname or "").lower(), approved_host):
+            socket.connect_to_server()
         else:
-            await route.fallback()
+            blocked.append(_WEBSOCKET)
+            await socket.close()
 
     await page.route("**/*", handle)
+    await page.route_web_socket("**/*", handle_socket)
 
 
 async def _wait_result(page: Page, timeout_ms: int) -> _Result | None:

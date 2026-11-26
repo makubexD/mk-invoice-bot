@@ -44,7 +44,7 @@ from invoicebot.auth.google_oauth import GOOGLE_OAUTH_ADAPTER, google_secrets
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ConsoleChannel, StoreDirectory, SunatSolSite
 from invoicebot.fetchers.sunat_sol import SECRETS, SunatSolFetcher
-from invoicebot.pipeline.steps import DELIVER_STEP, PORTAL_CHECK_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import DELIVER_STEP, PORTAL_CHECK_STEP, PORTAL_PROBE_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.sunat_recheck import skip_recheck
 from invoicebot.pipeline.validate import VALIDATE_STEP
 from invoicebot.runtime_config import ConfigRejected
@@ -336,11 +336,11 @@ def test_no_cookies_jar_keeps_nothing() -> None:
         assert len(client.cookies.jar) == 0
 
 
-def test_portal_check_step_is_registered() -> None:
-    """D192: the portal handlers hold the portal check step and no other."""
-    handlers = _portal_handlers(cast(Any, None), cast(Any, None))
+def test_portal_check_and_probe_steps_are_registered() -> None:
+    """D192, D193: the portal handlers hold the portal check and portal probe steps and no other."""
+    handlers = _portal_handlers(cast(Any, None), cast(Any, None), cast(Any, None))
 
-    assert set(handlers) == {PORTAL_CHECK_STEP}
+    assert set(handlers) == {PORTAL_CHECK_STEP, PORTAL_PROBE_STEP}
 
 
 def test_google_secret_view_declares_only_the_client_secret() -> None:
