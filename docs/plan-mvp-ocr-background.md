@@ -196,7 +196,7 @@ them):
 
 Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py tests/unit/test_golden_set.py`
 
-## Step 9: `[` and `]` after RUC `[worker:low]`
+## Step 9: square brackets after RUC `[worker:low]`
 
 Files: `config/parsing_rules.yaml`, `tests/unit/test_extract_ocr_parse.py`.
 
