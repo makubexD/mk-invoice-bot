@@ -80,7 +80,7 @@ from invoicebot.pipeline.deliver import (
 )
 from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
-from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler, run_extract_helper
+from invoicebot.pipeline.extract import ROUTE_STEP, ExtractInputs, make_extract_handler, run_extract_helper
 from invoicebot.pipeline.failed import notify_dead
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -349,9 +349,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             **_portal_handlers(pool, probe_http, _probe_deps(pool, cfg, settings, prefixes)),
             EXTRACT_STEP: make_extract_handler(
                 pool,
-                cfg.extraction,
-                cfg.limits.media,
-                settings.parsing_rules_path,
+                ExtractInputs(
+                    cfg.extraction,
+                    cfg.limits.media,
+                    settings.parsing_rules_path,
+                    frozenset({cfg.owner.ruc, cfg.work.ruc}),
+                ),
                 GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
                 helper_prefix=prefixes.image,
             ),
