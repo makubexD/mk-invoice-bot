@@ -6,11 +6,16 @@ becomes a draft, uploads each attachment through its own upload session (the
 chunked ``PUT``s carry no bearer header), then sends the draft. Tokens come
 from an injected :class:`TokenSource`; errors carry the HTTP status only, never
 a body, an address or a token (R-9.16).
+
+The body is always HTML (D197): a ``Text`` body was routed through Outlook.com's
+high-risk pool and bounced with 5.7.501.
 """
 
 from __future__ import annotations
 
 import base64
+import html
+import re
 import urllib.parse
 from collections.abc import Sequence
 
@@ -36,6 +41,20 @@ _FILE_ATTACHMENT_TYPE = "#microsoft.graph.fileAttachment"
 _DRAFT_CREATED_STATUS = 201
 
 
+#: Inline style of the one wrapper div around the body (D197).
+BODY_STYLE = "font-family: Calibri, Arial, sans-serif; font-size: 11pt"
+
+_BLANK_LINES = re.compile(r"\n\s*\n")
+
+
+def html_body(text: str) -> str:
+    """Render plain ``text`` as an HTML body: escaped, one ``<p>`` per paragraph (D197)."""
+    escaped = html.escape(text).replace("\r\n", "\n")
+    paragraphs = [part.strip("\n") for part in _BLANK_LINES.split(escaped)]
+    rendered = "".join(f"<p>{part.replace(chr(10), '<br>')}</p>" for part in paragraphs if part.strip())
+    return f'<html><body><div style="{BODY_STYLE}">{rendered}</div></body></html>'
+
+
 def _recipients(addresses: Sequence[str]) -> list[dict[str, object]]:
     """Render addresses as Graph recipients."""
     return [{"emailAddress": {"address": address}} for address in addresses]
@@ -45,7 +64,7 @@ def _message(mail: OutgoingMail) -> dict[str, object]:
     """Render the Graph ``message`` resource for ``mail``, without attachments."""
     return {
         "subject": mail.subject,
-        "body": {"contentType": "Text", "content": mail.body},
+        "body": {"contentType": "HTML", "content": html_body(mail.body)},
         "toRecipients": _recipients(mail.to),
         "ccRecipients": _recipients(mail.cc),
     }

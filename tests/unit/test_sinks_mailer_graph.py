@@ -14,7 +14,7 @@ import pytest
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.base import Attachment, OutgoingMail
-from invoicebot.sinks.mailer_graph import MAX_INLINE_ATTACHMENT_BYTES, GraphMailer
+from invoicebot.sinks.mailer_graph import BODY_STYLE, MAX_INLINE_ATTACHMENT_BYTES, GraphMailer, html_body
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
     NOT_SENT_STATUS,
@@ -120,7 +120,7 @@ async def test_a_small_mail_is_one_send_mail_call_with_the_attachments() -> None
     assert json.loads(request.content) == {
         "message": {
             "subject": "Support release 05/11/2026",
-            "body": {"contentType": "Text", "content": "Here is the invoice."},
+            "body": {"contentType": "HTML", "content": html_body("Here is the invoice.")},
             "toRecipients": [{"emailAddress": {"address": "owner@example.com"}}],
             "ccRecipients": [{"emailAddress": {"address": "accounting@example.com"}}],
             "attachments": [
@@ -408,3 +408,37 @@ async def test_a_failed_send_of_the_draft_maps_the_error_status() -> None:
 
     assert raised.value.status == 400
     assert requests[-1].url.path.endswith("/message-id/send")
+
+
+def _wrapped(paragraphs: str) -> str:
+    return f'<html><body><div style="{BODY_STYLE}">{paragraphs}</div></body></html>'
+
+
+def test_html_body_wraps_paragraphs_and_turns_single_newlines_into_br() -> None:
+    """D197: blank lines split paragraphs, a single newline is a br, all in the styled wrapper."""
+    assert html_body("Hola,\n\nAdjunto.\n\nSaludos,\nKiefer") == _wrapped(
+        "<p>Hola,</p><p>Adjunto.</p><p>Saludos,<br>Kiefer</p>"
+    )
+
+
+def test_html_body_escapes_markup_characters() -> None:
+    """D197: <, >, & and quotes are escaped so a rendered value cannot add markup."""
+    assert html_body('<b>&"x"') == _wrapped("<p>&lt;b&gt;&amp;&quot;x&quot;</p>")
+
+
+def test_html_body_normalizes_crlf_and_repeated_blank_lines() -> None:
+    """D197: CRLF line ends and several blank lines give the same paragraphs as LF and one blank line."""
+    assert html_body("a\r\nb\r\n\r\n\r\n\r\nc") == html_body("a\nb\n\nc")
+
+
+async def test_a_large_mail_draft_carries_the_html_body() -> None:
+    """D197: the draft created for oversized attachments has the same HTML body as an inline send."""
+    requests: list[httpx.Request] = []
+
+    async with _make_mailer(_large_path_handler(requests)) as mailer:
+        await mailer.send(LARGE_MAIL)
+
+    assert json.loads(requests[0].content)["body"] == {
+        "contentType": "HTML",
+        "content": html_body(LARGE_MAIL.body),
+    }
