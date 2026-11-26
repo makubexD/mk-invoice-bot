@@ -80,6 +80,8 @@ NUMERO = "15160"
 FECHA = date(2026, 11, 5)
 FOLDER_PREFIX = "2026-11-Support_"
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
+#: The browser link the fake drive gives every folder (D194).
+FAKE_FOLDER_URL = "https://onedrive.live.com/?id=FAKE"
 XML_BYTES = b"""<?xml version="1.0" encoding="UTF-8"?>
 <Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2">
   <ID>F001-15160</ID>
@@ -112,12 +114,25 @@ def _laptop_clock() -> datetime:
 class FakeDrive:
     """An in-memory Drive: folders hold their entry names and uploads keep their bytes."""
 
-    def __init__(self, folders: dict[str, list[str]] | None = None) -> None:
+    def __init__(
+        self,
+        folders: dict[str, list[str]] | None = None,
+        web_url_error: Exception | None = None,
+    ) -> None:
         self.folders = {path: list(names) for path, names in (folders or {}).items()}
         self.listings: list[str] = []
         self.created: list[tuple[str, str]] = []
         self.uploads: dict[str, bytes] = {}
         self.moves: list[tuple[str, str, str]] = []
+        self.web_urls: list[str] = []
+        self._web_url_error = web_url_error
+
+    async def web_url(self, path: str) -> str:
+        """Record the path and return the fake folder link, or raise the installed error (D194)."""
+        self.web_urls.append(path)
+        if self._web_url_error is not None:
+            raise self._web_url_error
+        return FAKE_FOLDER_URL
 
     async def list_names(self, path: str) -> list[str]:
         """Return the entries of a folder; a path that does not exist has none."""
@@ -352,6 +367,7 @@ def _handler(
             cfg,
             _directory(),
             drive,
+            drive,
             {mode_name: mode or DryRun(data_dir)},
             data_dir,
             laptop_flows=frozenset(),
@@ -368,7 +384,9 @@ def _resend_handlers(
     laptop_flows: frozenset[str] = frozenset(),
 ) -> dict[str, Handler]:
     """Build the resend handlers with the given mail modes."""
-    context = DeliverContext(pool, cfg, _directory(), drive, modes, data_dir, laptop_flows=laptop_flows)
+    context = DeliverContext(
+        pool, cfg, _directory(), drive, drive, modes, data_dir, laptop_flows=laptop_flows
+    )
     return dict(make_resend_handler(context))
 
 
@@ -384,6 +402,7 @@ def _two_brand_handler(
             pool,
             cfg,
             _two_brand_directory(),
+            drive,
             drive,
             {"dry_run": DryRun(data_dir)},
             data_dir,
@@ -517,6 +536,15 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     )
     rows = await cur.fetchall()
     return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
+
+
+async def _outbox_links(conn: AsyncConnection[Any], profile_id: str) -> list[Any]:
+    """Return the links of each queued message for the profile, in insertion order (D194)."""
+    cur = await conn.execute(
+        "SELECT payload_json->'links' FROM outbox WHERE \"to\" = %s ORDER BY id",
+        (profile_id,),
+    )
+    return [links for (links,) in await cur.fetchall()]
 
 
 def _retry_buttons(invoice_id: int) -> list[dict[str, str]]:
@@ -706,6 +734,94 @@ async def test_retry_after_a_crash_reuses_the_saved_folder(
     assert drive.created == [("/Reembolsos", first_data["folder"])]
     assert invoice == ("BATCHED", "BR-D07")
     assert batch_state == "prepared"
+
+
+async def test_the_graph_done_message_carries_the_folder_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: BR-D10's message links the filed folder and the delivery saves its URL."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+    drive = FakeDrive()
+
+    await _handler(db_pool, cfg, drive, tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        links = await _outbox_links(conn, profile_id)
+    assert flow_data["folder_url"] == FAKE_FOLDER_URL
+    assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+
+
+async def test_a_retried_delivery_reuses_the_saved_folder_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: a retry after a crash reads the saved folder link instead of asking Graph again."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive()
+
+    with pytest.raises(RuntimeError, match="synthetic crash"):
+        await _handler(db_pool, cfg, drive, tmp_path, CrashingMode())(_job(invoice_id))
+
+    await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    assert len(drive.web_urls) == 1
+
+
+async def test_the_assisted_br_d07_message_carries_the_folder_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: the dry_run BR-D07 message links the filed folder."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        links = await _outbox_links(conn, profile_id)
+    assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+
+
+async def test_the_inbox_rule_done_message_carries_the_link_and_no_llego(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: the inbox_rule BR-D13 message links the folder and keeps its [No llegó] button."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="inbox_rule")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeInboxRuleMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="inbox_rule")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+    assert outbox[0][2] == [{"id": button_id(invoice_id, "not_arrived"), "title": "No llegó"}]
+
+
+async def test_a_transient_folder_link_error_keeps_the_invoice_delivering(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: a transient failure reading the folder link reaches the queue and keeps DELIVERING."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    drive = FakeDrive(web_url_error=GraphTransient(503))
+
+    with pytest.raises(GraphTransient, match="status 503"):
+        await _handler(db_pool, cfg, drive, tmp_path)(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert invoice == ("DELIVERING", None)
+    assert outbox == []
 
 
 async def test_graph_sends_once_and_closes_as_done(

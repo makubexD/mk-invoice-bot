@@ -39,7 +39,7 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.base import Button
+from invoicebot.channels.base import Button, Link
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -60,7 +60,13 @@ from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
-from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
+from invoicebot.pipeline.outgoing import (
+    Addressee,
+    outbound,
+    queue_admin_alert,
+    queue_outbound,
+    safe_links,
+)
 from invoicebot.pipeline.pending_auth import (
     GOOGLE,
     MICROSOFT,
@@ -82,10 +88,11 @@ from invoicebot.rules.messages_es import (
     BUTTON_NOT_ARRIVED,
     BUTTON_SENT,
     KIND_SUBJECT,
+    LINK_TITLE_FOLDER,
     MESSAGES,
     modes_desc,
 )
-from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
+from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, FolderLinks, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
 from invoicebot.sinks.folders import comercio_for
@@ -150,6 +157,8 @@ LAPTOP_OUTLOOK_MODE = "laptop_outlook"
 #: The flow-data key a laptop resend sets before its upload. ``False`` clears it, because
 #: :func:`merge_flow_data` merges and cannot delete a key (D89).
 RESENDING_KEY = "resending"
+#: The flow-data key of the invoice folder's browser link, saved so a retry reuses it (D194).
+FOLDER_URL_KEY = "folder_url"
 #: The invoice states a resend job acts on: delivered, not still in flight (R-7.8, R-7.14).
 RESEND_STATES = frozenset({DONE, BATCHED})
 
@@ -163,13 +172,15 @@ class DeliverContext:
     """The handler's dependencies, shared by every delivery branch.
 
     ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook``; a BR-D11
-    resend offers [Por la laptop] only to an invoice in one of them (D109).
+    resend offers [Por la laptop] only to an invoice in one of them (D109). ``links``
+    reads the invoice folder's browser link for the delivery messages (D194).
     """
 
     pool: Pool
     cfg: Config
     directory: StoreDirectory
     drive: Drive
+    links: FolderLinks
     modes: Mapping[str, MailMode]
     data_dir: Path
     laptop_flows: frozenset[str]
@@ -217,6 +228,7 @@ class _Delivery:
     flow_name: str
     folder: str
     folder_path: str
+    folder_url: str
     seq: int
     mail: OutgoingMail
 
@@ -377,13 +389,15 @@ async def _resend_laptop(
                 conn,
                 invoice.head,
                 invoice.job.invoice_id,
-                RULE_STALE,
-                MESSAGES[RULE_STALE].format(
-                    serie=prepared.values["serie"],
-                    numero=prepared.values["numero"],
-                    hours=hours,
+                _Reply(
+                    RULE_STALE,
+                    MESSAGES[RULE_STALE].format(
+                        serie=prepared.values["serie"],
+                        numero=prepared.values["numero"],
+                        hours=hours,
+                    ),
+                    [],
                 ),
-                [],
             )
             return
         await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: True})
@@ -421,7 +435,10 @@ async def _resend_eml(
     async with context.pool.connection() as conn, conn.transaction():
         prepared = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
         await _notify(
-            conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button] if prepared else []
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            _Reply(RULE_BATCHED, text, [button] if prepared else [], _folder_links(delivery)),
         )
 
 
@@ -559,11 +576,20 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
             saved=invoice.flow_data,
         ),
     )
+    saved_url = invoice.flow_data.get(FOLDER_URL_KEY)
+    folder_url = (
+        saved_url if isinstance(saved_url, str) and saved_url else await context.links.web_url(folder.path)
+    )
     async with context.pool.connection() as conn, conn.transaction():
         await merge_flow_data(
             conn,
             invoice.job.invoice_id,
-            {"folder": folder.folder, "seq": folder.seq, "folder_path": folder.path},
+            {
+                "folder": folder.folder,
+                "seq": folder.seq,
+                "folder_path": folder.path,
+                FOLDER_URL_KEY: folder_url,
+            },
         )
     excel = await asyncio.to_thread(build_excel, sinks.excel, prepared.values, prepared.overrides)
     await context.drive.upload(f"{folder.path}/{sinks.excel.output}", excel)
@@ -578,6 +604,7 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         flow_name=invoice.flow_name,
         folder=folder.folder,
         folder_path=folder.path,
+        folder_url=folder_url,
         seq=folder.seq,
         mail=mail,
     )
@@ -624,7 +651,12 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
             ),
         )
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
-        await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
+        await _notify(
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            _Reply(RULE_BATCHED, text, [button], _folder_links(delivery)),
+        )
         await _close_fixed_gap(conn, context, delivery.invoice_id)
 
 
@@ -682,9 +714,12 @@ async def _automatic(
             conn,
             delivery.head,
             delivery.invoice_id,
-            mode.done_rule,
-            MESSAGES[mode.done_rule].format(folder=delivery.folder),
-            _done_buttons(delivery.invoice_id, mode.done_rule),
+            _Reply(
+                mode.done_rule,
+                MESSAGES[mode.done_rule].format(folder=delivery.folder),
+                _done_buttons(delivery.invoice_id, mode.done_rule),
+                _folder_links(delivery),
+            ),
         )
         await _close_fixed_gap(conn, context, delivery.invoice_id)
         photos = await take_photo_paths(conn, delivery.invoice_id)
@@ -777,9 +812,11 @@ async def _crashed_send(
         conn,
         delivery.head,
         delivery.invoice_id,
-        RULE_SEND_FAILED,
-        _send_failed_text(prepared, delivery.invoice_id),
-        [retry_button(delivery.invoice_id)],
+        _Reply(
+            RULE_SEND_FAILED,
+            _send_failed_text(prepared, delivery.invoice_id),
+            [retry_button(delivery.invoice_id)],
+        ),
     )
     await queue_admin_alert(
         conn,
@@ -806,9 +843,7 @@ async def _send_failed(
             conn,
             delivery.head,
             delivery.invoice_id,
-            RULE_SEND_FAILED,
-            text,
-            [retry_button(delivery.invoice_id)],
+            _Reply(RULE_SEND_FAILED, text, [retry_button(delivery.invoice_id)]),
         )
         await queue_admin_alert(
             conn,
@@ -859,9 +894,7 @@ async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_nam
             conn,
             invoice.head,
             invoice.job.invoice_id,
-            RULE_TEMPLATE_INVALID,
-            MESSAGES[RULE_TEMPLATE_INVALID],
-            [],
+            _Reply(RULE_TEMPLATE_INVALID, MESSAGES[RULE_TEMPLATE_INVALID], []),
         )
         await raise_gap(
             conn,
@@ -899,23 +932,36 @@ async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool
     return head is not None and head.state == DELIVERING
 
 
+@dataclass(frozen=True)
+class _Reply:
+    """One chat message: its rule, text, buttons and links (D194)."""
+
+    rule_id: str
+    text: str
+    buttons: Sequence[Button]
+    links: Sequence[Link] = ()
+
+
 async def _notify(
     conn: AsyncConnection[Any],
     head: InvoiceHead,
     invoice_id: int,
-    rule_id: str,
-    text: str,
-    buttons: Sequence[Button],
+    reply: _Reply,
 ) -> None:
-    """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    await queue_message(
-        conn,
+    """Queue ``reply`` for the invoice's sender in the caller's transaction (D194)."""
+    message = outbound(
         Addressee(head.origin_channel, head.profile_id),
-        text,
-        invoice_id=invoice_id,
-        rule_id=rule_id,
-        buttons=buttons,
+        reply.text,
+        rule_id=reply.rule_id,
+        buttons=reply.buttons,
+        links=reply.links,
     )
+    await queue_outbound(conn, message, invoice_id=invoice_id)
+
+
+def _folder_links(delivery: _Delivery) -> list[Link]:
+    """Return the invoice folder's link for a delivery message (D194)."""
+    return safe_links([(LINK_TITLE_FOLDER, delivery.folder_url)])
 
 
 def _values(

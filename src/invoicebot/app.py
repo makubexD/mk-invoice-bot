@@ -627,7 +627,9 @@ def _deliver_handlers(
         laptop = LaptopOutlook(drive, root, key, partial(datetime.now, UTC))
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
-    context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)
+    context = DeliverContext(
+        pool, cfg, directory, drive, drive, modes, settings.data_dir, laptop_flows=laptop_flows
+    )
     return DeliverHandlers(
         deliver=make_deliver_handler(context),
         folder_status=make_folder_status_handler(pool, cfg, drive),
