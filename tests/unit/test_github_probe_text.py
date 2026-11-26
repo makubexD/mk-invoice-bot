@@ -99,6 +99,14 @@ def test_captcha_report_without_submit_has_no_submit_key() -> None:
     assert "downloads" not in draft
 
 
+def test_an_unnamed_submit_reaches_the_draft() -> None:
+    """R-11.12, D193: a submit named by its type is kept in the draft."""
+    text = render_probe(URL, _full_report(submit="button[type='submit']"))
+
+    assert text is not None
+    assert _draft(text)["submit"] == "button[type='submit']"
+
+
 def test_url_query_is_reduced() -> None:
     """R-11.12, D193: a query, credentials and a fragment never reach the text."""
     text = render_probe("https://user:pass@portal.example.pe/consulta?token=abc#top", _full_report())

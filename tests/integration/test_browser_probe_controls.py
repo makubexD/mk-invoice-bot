@@ -329,6 +329,77 @@ async def test_the_one_submit_word_picks_the_button(page: Page, buttons: str, ex
     assert form.submit == expected
 
 
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_unnamed_button_submit_is_named_by_its_type(page: Page) -> None:
+    """R-11.12, D193: a submit button with no id or name is named as the page's one button submit."""
+    await page.set_content(
+        """<html><body><form>
+          <label for="serie">Serie</label><input id="serie" />
+          <label for="total">Monto Total</label><input id="total" />
+          <button type="submit">Buscar comprobante</button>
+        </form></body></html>"""
+    )
+
+    form = await read_page(page)
+
+    assert form.submit == "button[type='submit']"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_unnamed_input_submit_is_named_by_its_type(page: Page) -> None:
+    """R-11.12, D193: an input submit with no id or name is named as the page's one input submit."""
+    await page.set_content(
+        """<html><body><form>
+          <label for="serie">Serie</label><input id="serie" />
+          <label for="total">Monto Total</label><input id="total" />
+          <input type="submit" value="Buscar" />
+        </form></body></html>"""
+    )
+
+    form = await read_page(page)
+
+    assert form.submit == "input[type='submit']"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_two_unnamed_submits_on_the_page_leave_no_selector(page: Page) -> None:
+    """R-11.12, D193: an unnamed submit shared by two forms cannot name one element."""
+    await page.set_content(
+        """<html><body>
+        <form id="uno">
+          <label for="serie1">Serie</label><input id="serie1" />
+          <label for="total1">Monto Total</label><input id="total1" />
+          <button type="submit">Buscar</button>
+        </form>
+        <form id="dos">
+          <label for="serie2">Serie</label><input id="serie2" />
+          <label for="total2">Monto Total</label><input id="total2" />
+          <button type="submit">Buscar</button>
+        </form>
+        </body></html>"""
+    )
+
+    form = await read_page(page)
+
+    assert form.submit is None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_submit_with_a_unique_id_keeps_its_id(page: Page) -> None:
+    """R-11.12, D193: a submit with a unique id is still named by that id."""
+    await page.set_content(
+        """<html><body><form>
+          <label for="serie">Serie</label><input id="serie" />
+          <label for="total">Monto Total</label><input id="total" />
+          <button id="search" type="submit">Buscar</button>
+        </form></body></html>"""
+    )
+
+    form = await read_page(page)
+
+    assert form.submit == "#search"
+
+
 def test_safe_text_keeps_only_the_allow_list() -> None:
     """D193: a character outside the allow-list becomes a space and the text collapses."""
     assert safe_text("Serie @#<b>") == "Serie b"

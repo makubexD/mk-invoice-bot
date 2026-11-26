@@ -18,8 +18,14 @@ from invoicebot.config.models import MediaMaxBytes
 from invoicebot.fetchers.base import FetchInvoice
 from invoicebot.fetchers.browser.protocol import ERROR_CLASS_PATTERN, HelperFile
 
-#: A form control found by id or by name, ASCII only (D193, R-11.12).
-SELECTOR_PATTERN = r"^(#[A-Za-z][A-Za-z0-9_-]{0,79}|\[name='[A-Za-z0-9_$:.-]{1,80}'\])$"
+#: A form control found by id, by name, or as the page's one unnamed submit, ASCII only (D193, R-11.12).
+SELECTOR_PATTERN = (
+    r"^(#[A-Za-z][A-Za-z0-9_-]{0,79}"
+    r"|\[name='[A-Za-z0-9_$:.-]{1,80}'\]"
+    r"|button\[type='submit'\]"
+    r"|input\[type='submit'\]"
+    r")$"
+)
 #: How long a safe label or option may be (D193, R-11.12).
 _SAFE_TEXT_MAX_LENGTH = 60
 #: The characters a label or option keeps, one home for the pattern and ``safe_text`` (D193, R-11.12).
@@ -36,7 +42,7 @@ MAX_REPORT_FIELDS = 20
 #: A select never carries more option labels than this (D193).
 MAX_FIELD_OPTIONS = 20
 
-#: A control the probe can point the helper at, by id or by name (D193, R-11.12).
+#: A control the probe can point the helper at, by id, by name or as an unnamed submit (D193, R-11.12).
 Selector = Annotated[str, Field(pattern=SELECTOR_PATTERN)]
 #: A label or option reduced to the allow-list of characters (D193, R-11.12).
 SafeText = Annotated[str, Field(pattern=SAFE_TEXT_PATTERN)]

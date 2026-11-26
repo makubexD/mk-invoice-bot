@@ -43,6 +43,8 @@ _RECAPTCHA_PATH = "/recaptcha"
 _HCAPTCHA_HOST = "hcaptcha.com"
 #: Whole words that mark the control that submits a search form (D193).
 _SUBMIT_WORDS = frozenset({"buscar", "consultar", "ver"})
+#: Selectors that find a submit control with no id or name, in the order tried (D193).
+_SUBMIT_SELECTORS = ("button[type='submit']", "input[type='submit']")
 
 #: Control types the probe never reports as fields, only notices when required (D193).
 _UNREAD_TYPES = frozenset({"textarea", "radio", "checkbox"})
@@ -387,6 +389,9 @@ async def _submit(page: Page, buttons: Sequence[_RawButton], group: int) -> str 
 
     A single submit control wins. Otherwise the only visible button whose text has
     the whole word ``buscar``, ``consultar`` or ``ver`` wins; two or none give None.
+    When the winner has neither a unique id nor a unique name and is a submit
+    control, the page's one ``button[type='submit']`` or ``input[type='submit']``
+    names it instead.
     """
     members = [button for button in buttons if button.group == group]
     submitters = [button for button in members if button.submit]
@@ -397,7 +402,18 @@ async def _submit(page: Page, buttons: Sequence[_RawButton], group: int) -> str 
         if len(hits) != 1:
             return None
         winner = hits[0]
-    return await _locate(page, winner.id, winner.name)
+    located = await _locate(page, winner.id, winner.name)
+    if located is not None or not winner.submit:
+        return located
+    return await _locate_unnamed_submit(page)
+
+
+async def _locate_unnamed_submit(page: Page) -> str | None:
+    """Return the first submit-type selector that matches one element, else None (D193)."""
+    for candidate in _SUBMIT_SELECTORS:
+        if await page.locator(candidate).count() == 1:
+            return candidate
+    return None
 
 
 def _has_submit_word(text: str) -> bool:

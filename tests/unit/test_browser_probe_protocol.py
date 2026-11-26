@@ -139,6 +139,18 @@ def test_probe_report_accepts_twenty_fields() -> None:
     assert len(ProbeReport(outcome="ok", fields=tuple(_field() for _ in range(20))).fields) == 20
 
 
+@pytest.mark.parametrize("selector", ["button[type='submit']", "input[type='submit']"])
+def test_probe_report_accepts_an_unnamed_submit(selector: str) -> None:
+    """R-11.12, D193: an unnamed submit selector is accepted as a report's submit."""
+    assert ProbeReport(outcome="ok", submit=selector).submit == selector
+
+
+def test_probe_report_rejects_an_unquoted_submit_type() -> None:
+    """R-11.12, D193: a submit selector without the quotes around the type is refused."""
+    with pytest.raises(ValidationError):
+        ProbeReport(outcome="ok", submit="button[type=submit]")
+
+
 def test_probed_field_rejects_more_than_twenty_options() -> None:
     """D193, R-11.12: a select with more than the option limit is refused."""
     with pytest.raises(ValidationError):
