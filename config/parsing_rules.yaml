@@ -2,7 +2,7 @@
 # Every pattern is compiled with re.IGNORECASE and searched in the OCR text, one OCR line per text line.
 # A pattern's named group carries the value.
 ruc:   # in order: keyword-anchored first, then a bare 11-digit RUC
-  - 'R\.?\s?U\.?\s?C\.?\s*[:;.,!|]?\s*(?:N[°º.]?\s*)?(?P<value>\d{11})(?!\d)'
+  - 'R\.?\s?U\.?\s?C\.?\s*[:;.,!|\[\]]?\s*(?:N[°º.]?\s*)?(?P<value>\d{11})(?!\d)'
   - '(?<!\d)(?P<value>(?:10|15|17|20)\d{9})(?!\d)'
 tipo:
   "01": ['FACTURA\s+(?:DE\s+VENTA\s+)?ELECTR[OÓ0]NICA']

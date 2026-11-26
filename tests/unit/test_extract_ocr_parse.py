@@ -459,9 +459,9 @@ def test_parse_ocr_misread_ruc_separator_keeps_issuer_and_buyer(rules: ParsingRu
     assert fields["num_doc_adq"] == SYNTHETIC_RUC_OTHER
 
 
-@pytest.mark.parametrize("separator", ["|", ";", ",", "!"])
+@pytest.mark.parametrize("separator", ["|", ";", ",", "!", "[", "]"])
 def test_parse_ocr_ruc_separator_misreads_anchor_the_issuer(rules: ParsingRules, separator: str) -> None:
-    """D198: '|', ';', ',' or '!' after RUC anchors the issuer ahead of a bare RUC printed earlier."""
+    """D198: '|', ';', ',', '!', '[' or ']' after RUC anchors the issuer ahead of an earlier bare RUC."""
     text = _ocr(f"REF {EARLIER_BARE_RUC}", f"RUC{separator} {SYNTHETIC_RUC}")
 
     assert _fields(text, rules)["ruc_emisor"] == SYNTHETIC_RUC
