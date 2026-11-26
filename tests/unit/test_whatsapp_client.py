@@ -19,6 +19,7 @@ PHONE_NUMBER_ID = "123456789"
 GRAPH_VERSION = "v23.0"
 BEARER = "synthetic-bearer-value"
 SEND_URL = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/messages"
+UPLOAD_URL = f"https://graph.facebook.com/{GRAPH_VERSION}/{PHONE_NUMBER_ID}/media"
 MEDIA_ID = "MID"
 MEDIA_URL = "https://mmg.whatsapp.net/v/t62/media"
 
@@ -217,3 +218,57 @@ async def test_media_info_rejects_an_id_that_could_change_the_path(media_id: str
         with pytest.raises(WhatsAppError):
             await client.media_info(media_id)
     assert requests == []
+
+
+async def test_upload_media_posts_multipart_and_returns_the_media_id() -> None:
+    """D194: upload_media POSTs messaging_product, type and the file as multipart and returns the id."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"id": "m1"})
+
+    async with _make_client(handler) as client:
+        media_id = await client.upload_media(b"%PDF-1.4", "factura.pdf", "application/pdf")
+
+    assert media_id == "m1"
+    assert len(requests) == 1
+    request = requests[0]
+    assert request.method == "POST"
+    assert str(request.url) == UPLOAD_URL
+    assert request.headers["Authorization"] == f"Bearer {BEARER}"
+    assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+    assert b'name="messaging_product"' in request.content
+    assert b"whatsapp" in request.content
+    assert b'name="type"' in request.content
+    assert b"application/pdf" in request.content
+    assert b'name="file"; filename="factura.pdf"' in request.content
+    assert b"%PDF-1.4" in request.content
+
+
+async def test_upload_media_raises_when_the_answer_has_no_id() -> None:
+    """D194: a successful upload answer without an id raises WhatsAppError carrying the status."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    async with _make_client(handler) as client:
+        with pytest.raises(WhatsAppError, match="no id") as raised:
+            await client.upload_media(b"%PDF-1.4", "factura.pdf", "application/pdf")
+
+    assert raised.value.status == 200
+    assert BEARER not in str(raised.value)
+
+
+async def test_upload_media_maps_a_400_like_send() -> None:
+    """D194: a 400 upload answer maps to WhatsAppError with Meta's status and error code."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"code": 100, "message": "Invalid parameter"}})
+
+    async with _make_client(handler) as client:
+        with pytest.raises(WhatsAppError) as raised:
+            await client.upload_media(b"%PDF-1.4", "factura.pdf", "application/pdf")
+
+    assert raised.value.status == 400
+    assert raised.value.code == 100
