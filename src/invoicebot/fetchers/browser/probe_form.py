@@ -151,7 +151,7 @@ class FormRead:
 
     ``outcome`` is None when a form was found and may be filled; ``captcha`` is
     reported but not decided here. When ``outcome`` is set, the other fields are
-    empty. ``required_unmatched`` is true when a required control of the form cannot
+    empty. ``unmatched`` names the first required control of the form that cannot
     be filled from the invoice (see :class:`PageForm`).
     """
 
@@ -160,7 +160,12 @@ class FormRead:
     captcha: CaptchaKind = "none"
     fields: tuple[ProbedField, ...] = ()
     submit: str | None = None
-    required_unmatched: bool = False
+    unmatched: str | None = None
+
+    @property
+    def required_unmatched(self) -> bool:
+        """Return whether a required control of the form cannot be filled (D193)."""
+        return self.unmatched is not None
 
 
 async def read_form(page: Page, url: str) -> FormRead:
@@ -318,7 +323,7 @@ def _found(page: Page, reading: PageForm) -> FormRead:
         captcha=reading.captcha,
         fields=reading.fields,
         submit=reading.submit,
-        required_unmatched=reading.required_unmatched,
+        unmatched=reading.unmatched,
     )
 
 

@@ -242,11 +242,12 @@ _READ_PAGE_JS = Template(
 class PageForm:
     """The form the current page shows, read before anything is typed (D193).
 
-    ``fields`` is empty when the page has no form. ``required_unmatched`` is true when
-    a visible enabled required control of the form is one the probe cannot fill from
+    ``fields`` is empty when the page has no form. ``unmatched`` names the first
+    visible enabled required control of the form that the probe cannot fill from
     the invoice: it has no value name, no unique selector, lies past the field cap, or
     is a textarea, radio or checkbox (an unmatched select with one real option is
-    fine). ``captcha`` is ``none`` when the
+    fine). It is its label, else its name or id, as safe text; ``""`` when it has
+    none of them, None when there is no such control. ``captcha`` is ``none`` when the
     page asks for no captcha; ``has_password`` is true when a visible password input
     is anywhere on the page, even outside the form.
     """
@@ -255,7 +256,12 @@ class PageForm:
     has_password: bool
     fields: tuple[ProbedField, ...]
     submit: str | None
-    required_unmatched: bool = False
+    unmatched: str | None = None
+
+    @property
+    def required_unmatched(self) -> bool:
+        """Return whether a required control of the form cannot be filled (D193)."""
+        return self.unmatched is not None
 
 
 async def read_page(page: Page) -> PageForm:
@@ -274,14 +280,14 @@ async def read_page(page: Page) -> PageForm:
     form_group = _form_group(grouped)
     if form_group is None:
         return PageForm(captcha=_captcha_kind(raw), has_password=raw.has_password, fields=(), submit=None)
-    fields, required_unmatched = await _fields(page, grouped[form_group])
+    fields, unmatched = await _fields(page, grouped[form_group])
     submit = await _submit(page, raw.buttons, form_group)
     return PageForm(
         captcha=_captcha_kind(raw),
         has_password=raw.has_password,
         fields=fields,
         submit=submit,
-        required_unmatched=required_unmatched,
+        unmatched=unmatched,
     )
 
 
@@ -314,24 +320,31 @@ def _form_group(
 
 async def _fields(
     page: Page, members: Sequence[tuple[_RawControl, ValueName | None]]
-) -> tuple[tuple[ProbedField, ...], bool]:
-    """Turn a form group's controls into report fields and flag required ones left out (D193).
+) -> tuple[tuple[ProbedField, ...], str | None]:
+    """Turn a form group's controls into report fields and name the first required one left out (D193).
 
-    A control with no unique selector, or of a type not read, is skipped. The flag is
-    true when a required control is skipped, has no value name (see
-    :func:`_needs_a_value`) or lies past ``MAX_REPORT_FIELDS``.
+    A control with no unique selector, or of a type not read, is skipped. The name
+    (see :func:`_control_name`) is that of the first required control that is skipped,
+    has no value name (see :func:`_needs_a_value`) or lies past ``MAX_REPORT_FIELDS``;
+    None when there is none.
     """
     fields: list[ProbedField] = []
-    required_unmatched = False
+    unmatched: str | None = None
     for control, matched in members[:MAX_REPORT_FIELDS]:
         field = await _field(page, control, matched)
         if field is not None:
             fields.append(field)
-        if control.required and _needs_a_value(control, matched, field):
-            required_unmatched = True
-    if any(control.required for control, _ in members[MAX_REPORT_FIELDS:]):
-        required_unmatched = True
-    return tuple(fields), required_unmatched
+        if unmatched is None and control.required and _needs_a_value(control, matched, field):
+            unmatched = _control_name(control)
+    past_cap = [control for control, _ in members[MAX_REPORT_FIELDS:] if control.required]
+    if unmatched is None and past_cap:
+        unmatched = _control_name(past_cap[0])
+    return tuple(fields), unmatched
+
+
+def _control_name(control: _RawControl) -> str:
+    """Return the control's label, else its name or id, as safe text; ``""`` with none (D193)."""
+    return safe_text(control.label) or safe_text(control.name or control.id)
 
 
 async def _field(page: Page, control: _RawControl, matched: ValueName | None) -> ProbedField | None:

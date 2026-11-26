@@ -37,7 +37,13 @@ from invoicebot.pipeline.steps import DELIVER_STEP, PORTAL_PROBE_STEP
 from invoicebot.queue import outbox
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, PROBE_OUTCOME_DESC
+from invoicebot.rules.messages_es import (
+    MESSAGES,
+    PROBE_DRAFT_KEPT,
+    PROBE_DRAFT_POSTED,
+    PROBE_FIELD_DESC,
+    PROBE_OUTCOME_DESC,
+)
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import portal_probes, taught_links
 from invoicebot.store.db import Pool
@@ -215,11 +221,12 @@ async def _conclude(
         return False
     issue_key = portal_gap_fingerprint(ruc)
     await outbox.release_issue(conn, issue_key)
-    await _queue_report(conn, deps.cfg, issue_key, target.url, stored_report)
+    posted = await _queue_report(conn, deps.cfg, issue_key, target.url, stored_report)
     filed = waiting_state is not None and _covers(target.flow, probe.files)
     if filed and waiting_state is not None:
         await _file(conn, invoice_id, probe.files, waiting_state)
-    await _tell_admins(conn, deps.cfg, ruc, invoice_id, report, filed=filed)
+    rule_id, text = _answer(ruc, invoice_id, report, filed=filed, posted=posted)
+    await queue_admin_alert(conn, deps.cfg.profiles, rule_id, text)
     return filed
 
 
@@ -236,16 +243,20 @@ async def _queue_report(
     gap_fingerprint: str,
     url: str,
     report: dict[str, Any],
-) -> None:
-    """Queue the report as an issue comment when GitHub is on and the gap exists (D193, R-11.12)."""
+) -> bool:
+    """Queue the report as an issue comment when GitHub is on and the gap exists, and say so (D193, R-11.12).
+
+    Otherwise the report waits in ``portal_probes`` for the issue the gap opens later.
+    """
     if not cfg.gaps.github.enabled or await get_gap(conn, gap_fingerprint) is None:
-        return
+        return False
     await outbox.add(
         conn,
         "github",
         cfg.gaps.github.repo,
         {"op": "probe_report", "fingerprint": gap_fingerprint, "url": url, "report": report},
     )
+    return True
 
 
 def _covers(flow: Flow, files: tuple[FetchedFile, ...]) -> bool:
@@ -270,18 +281,25 @@ async def _file(
     await enqueue(conn, invoice_id, DELIVER_STEP)
 
 
-async def _tell_admins(
-    conn: AsyncConnection[Any],
-    cfg: Config,
-    ruc_emisor: int,
-    invoice_id: int,
-    report: ProbeReport,
-    *,
-    filed: bool,
-) -> None:
-    """Queue BR-S06's answer: filed, a form was read, or the portal could not be checked (D193)."""
+def _answer(
+    ruc_emisor: int, invoice_id: int, report: ProbeReport, *, filed: bool, posted: bool
+) -> tuple[str, str]:
+    """Return BR-S06's rule and answer to the admins: filed, a form was read, or not checked (D193).
+
+    ``posted`` says whether the report went to an existing issue.
+    """
     rule_id = RULE_PROBE_FILED if filed else RULE_PROBE_FORM if report.fields else RULE_PROBE_FAILED
     text = MESSAGES[rule_id].format(
-        ruc_emisor=ruc_emisor, id=invoice_id, outcome_desc=PROBE_OUTCOME_DESC[report.outcome.value]
+        ruc_emisor=ruc_emisor,
+        id=invoice_id,
+        outcome_desc=_outcome_desc(report),
+        draft_note=PROBE_DRAFT_POSTED if posted else PROBE_DRAFT_KEPT,
     )
-    await queue_admin_alert(conn, cfg.profiles, rule_id, text)
+    return rule_id, text
+
+
+def _outcome_desc(report: ProbeReport) -> str:
+    """Return how the probe ended, naming the field an ``unmatched_field`` probe stopped at (D193)."""
+    if report.stopped_at:
+        return PROBE_FIELD_DESC.format(field=report.stopped_at)
+    return PROBE_OUTCOME_DESC[report.outcome.value]

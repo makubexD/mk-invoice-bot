@@ -24,9 +24,11 @@ from invoicebot.fetchers.browser.form import file_sha256
 from invoicebot.fetchers.browser.probe_form import FormRead, approved_host_of, is_approved_host, read_form
 from invoicebot.fetchers.browser.probe_protocol import (
     SELECTOR_PATTERN,
+    ProbedField,
     ProbeOutcome,
     ProbeReport,
     ProbeRequest,
+    safe_text,
 )
 from invoicebot.fetchers.browser.probe_values import apply_fills, plan_fills
 from invoicebot.fetchers.browser.protocol import HelperFile, error_class_of
@@ -143,12 +145,12 @@ async def _run(page: Page, request: ProbeRequest, run: _Run) -> ProbeReport:
     run.form = form
     stop = _stop_outcome(form)
     if stop is not None:
-        return _report(run, stop)
-    fills = await plan_fills(page, form.fields, request.invoice)
-    if fills is None:
-        return _report(run, ProbeOutcome.UNMATCHED_FIELD)
+        return _stopped(run, stop, form.unmatched)
+    plan = await plan_fills(page, form.fields, request.invoice)
+    if plan.blocked is not None:
+        return _stopped(run, ProbeOutcome.UNMATCHED_FIELD, _field_name(plan.blocked))
     await _guard(page, approved_host_of(request.url), run.blocked)
-    await apply_fills(page, fills)
+    await apply_fills(page, plan.fills)
     await page.locator(str(form.submit)).click()
     result = await _wait_result(page, request.page_timeout_ms)
     if result is None:
@@ -164,9 +166,16 @@ def _stop_outcome(form: FormRead) -> ProbeOutcome | None:
         return form.outcome
     if form.captcha != "none":
         return ProbeOutcome.CAPTCHA
-    if form.required_unmatched or form.submit is None:
+    if form.required_unmatched:
         return ProbeOutcome.UNMATCHED_FIELD
+    if form.submit is None:
+        return ProbeOutcome.NO_SUBMIT
     return None
+
+
+def _field_name(field: ProbedField) -> str:
+    """Return a field's label, else its selector as safe text, to name it in the report (D193)."""
+    return field.label or safe_text(field.selector)
 
 
 def _report(
@@ -193,6 +202,14 @@ def _report(
         files=files,
         error_class=error_class,
     )
+
+
+def _stopped(run: _Run, outcome: ProbeOutcome, field_name: str | None) -> ProbeReport:
+    """Build the report of a probe stopped before typing; ``unmatched_field`` names its field (D193)."""
+    report = _report(run, outcome)
+    if outcome is not ProbeOutcome.UNMATCHED_FIELD or not field_name:
+        return report
+    return ProbeReport.model_validate(report.model_dump() | {"stopped_at": field_name})
 
 
 async def _guard(page: Page, approved_host: str, blocked: list[str]) -> None:

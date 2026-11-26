@@ -107,8 +107,10 @@ class FakeProber:
         with_fields: bool = True,
         during: Callable[[], Awaitable[None]] | None = None,
         error: Exception | None = None,
+        stopped_at: str | None = None,
     ) -> None:
         self.outcome = outcome
+        self.stopped_at = stopped_at
         self.kinds = kinds
         self.with_fields = with_fields
         self.during = during
@@ -125,7 +127,9 @@ class FakeProber:
             _written(out_dir, "pdf")
             raise self.error
         files = tuple(_written(out_dir, kind) for kind in self.kinds)
-        report = ProbeReport(outcome=self.outcome, fields=_FIELDS if self.with_fields else ())
+        report = ProbeReport(
+            outcome=self.outcome, fields=_FIELDS if self.with_fields else (), stopped_at=self.stopped_at
+        )
         return Probe(report, files)
 
 
@@ -146,8 +150,9 @@ async def _world(
     *,
     state: str = MANUAL_REQUIRED,
     rule_id: str | None = "BR-F07",
+    gap: bool = True,
 ) -> int:
-    """Create a routed invoice, an approved link, a queued probe, the gap and its held issue row."""
+    """Create a routed invoice, an approved link, a queued probe and, with ``gap``, the gap and held issue."""
     async with pool.connection() as conn, conn.transaction():
         invoice_id = await create_invoice(conn, SENDER, "whatsapp")
         await save_reading(conn, invoice_id, _reading())
@@ -157,6 +162,8 @@ async def _world(
         assert version is not None
         await taught_links.decide(conn, ISSUER_RUC, version, True)
         await portal_probes.start(conn, ISSUER_RUC, version, invoice_id)
+        if not gap:
+            return invoice_id
         await upsert_gap(conn, GAP_KINDS["PORTAL_MISSING"], GAP_FINGERPRINT, f"RUC {ISSUER_RUC}", invoice_id)
         issue_id = await outbox.add(
             conn, "github", "owner/ops", {"op": "create_issue", "fingerprint": GAP_FINGERPRINT, "fields": {}}
@@ -195,6 +202,12 @@ async def _rules(conn: AsyncConnection[Any]) -> list[str]:
     cur = await conn.execute(
         "SELECT payload_json->>'rule_id' FROM outbox WHERE channel <> 'github' ORDER BY id"
     )
+    return [str(row[0]) for row in await cur.fetchall()]
+
+
+async def _texts(conn: AsyncConnection[Any]) -> list[str]:
+    """Return the texts of the chat messages queued, oldest first."""
+    cur = await conn.execute("SELECT payload_json->>'text' FROM outbox WHERE channel <> 'github' ORDER BY id")
     return [str(row[0]) for row in await cur.fetchall()]
 
 
@@ -311,6 +324,48 @@ async def test_a_stopped_probe_queues_its_report(
     assert probe.report is not None
     assert probe.report["files"] == []
     assert _leftovers(tmp_path, invoice_id) == []
+
+
+@pytest.mark.parametrize(
+    ("outcome", "stopped_at", "desc"),
+    [
+        (ProbeOutcome.UNMATCHED_FIELD, "Tipo comprobante", "no sé llenar el campo «Tipo comprobante»"),
+        (ProbeOutcome.UNMATCHED_FIELD, None, "no sé llenar uno de sus campos"),
+        (ProbeOutcome.NO_SUBMIT, None, "no encontré su botón de búsqueda"),
+    ],
+)
+async def test_the_answer_says_what_stopped_the_probe(
+    outcome: ProbeOutcome,
+    stopped_at: str | None,
+    desc: str,
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """BR-S06, D193: the probe_form answer names the field or the missing button; the issue gets the draft."""
+    invoice_id = await _world(db_pool)
+    await _handler(db_pool, FakeProber(outcome, (), stopped_at=stopped_at), tmp_path)(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        assert await _texts(conn) == [
+            f"🔎 Abrí el portal de RUC {ISSUER_RUC}: {desc}. El borrador va en el issue."
+        ]
+        assert await _github_ops(conn) == ["create_issue", "probe_report"]
+
+
+async def test_without_an_issue_the_answer_keeps_the_draft(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-S06, D193: with no gap yet, nothing goes to GitHub and the answer says the draft waits."""
+    invoice_id = await _world(db_pool, gap=False)
+    await _handler(db_pool, FakeProber(ProbeOutcome.CAPTCHA, ()), tmp_path)(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        assert await _texts(conn) == [
+            f"🔎 Abrí el portal de RUC {ISSUER_RUC}: pide un captcha que no puedo resolver. "
+            "Guardo el borrador para el issue del portal."
+        ]
+        assert await _github_ops(conn) == []
+        probe = await portal_probes.get(conn, ISSUER_RUC)
+    assert probe is not None
+    assert probe.state == "done"
 
 
 async def test_busy_retries_after_15_minutes_1_hour_and_6_hours_then_fails_once(

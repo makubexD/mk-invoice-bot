@@ -217,8 +217,54 @@ async def test_an_unmatched_required_field_stops_before_typing(page: Page, tmp_p
     report = await probe(page, _request(tmp_path))
 
     assert report.outcome is ProbeOutcome.UNMATCHED_FIELD
+    assert report.stopped_at == "Otro"
     assert seen.posts() == []
     assert not seen.leaked()
+    _clean(report)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_required_textarea_names_its_label(page: Page, tmp_path: Path) -> None:
+    """BR-S06, D193: a required textarea stops the probe as unmatched_field named by its label."""
+    extra = '<label for="nota">Comentario</label><textarea id="nota" name="nota" required></textarea>'
+    seen = await _serve(page, _form(extra=extra), "")
+
+    report = await probe(page, _request(tmp_path))
+
+    assert report.outcome is ProbeOutcome.UNMATCHED_FIELD
+    assert report.stopped_at == "Comentario"
+    assert seen.posts() == []
+    _clean(report)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_tipo_text_input_names_its_label(page: Page, tmp_path: Path) -> None:
+    """BR-S06, D193: a tipo the probe cannot type stops it as unmatched_field named by its label."""
+    tipo_select = _FIELDS.split("\n")[2]
+    fields = _FIELDS.replace(tipo_select, '  <input id="tipo" name="tipo" />')
+    html = f'<!doctype html><html><body><form method="post" action="/buscar">{fields}</form></body></html>'
+    seen = await _serve(page, html, "")
+
+    report = await probe(page, _request(tmp_path))
+
+    assert report.outcome is ProbeOutcome.UNMATCHED_FIELD
+    assert report.stopped_at == "Tipo de Documento"
+    assert seen.posts() == []
+    _clean(report)
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_form_without_a_submit_is_no_submit(page: Page, tmp_path: Path) -> None:
+    """BR-S06, D193: a form with no submit control the probe can name is no_submit, nothing typed."""
+    fields = _FIELDS.replace('<button id="buscar" type="submit">Buscar</button>', "")
+    html = f'<!doctype html><html><body><form method="post" action="/buscar">{fields}</form></body></html>'
+    seen = await _serve(page, html, "")
+
+    report = await probe(page, _request(tmp_path))
+
+    assert report.outcome is ProbeOutcome.NO_SUBMIT
+    assert report.stopped_at is None
+    assert seen.posts() == []
     _clean(report)
 
 

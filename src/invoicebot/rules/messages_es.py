@@ -210,9 +210,7 @@ MESSAGES: dict[str, str] = {
         "✅ Guardé el portal de RUC {ruc_emisor}. Lo abro ahora y te cuento qué encuentro."
     ),
     "BR-S06_probe_filed": "✅ Abrí el portal de RUC {ruc_emisor} y archivé el comprobante #{id}.",
-    "BR-S06_probe_form": (
-        "🔎 Abrí el portal de RUC {ruc_emisor}: {outcome_desc}. El borrador va en el issue."
-    ),
+    "BR-S06_probe_form": ("🔎 Abrí el portal de RUC {ruc_emisor}: {outcome_desc}. {draft_note}"),
     "BR-S06_probe_failed": "⚠️ No pude revisar el portal de RUC {ruc_emisor}: {outcome_desc}.",
     "BR-S06_rejected": "Descarté el portal propuesto para RUC {ruc_emisor}.",
     "BR-S06_sender_approved": (
@@ -300,7 +298,8 @@ KIND_SUBJECT: dict[str, str] = {
 PROBE_OUTCOME_DESC: dict[str, str] = {
     "ok": "descargué archivos, pero no alcanzan para archivarlo",
     "captcha": "pide un captcha que no puedo resolver",
-    "unmatched_field": "pide un dato que no tengo",
+    "unmatched_field": "no sé llenar uno de sus campos",
+    "no_submit": "no encontré su botón de búsqueda",
     "login_only": "pide usuario y contraseña",
     "no_form": "no encontré el formulario de consulta",
     "other_host": "lleva a otro sitio",
@@ -310,6 +309,12 @@ PROBE_OUTCOME_DESC: dict[str, str] = {
     "guard_blocked": "lleva a una dirección que no puedo abrir",
     "technical": "ocurrió un error técnico",
 }
+
+#: ``{outcome_desc}`` of an ``unmatched_field`` probe that names the field it stopped at (D193).
+PROBE_FIELD_DESC = "no sé llenar el campo «{field}»"
+#: ``{draft_note}`` in ``BR-S06_probe_form``: the report went to the portal's issue, or waits for it (D193).
+PROBE_DRAFT_POSTED = "El borrador va en el issue."
+PROBE_DRAFT_KEPT = "Guardo el borrador para el issue del portal."
 
 STATE_DESC: dict[str, str] = {
     "RECEIVED": "recibido",

@@ -42,13 +42,20 @@ def render_probe(url: str, report: ProbeReport) -> str | None:
     dumped = yaml.safe_dump(draft, sort_keys=False)
     if yaml.safe_load(dumped) != draft:
         return None
-    lines = [f"**Sonda del portal:** {report.outcome.value}", ""]
+    lines = [_outcome_line(report), ""]
     if report.fields:
         lines += ["| Etiqueta | Tipo | Dato |", "| --- | --- | --- |"]
         lines += [_row(field) for field in report.fields]
         lines.append("")
     lines += ["Borrador de `config/portals/<clave>.yaml`:", "", "```yaml", dumped.rstrip("\n"), "```"]
     return "\n".join(lines)
+
+
+def _outcome_line(report: ProbeReport) -> str:
+    """Return the comment's first line: the outcome and, when it has one, the field it stopped at (D193)."""
+    line = f"**Sonda del portal:** {report.outcome.value}"
+    stopped_at = (report.stopped_at or "").translate(_CELL_STRIP).strip()
+    return f"{line} en «{stopped_at}»" if stopped_at else line
 
 
 def _row(field: ProbedField) -> str:

@@ -107,6 +107,28 @@ def test_an_unnamed_submit_reaches_the_draft() -> None:
     assert _draft(text)["submit"] == "button[type='submit']"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "stopped_at", "first_line"),
+    [
+        (
+            ProbeOutcome.UNMATCHED_FIELD,
+            "Tipo comprobante",
+            "**Sonda del portal:** unmatched_field en «Tipo comprobante»",
+        ),
+        (ProbeOutcome.UNMATCHED_FIELD, None, "**Sonda del portal:** unmatched_field"),
+        (ProbeOutcome.NO_SUBMIT, None, "**Sonda del portal:** no_submit"),
+    ],
+)
+def test_the_outcome_line_names_where_the_probe_stopped(
+    outcome: ProbeOutcome, stopped_at: str | None, first_line: str
+) -> None:
+    """BR-S06, R-11.12, D193: the comment's first line names the field an unmatched_field probe stopped at."""
+    text = render_probe(URL, _full_report(outcome=outcome, stopped_at=stopped_at, pdf=None, xml=None))
+
+    assert text is not None
+    assert text.splitlines()[0] == first_line
+
+
 def test_url_query_is_reduced() -> None:
     """R-11.12, D193: a query, credentials and a fragment never reach the text."""
     text = render_probe("https://user:pass@portal.example.pe/consulta?token=abc#top", _full_report())

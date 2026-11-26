@@ -41,13 +41,23 @@ class Fill:
         return f"Fill(selector={self.selector!r}, kind={self.kind!r})"
 
 
-async def plan_fills(
-    page: Page, fields: Sequence[ProbedField], invoice: FetchInvoice
-) -> tuple[Fill, ...] | None:
+@dataclass(frozen=True)
+class FillPlan:
+    """The fills of a form, or the first field that cannot be filled (D193).
+
+    ``blocked`` is None when every field with a value name has its fill in ``fills``;
+    otherwise ``fills`` is empty and nothing may be typed.
+    """
+
+    fills: tuple[Fill, ...] = ()
+    blocked: ProbedField | None = None
+
+
+async def plan_fills(page: Page, fields: Sequence[ProbedField], invoice: FetchInvoice) -> FillPlan:
     """Decide the fill of every field that has a value name, typing nothing (D193).
 
-    Returns None when any such field cannot be filled. Fields with no value name are
-    left alone, including a select with one real option.
+    Stops at the first such field that cannot be filled and names it in ``blocked``.
+    Fields with no value name are left alone, including a select with one real option.
 
     Raises:
         PlaywrightError: the page could not be read.
@@ -58,9 +68,9 @@ async def plan_fills(
             continue
         fill = await _plan_one(page, field, field.value_name, invoice)
         if fill is None:
-            return None
+            return FillPlan(blocked=field)
         fills.append(fill)
-    return tuple(fills)
+    return FillPlan(fills=tuple(fills))
 
 
 async def apply_fills(page: Page, fills: Sequence[Fill]) -> None:

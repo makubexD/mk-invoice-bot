@@ -70,6 +70,7 @@ class ProbeOutcome(StrEnum):
     OK = "ok"
     CAPTCHA = "captcha"
     UNMATCHED_FIELD = "unmatched_field"
+    NO_SUBMIT = "no_submit"
     LOGIN_ONLY = "login_only"
     NO_FORM = "no_form"
     OTHER_HOST = "other_host"
@@ -105,7 +106,11 @@ class ProbedField(BaseModel):
 
 
 class ProbeReport(BaseModel):
-    """The helper's one stdout line for a probe (D193, R-11.12)."""
+    """The helper's one stdout line for a probe (D193, R-11.12).
+
+    ``stopped_at`` names the field that ended an ``unmatched_field`` probe, as safe
+    text; None when that field has no usable name or the probe ended otherwise.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -118,3 +123,4 @@ class ProbeReport(BaseModel):
     xml: Selector | None = None
     files: tuple[HelperFile, ...] = ()
     error_class: str | None = Field(default=None, pattern=ERROR_CLASS_PATTERN)
+    stopped_at: SafeText | None = None

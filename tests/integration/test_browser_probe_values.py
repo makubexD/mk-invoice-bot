@@ -182,9 +182,10 @@ async def test_full_form_plan(page: Page) -> None:
     await page.set_content(_FULL)
     fields = (await read_page(page)).fields
 
-    fills = await plan_fills(page, fields, _invoice())
+    plan = await plan_fills(page, fields, _invoice())
 
-    assert fills == (
+    assert plan.blocked is None
+    assert plan.fills == (
         Fill("#tipo", "select", index=1),
         Fill("#serie", "text", "F001"),
         Fill("#numero", "text", "123"),
@@ -202,31 +203,39 @@ async def test_text_date_follows_its_placeholder(page: Page) -> None:
         )
         fields = (await read_page(page)).fields
 
-        fills = await plan_fills(page, fields, _invoice())
+        plan = await plan_fills(page, fields, _invoice())
 
-        assert fills is not None
-        assert fills[-1] == Fill("#fecha", "text", expected)
+        assert plan.blocked is None
+        assert plan.fills[-1] == Fill("#fecha", "text", expected)
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_tipo_text_input_has_no_plan(page: Page) -> None:
-    """D193: a tipo typed into a text input cannot be decided, so there is no plan."""
+async def test_tipo_text_input_blocks_the_plan(page: Page) -> None:
+    """D193: a tipo typed into a text input cannot be decided, so it blocks the plan."""
     await page.set_content(
         f'<form><label for="tipo">Tipo de Documento</label><input id="tipo" name="tipo" />{_CORE}</form>'
     )
     fields = (await read_page(page)).fields
 
-    assert await plan_fills(page, fields, _invoice()) is None
+    plan = await plan_fills(page, fields, _invoice())
+
+    assert plan.fills == ()
+    assert plan.blocked is not None
+    assert plan.blocked.label == "Tipo de Documento"
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_tipo_select_without_a_usable_option_has_no_plan(page: Page) -> None:
-    """D193: a tipo select with no matching option gives no plan."""
+async def test_tipo_select_without_a_usable_option_blocks_the_plan(page: Page) -> None:
+    """D193: a tipo select with no matching option blocks the plan."""
     body = _TIPO.replace("FACTURA ELECTRONICA", "NOTA DE CREDITO") + _CORE
     await page.set_content(f"<form>{body}</form>")
     fields = (await read_page(page)).fields
 
-    assert await plan_fills(page, fields, _invoice()) is None
+    plan = await plan_fills(page, fields, _invoice())
+
+    assert plan.fills == ()
+    assert plan.blocked is not None
+    assert plan.blocked.selector == "#tipo"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -242,15 +251,18 @@ async def test_other_select_needs_an_equal_option(page: Page) -> None:
     )
     fields = (await read_page(page)).fields
 
-    fills = await plan_fills(page, fields, _invoice())
+    plan = await plan_fills(page, fields, _invoice())
 
-    assert fills is not None
-    assert Fill("#serie", "select", index=1) in fills
+    assert plan.blocked is None
+    assert Fill("#serie", "select", index=1) in plan.fills
 
     await page.set_content(f"<form>{base}{select.format('<option>B001</option>')}</form>")
     fields = (await read_page(page)).fields
 
-    assert await plan_fills(page, fields, _invoice()) is None
+    blocked = (await plan_fills(page, fields, _invoice())).blocked
+
+    assert blocked is not None
+    assert blocked.selector == "#serie"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -259,13 +271,13 @@ async def test_apply_fills_types_and_plan_does_not(page: Page) -> None:
     await page.set_content(_FULL)
     fields = (await read_page(page)).fields
 
-    fills = await plan_fills(page, fields, _invoice())
+    plan = await plan_fills(page, fields, _invoice())
 
-    assert fills is not None
+    assert plan.blocked is None
     assert await page.locator("#serie").input_value() == ""
     assert await page.locator("#tipo").evaluate("e => e.selectedIndex") == 0
 
-    await apply_fills(page, fills)
+    await apply_fills(page, plan.fills)
 
     assert await page.locator("#serie").input_value() == "F001"
     assert await page.locator("#numero").input_value() == "123"
