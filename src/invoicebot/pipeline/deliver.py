@@ -104,6 +104,7 @@ from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.outbox import has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BUTTON_HOLD,
@@ -364,8 +365,10 @@ async def _deliver(
     A mailer on ``send: review`` posts the mail for review instead, until the owner's
     [Enviar] has set ``reviewed`` in the flow data and the mail rebuilt now is the mail the
     owner saw, by its digest (D194). Once the mode's completion has committed, the send, the
-    draft or the laptop job holds the attachments, so the review files are removed, and a
-    reviewed delivery clears ``reviewed`` so the next delivery posts a new review (D194).
+    draft or the laptop job holds the attachments, so the review files are removed, unless a
+    review document is still waiting to send: that keeps them for the daily housekeeping
+    sweep (D195). A reviewed delivery clears ``reviewed`` so the next delivery posts a new
+    review (D194).
     """
     delivery = await _prepare(context, invoice, sinks, prepared)
     reviewed = sinks.mailer.send == "review"
@@ -374,7 +377,10 @@ async def _deliver(
         return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
-    await remove_review_files(context.data_dir, delivery.invoice_id)
+    async with context.pool.connection() as conn:
+        waiting = await has_pending_document(conn, delivery.invoice_id, RULE_REVIEW)
+    if not waiting:
+        await remove_review_files(context.data_dir, delivery.invoice_id)
     if reviewed:
         async with context.pool.connection() as conn, conn.transaction():
             await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})

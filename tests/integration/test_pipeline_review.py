@@ -38,6 +38,7 @@ from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.review import mail_digest, remove_review_files, write_review_files
 from invoicebot.queue.jobs import Job
+from invoicebot.queue.outbox import add, has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.mailer import DryRun
@@ -385,16 +386,34 @@ async def _post_review_then_press_send(
 ) -> None:
     """Post the review, then do what [Enviar] does to the flow data and the state (D194)."""
     await handler(_job(invoice_id))
+    await _press_send(pool, invoice_id)
+
+
+async def _press_send(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> None:
+    """Do what [Enviar] does to the flow data and the state (D194)."""
     async with pool.connection() as conn, conn.transaction():
         await merge_flow_data(conn, invoice_id, {"reviewed": True})
         await set_state(conn, invoice_id, "DELIVERING")
 
 
-async def _review_then_send(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], handler: Handler, invoice_id: int
+async def _mark_documents(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, state: str
 ) -> None:
-    """Post the review, press [Enviar] and run the delivery again (D194)."""
-    await _post_review_then_press_send(pool, handler, invoice_id)
+    """Set the state of the profile's queued document rows, as the sender would (D195)."""
+    async with pool.connection() as conn:
+        await conn.execute(
+            "UPDATE outbox SET state = %s WHERE \"to\" = %s AND payload_json->>'document' IS NOT NULL",
+            (state, profile_id),
+        )
+
+
+async def _review_then_send(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], handler: Handler, invoice_id: int, profile_id: str
+) -> None:
+    """Post the review, mark its documents sent, press [Enviar] and deliver again (D194, D195)."""
+    await handler(_job(invoice_id))
+    await _mark_documents(pool, profile_id, "sent")
+    await _press_send(pool, invoice_id)
     await handler(_job(invoice_id))
 
 
@@ -408,7 +427,7 @@ async def test_a_reviewed_graph_send_removes_the_review_files_and_the_photo(
     mode = FakeGraphMode()
     handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
 
-    await _review_then_send(db_pool, handler, invoice_id)
+    await _review_then_send(db_pool, handler, invoice_id, profile_id)
 
     async with db_pool.connection() as conn:
         photo_path = await get_file_path(conn, invoice_id, "photo")
@@ -427,10 +446,48 @@ async def test_a_reviewed_dry_run_draft_removes_the_review_files(
     cfg = _config(tmp_path, profile_id, "review", mode_name="dry_run")
     handler = _handler(db_pool, cfg, tmp_path, DryRun(tmp_path), mode_name="dry_run")
 
-    await _review_then_send(db_pool, handler, invoice_id)
+    await _review_then_send(db_pool, handler, invoice_id, profile_id)
 
     assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D07")
     assert not (tmp_path / "mail" / str(invoice_id)).exists()
+
+
+async def test_enviar_with_a_pending_review_document_keeps_the_review_files(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D195: [Enviar] sends the mail but leaves mail/<id>/ while a review document row is pending."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
+
+    await _post_review_then_press_send(db_pool, handler, invoice_id)
+    await handler(_job(invoice_id))
+
+    assert len(mode.calls) == 1
+    assert (tmp_path / "mail" / str(invoice_id)).is_dir()
+
+
+async def test_has_pending_document_sees_only_this_invoices_pending_documents(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D195: text rows, other invoices' rows and sent rows give false; a pending document row gives true."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    other_id = await _delivering_invoice(db_pool, tmp_path, f"review-{uuid4().hex}")
+    document = {"text": "x", "rule_id": "BR-D19", "document": {"filename": "a.pdf", "path": "a.pdf"}}
+    async with db_pool.connection() as conn:
+        await add(conn, "telegram", profile_id, {"text": "hola", "document": None}, invoice_id=invoice_id)
+        await add(conn, "telegram", profile_id, document, invoice_id=other_id)
+        sent_id = await add(conn, "telegram", profile_id, document, invoice_id=invoice_id)
+        await conn.execute("UPDATE outbox SET state = 'sent' WHERE id = %s", (sent_id,))
+        await add(conn, "telegram", profile_id, {**document, "rule_id": "BR-D07"}, invoice_id=invoice_id)
+        before = await has_pending_document(conn, invoice_id, "BR-D19")
+        await add(conn, "telegram", profile_id, document, invoice_id=invoice_id)
+        after = await has_pending_document(conn, invoice_id, "BR-D19")
+
+    assert before is False
+    assert after is True
 
 
 async def test_removing_absent_review_files_raises_nothing(tmp_path: Path) -> None:
@@ -584,6 +641,7 @@ async def test_the_real_send_press_runs_the_delivery_and_clears_reviewed(
     mode = FakeGraphMode()
     handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
     await handler(_job(invoice_id))
+    await _mark_documents(db_pool, profile_id, "sent")
     posted = await _flow_data(db_pool, invoice_id)
     assert len(posted["review_digest"]) == 64
     assert posted["reviewed"] is False
@@ -658,7 +716,7 @@ async def test_revisar_on_a_prepared_batch_posts_the_review_and_the_old_draft_bu
     invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
     cfg = _config(tmp_path, profile_id, "review", mode_name="dry_run")
     handler = _handler(db_pool, cfg, tmp_path, DryRun(tmp_path), mode_name="dry_run")
-    await _review_then_send(db_pool, handler, invoice_id)
+    await _review_then_send(db_pool, handler, invoice_id, profile_id)
     assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D07")
     assert await _batch_state(db_pool, invoice_id) == "prepared"
     queued = len(await _outbox(db_pool, profile_id))
