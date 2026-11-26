@@ -172,18 +172,12 @@ MESSAGES: dict[str, str] = {
         "Vuelve a enviar el archivo respondiendo a la foto del comprobante."
     ),
     "BR-D15": "El archivo que enviaste no es un PDF válido; no lo guardé.",
-    "BR-D16": (
-        "✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.\n"
-        "Fila: {link_row}\n"
-        "Carpeta: {link_folder}"
-    ),
+    "BR-D16": "✅ Guardado {serie}-{numero} de {razon_social}, S/ {total}.",
     "BR-D17": (
         "⚠️ Guardado {serie}-{numero} de {razon_social}, S/ {total}, pero aún sin PDF; "
-        "lo agrego cuando llegue.\n"
-        "Fila: {link_row}\n"
-        "Carpeta: {link_folder}"
+        "lo agrego cuando llegue."
     ),
-    "BR-D18": "✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.\nFila: {link_row}",
+    "BR-D18": "✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.",
     "BR-D19": (
         "📧 Revisa el correo de {serie}-{numero} antes de enviarlo.\n"
         "Para: {to}\n"

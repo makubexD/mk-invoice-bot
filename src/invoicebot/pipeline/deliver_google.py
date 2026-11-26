@@ -31,14 +31,14 @@ from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.pipeline.deliver import TEMPLATE_INVALID
 from invoicebot.pipeline.gaps import close_if_fixed
-from invoicebot.pipeline.outgoing import Addressee, queue_message
+from invoicebot.pipeline.outgoing import Addressee, outbound, queue_outbound, safe_links
 from invoicebot.pipeline.pending_auth import GOOGLE, park_for_auth
 from invoicebot.pipeline.route import natural_key
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import LINK_TITLE_FOLDER, LINK_TITLE_ROW, MESSAGES
 from invoicebot.sinks.base import FolderDrive, RowSheet
 from invoicebot.sinks.drive_files import LINK_FOLDER, DriveInput, file_to_drive
 from invoicebot.sinks.sheet_rows import LINK_ROW, upsert_row
@@ -234,34 +234,32 @@ async def _complete(
     """Close the delivery and, after the commit, delete the local files (R-9.7, BR-D16 to BR-D18).
 
     A flow with no Drive sink reports BR-D18, its row without a folder link (D144); otherwise
-    the rule reports whether the PDF is there (BR-D16, BR-D17). The state change, the
-    completion message and the photo-path clearing commit together; only once they have does
-    the handler unlink the photo, PDF and XML files. A cancellation before the commit deletes
-    nothing, and a ``StateMoved`` rolls the transaction back.
+    the rule reports whether the PDF is there (BR-D16, BR-D17). The row and folder links go
+    with the message as links, not in its text, and an empty one is left out (D194). The
+    state change, the completion message and the photo-path clearing commit together; only
+    once they have does the handler unlink the photo, PDF and XML files. A cancellation
+    before the commit deletes nothing, and a ``StateMoved`` rolls the transaction back.
     """
     if sinks.drive is None:
         rule = RULE_ROW_ONLY
     else:
         rule = RULE_DONE_NO_PDF if invoice.files.pdf is None else RULE_DONE
-    # BR-D18's text has no folder, and ``format`` ignores the unused keyword.
     text = MESSAGES[rule].format(
         serie=values["serie"],
         numero=values["numero"],
         razon_social=values["razon_social"],
         total=values["total"],
-        link_row=values[LINK_ROW],
-        link_folder=values.get(LINK_FOLDER, ""),
+    )
+    pairs = [(LINK_TITLE_ROW, values[LINK_ROW]), (LINK_TITLE_FOLDER, values.get(LINK_FOLDER, ""))]
+    message = outbound(
+        Addressee(invoice.head.origin_channel, invoice.head.profile_id),
+        text,
+        rule_id=rule,
+        links=safe_links([(title, str(url)) for title, url in pairs if url]),
     )
     async with context.pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice.job.invoice_id, DONE, rule_id=rule, expected=DELIVERING)
-        await queue_message(
-            conn,
-            Addressee(invoice.head.origin_channel, invoice.head.profile_id),
-            text,
-            invoice_id=invoice.job.invoice_id,
-            rule_id=rule,
-            buttons=[],
-        )
+        await queue_outbound(conn, message, invoice_id=invoice.job.invoice_id)
         # The invoice got past the delivery step, so its fixed template gap closes (R-11.9).
         await close_if_fixed(conn, invoice.job.invoice_id, TEMPLATE_INVALID, context.cfg.gaps.github.repo)
         photos = await take_photo_paths(conn, invoice.job.invoice_id)
