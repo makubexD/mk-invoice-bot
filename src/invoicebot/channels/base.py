@@ -2,7 +2,8 @@
 
 Every channel adapter speaks this one contract, so the core never depends on
 WhatsApp or Telegram specifics. Attachments travel by reference (R-1.4), not as
-bytes, and the sender role lets the pipeline apply admin/owner permissions.
+bytes, and the sender role lets the pipeline apply admin/owner permissions. An
+outbound message may also carry https links and one document (D194).
 """
 
 from __future__ import annotations
@@ -11,8 +12,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from invoicebot.config.models import MediaLimits
 
@@ -68,6 +70,51 @@ class ButtonPress(NamedTuple):
     menu: int | None
 
 
+class Link(BaseModel):
+    """A titled https link an outbound message carries (D194)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title: str = Field(min_length=1)
+    url: str
+
+    @field_validator("url")
+    @classmethod
+    def _https_with_host(cls, url: str) -> str:
+        """Refuse a URL that is not https or has no host."""
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc or not parsed.hostname:
+            raise ValueError("a link must be an https URL with a host")
+        return url
+
+
+class Document(BaseModel):
+    """A file under the data directory that an outbound message sends (D194)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    filename: str = Field(min_length=1, max_length=255)
+    mime: str = Field(min_length=1)
+    size: int = Field(ge=0)
+
+    @field_validator("path")
+    @classmethod
+    def _absolute(cls, path: str) -> str:
+        """Refuse a path that is not absolute."""
+        if not Path(path).is_absolute():
+            raise ValueError("a document path must be absolute")
+        return path
+
+    @field_validator("filename")
+    @classmethod
+    def _plain_name(cls, filename: str) -> str:
+        """Refuse a file name that names another directory."""
+        if "/" in filename or "\\" in filename:
+            raise ValueError("a document filename must not contain a separator")
+        return filename
+
+
 class OutboundMessage(BaseModel):
     """One message to send through a channel, in canonical form."""
 
@@ -80,6 +127,8 @@ class OutboundMessage(BaseModel):
     text: str
     buttons: list[Button] = Field(default_factory=list)
     template: str | None = None
+    links: list[Link] = Field(default_factory=list)
+    document: Document | None = None
 
 
 class Channel(Protocol):
