@@ -14,8 +14,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
+import httpx
+
 from invoicebot.auth.msal_cache import PinnedAccount, TokenProvider
 from invoicebot.config.models import (
+    PERSONAL_MICROSOFT_ACCOUNT,
     Config,
     GoogleSheetsSink,
     files_accounts,
@@ -27,6 +30,7 @@ from invoicebot.config.models import (
 )
 from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
+from invoicebot.sinks.onedrive import GraphDrive
 
 #: The scopes every account signs in with: token refresh only (R-7.9).
 BASE_SCOPES = ("offline_access",)
@@ -152,3 +156,10 @@ def google_scopes_for(cfg: Config, account: str) -> list[str]:
     if not scopes:
         raise ValueError(f"no Google sink or gmail inbox names account {account!r}")
     return [*IDENTITY_SCOPES, *scopes]
+
+
+def personal_drive(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> GraphDrive:
+    """Build the personal OneDrive drive the backup and ``invoice forget`` use (D119, D196)."""
+    account = PERSONAL_MICROSOFT_ACCOUNT
+    provider = build_token_provider(settings, cfg, account, scopes_for(cfg, account))
+    return GraphDrive(http, provider, cfg.microsoft.timeout_s, account=account)

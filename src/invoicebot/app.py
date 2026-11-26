@@ -30,6 +30,7 @@ from invoicebot.auth.providers import (
     google_accounts,
     google_token_path,
     microsoft_accounts,
+    personal_drive,
     scopes_for,
 )
 from invoicebot.channels.base import MediaSource
@@ -381,7 +382,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             **_github_transports(cfg, github_app, http, pool),
         }
         sender = OutboxSender(pool, transports)
-        drive = _personal_drive(settings, cfg, http)
+        drive = personal_drive(settings, cfg, http)
         # Fail fast: a query key the dump cannot pass on would fail every nightly backup,
         # so the URL is checked when the job is wired, not at backup time (D148, R-9.11).
         database_url = settings.database_url
@@ -948,12 +949,6 @@ def _daily_tasks(cfg: Config, runs: DailyRuns) -> list[DailyTask]:
     if runs.github_health is not None:
         tasks.append(DailyTask(key="github_health", at=cfg.gaps.digest_at, run=runs.github_health))
     return tasks
-
-
-def _personal_drive(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> GraphDrive:
-    """Build the personal OneDrive drive the backup uploads through (D119)."""
-    provider = build_token_provider(settings, cfg, MICROSOFT_ACCOUNT, scopes_for(cfg, MICROSOFT_ACCOUNT))
-    return GraphDrive(http, provider, cfg.microsoft.timeout_s, account=MICROSOFT_ACCOUNT)
 
 
 def _backup_job(settings: Settings, cfg: Config) -> BackupJob:
