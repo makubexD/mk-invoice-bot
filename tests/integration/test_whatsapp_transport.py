@@ -12,9 +12,13 @@ from typing import Any
 import httpx
 import pytest
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Link, OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
-from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
+from invoicebot.channels.whatsapp.transport import (
+    TEMPLATE_PARAM_MAX_CHARS,
+    TEMPLATE_SLOT_BY_RULE,
+    make_transport,
+)
 from invoicebot.config.models import ChannelTemplates
 from invoicebot.queue.outbox import (
     OutboxRow,
@@ -216,6 +220,54 @@ async def test_template_parameter_collapses_tabs_and_space_runs(db_pool: Pool) -
     assert sent[0]["template"]["components"] == [
         {"type": "body", "parameters": [{"type": "text", "text": "Revisa el comprobante"}]}
     ]
+
+
+async def test_open_window_appends_the_link_lines(db_pool: Pool) -> None:
+    """D194: in the window, a message with a link sends its line after the text."""
+    await _prepare(db_pool, window_hours_ago=1)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(text="Listo", links=[link])))
+
+    assert sent[0]["type"] == "text"
+    assert sent[0]["text"]["body"].endswith("\n📂 Abrir carpeta: https://x.example/f")
+
+
+async def test_closed_window_template_keeps_the_link_lines(db_pool: Pool) -> None:
+    """D194: outside the window, the template parameter ends with the link line."""
+    await _prepare(db_pool, window_hours_ago=None)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text="Listo", links=[link])))
+
+    parameter = sent[0]["template"]["components"][0]["parameters"][0]["text"]
+    assert parameter.endswith("📂 Abrir carpeta: https://x.example/f")
+
+
+async def test_template_keeps_the_link_lines_when_the_text_is_capped(db_pool: Pool) -> None:
+    """D194: a text longer than the parameter cap is truncated, but its link line survives whole."""
+    await _prepare(db_pool, window_hours_ago=None)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    text = "x" * (TEMPLATE_PARAM_MAX_CHARS + 100)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text=text, links=[link])))
+
+    parameter = sent[0]["template"]["components"][0]["parameters"][0]["text"]
+    assert parameter.endswith("📂 Abrir carpeta: https://x.example/f")
+    assert len(parameter) <= TEMPLATE_PARAM_MAX_CHARS
+
+
+@pytest.mark.parametrize("window_hours_ago", [1, None])
+async def test_a_message_without_links_keeps_its_text(db_pool: Pool, window_hours_ago: int | None) -> None:
+    """D194: a message with no links sends exactly its text, in and out of the window."""
+    await _prepare(db_pool, window_hours_ago=window_hours_ago)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text="hola")))
+
+    if window_hours_ago is None:
+        assert sent[0]["template"]["components"][0]["parameters"][0]["text"] == "hola"
+    else:
+        assert sent[0]["text"]["body"] == "hola"
 
 
 async def test_window_expired_on_send_falls_back_to_template(db_pool: Pool) -> None:

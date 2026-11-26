@@ -118,7 +118,7 @@ def make_transport(
             raise PermanentSendError(str(exc)) from exc
         message_id = await _send(
             client,
-            template_payload(to, name, language, [_template_parameter(msg.text)]),
+            template_payload(to, name, language, [_template_parameter(msg)]),
             on_token_rejected,
         )
         return _channel_message_id(row, message_id)
@@ -166,11 +166,18 @@ async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: st
 
 def _free_form_payload(to: str, msg: OutboundMessage) -> dict[str, Any]:
     """Build the in-window payload: a list past Meta's button cap, reply buttons, else plain text."""
+    links = _link_lines(msg)
+    text = f"{msg.text}\n{links}" if links else msg.text
     if len(msg.buttons) > BUTTONS_MAX_COUNT:
-        return list_payload(to, msg.text, LIST_BUTTON, msg.buttons)
+        return list_payload(to, text, LIST_BUTTON, msg.buttons)
     if msg.buttons:
-        return buttons_payload(to, msg.text, msg.buttons)
-    return text_payload(to, msg.text)
+        return buttons_payload(to, text, msg.buttons)
+    return text_payload(to, text)
+
+
+def _link_lines(msg: OutboundMessage) -> str:
+    """Return one ``title: url`` line per link, or an empty string when there are none (D194)."""
+    return "\n".join(f"{link.title}: {link.url}" for link in msg.links)
 
 
 def _template_name(templates: ChannelTemplates, msg: OutboundMessage) -> str:
@@ -182,10 +189,16 @@ def _template_name(templates: ChannelTemplates, msg: OutboundMessage) -> str:
     return str(name)
 
 
-def _template_parameter(text: str) -> str:
-    """Fit the message text into one template body parameter on a single line.
+def _template_parameter(msg: OutboundMessage) -> str:
+    """Fit the message text and its link lines into one template body parameter (D194).
 
-    Meta rejects newlines, tabs and runs of more than four spaces, so the text
-    is truncated first and every whitespace run is collapsed to one space.
+    Meta rejects newlines, tabs and runs of more than four spaces, so every
+    whitespace run is collapsed to one space. The link lines are kept whole and
+    only the text is truncated, to the room the links leave.
     """
-    return " ".join(text[:TEMPLATE_PARAM_MAX_CHARS].split())
+    links = " ".join(_link_lines(msg).split())
+    if not links:
+        return " ".join(msg.text[:TEMPLATE_PARAM_MAX_CHARS].split())
+    room = max(TEMPLATE_PARAM_MAX_CHARS - len(links) - 1, 0)
+    text = " ".join(msg.text[:room].split())
+    return f"{text} {links}" if text else links
