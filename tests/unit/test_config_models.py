@@ -645,8 +645,11 @@ def test_mailer_sink_rejects_bad_modes_and_recipients(
 def test_mailer_send_setting_loads(tmp_path: Path, send: str | None, expected: str) -> None:
     """D194: a mailer without ``send`` sends at once, and ``review`` holds each mail for the owner."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    if send is not None:
-        document["flows"]["work_microsoft"]["sinks"][2]["send"] = send
+    mailer = document["flows"]["work_microsoft"]["sinks"][2]
+    if send is None:
+        mailer.pop("send", None)
+    else:
+        mailer["send"] = send
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     sink = load_config(path).flows["work_microsoft"].sinks[2]

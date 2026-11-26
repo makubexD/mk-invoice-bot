@@ -11,7 +11,8 @@ photo or the PDF of an invoice (the XML can follow) and it:
 3. checks the invoice with SUNAT and fetches the official PDF and XML from the
    QR link, the store's portal or a mailbox;
 4. files it: Google Drive and a Sheets row, or a OneDrive folder, the employer's
-   Excel template and a mail to HR;
+   Excel template and a mail to HR. A flow can hold the mail for the owner to
+   check in the chat and send it with [Enviar] (`send: review`, D194);
 5. replies in the chat. When it can't do something (an unknown store portal,
    for example), it says why, opens an issue in a private ops repo and alerts
    the owner.

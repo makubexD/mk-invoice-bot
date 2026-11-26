@@ -236,6 +236,7 @@ stateDiagram-v2
     DELIVERING --> BATCHED: flow B, added to its batch
     BATCHED --> DONE: batch sent (R-7.8)
     BATCHED --> DELIVERING: /reprocesar after a failed batch, or an edit
+    BATCHED --> DELIVERING: [Enviar] on a review batch, or /revisar (D194)
     FAILED --> FETCHING_DOCS: /reprocesar
     EXTRACT_FAILED --> PENDING_USER: no answer (BR-S08)
     CONFIRMING --> PENDING_USER: no answer (BR-S08)
@@ -335,6 +336,14 @@ sequenceDiagram
         User->>Bot: sends them
     end
     Bot->>MS: create the invoice folder, fill the Excel template
+    opt mailer send: review (D194)
+        Bot-->>User: the attachments as documents, then BR-D19 with the mail
+        alt [Enviar]
+            User->>Bot: Enviar (back to DELIVERING)
+        else [Cancelar]
+            User->>Bot: Cancelar holds the mail, invoice stays BATCHED
+        end
+    end
     Bot->>Mail: send the batch to HR (Graph, or a signed laptop job)
     Mail-->>Bot: sent, or laptop receipt
     Bot-->>User: done (BATCHED to DONE)
