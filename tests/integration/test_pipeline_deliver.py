@@ -920,6 +920,29 @@ async def test_delivery_saves_the_mail_to_addresses(
     assert flow_data["mail_to"] == list(sink.to)
 
 
+async def test_done_text_names_the_xml_serie_numero_when_the_photo_lacks_them(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-D10, R-7.4, D195: a photo without serie or numero reports the XML's, as the mail does."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    photo = _reading()
+    gaps = Reading(
+        fields={k: v for k, v in photo.fields.items() if k not in ("serie", "numero")}, document_url=None
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, gaps)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        flow_data = await load_flow_data(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert flow_data["mail_invoice"] == ["F001", "15160"]
+    assert outbox[0][0].startswith("✅ F001-15160 archivada en ")
+
+
 async def test_graph_sends_once_and_closes_as_done(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:

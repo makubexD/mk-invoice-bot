@@ -24,7 +24,7 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import Mail
 from invoicebot.pipeline.actions import send_not_confirmed
 from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE, SENT_BATCH_STATE
-from invoicebot.pipeline.done import done_text
+from invoicebot.pipeline.done import RULE_DONE, done_text
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
@@ -55,8 +55,6 @@ logger = logging.getLogger(__name__)
 
 #: The cap on a receipt's body; the same 4 KiB the parser accepts (R-7.14).
 RECEIPT_MAX_BYTES = MAX_RECEIPT_BYTES
-#: BR-D10: the mail was sent and the invoice is filed (spec 06).
-RULE_DONE = "BR-D10"
 #: BR-D12: the laptop agent has not picked the job up (spec 06).
 RULE_STALE = "BR-D12"
 

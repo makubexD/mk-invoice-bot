@@ -15,6 +15,7 @@ from invoicebot.queue.outbox import (
     PermanentSendError,
     SendLater,
     add,
+    has_pending_document,
     hold,
     last_rule,
     release_issue,
@@ -718,3 +719,24 @@ async def test_release_issue_keeps_the_backoff_of_a_failed_row(
         before = await _run_after_seconds(conn, outbox_id)
         assert await release_issue(conn, str(ISSUE_PAYLOAD["fingerprint"])) == 0
         assert abs(await _run_after_seconds(conn, outbox_id) - before) < 5
+
+
+async def test_has_pending_document_sees_only_this_invoices_pending_documents(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D195: only a pending document row of this invoice and rule gives true."""
+    document = {"text": "x", "rule_id": "BR-D19", "document": {"filename": "a.pdf", "path": "a.pdf"}}
+    async with db_pool.connection() as conn:
+        invoice_id = await _insert_invoice(conn)
+        other_id = await _insert_invoice(conn)
+        await add(conn, "telegram", "owner", {"text": "hola", "document": None}, invoice_id=invoice_id)
+        await add(conn, "telegram", "owner", document, invoice_id=other_id)
+        sent_id = await add(conn, "telegram", "owner", document, invoice_id=invoice_id)
+        await conn.execute("UPDATE outbox SET state = 'sent' WHERE id = %s", (sent_id,))
+        await add(conn, "telegram", "owner", {**document, "rule_id": "BR-D07"}, invoice_id=invoice_id)
+        before = await has_pending_document(conn, invoice_id, "BR-D19")
+        await add(conn, "telegram", "owner", document, invoice_id=invoice_id)
+        after = await has_pending_document(conn, invoice_id, "BR-D19")
+
+    assert before is False
+    assert after is True

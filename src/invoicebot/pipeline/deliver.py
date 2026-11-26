@@ -67,7 +67,7 @@ from invoicebot.pipeline.actions import (
     SENT_ACTION,
     send_not_confirmed,
 )
-from invoicebot.pipeline.done import MAIL_TO_KEY, done_text
+from invoicebot.pipeline.done import MAIL_INVOICE_KEY, MAIL_TO_KEY, RULE_DONE, done_text
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.outgoing import (
     Addressee,
@@ -163,8 +163,6 @@ FAILED_BATCH_STATE = "failed"
 RULE_SEND_FAILED = "BR-D03"
 #: BR-D12: the rule that tells the sender a waiting laptop job has not gone out yet (R-7.7).
 RULE_STALE = "BR-D12"
-#: BR-D10: the rule that reports a filed invoice whose mail Graph accepted (D195).
-RULE_DONE = "BR-D10"
 #: BR-D13: the rule that accepts the ``inbox_rule`` send and offers [No llegó] (R-7.8).
 RULE_INBOX = "BR-D13"
 #: BR-D03's admin-only alert, with the command the admin runs to reprocess (BR-D03).
@@ -659,7 +657,14 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         _attachments(sinks.excel.output, excel, sinks.folder, prepared.values, invoice.pdf, invoice.xml),
     )
     async with context.pool.connection() as conn, conn.transaction():
-        await merge_flow_data(conn, invoice.job.invoice_id, {MAIL_TO_KEY: list(mail.to)})
+        await merge_flow_data(
+            conn,
+            invoice.job.invoice_id,
+            {
+                MAIL_TO_KEY: list(mail.to),
+                MAIL_INVOICE_KEY: [prepared.values["serie"], prepared.values["numero"]],
+            },
+        )
     return _Delivery(
         invoice_id=invoice.job.invoice_id,
         head=invoice.head,

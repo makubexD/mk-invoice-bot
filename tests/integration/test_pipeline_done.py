@@ -10,7 +10,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.extract.fields import Field, Reading
-from invoicebot.pipeline.done import MAIL_TO_KEY, done_text
+from invoicebot.pipeline.done import MAIL_INVOICE_KEY, MAIL_TO_KEY, done_text
 from invoicebot.store.flow_b import merge_flow_data
 from invoicebot.store.invoices import create_invoice, save_reading
 
@@ -74,6 +74,24 @@ async def test_done_text_with_an_empty_mail_to_names_the_recipient_generically(
     """BR-D10, D195: an empty mail_to list falls back to "el destinatario"."""
     invoice_id = await _invoice(db_pool, {MAIL_TO_KEY: []})
     assert await _text(db_pool, invoice_id) == f"{PREFIX}el destinatario."
+
+
+async def test_done_text_prefers_the_serie_numero_saved_with_the_mail(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D10, R-7.4, D195: the [serie, numero] deliver saved wins over the photo's reading."""
+    invoice_id = await _invoice(db_pool, {MAIL_INVOICE_KEY: ["E001", "9"], MAIL_TO_KEY: ["a@example.com"]})
+    assert await _text(db_pool, invoice_id) == (
+        "✅ E001-9 archivada en F. Outlook aceptó el correo para a@example.com."
+    )
+
+
+async def test_done_text_ignores_a_malformed_saved_serie_numero(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D10, D195: a saved value that is not a pair of strings falls back to the photo's reading."""
+    invoice_id = await _invoice(db_pool, {MAIL_INVOICE_KEY: ["E001"], MAIL_TO_KEY: ["a@example.com"]})
+    assert await _text(db_pool, invoice_id) == f"{PREFIX}a@example.com."
 
 
 async def test_done_text_for_an_invoice_without_a_reading_raises(
