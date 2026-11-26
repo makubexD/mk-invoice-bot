@@ -235,7 +235,40 @@ Cases (docstrings start with `D198:`):
 
 Test: `uv run pytest -q tests/unit/test_helper.py`
 
-## Step 12: private photos, deploy and #37 again `[inline: private samples and the live bot]`
+## Step 12: D198, an upscaled plain read `[inline: spec text from the live resend, owner GO]`
+
+The live resend of #37 (as #38, image `7b3c6a32d83b`) read tipo, serie, numero and total and asked for the issuer RUC
+and the date: never a wrong issuer, but the issuer line is printed clearly. Telegram's 1080-px photo leaves the
+header print too small; in the container a plain read of the deskewed photo upscaled ×2 found the issuer's RUC (the
+date line does not come out at any scale, left for a later phase). A 2× read of a 1080×1920 photo takes about 2 s.
+
+Files: `specs/05-open-questions.md`.
+
+- D198's **Retries**: the candidates become the plain deskewed photo, then the plain deskewed photo upscaled ×2
+  (capped so its long side is at most 4000 px), then the binarized and the plain crop.
+
+Test: `npx prettier --check specs/05-open-questions.md`
+
+## Step 13: the upscaled plain candidate `[worker]`
+
+Files: `src/invoicebot/extract/__main__.py`, `tests/unit/test_helper.py`.
+
+- `_candidates` yields, after `straight` plain, `upscaled(straight)` plain: `straight` resized with `INTER_CUBIC` by
+  `min(UPSCALE_FACTOR, UPSCALE_MAX_SIDE / long side)`, with `UPSCALE_FACTOR = 2.0` and `UPSCALE_MAX_SIDE = 4000`
+  (module constants), skipped when that factor is at most 1. It is computed lazily, like the crop. Its "deskewed
+  image" for the URL-strip re-read is `straight`, not the upscaled one (the strip reader upscales its own bands).
+  A `cv2.error` or `MemoryError` while resizing skips it.
+
+Cases (docstrings start with `D198:`):
+
+1. First and plain reads missing a field, the upscaled read complete: three reads, the upscaled one kept, its image
+   twice the size of `straight`, `crop_receipt` not called, and the URL-strip re-read gets `straight`.
+2. A `straight` whose long side is 3000 px is upscaled by 4000/3000; one of 4000 px or more gets no upscaled read.
+3. The step 7 and step 11 cases still pass (update their read counts where the new candidate now runs).
+
+Test: `uv run pytest -q tests/unit/test_helper.py`
+
+## Step 14: private photos, deploy and #37 again `[inline: private samples and the live bot]`
 
 Files: `specs/spikes/ocr-background.md` (new).
 
