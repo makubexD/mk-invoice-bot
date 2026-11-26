@@ -207,7 +207,7 @@ def test_helper_read_text_memory_error_reports_unreadable_and_exits_zero(
 ) -> None:
     """R-2.1, BR-E01: an OCR allocation failure answers unreadable, exit 0."""
 
-    def explode(_image: np.ndarray, _ocr: object) -> None:
+    def explode(_image: np.ndarray, _ocr: object, **_overrides: object) -> None:
         raise MemoryError
 
     monkeypatch.setattr(helper, "_limit_resources", lambda: None)
@@ -226,7 +226,7 @@ def test_helper_read_text_memory_error_keeps_the_qr_reading(
 ) -> None:
     """R-2.1, BR-E01: an OCR allocation failure on a QR photo still answers the QR reading."""
 
-    def explode(_image: np.ndarray, _ocr: object) -> None:
+    def explode(_image: np.ndarray, _ocr: object, **_overrides: object) -> None:
         raise MemoryError
 
     canvas = _paste(_canvas(*CANVAS), _code(PAYLOAD), 100, 100)

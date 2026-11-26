@@ -17,6 +17,8 @@ RULES_PATH = ROOT / "config" / "parsing_rules.yaml"
 # Synthetic RUCs from tests/synthetic_rucs.txt. No real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
 SYNTHETIC_RUC_OTHER = "51900000000"
+#: A listed synthetic RUC the bare pattern matches, printed before the anchored issuer.
+EARLIER_BARE_RUC = "20000000010"
 WRONG_CHECK_DIGIT_RUC = "20000000002"
 DEFAULT_CONFIDENCE = 0.95
 LONG_FILLER = "A" * 100_000
@@ -438,3 +440,109 @@ def test_parse_ocr_skips_a_punycode_printed_host(rules: ParsingRules) -> None:
     reading = parse_ocr(_ocr("https://xn--sunt-gra.pe/x https://portal.example.pe/y"), rules).reading
 
     assert reading.printed_url == "https://portal.example.pe/y"
+
+
+def test_parse_ocr_misread_ruc_separator_keeps_issuer_and_buyer(rules: ParsingRules) -> None:
+    """D198: a '!' read for the ':' after RUC still anchors the issuer; the buyer's RUC is num_doc_adq."""
+    text = _ocr(
+        "BODEGA EJEMPLO SAC",
+        "AV EJEMPLO 123",
+        f"RUC! {SYNTHETIC_RUC}",
+        "FACTURA ELECTRÓNICA",
+        "CLIENTE: EMPRESA CLIENTE SAC",
+        f"RUC: {SYNTHETIC_RUC_OTHER}",
+    )
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == SYNTHETIC_RUC_OTHER
+
+
+@pytest.mark.parametrize("separator", ["|", ";", ",", "!", "[", "]"])
+def test_parse_ocr_ruc_separator_misreads_anchor_the_issuer(rules: ParsingRules, separator: str) -> None:
+    """D198: '|', ';', ',', '!', '[' or ']' after RUC anchors the issuer ahead of an earlier bare RUC."""
+    text = _ocr(f"REF {EARLIER_BARE_RUC}", f"RUC{separator} {SYNTHETIC_RUC}")
+
+    assert _fields(text, rules)["ruc_emisor"] == SYNTHETIC_RUC
+
+
+BUYER_RUC = "20000000028"
+
+
+@pytest.mark.parametrize("label", ["SR.:", "SRES.:", "SEÑOR(ES):", "SENOR:", "CLIENTE:", "ADQUIRIENTE:"])
+def test_buyer_label_matches_every_printed_form(rules: ParsingRules, label: str) -> None:
+    """D198: each buyer label form starting a line, with the punctuation OCR keeps after it, matches."""
+    assert rules.buyer_label.search(f"{label} EMPRESA SAC")
+
+
+def test_parse_ocr_ruc_under_buyer_label_alone_is_no_issuer(rules: ParsingRules) -> None:
+    """D198: a lone RUC under CLIENTE is the buyer's; there is no ruc_emisor."""
+    fields = _fields(_ocr("CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"), rules)
+
+    assert "ruc_emisor" not in fields
+    assert fields["num_doc_adq"] == BUYER_RUC
+    assert fields["tipo_doc_adq"] == "6"
+
+
+def test_parse_ocr_issuer_on_top_and_buyer_under_label(rules: ParsingRules) -> None:
+    """D198: the RUC at the top is the issuer and the one under CLIENTE is the buyer."""
+    fields = _fields(_ocr(f"RUC: {SYNTHETIC_RUC}", "CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_buyer_ruc_on_the_label_line_is_not_the_issuer(rules: ParsingRules) -> None:
+    """D198: a RUC on the SEÑOR(ES) line itself is the buyer's."""
+    fields = _fields(
+        _ocr(
+            f"SEÑOR(ES): EMPRESA SAC RUC {BUYER_RUC}",
+            "AV EJEMPLO 123",
+            "LIMA",
+            "TELEFONO",
+            f"RUC: {SYNTHETIC_RUC}",
+        ),
+        rules,
+    )
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_buyer_label_three_lines_above_does_not_make_a_buyer(rules: ParsingRules) -> None:
+    """D198: a RUC more than two lines below the buyer label stays the issuer's."""
+    text = _ocr("CLIENTE: EMPRESA SAC", "AV EJEMPLO 123", "LIMA", f"RUC: {SYNTHETIC_RUC}")
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert "num_doc_adq" not in fields
+
+
+@pytest.mark.parametrize(
+    "line", ["INVERSIONES EL SEÑOR DE SIPAN SAC", "SEÑOR DE LUREN SAC", f"RUC: {SYNTHETIC_RUC} SEÑOR(ES): X"]
+)
+def test_buyer_label_needs_the_line_start_and_a_separator(rules: ParsingRules, line: str) -> None:
+    """D198: SEÑOR inside an issuer name, without a separator or after other text, is no buyer label."""
+    assert not rules.buyer_label.search(line)
+
+
+def test_parse_ocr_issuer_named_senor_keeps_its_ruc(rules: ParsingRules) -> None:
+    """D198: an issuer whose name holds SEÑOR keeps the RUC printed under it."""
+    fields = _fields(_ocr("INVERSIONES EL SEÑOR DE SIPAN SAC", f"RUC: {SYNTHETIC_RUC}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert "num_doc_adq" not in fields
+
+
+def test_parse_ocr_labelled_buyer_wins_over_a_second_unlabelled_ruc(rules: ParsingRules) -> None:
+    """D198: with two unlabelled RUCs and one under CLIENTE, the labelled one is the buyer."""
+    text = _ocr(
+        f"RUC: {SYNTHETIC_RUC}", f"REF {EARLIER_BARE_RUC}", "CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"
+    )
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC
