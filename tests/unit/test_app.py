@@ -19,12 +19,16 @@ from invoicebot.app import (
     _github_app,
     _github_transports,
     _laptop_root_and_key,
+    _portal_handlers,
 )
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config
 from invoicebot.pipeline.commands import PaymentFlow
 from invoicebot.pipeline.intake_config import payment_flow, teach_setup
+from invoicebot.pipeline.portal_probe import ProbeDeps
+from invoicebot.pipeline.steps import PORTAL_CHECK_STEP, PORTAL_PROBE_STEP
 from invoicebot.secrets import SecretMissing, Secrets, SecretStore
+from invoicebot.store.db import Pool
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -182,3 +186,18 @@ async def test_github_enabled_with_key_registers_only_the_github_transport(tmp_p
         transports = _github_transports(cfg, _github_app(cfg, store, http), http, cast(Any, None))
 
     assert set(transports) == {GITHUB_ADAPTER}
+
+
+def test_portal_handlers_hold_the_check_and_the_probe_steps(tmp_path: Path) -> None:
+    """BR-F14, D193: the portal wiring registers both the check and the probe job steps."""
+    probe = ProbeDeps(
+        pool=cast(Pool, None),
+        cfg=_config(tmp_path, track_payments=False),
+        prober=cast(Any, None),
+        pdf_reader=cast(Any, None),
+        data_dir=tmp_path,
+    )
+
+    handlers = _portal_handlers(cast(Pool, None), cast(httpx.AsyncClient, None), probe)
+
+    assert set(handlers) == {PORTAL_CHECK_STEP, PORTAL_PROBE_STEP}

@@ -16,6 +16,7 @@ import logging
 import time
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from psycopg import AsyncConnection
@@ -30,6 +31,7 @@ from invoicebot.pipeline.portal_offer import (
     MESSAGE_UNVERIFIED,
     ask_unread,
     offer_candidate,
+    offer_other_host,
     qr_offer,
 )
 from invoicebot.pipeline.steps import PORTAL_CHECK_STEP
@@ -135,7 +137,8 @@ async def _record(
 ) -> None:
     """Offer the portal in the caller's transaction, or write nothing when the state moved (D192).
 
-    A busy probe is offered as ``BR-F14_busy`` and an answering one as BR-F14; without a
+    A busy probe is offered as ``BR-F14_busy`` and an answering one as BR-F14, or as
+    ``BR-F14_other_host`` when its host is not the first candidate's; without a
     probe the first guess is offered unverified, then the QR link, then BR-F15. It locks
     the row first: an invoice cancelled or settled after :func:`_read`, or one moved to
     another state, is left untouched and nothing is queued.
@@ -155,7 +158,7 @@ async def _record(
         )
         return
     if probed is not None:
-        await offer_candidate(conn, check.addressee, check.invoice_id, check.reading, probed.url)
+        await _offer_answering(conn, check, candidates[0], probed.url)
         return
     if candidates:
         await offer_candidate(
@@ -172,3 +175,12 @@ async def _record(
         await offer_candidate(conn, check.addressee, check.invoice_id, check.reading, link)
         return
     await ask_unread(conn, check.addressee, check.invoice_id, check.reading, check.text)
+
+
+async def _offer_answering(conn: AsyncConnection[Any], check: _Check, first: str, url: str) -> None:
+    """Offer the answering ``url``, naming the host as read when it is another one (BR-F14, D193)."""
+    read_host = urlsplit(first).hostname
+    if read_host is None or read_host == urlsplit(url).hostname:
+        await offer_candidate(conn, check.addressee, check.invoice_id, check.reading, url)
+        return
+    await offer_other_host(conn, check.addressee, check.invoice_id, check.reading, url, read_host)

@@ -73,3 +73,8 @@ def fingerprint(kind: str, *parts: str) -> str:
         if ":" in part:
             raise ValueError(f"fingerprint part for {kind} contains ':': {part!r}")
     return ":".join((GAP_KINDS[kind].fingerprint_prefix, *parts))
+
+
+def portal_gap_fingerprint(ruc_emisor: int) -> str:
+    """Return the fingerprint of the issuer's PORTAL_MISSING gap (R-11.2); one home for it."""
+    return fingerprint(GAP_KINDS["PORTAL_MISSING"].kind, str(ruc_emisor))

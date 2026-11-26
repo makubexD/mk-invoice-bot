@@ -144,7 +144,7 @@ def make_extract_handler(
                 return
 
         try:
-            result = await _run_helper(path, kind, extraction_cfg, media, rules_path, helper_prefix)
+            result = await run_extract_helper(path, kind, extraction_cfg, media, rules_path, helper_prefix)
         except TimeoutError:
             await _finish(
                 pool,
@@ -223,7 +223,7 @@ async def _file_to_read(conn: AsyncConnection[Any], invoice_id: int) -> tuple[st
     return None
 
 
-async def _run_helper(
+async def run_extract_helper(
     path: str,
     kind: AttachmentKind,
     extraction_cfg: Extraction,

@@ -2,7 +2,8 @@
 
 The URL and address checks are the request guard's in :mod:`invoicebot.net.guard`; this module
 adds only the taught-link limits: at most 300 visible ASCII characters, the default port, no fragment
-and a plain host that is neither an IP literal, punycode nor SUNAT's.
+and a plain host that is neither an IP literal, punycode nor SUNAT's. A link that passes is returned
+without the portal's session address (D193).
 """
 
 from __future__ import annotations
@@ -11,7 +12,7 @@ import ipaddress
 import re
 import unicodedata
 from enum import StrEnum
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from invoicebot.extract.fields import is_printed_host
 from invoicebot.net.guard import GuardReason, Resolver, check_url, resolve_and_check
@@ -24,6 +25,10 @@ DONT_KNOW_FORMS = frozenset({"nose"})
 #: Visible ASCII only: ``urlsplit`` drops tabs and newlines, so the host checked could differ from
 #: the host shown (D191).
 _URL_CHARS_PATTERN = re.compile(r"[!-~]+")
+#: A whole ASP.NET cookieless session segment, such as ``(S(abc123))`` (D193).
+_SESSION_SEGMENT_PATTERN = re.compile(r"\([A-Za-z]\([^/()]*\)\)")
+#: A ``;jsessionid=...`` suffix of one path segment, in any case (D193).
+_JSESSIONID_PATTERN = re.compile(r";jsessionid=[^/]*", re.IGNORECASE)
 _HTTPS_PORT = 443
 
 
@@ -72,6 +77,34 @@ def looks_like_url(text: str) -> bool:
         return False
 
 
+def without_session(url: str) -> str:
+    """Return ``url`` without the portal's session address in its path (D193).
+
+    ASP.NET puts a cookieless session in whole path segments, such as ``(S(abc123))``,
+    and some portals append ``;jsessionid=...`` to one segment. Both change on every
+    visit, so they must be neither stored nor probed. The rest of the path, the query
+    and the fragment stay; a path whose segments were all dropped becomes ``/``.
+    """
+    parts = urlsplit(url)
+    path = _without_session_path(parts.path)
+    if path == parts.path:
+        return url
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+
+
+def _without_session_path(path: str) -> str:
+    """Return ``path`` without session segments and ``;jsessionid=`` suffixes (D193)."""
+    kept: list[str] = []
+    for segment in path.split("/"):
+        if _SESSION_SEGMENT_PATTERN.fullmatch(segment) is not None:
+            continue
+        kept.append(_JSESSIONID_PATTERN.sub("", segment))
+    cleaned = "/".join(kept)
+    if not cleaned and path:
+        return "/"
+    return cleaned
+
+
 def taught_url_refusal(url: str) -> GuardReason | TaughtUrlReason | None:
     """Return why ``url`` may not be offered or taught, or None; nothing is resolved (R-11.4, D191)."""
     if len(url) > MAX_TAUGHT_URL_CHARS:
@@ -107,7 +140,8 @@ async def check_taught_url(text: str, resolver: Resolver) -> str:
     """Return the cleaned link ``text`` teaches, or raise :class:`TaughtUrlError` (R-11.4).
 
     The link must pass :func:`taught_url_refusal` and its host must resolve only to
-    addresses the request guard allows.
+    addresses the request guard allows. The returned link loses its session address
+    (D193), so teaching it again compares equal to the one already stored.
     """
     url = text.strip()
     refusal = taught_url_refusal(url)
@@ -116,7 +150,7 @@ async def check_taught_url(text: str, resolver: Resolver) -> str:
     _, unsafe = await resolve_and_check(urlsplit(url).hostname or "", resolver)
     if unsafe is not None:
         raise TaughtUrlError(unsafe)
-    return url
+    return without_session(url)
 
 
 def _is_ip_literal(host: str) -> bool:

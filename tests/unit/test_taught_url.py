@@ -10,6 +10,7 @@ from invoicebot.net.taught_url import (
     TaughtUrlReason,
     check_taught_url,
     is_dont_know,
+    without_session,
 )
 
 PUBLIC_ADDRESS = "93.184.216.34"
@@ -72,6 +73,31 @@ async def test_check_taught_url_refuses_a_host_resolving_to_no_address() -> None
     with pytest.raises(TaughtUrlError) as raised:
         await check_taught_url(GOOD_URL, FakeResolver([]))
     assert raised.value.reason is GuardReason.UNRESOLVABLE
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("https://p.example.pe/(S(abc123))/frm.aspx", "https://p.example.pe/frm.aspx"),
+        ("https://p.example.pe/a/(S(x))/(F(y))/b", "https://p.example.pe/a/b"),
+        ("https://p.example.pe/a;JSESSIONID=9F/b?x=1", "https://p.example.pe/a/b?x=1"),
+        ("https://p.example.pe/a(1)/b", "https://p.example.pe/a(1)/b"),
+        ("https://p.example.pe/", "https://p.example.pe/"),
+        ("https://p.example.pe/(S(x))", "https://p.example.pe/"),
+    ],
+)
+def test_without_session_removes_only_session_addresses(url: str, expected: str) -> None:
+    """D193: session segments and ``;jsessionid=`` suffixes go; the rest of the link stays."""
+    assert without_session(url) == expected
+
+
+async def test_check_taught_url_returns_the_link_without_its_session_address() -> None:
+    """D193: a taught link keeps its path but loses the session address the portal added."""
+    resolver = FakeResolver([PUBLIC_ADDRESS])
+    assert (
+        await check_taught_url("https://p.example.pe/(S(abc123))/frm.aspx", resolver)
+        == "https://p.example.pe/frm.aspx"
+    )
 
 
 @pytest.mark.parametrize("text", ["no sé", "no se", "nose", " NO  SÉ "])

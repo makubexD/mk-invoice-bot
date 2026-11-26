@@ -31,3 +31,24 @@ Date: 2026-11-25. Read-only GETs with `curl`; no form was submitted and no invoi
 - What the first visit learns (landing steps, field mapping, captcha, result page, downloads) is registered in the
   site's settings and in the issue, so the next invoice of that site reuses it.
 - SUNAT: no scraping of SUNAT pages. The owner has tokens for an official API; reviewing what it returns comes later.
+
+## Live check (2026-11-25, image `ac526779d9cd`)
+
+| Row                                   | Result                                                                                                                                                      |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PEBSA link taught, session id cleaned | pass: `BR-S06_approved_probe`, then `captcha`, every field mapped (image `d68b2f4261dc`)                                                                    |
+| La Leña ticket gives a [🔗]           | waived: no link read (anchor "ingresando a", address over two lines): 9t2                                                                                   |
+| La Leña probe, unnamed submit         | pass: `unmatched_field` stopped at «Tipo comprobante», draft has `submit: button[type='submit']`, `captcha: none`, all five fields mapped to invoice values |
+| La Leña configured portal files #34   | pass: `portal_registry` `facturactiva-la-lena` ok in 6.5 s, delivered by Graph, #34 `BATCHED` in place of cancelled #12                                     |
+| Test invoice #32 cancelled            | pass: `/cancelar 32`                                                                                                                                        |
+
+Findings for 9t2:
+
+- «Tipo comprobante» is an Ant Design list: the probe reads it as a text field with no options. The site's options are
+  Factura, Boleta de venta, Nota de crédito, Nota de débito, Comprobante de retención, Guía de remisión - Remitente and
+  Guía de remisión - Transportista. The value must be picked by label from the invoice's SUNAT tipo (01 Factura, 03
+  Boleta de venta), as the hand-written `facturactiva-la-lena` portal already does with `tipo_labels`.
+- A portal added while an invoice waits on email is never tried: the chain does not go back to a fetcher that ended
+  (`no_portal`), the config re-check resumes only `MANUAL_REQUIRED` invoices, and `/reprocesar` refuses
+  `FETCHING_DOCS`. The live check cleared the attempt by hand. A user needs a way out from the chat.
+- A press on a decided or removed proposal answers nothing (D192 keeps it silent); a user reads it as broken.

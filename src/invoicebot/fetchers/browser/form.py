@@ -229,7 +229,7 @@ async def _download_one(
     size = path.stat().st_size
     if size > _limit(max_bytes, kind):
         raise _Technical
-    return FetchedFile(kind=kind, path=path, size=size, sha256=_sha256(path))
+    return FetchedFile(kind=kind, path=path, size=size, sha256=file_sha256(path))
 
 
 def _limit(max_bytes: MediaMaxBytes, kind: DownloadKind) -> int:
@@ -237,7 +237,7 @@ def _limit(max_bytes: MediaMaxBytes, kind: DownloadKind) -> int:
     return max_bytes.pdf if kind == "pdf" else max_bytes.xml
 
 
-def _sha256(path: Path) -> str:
+def file_sha256(path: Path) -> str:
     """The SHA-256 hex digest of a file, read in bounded chunks."""
     digest = hashlib.sha256()
     with path.open("rb") as file:

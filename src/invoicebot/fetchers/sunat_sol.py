@@ -18,7 +18,7 @@ from pydantic import SecretStr
 from invoicebot.config.models import MediaMaxBytes, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchResult
 from invoicebot.fetchers.browser.protocol import HelperOutput, SolCredentialsIn, SolRequest
-from invoicebot.fetchers.portal import PAGE_TIMEOUT_MS, result_from, run_browser_job
+from invoicebot.fetchers.portal import PAGE_TIMEOUT_MS, BrowserJob, result_from, run_browser_job
 from invoicebot.secrets import Secrets
 from invoicebot.sunat_origins import SUNAT_SOL
 
@@ -65,7 +65,15 @@ class SunatSolFetcher:
 
     async def _run(self, payload: bytes, out_dir: Path) -> HelperOutput | FetchResult:
         """Run the helper in its own temp folder and validate its one JSON line (R-9.2, R-9.10)."""
-        return await run_browser_job(self._helper_command, payload, self._timeout_s, SUNAT_SOL, out_dir)
+        job = BrowserJob(
+            command=self._helper_command,
+            payload=payload,
+            timeout_s=self._timeout_s,
+            name=SUNAT_SOL,
+            out_dir=out_dir,
+            model=HelperOutput,
+        )
+        return await run_browser_job(job)
 
 
 def _credentials(secrets: Secrets) -> SolCredentialsIn:

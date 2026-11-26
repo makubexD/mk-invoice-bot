@@ -15,7 +15,9 @@ from invoicebot.queue.outbox import (
     PermanentSendError,
     SendLater,
     add,
+    hold,
     last_rule,
+    release_issue,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -648,3 +650,71 @@ async def test_send_later_never_lets_the_row_go_dead(
     assert row is not None
     assert row[0] == "pending"
     assert row[1] == 0
+
+
+ISSUE_PAYLOAD = {"op": "create_issue", "fingerprint": "portal_missing:20123456789", "fields": {}}
+
+
+async def _run_after_seconds(conn: AsyncConnection[Any], outbox_id: int) -> float:
+    """Return how many seconds ahead of the database clock the row is due."""
+    cur = await conn.execute(
+        "SELECT extract(epoch FROM run_after - now()) FROM outbox WHERE id = %s", (outbox_id,)
+    )
+    row = await cur.fetchone()
+    assert row is not None
+    return float(row[0])
+
+
+async def test_hold_makes_a_row_due_that_much_later(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: a held row is due now() + delay; an unheld one is due now."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        held = await add(conn, "github", "owner/repo", ISSUE_PAYLOAD)
+        await hold(conn, held, timedelta(hours=12))
+        now_id = await add(conn, "github", "owner/repo", ISSUE_PAYLOAD)
+        assert abs(await _run_after_seconds(conn, held) - 12 * 3600) < 60
+        assert abs(await _run_after_seconds(conn, now_id)) < 60
+
+
+async def test_release_issue_makes_a_held_row_due_now(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: release_issue sets run_after to now and returns 1."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "github", "owner/repo", ISSUE_PAYLOAD)
+        await hold(conn, outbox_id, timedelta(hours=12))
+        assert await release_issue(conn, str(ISSUE_PAYLOAD["fingerprint"])) == 1
+        assert abs(await _run_after_seconds(conn, outbox_id)) < 60
+
+
+async def test_release_issue_leaves_a_sent_row_alone(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: a row already sent is not released again (returns 0)."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "github", "owner/repo", ISSUE_PAYLOAD)
+        await conn.execute("UPDATE outbox SET state = 'sent', sent_at = now() WHERE id = %s", (outbox_id,))
+        assert await release_issue(conn, str(ISSUE_PAYLOAD["fingerprint"])) == 0
+
+
+async def test_release_issue_keeps_the_backoff_of_a_failed_row(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-11.5, D193: a row that failed once keeps its backoff; release returns 0."""
+    async with db_pool.connection() as conn:
+        await _clear_outbox(conn)
+        outbox_id = await add(conn, "github", "owner/repo", ISSUE_PAYLOAD)
+        await conn.execute(
+            """
+            UPDATE outbox SET attempts = 1, last_error = 'boom', run_after = now() + interval '2 minutes'
+            WHERE id = %s
+            """,
+            (outbox_id,),
+        )
+        before = await _run_after_seconds(conn, outbox_id)
+        assert await release_issue(conn, str(ISSUE_PAYLOAD["fingerprint"])) == 0
+        assert abs(await _run_after_seconds(conn, outbox_id) - before) < 5

@@ -57,6 +57,8 @@ APPROVED_HOST_URL = "https://sv.example.pe/tienda"
 #: A QR link BR-F14 may offer when the strip is no address (D192).
 QR_URL = "https://otro.example.pe/comprobante"
 RAZON_SOCIAL = "Tienda Example"
+#: The host of the first candidate of :data:`URL_STRIP`, as read (D193).
+OTHER_HOST_READ = "portal.example.pe"
 SENDER = "asistente"
 
 
@@ -160,6 +162,19 @@ def _statuses(statuses: dict[str, int]) -> tuple[httpx.MockTransport, list[str]]
     return httpx.MockTransport(handler), requested
 
 
+def _statuses_after_refusal(statuses: dict[str, int]) -> tuple[httpx.MockTransport, list[str]]:
+    """Return a transport that refuses URLs not in ``statuses`` and answers the listed ones (D193)."""
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(str(request.url))
+        if str(request.url) not in statuses:
+            raise httpx.ConnectError("connection refused", request=request)
+        return httpx.Response(statuses[str(request.url)])
+
+    return httpx.MockTransport(handler), requested
+
+
 def _refusing() -> tuple[httpx.MockTransport, list[str]]:
     """Return a transport that fails every request with ConnectError and records the URLs."""
     requested: list[str] = []
@@ -245,10 +260,10 @@ def _candidates(text: str = URL_STRIP) -> tuple[str, ...]:
 async def test_second_candidate_answering_is_the_one_offered(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-F14, D192: when the first guess does not answer, the second is offered and stored."""
+    """BR-F14, D192, D193: a second guess answering on another host is offered as BR-F14_other_host."""
     candidates = _candidates()
     assert len(candidates) >= 2
-    transport, requested = _answering(candidates[1])
+    transport, requested = _statuses_after_refusal({candidates[1]: 200})
     invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
 
     await _run(db_pool, invoice_id, transport)
@@ -256,7 +271,9 @@ async def test_second_candidate_answering_is_the_one_offered(
     async with db_pool.connection() as conn:
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
-    expected = MESSAGES["BR-F14"].format(razon_social=RAZON_SOCIAL, url=candidates[1])
+    expected = MESSAGES["BR-F14_other_host"].format(
+        read_host=OTHER_HOST_READ, razon_social=RAZON_SOCIAL, url=candidates[1]
+    )
     assert requested == [candidates[0], candidates[1]]
     assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, candidates[1]))]
     assert candidate == candidates[1]
@@ -265,7 +282,10 @@ async def test_second_candidate_answering_is_the_one_offered(
 async def test_no_candidate_answering_offers_the_first_as_unverified(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """BR-F14, D192: when no guess answers, the first is offered as unverified with three buttons."""
+    """BR-F14, D192, D193: when no guess answers, the first is offered as unverified with three buttons.
+
+    The read host's 404 is a status, so the other hosts are not tried and only the first is requested.
+    """
     candidates = _candidates()
     transport, requested = _answering()
     invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
@@ -276,7 +296,7 @@ async def test_no_candidate_answering_offers_the_first_as_unverified(
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
     expected = MESSAGES["BR-F14_unverified"].format(razon_social=RAZON_SOCIAL, url=candidates[0])
-    assert requested == list(candidates)
+    assert requested == [candidates[0]]
     assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, candidates[0]))]
     assert len(rows[0][2]) == 3
     assert candidate == candidates[0]
@@ -308,7 +328,7 @@ async def test_first_not_answering_second_busy_offers_the_second(
     """BR-F14, D192: a busy second candidate is offered as BR-F14_busy after the first gives no answer."""
     candidates = _candidates()
     assert len(candidates) >= 2
-    transport, requested = _statuses({candidates[1]: 503})
+    transport, requested = _statuses_after_refusal({candidates[1]: 503})
     invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
 
     await _run(db_pool, invoice_id, transport)
@@ -320,6 +340,42 @@ async def test_first_not_answering_second_busy_offers_the_second(
     assert requested == [candidates[0], candidates[1]]
     assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, candidates[1]))]
     assert candidate == candidates[1]
+
+
+async def test_same_host_other_path_is_offered_as_the_plain_question(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D193: an answering URL on the host as read, with another path, keeps BR-F14's own text."""
+    transport, requested = _statuses_after_refusal({READ_HOST_URL: 200})
+    invoice_id = await _invoice(db_pool, _reading(url_strip=GARBLED_STRIP, razon_social=STRIP_RAZON_SOCIAL))
+
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn:
+        rows = await _outbox(conn, SENDER)
+    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=READ_HOST_URL)
+    assert requested == [GARBLED_REPAIRED_URL, READ_HOST_URL]
+    assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, READ_HOST_URL))]
+
+
+async def test_yes_on_the_other_host_offer_proposes_that_url(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-F14, D193: [Sí] on the other-host offer proposes exactly the URL it showed."""
+    candidates = _candidates()
+    transport, _ = _statuses_after_refusal({candidates[1]: 200})
+    invoice_id = await _invoice(db_pool, _reading(url_strip=URL_STRIP))
+    await _run(db_pool, invoice_id, transport)
+
+    async with db_pool.connection() as conn, conn.transaction():
+        await handle_press(
+            conn,
+            _button_press(SENDER, f"u{invoice_id}:{yes_press_suffix(candidates[1])}"),
+            _setup(),
+        )
+        link = await taught_links.get(conn, ISSUER_RUC)
+
+    assert link == TaughtLink(ISSUER_RUC, candidates[1], SENDER, "proposed")
 
 
 async def test_yes_on_the_unverified_offer_proposes_that_url(
@@ -587,7 +643,7 @@ async def test_approved_host_close_to_the_strip_is_tried_after_it_and_offered(
     candidates = candidate_urls(GARBLED_STRIP, STRIP_RAZON_SOCIAL, frozenset({"sv.example.pe"}))
     assert candidates[:2] == (GARBLED_REPAIRED_URL, READ_HOST_URL)
     assert APPROVED_HOST_URL in candidates[2:]
-    transport, requested = _answering(APPROVED_HOST_URL)
+    transport, requested = _statuses_after_refusal({APPROVED_HOST_URL: 200})
     invoice_id = await _invoice(db_pool, _reading(url_strip=GARBLED_STRIP, razon_social=STRIP_RAZON_SOCIAL))
 
     await _run(db_pool, invoice_id, transport)
@@ -595,7 +651,9 @@ async def test_approved_host_close_to_the_strip_is_tried_after_it_and_offered(
     async with db_pool.connection() as conn:
         rows = await _outbox(conn, SENDER)
         candidate = await portal_candidates.get(conn, invoice_id)
-    expected = MESSAGES["BR-F14"].format(razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL)
+    expected = MESSAGES["BR-F14_other_host"].format(
+        read_host="sy.example.pe", razon_social=STRIP_RAZON_SOCIAL, url=APPROVED_HOST_URL
+    )
     assert requested == [GARBLED_REPAIRED_URL, READ_HOST_URL, APPROVED_HOST_URL]
     assert rows == [(expected, "BR-F14", _offer_buttons(invoice_id, APPROVED_HOST_URL))]
     assert candidate == APPROVED_HOST_URL

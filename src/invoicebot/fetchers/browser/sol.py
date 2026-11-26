@@ -30,11 +30,14 @@ from invoicebot.fetchers.browser.protocol import (
 from invoicebot.fetchers.browser.session import (
     browse,
     emit,
+    guarded_result,
     limit_resources,
     output,
+    portal_options,
     read_request,
 )
 from invoicebot.fetchers.browser.sol_login import SolCredentials, log_in
+from invoicebot.net.guard import GuardReason
 
 __all__ = ["SolCredentialsIn", "SolRequest", "main", "run_sol"]
 
@@ -62,6 +65,16 @@ async def run_sol(page: Page, request: SolRequest, fill: Fill = fill_and_downloa
     return await fill(page, site.query, request.invoice, request.out_dir, request.max_bytes)
 
 
+async def _browse(request: SolRequest, chromium_sandbox: bool) -> tuple[FetchResult, GuardReason | None]:
+    """Run the guarded browser for one SOL request (S10.1, R-5.10)."""
+    return await browse(
+        portal_options(request.site.query),
+        request.page_timeout_ms,
+        lambda page: run_sol(page, request),
+        chromium_sandbox=chromium_sandbox,
+    )
+
+
 def main() -> int:
     """Read the request, run one SOL fetch and print its result (S10.1)."""
     try:
@@ -72,19 +85,12 @@ def main() -> int:
         return 0
     limit_resources(request.max_bytes)
     try:
-        result = asyncio.run(
-            browse(
-                request.site.query,
-                request.page_timeout_ms,
-                lambda page: run_sol(page, request),
-                chromium_sandbox=chromium_sandbox,
-            )
-        )
+        result, block = asyncio.run(_browse(request, chromium_sandbox))
     except Exception as error:  # top-level boundary: a page error must not print page text (R-9.16, D169)
         logger.error("SOL browser helper failed: %s", type(error).__name__)
         emit(HelperOutput(reason=FetchReason.TECHNICAL, error_class=error_class_of(error)))
     else:
-        emit(output(result))
+        emit(output(guarded_result(result, block)))
     return 0
 
 

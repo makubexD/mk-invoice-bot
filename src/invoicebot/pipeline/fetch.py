@@ -205,7 +205,7 @@ def make_fetch_handler(
             job=job,
             head=head,
             flow=flow,
-            invoice=_fetch_invoice(reading, job.invoice_id),
+            invoice=fetch_invoice(reading, job.invoice_id),
             attempts=_attempts(rows),
             directory=directory,
             no_retry=no_retry,
@@ -396,7 +396,7 @@ async def _record_result(
         await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_MISSING, repo)
         await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_BROKEN, repo)
     elif result.reason in WAIT_REASONS:
-        run_after = None if delay is None else await _run_after(conn, delay)
+        run_after = None if delay is None else await run_after_delay(conn, delay)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
         if run_after is not None and _is_first_attempt(inputs.attempts, fetcher, WAIT_REASONS):
             await _wait_notice(conn, inputs, reading, fetcher, run_after)
@@ -406,7 +406,7 @@ async def _record_result(
             await _alert_sign_in(conn, inputs)
     elif result.reason in TECHNICAL_REASONS and delay is not None:
         # D167: a technical retry sends no notice and no admin alert.
-        await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await _run_after(conn, delay))
+        await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await run_after_delay(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
 
@@ -598,7 +598,7 @@ async def _notify(
     )
 
 
-async def _run_after(conn: AsyncConnection[Any], delay: timedelta) -> datetime:
+async def run_after_delay(conn: AsyncConnection[Any], delay: timedelta) -> datetime:
     """Return the database clock plus ``delay``; the caller owns the transaction (D65)."""
     cur = await conn.execute("SELECT now() + %s", (delay,))
     row = await cur.fetchone()
@@ -607,7 +607,7 @@ async def _run_after(conn: AsyncConnection[Any], delay: timedelta) -> datetime:
     return cast(datetime, row[0])
 
 
-def _fetch_invoice(reading: Reading, invoice_id: int) -> FetchInvoice:
+def fetch_invoice(reading: Reading, invoice_id: int) -> FetchInvoice:
     """Return the fields a fetcher needs, or raise when the reading lacks one (R-5.1)."""
     ruc_emisor = reading.value("ruc_emisor")
     tipo = reading.value("tipo")

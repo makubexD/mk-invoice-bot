@@ -10,7 +10,7 @@ import hmac
 import logging
 import os
 import signal
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -52,11 +52,13 @@ from invoicebot.config.models import (
     StoreDirectory,
     SunatSolSite,
 )
+from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
 from invoicebot.fetchers.email_inbox import EmailInboxFetcher, Mailbox
 from invoicebot.fetchers.gmail import GmailMailbox
 from invoicebot.fetchers.graph_mail import GraphMailbox
 from invoicebot.fetchers.portal import DEFAULT_HELPER_COMMAND, PortalFetcher
+from invoicebot.fetchers.portal_probe import DEFAULT_PROBE_COMMAND, PortalProber
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER, QrUrlFetcher, allowed_hosts
 from invoicebot.fetchers.sunat_sol import SECRETS, SOL_HELPER_COMMAND, SunatSolFetcher
 from invoicebot.github.app_token import GitHubApp, GitHubTokenError
@@ -77,7 +79,7 @@ from invoicebot.pipeline.deliver import (
 )
 from invoicebot.pipeline.deliver_dispatch import make_deliver_dispatch
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
-from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler, run_extract_helper
 from invoicebot.pipeline.failed import notify_dead
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
@@ -95,9 +97,17 @@ from invoicebot.pipeline.manual_message import portal_for
 from invoicebot.pipeline.outgoing import queue_rate_limited_alert, queue_token_error_alert
 from invoicebot.pipeline.park import PARK_SWEEP_S, park_stale_questions
 from invoicebot.pipeline.portal_check import make_portal_check_handler
+from invoicebot.pipeline.portal_probe import ProbeDeps, make_portal_probe_handler
+from invoicebot.pipeline.probe_files import PdfReader
 from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
-from invoicebot.pipeline.steps import ATTACH_STEP, FOLDER_STATUS_STEP, PORTAL_CHECK_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.steps import (
+    ATTACH_STEP,
+    FOLDER_STATUS_STEP,
+    PORTAL_CHECK_STEP,
+    PORTAL_PROBE_STEP,
+    SUNAT_RECHECK_STEP,
+)
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
@@ -338,7 +348,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         sources = _media_sources(wirings)
         handlers = {
             **_media_handlers(cfg, sources, settings, pool),
-            **_portal_handlers(pool, probe_http),
+            **_portal_handlers(pool, probe_http, _probe_deps(pool, cfg, settings, prefixes)),
             EXTRACT_STEP: make_extract_handler(
                 pool,
                 cfg.extraction,
@@ -514,9 +524,44 @@ def _no_cookies() -> CookieJar:
     return CookieJar(policy=DefaultCookiePolicy(allowed_domains=[]))
 
 
-def _portal_handlers(pool: Pool, probe_http: httpx.AsyncClient) -> dict[str, Handler]:
-    """Return the portal check handler, which must only use a guarded client (R-5.10, D192)."""
-    return {PORTAL_CHECK_STEP: make_portal_check_handler(pool, probe_http)}
+def _portal_handlers(pool: Pool, probe_http: httpx.AsyncClient, probe: ProbeDeps) -> dict[str, Handler]:
+    """Return the portal check and portal probe handlers (R-5.10, D192, D193).
+
+    The check must only use a guarded client; the probe opens the approved link in the sandboxed browser.
+    """
+    return {
+        PORTAL_CHECK_STEP: make_portal_check_handler(pool, probe_http),
+        PORTAL_PROBE_STEP: make_portal_probe_handler(probe),
+    }
+
+
+def _probe_deps(pool: Pool, cfg: Config, settings: Settings, prefixes: HelperPrefixes) -> ProbeDeps:
+    """Return what the portal probe needs: the browser prober and the extract helper as PDF reader (D193)."""
+    prober = PortalProber(
+        cfg.limits.media.max_bytes,
+        cfg.retrieval.portal_timeout_s,
+        helper_command=browser_command(prefixes, DEFAULT_PROBE_COMMAND),
+    )
+    pdf_reader = _extract_pdf_reader(cfg, settings.parsing_rules_path, prefixes.image)
+    return ProbeDeps(pool=pool, cfg=cfg, prober=prober, pdf_reader=pdf_reader, data_dir=settings.data_dir)
+
+
+def _extract_pdf_reader(cfg: Config, rules_path: Path, helper_prefix: Sequence[str]) -> PdfReader:
+    """Return a reader that gives a PDF's reading through the extract helper, or None when none (D193)."""
+
+    async def read(path: Path) -> Reading | None:
+        result = await run_extract_helper(
+            str(path), "pdf", cfg.extraction, cfg.limits.media, rules_path, helper_prefix
+        )
+        if result.error is not None or result.reading is None:
+            return None
+        try:
+            return reading_from_json(result.reading)
+        except ValueError:
+            # The payload quotes values such as a RUC or an amount, so nothing of it is logged (R-9.16).
+            return None
+
+    return read
 
 
 def _validation_secrets(cfg: Config, store: SecretStore) -> Secrets | None:

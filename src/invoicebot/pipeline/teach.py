@@ -21,7 +21,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Button, InboundMessage
 from invoicebot.config.models import Profile
-from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
+from invoicebot.gaps.kinds import portal_gap_fingerprint
 from invoicebot.net.guard import Resolver
 from invoicebot.net.taught_url import check_taught_url
 from invoicebot.pipeline.failed import RULE_DEAD
@@ -32,12 +32,14 @@ from invoicebot.pipeline.outgoing import (
     queue_message,
 )
 from invoicebot.pipeline.questions import RULE_DOCS_NEEDED
+from invoicebot.pipeline.steps import PORTAL_PROBE_STEP
 from invoicebot.queue import outbox
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import BUTTON_APPROVE, BUTTON_REJECT, MESSAGES, UNKNOWN_ISSUER
 from invoicebot.states import FETCHING_DOCS
-from invoicebot.store import taught_links
+from invoicebot.store import portal_probes, taught_links
 from invoicebot.store.gaps import get_gap, set_hint
-from invoicebot.store.invoices import load_invoice_head
+from invoicebot.store.invoices import issuer_ruc, load_invoice_head, newest_waiting_invoice
 from invoicebot.store.taught_links import TaughtLink
 
 logger = logging.getLogger(__name__)
@@ -64,6 +66,8 @@ NOT_QUESTIONS = frozenset(
 )
 #: The admin's answer after [Aprobar] (BR-S06, D118).
 RULE_APPROVED = "BR-S06_approved"
+#: The admin's answer after [Aprobar] when a probe starts on a waiting invoice (BR-S06, D193).
+RULE_APPROVED_PROBE = "BR-S06_approved_probe"
 #: The admin's answer after [Rechazar] (BR-S06, D118).
 RULE_REJECTED = "BR-S06_rejected"
 #: The pressing admin's answer when a newer link replaced the proposal (BR-S06, D192).
@@ -153,6 +157,9 @@ async def dont_know_reply(
     The caller owns the transaction.
     """
     head = await load_invoice_head(conn, invoice_id)
+    ruc = await issuer_ruc(conn, invoice_id)
+    if ruc is not None:
+        await outbox.release_issue(conn, portal_gap_fingerprint(ruc))
     key = RULE_DONT_KNOW if head is not None and head.state == FETCHING_DOCS else MESSAGE_DONT_KNOW_MANUAL
     await queue_message(
         conn,
@@ -192,9 +199,7 @@ async def handle_press(
     if link is None:
         await _answer_stale_press(conn, msg, ruc_emisor)
         return
-    if approved:
-        await _record_hint(conn, setup, ruc_emisor, link.url)
-    rule_id = RULE_APPROVED if approved else RULE_REJECTED
+    rule_id = await _apply_decision(conn, setup, link, approved)
     await queue_message(
         conn,
         Addressee(msg.channel, msg.profile_id),
@@ -202,6 +207,32 @@ async def handle_press(
         rule_id=rule_id,
     )
     await _notify_proposer(conn, setup, link, msg.profile_id, ruc_emisor, approved)
+
+
+async def _apply_decision(
+    conn: AsyncConnection[Any],
+    setup: TeachSetup,
+    link: TaughtLink,
+    approved: bool,
+) -> str:
+    """Act on a decided link and return the rule id of the admin's answer (BR-S06, D193).
+
+    Rejection releases the gap's held issue. Approval records the hint, then starts the
+    probe on the issuer's newest waiting invoice (BR-S06_approved_probe), or, with none,
+    releases the issue (BR-S06_approved). The caller owns the transaction.
+    """
+    ruc_emisor = link.ruc_emisor
+    if not approved:
+        await outbox.release_issue(conn, portal_gap_fingerprint(ruc_emisor))
+        return RULE_REJECTED
+    await _record_hint(conn, setup, ruc_emisor, link.url)
+    invoice_id = await newest_waiting_invoice(conn, ruc_emisor)
+    if invoice_id is None:
+        await outbox.release_issue(conn, portal_gap_fingerprint(ruc_emisor))
+        return RULE_APPROVED
+    await portal_probes.start(conn, ruc_emisor, link.version, invoice_id)
+    await enqueue(conn, invoice_id, PORTAL_PROBE_STEP)
+    return RULE_APPROVED_PROBE
 
 
 async def _answer_stale_press(
@@ -272,10 +303,10 @@ async def _record_hint(
     both on separate connections, where Postgres sees no deadlock. Once the wait ends,
     the gap read sees the issue URL the callback committed.
     """
-    gap_fingerprint = fingerprint(GAP_KINDS["PORTAL_MISSING"].kind, str(ruc_emisor))
-    hint_in_pending_issue = await outbox.set_pending_issue_hint(conn, gap_fingerprint, url) > 0
-    await set_hint(conn, gap_fingerprint, url)
-    gap = await get_gap(conn, gap_fingerprint)
+    issue_key = portal_gap_fingerprint(ruc_emisor)
+    hint_in_pending_issue = await outbox.set_pending_issue_hint(conn, issue_key, url) > 0
+    await set_hint(conn, issue_key, url)
+    gap = await get_gap(conn, issue_key)
     if hint_in_pending_issue or gap is None or gap.issue_url is None or setup.github_repo is None:
         return
     await outbox.add(
@@ -284,7 +315,7 @@ async def _record_hint(
         setup.github_repo,
         {
             "op": "comment",
-            "fingerprint": gap_fingerprint,
+            "fingerprint": issue_key,
             "issue_url": gap.issue_url,
             "hint_url": url,
         },

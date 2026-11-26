@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
+from datetime import timedelta
 from typing import Any
 
 from psycopg import AsyncConnection
@@ -20,9 +21,11 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import Gaps, Profile
 from invoicebot.gaps.kinds import GAP_KINDS, fingerprint
 from invoicebot.github.issue_text import IssueFields
+from invoicebot.net.taught_url import without_session
 from invoicebot.pipeline.outgoing import queue_admin_alert
 from invoicebot.queue import outbox
 from invoicebot.rules.messages_es import GAP_DIGEST_LINE, KIND_DESC, MESSAGES
+from invoicebot.store import portal_probes, taught_links
 from invoicebot.store.db import Pool
 from invoicebot.store.gaps import (
     GapRow,
@@ -41,6 +44,10 @@ RULE_GAP_ADMIN = "GAP_admin"
 
 #: The message key and rule id of the daily digest of the digest kinds (spec 06 §3).
 RULE_GAP_DIGEST = "GAP_DIGEST_admin"
+
+
+#: How long a new PORTAL_MISSING issue waits for a portal probe before it opens (D193).
+PORTAL_ISSUE_HOLD = timedelta(hours=12)
 
 
 @dataclass(frozen=True)
@@ -226,19 +233,7 @@ async def _queue_alert(
     """
     if ctx.gaps_cfg.github.enabled and gap.issue_url is None:
         if not await _issue_queued(conn, gap_fingerprint):
-            fields = sighting.fields
-            if fields.hint_url is None and gap.hint_url is not None:
-                fields = replace(fields, hint_url=gap.hint_url)
-            await outbox.add(
-                conn,
-                "github",
-                ctx.gaps_cfg.github.repo,
-                {
-                    "op": "create_issue",
-                    "fingerprint": gap_fingerprint,
-                    "fields": _issue_payload(fields),
-                },
-            )
+            await _queue_issue(conn, ctx, sighting, gap, gap_fingerprint)
         return
     if sighting.kind in ctx.gaps_cfg.digest_kinds:
         return
@@ -249,6 +244,53 @@ async def _queue_alert(
         _gap_admin_text(sighting.kind, sighting.subject, gap.issue_url),
     )
     await mark_alerted(conn, [gap_fingerprint])
+
+
+async def _queue_issue(
+    conn: AsyncConnection[Any],
+    ctx: GapContext,
+    sighting: GapSighting,
+    gap: GapRow,
+    gap_fingerprint: str,
+) -> None:
+    """Queue the ``create_issue`` row, held for a probe if due, plus the probe's report (D193)."""
+    fields = sighting.fields
+    if fields.hint_url is None and gap.hint_url is not None:
+        fields = replace(fields, hint_url=gap.hint_url)
+    probe = await _done_probe(conn, sighting)
+    held = sighting.kind == "PORTAL_MISSING" and ctx.gaps_cfg.teach_via_chat and probe is None
+    repo = ctx.gaps_cfg.github.repo
+    issue_id = await outbox.add(
+        conn,
+        "github",
+        repo,
+        {"op": "create_issue", "fingerprint": gap_fingerprint, "fields": _issue_payload(fields)},
+    )
+    if held:
+        await outbox.hold(conn, issue_id, PORTAL_ISSUE_HOLD)
+    if probe is not None and probe.report is not None:
+        # Only the link the probe opened, still approved at its version, goes in the issue (R-11.4).
+        url = await taught_links.approved_url(conn, probe.ruc_emisor, probe.link_version)
+        if url is not None:
+            await outbox.add(
+                conn,
+                "github",
+                repo,
+                {
+                    "op": "probe_report",
+                    "fingerprint": gap_fingerprint,
+                    "url": without_session(url),
+                    "report": probe.report,
+                },
+            )
+
+
+async def _done_probe(conn: AsyncConnection[Any], sighting: GapSighting) -> portal_probes.PortalProbe | None:
+    """Return the finished probe of a PORTAL_MISSING sighting's issuer, or None (D193)."""
+    if sighting.kind != "PORTAL_MISSING":
+        return None
+    probe = await portal_probes.get(conn, int(sighting.parts[0]))
+    return probe if probe is not None and probe.state == "done" else None
 
 
 async def _issue_queued(conn: AsyncConnection[Any], gap_fingerprint: str) -> bool:

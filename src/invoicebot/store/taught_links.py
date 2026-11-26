@@ -23,6 +23,7 @@ class TaughtLink:
     url: str
     profile_id: str
     state: str
+    version: int = 1
 
 
 async def exists(conn: AsyncConnection[Any], ruc_emisor: int) -> bool:
@@ -40,13 +41,23 @@ async def exists(conn: AsyncConnection[Any], ruc_emisor: int) -> bool:
 async def get(conn: AsyncConnection[Any], ruc_emisor: int) -> TaughtLink | None:
     """Return the issuer's taught link in any state, or None (BR-S06); does not commit."""
     cur = await conn.execute(
-        "SELECT ruc_emisor, url, profile_id, state FROM taught_links WHERE ruc_emisor = %s",
+        "SELECT ruc_emisor, url, profile_id, state, version FROM taught_links WHERE ruc_emisor = %s",
         (ruc_emisor,),
     )
     row = await cur.fetchone()
     if row is None:
         return None
-    return TaughtLink(ruc_emisor=row[0], url=row[1], profile_id=row[2], state=row[3])
+    return TaughtLink(ruc_emisor=row[0], url=row[1], profile_id=row[2], state=row[3], version=row[4])
+
+
+async def approved_url(conn: AsyncConnection[Any], ruc_emisor: int, version: int) -> str | None:
+    """Return the issuer's URL when the link at ``version`` is approved, else None (D193); does not commit."""
+    cur = await conn.execute(
+        "SELECT url FROM taught_links WHERE ruc_emisor = %s AND version = %s AND state = 'approved'",
+        (ruc_emisor, version),
+    )
+    row = await cur.fetchone()
+    return None if row is None else str(row[0])
 
 
 async def approved_hosts(conn: AsyncConnection[Any]) -> frozenset[str]:
@@ -122,4 +133,4 @@ async def decide(
         """,
         (state, approved, ruc_emisor),
     )
-    return TaughtLink(ruc_emisor=ruc_emisor, url=row[0], profile_id=row[1], state=state)
+    return TaughtLink(ruc_emisor=ruc_emisor, url=row[0], profile_id=row[1], state=state, version=version)

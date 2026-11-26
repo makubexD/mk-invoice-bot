@@ -1,8 +1,10 @@
-"""Which of a few guessed portal addresses answers or is busy (R-5.10, D192).
+"""Which of a few guessed portal addresses answers or is busy (R-5.10, D192, D193).
 
 The caller passes a client whose transport is :class:`invoicebot.net.http.GuardedTransport`, so
 every request is refused or pinned by the shared guard. A redirect is followed one checked hop at
-a time; only the status decides, and no response body is ever read.
+a time; only the status decides, and no response body is ever read. Once the host the strip was
+read on gives any status, the candidates on other hosts are not tried, so a look-alike site that
+answers is never offered in its place (D193).
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import httpx
 
@@ -54,18 +56,26 @@ class _Outcome(StrEnum):
 
 
 async def first_answering(http: httpx.AsyncClient, urls: Sequence[str]) -> Probed | None:
-    """Return the first of ``urls`` that answers or is busy, or None (R-5.10, D192).
+    """Return the first of ``urls`` that answers or is busy, or None (R-5.10, D192, D193).
 
     Candidates are tried one at a time, each within ``PROBE_TIMEOUT_S``; the whole probe stops
     at ``PROBE_TOTAL_S``. The URL returned is the one given, not where it redirects. One INFO
-    record reports the outcome and a reason for every candidate started.
+    record reports the outcome and a reason for every candidate started. The first URL's host
+    is the host as read: once any URL of that host gives an HTTP status (a redirect included),
+    later candidates on another host are skipped, with no reason and no request (D193).
     """
     reasons: list[str] = []
+    read_host = _host(urls[0]) if urls else None
+    read_host_answered = False
     try:
         async with asyncio.timeout(PROBE_TOTAL_S):
             for url in urls:
-                outcome, reason = await _probe(http, url)
+                if read_host_answered and _host(url) != read_host:
+                    continue
+                statuses: list[int] = []
+                outcome, reason = await _probe(http, url, statuses)
                 reasons.append(reason)
+                read_host_answered = read_host_answered or (_host(url) == read_host and bool(statuses))
                 if outcome is not _Outcome.NONE:
                     _log_probe(outcome, reasons)
                     return Probed(url, busy=outcome is _Outcome.BUSY)
@@ -75,17 +85,26 @@ async def first_answering(http: httpx.AsyncClient, urls: Sequence[str]) -> Probe
     return None
 
 
-async def _probe(http: httpx.AsyncClient, url: str) -> tuple[_Outcome, str]:
-    """Return how ``url`` ended within its own deadline, and why (R-5.10, D192)."""
+def _host(url: str) -> str | None:
+    """Return the host ``url`` names, for an exact comparison (D193)."""
+    return urlsplit(url).hostname
+
+
+async def _probe(http: httpx.AsyncClient, url: str, statuses: list[int]) -> tuple[_Outcome, str]:
+    """Return how ``url`` ended within its own deadline, and why (R-5.10, D192, D193).
+
+    Every status that came back, a redirect's included, is appended to ``statuses`` before
+    ``_follow`` could fail, so a timeout past it still counts the host as answered (D193).
+    """
     try:
         async with asyncio.timeout(PROBE_TIMEOUT_S):
-            return await _follow(http, url)
+            return await _follow(http, url, statuses)
     except TimeoutError:
         return _Outcome.NONE, "TimeoutError"
 
 
-async def _follow(http: httpx.AsyncClient, url: str) -> tuple[_Outcome, str]:
-    """Return how ``url`` or the last hop it redirects to ended, and why (R-5.10, D192)."""
+async def _follow(http: httpx.AsyncClient, url: str, statuses: list[int]) -> tuple[_Outcome, str]:
+    """Return how ``url`` or the last hop it redirects to ended, and why (R-5.10, D192, D193)."""
     current = url
     redirects = 0
     while True:
@@ -98,6 +117,7 @@ async def _follow(http: httpx.AsyncClient, url: str) -> tuple[_Outcome, str]:
             return _Outcome.BUSY, type(err).__name__
         except _NO_ANSWER_ERRORS as err:
             return _Outcome.NONE, type(err).__name__
+        statuses.append(response.status_code)
         await response.aclose()
         location = _redirect_location(response)
         if location is None:
