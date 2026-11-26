@@ -224,6 +224,18 @@ async def test_batch_accepts_prepared_and_rejects_unknown_states(
             await conn.execute(INSERT_BATCH, ("file-b", "bogus"))
 
 
+async def test_batch_accepts_review_and_rejects_paused(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: a batch accepts review and still rejects a state outside the check."""
+    async with db_pool.connection() as conn:
+        await conn.execute(INSERT_BATCH, ("file-b", "review"))
+
+    with pytest.raises(CheckViolation):
+        async with db_pool.connection() as conn:
+            await conn.execute(INSERT_BATCH, ("file-b", "paused"))
+
+
 async def test_file_accepts_eml_and_manifest_and_rejects_unknown_kinds(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

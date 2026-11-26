@@ -24,6 +24,7 @@ from invoicebot.config.models import (
     GapsGithub,
     GoogleDriveSink,
     GoogleSheetsSink,
+    MailerSink,
     Microsoft,
     OneDriveFolderSink,
     Padron,
@@ -637,6 +638,30 @@ def test_mailer_sink_rejects_bad_modes_and_recipients(
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     with pytest.raises(ValidationError, match=match):
+        load_config(path)
+
+
+@pytest.mark.parametrize(("send", "expected"), [(None, "auto"), ("review", "review")])
+def test_mailer_send_setting_loads(tmp_path: Path, send: str | None, expected: str) -> None:
+    """D194: a mailer without ``send`` sends at once, and ``review`` holds each mail for the owner."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    if send is not None:
+        document["flows"]["work_microsoft"]["sinks"][2]["send"] = send
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    sink = load_config(path).flows["work_microsoft"].sinks[2]
+
+    assert isinstance(sink, MailerSink)
+    assert sink.send == expected
+
+
+def test_mailer_send_unknown_value_fails(tmp_path: Path) -> None:
+    """D194: ``send`` is a closed set, so a value outside it fails at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][2]["send"] = "later"
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="send"):
         load_config(path)
 
 
