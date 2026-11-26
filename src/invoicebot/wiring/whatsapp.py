@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from pathlib import Path
 
 import httpx
 
@@ -25,7 +26,6 @@ from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.db import Pool
 from invoicebot.wiring.channels import (
     SENDER_HASH_KEY,
-    ChannelBuilder,
     ChannelWiring,
     alert_channel_token,
     channel_secrets,
@@ -39,7 +39,13 @@ WHATSAPP_SECRETS = frozenset({"whatsapp_token", "whatsapp_app_secret", "whatsapp
 
 
 class WhatsAppBuilder:
-    """Builds the WhatsApp channel, or ``None`` while its config or secrets are missing."""
+    """Builds the WhatsApp channel, or ``None`` while its config or secrets are missing.
+
+    It is bound to the process's data directory, where the transport reads documents (D194).
+    """
+
+    def __init__(self, data_dir: Path) -> None:
+        self._data_dir = data_dir
 
     def configured(self, cfg: Config) -> bool:
         """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
@@ -66,7 +72,7 @@ class WhatsAppBuilder:
         )
         return ChannelWiring(
             name=WHATSAPP_ADAPTER,
-            transport=_transport(cfg, channel, client, intake_deps.pool),
+            transport=_transport(cfg, channel, client, intake_deps.pool, self._data_dir),
             media_source=WhatsAppMediaSource(client),
             router=make_router(_webhook_deps(cfg, secrets, shared, intake_deps)),
         )
@@ -82,19 +88,17 @@ class WhatsAppBuilder:
         return None
 
 
-#: The builder ``app.py`` registers in its channel tuple (D174).
-whatsapp_wiring: ChannelBuilder = WhatsAppBuilder()
-
-
-def _transport(cfg: Config, channel: WhatsAppChannel, client: WhatsAppClient, pool: Pool) -> Transport:
+def _transport(
+    cfg: Config, channel: WhatsAppChannel, client: WhatsAppClient, pool: Pool, data_dir: Path
+) -> Transport:
     """Return the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4)."""
     numbers = {name: profile.whatsapp for name, profile in cfg.profiles.items() if profile.whatsapp}
     return make_transport(
         client,
         pool,
         numbers=numbers,
-        templates=channel.templates,
-        language=channel.template_language,
+        data_dir=data_dir,
+        channel=channel,
         on_token_rejected=partial(alert_channel_token, pool, cfg, "WhatsApp"),
     )
 

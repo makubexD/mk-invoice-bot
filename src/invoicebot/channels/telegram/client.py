@@ -100,6 +100,21 @@ def _int_field(value: object) -> int | None:
     return None
 
 
+def _message_ids(result: object, method: str) -> tuple[int, int]:
+    """Return the ``(chat id, message id)`` of a send result, or raise for a bad one.
+
+    The message went out, so a bad result must not read as ``NOT_SENT`` and invite a
+    duplicate retry. The error names ``method`` but never the token (R-9.16).
+    """
+    if isinstance(result, dict):
+        chat = result.get("chat")
+        message_id = _int_field(result.get("message_id"))
+        chat_id = _int_field(chat.get("id")) if isinstance(chat, dict) else None
+        if chat_id is not None and message_id is not None:
+            return chat_id, message_id
+    raise TelegramError(status=OK_STATUS, message=f"{method} result has no chat id or message id")
+
+
 def _retry_after(body: dict[str, Any]) -> int | None:
     """Read ``parameters.retry_after`` from an error body, when it is a positive int."""
     parameters = body.get("parameters")
@@ -172,8 +187,8 @@ class TelegramClient:
         """Never show the token (R-9.16)."""
         return "TelegramClient()"
 
-    async def call(self, method: str, payload: dict[str, Any]) -> object:
-        """POST ``payload`` to a Bot API method and return its ``result``.
+    async def _post(self, method: str, **kwargs: Any) -> object:
+        """POST to a Bot API method and return its ``result``.
 
         Raises ``TelegramError`` when the answer is not ``ok: true``. A transport
         failure becomes ``TelegramError(status=NOT_SENT_STATUS)`` naming only the
@@ -182,24 +197,31 @@ class TelegramClient:
         url = f"{API_BASE_URL}/bot{self._token}/{method}"
         answer: httpx.Response | TelegramError
         try:
-            answer = await self._http.post(url, json=payload, timeout=REQUEST_TIMEOUT_SECONDS)
+            answer = await self._http.post(url, timeout=REQUEST_TIMEOUT_SECONDS, **kwargs)
         except httpx.HTTPError as exc:
             answer = TelegramError(status=NOT_SENT_STATUS, message=type(exc).__name__)
         if isinstance(answer, TelegramError):
             raise answer
         return _result_of(answer)
 
+    async def call(self, method: str, payload: dict[str, Any]) -> object:
+        """POST ``payload`` as JSON to a Bot API method and return its ``result`` (R-9.16)."""
+        return await self._post(method, json=payload)
+
     async def send_message(self, payload: dict[str, Any]) -> tuple[int, int]:
         """Send a message and return its ``(chat id, message id)`` (R-1.7)."""
-        result = await self.call("sendMessage", payload)
-        if isinstance(result, dict):
-            chat = result.get("chat")
-            message_id = _int_field(result.get("message_id"))
-            chat_id = _int_field(chat.get("id")) if isinstance(chat, dict) else None
-            if chat_id is not None and message_id is not None:
-                return chat_id, message_id
-        # The message went out, so this must not read as NOT_SENT and invite a duplicate retry.
-        raise TelegramError(status=OK_STATUS, message="sendMessage result has no chat id or message id")
+        return _message_ids(await self.call("sendMessage", payload), "sendMessage")
+
+    async def send_document(
+        self, fields: dict[str, Any], filename: str, data: bytes, mime: str
+    ) -> tuple[int, int]:
+        """Send a document as multipart and return its ``(chat id, message id)`` (D194)."""
+        result = await self._post(
+            "sendDocument",
+            data={key: str(value) for key, value in fields.items()},
+            files={"document": (filename, data, mime)},
+        )
+        return _message_ids(result, "sendDocument")
 
     async def answer_callback_query(self, callback_query_id: str) -> None:
         """Acknowledge a button press so the client stops showing it as pending (D177)."""

@@ -253,3 +253,19 @@ roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each st
 8. **Rotate the token.** In BotFather: `/revoke`. Store the new token (§5), **reload**, and run step 7 again.
 9. **Lost owning account.** Create a new bot (steps 2–7) and tell every sender the new username. The old bot is no
    longer reachable.
+
+## 12. Switch a flow's mail between review and auto (D194)
+
+A flow's mailer sink has `send: review` or `send: auto` (the default). With `review`, `deliver` files the folder and
+the Excel as usual, then posts the attachments as documents and BR-D19 with the mail's To, Cc, subject and body.
+Nothing is sent until the owner taps **[Enviar]**; **[Cancelar]** only holds the mail, and the invoice stays filed. A
+held mail has no reminder and no timeout; `/estado` shows it. With `auto`, the mail goes out at once, as before.
+
+1. **Switch.** Set `send: review` or `send: auto` under the flow's `kind: mailer` sink in the live config, then
+   **reload**. The change applies to the next delivery; a mail already waiting for review keeps waiting.
+2. **Review a batch prepared earlier.** A flow B invoice that is `BATCHED` with a `prepared` batch, no laptop job and
+   a flow now on `review` (for example a dry_run draft written before the switch) goes through review with
+   `/revisar <n>`, sent by an admin. The bot answers at once, then posts the review as in step 1. Anything else
+   answers BR-D22. `/revisar` is in the admin's Telegram menu only after `invoicebot telegram commands` runs again
+   (§11) once the new image is live.
+3. **Going back to `auto`** does not send a mail that is waiting: tap [Enviar] on it first, or it keeps waiting.

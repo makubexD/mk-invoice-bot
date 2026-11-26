@@ -86,7 +86,8 @@ class IntakeRoles:
 
     ``admins`` holds the profile ids a command may reach another profile's invoice for,
     ``payment_flow`` is the flow whose payments a command may record (R-7.12),
-    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109), and
+    ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook`` (D109),
+    ``review_flows`` those whose mailer is ``send: review`` (D194), and
     ``teach`` is the profiles and resolver a /portal or BR-F02 answer teaches with,
     None when ``gaps.teach_via_chat`` is off (R-11.4), and ``reprocess_min_interval_s``
     is the least time between two fetch rounds ``/reprocesar`` may start, 0 for no
@@ -98,6 +99,7 @@ class IntakeRoles:
     admins: frozenset[str] = frozenset()
     payment_flow: PaymentFlow | None = None
     laptop_flows: frozenset[str] = frozenset()
+    review_flows: frozenset[str] = frozenset()
     teach: TeachSetup | None = None
 
 
@@ -285,6 +287,7 @@ def _command_context(roles: IntakeRoles, timezone: str) -> CommandContext:
         timezone=timezone,
         payment_flow=roles.payment_flow,
         teach=roles.teach,
+        review_flows=roles.review_flows,
         reprocess_min_interval_s=roles.reprocess_min_interval_s,
     )
 

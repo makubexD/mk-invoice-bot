@@ -1,4 +1,4 @@
-"""Deliver Telegram outbox rows as plain text with an inline keyboard (D180, R-1.10).
+"""Deliver Telegram outbox rows as plain text with an inline keyboard, or as a document (D180, D194, R-1.10).
 
 Telegram has no message window and no templates, so a row goes out as plain
 text with no ``parse_mode`` and the row's template is ignored (D180). Buttons
@@ -13,12 +13,15 @@ carried no ids, the row is delivered without one (D102).
 
 from __future__ import annotations
 
+import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Document, Link, OutboundMessage
+from invoicebot.channels.documents import read_document
 from invoicebot.channels.telegram.client import OK_STATUS, TelegramClient, TelegramError
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.queue.retry import MAX_BACKOFF_MINUTES, RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
@@ -27,6 +30,10 @@ logger = logging.getLogger(__name__)
 
 #: Telegram's sendMessage text cap in UTF-16 code units (D180).
 TEXT_MAX_CHARS = 4096
+#: Telegram's sendDocument caption cap in UTF-16 code units (D194).
+CAPTION_MAX_CHARS = 1024
+#: Telegram's sendDocument cap in bytes (D194).
+DOCUMENT_MAX_BYTES = 50 * 1024 * 1024
 #: Telegram's inline button callback_data cap in UTF-8 bytes (D180).
 CALLBACK_DATA_MAX_BYTES = 64
 #: A rejected bot token: Telegram answers 401 (BR-O03).
@@ -41,20 +48,26 @@ def make_transport(
     client: TelegramClient,
     *,
     user_ids: Mapping[str, int],
+    data_dir: Path,
     on_token_rejected: Callable[[], Awaitable[None]],
 ) -> Transport:
     """Build the outbox transport that delivers one Telegram message per row (D180).
 
     ``row.to`` is a profile id, resolved to that profile's Telegram user id
-    through ``user_ids``. A rejected token awaits ``on_token_rejected`` so the
-    owner is alerted, then reschedules the row instead of failing it (BR-O03).
+    through ``user_ids``. A document is read from under ``data_dir`` (D194). A
+    rejected token awaits ``on_token_rejected`` so the owner is alerted, then
+    reschedules the row instead of failing it (BR-O03).
     """
 
     async def transport(row: OutboxRow) -> str | None:
         msg = OutboundMessage.model_validate(row.payload)
-        payload = _payload(msg, _chat_id(row, user_ids))
+        chat_id = _chat_id(row, user_ids)
+        document = msg.document
         try:
-            chat_id, message_id = await client.send_message(payload)
+            if document is None:
+                ids = await client.send_message(_payload(msg, chat_id))
+            else:
+                ids = await _send_document(client, msg, chat_id, document, data_dir)
         except TelegramError as exc:
             if exc.status == OK_STATUS:
                 logger.warning("outbox row %d was delivered without a channel message id", row.id)
@@ -63,9 +76,35 @@ def make_transport(
             if later is not None:
                 raise later from exc
             raise
-        return f"{chat_id}:{message_id}"
+        return f"{ids[0]}:{ids[1]}"
 
     return transport
+
+
+async def _send_document(
+    client: TelegramClient,
+    msg: OutboundMessage,
+    chat_id: int,
+    document: Document,
+    data_dir: Path,
+) -> tuple[int, int]:
+    """Send ``msg``'s document, refusing before any request what Telegram would reject (D194)."""
+    fields, data = await _document_request(msg, chat_id, document, data_dir)
+    return await client.send_document(fields, document.filename, data, document.mime)
+
+
+async def _document_request(
+    msg: OutboundMessage, chat_id: int, document: Document, data_dir: Path
+) -> tuple[dict[str, Any], bytes]:
+    """Build the sendDocument fields and read the file, refusing an unsendable one (D194)."""
+    if _text_length(msg.text) > CAPTION_MAX_CHARS:
+        raise PermanentSendError(f"Telegram caption is over {CAPTION_MAX_CHARS} UTF-16 code units")
+    data = await read_document(document, data_dir, DOCUMENT_MAX_BYTES)
+    fields: dict[str, Any] = {"chat_id": str(chat_id), "caption": msg.text}
+    keyboard = _keyboard(msg.buttons) + _link_rows(msg.links)
+    if keyboard:
+        fields["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
+    return fields, data
 
 
 async def _send_later_for(
@@ -107,8 +146,9 @@ def _payload(msg: OutboundMessage, chat_id: int) -> dict[str, Any]:
     if _text_length(msg.text) > TEXT_MAX_CHARS:
         raise PermanentSendError(f"Telegram text is over {TEXT_MAX_CHARS} UTF-16 code units")
     payload: dict[str, Any] = {"chat_id": chat_id, "text": msg.text}
-    if msg.buttons:
-        payload["reply_markup"] = {"inline_keyboard": _keyboard(msg.buttons)}
+    keyboard = _keyboard(msg.buttons) + _link_rows(msg.links)
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
     return payload
 
 
@@ -120,3 +160,8 @@ def _keyboard(buttons: list[Button]) -> list[list[dict[str, str]]]:
             raise PermanentSendError(f"Telegram callback data is over {CALLBACK_DATA_MAX_BYTES} bytes")
         rows.append([{"text": button.title, "callback_data": button.id}])
     return rows
+
+
+def _link_rows(links: list[Link]) -> list[list[dict[str, str]]]:
+    """Lay each link out as one URL button row under the reply buttons (D194)."""
+    return [[{"text": link.title, "url": link.url}] for link in links]

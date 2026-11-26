@@ -7,15 +7,18 @@ import json
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Document, Link, OutboundMessage
 from invoicebot.channels.telegram.client import TelegramClient, TelegramError
 from invoicebot.channels.telegram.transport import (
     CALLBACK_DATA_MAX_BYTES,
+    CAPTION_MAX_CHARS,
+    DOCUMENT_MAX_BYTES,
     TEXT_MAX_CHARS,
     make_transport,
 )
@@ -28,6 +31,8 @@ CHAT_ID = 999001
 MESSAGE_ID = 42
 # Split so the scanner does not read the synthetic value as a committed credential.
 TOKEN = "123456" + ":ABC-fake-token"
+#: The data directory of tests that never send a document (D194).
+NO_DATA_DIR = Path("/nonexistent-data-dir")
 
 Handler = Callable[[httpx.Request], httpx.Response]
 Payload = dict[str, Any]
@@ -66,6 +71,16 @@ def _row(msg: OutboundMessage, *, to: str = PROFILE, template: str | None = None
     )
 
 
+def _document(path: Path, *, filename: str = "factura.xlsx", size: int | None = None) -> Document:
+    """Build a canonical document pointing at ``path``, with its stat size unless given."""
+    return Document(
+        path=str(path),
+        filename=filename,
+        mime="application/vnd.ms-excel",
+        size=path.stat().st_size if size is None else size,
+    )
+
+
 async def _noop_token_rejected() -> None:
     """Record nothing: the tests that do not inspect a rejected token pass this callback."""
 
@@ -75,13 +90,15 @@ async def _transport(
     handler: Handler = _accept,
     *,
     user_ids: Mapping[str, int] | None = None,
+    data_dir: Path = NO_DATA_DIR,
     on_token_rejected: Callable[[], Awaitable[None]] = _noop_token_rejected,
 ) -> AsyncIterator[tuple[Transport, list[Payload]]]:
     """Yield a transport plus the payloads it sends, answered through ``handler``."""
     sent: list[Payload] = []
 
     def recording(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content))
+        if request.headers.get("content-type", "").startswith("application/json"):
+            sent.append(json.loads(request.content))
         return handler(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as http:
@@ -90,6 +107,7 @@ async def _transport(
             make_transport(
                 client,
                 user_ids={PROFILE: USER_ID} if user_ids is None else user_ids,
+                data_dir=data_dir,
                 on_token_rejected=on_token_rejected,
             ),
             sent,
@@ -123,6 +141,43 @@ async def test_three_buttons_become_three_one_button_rows_in_order() -> None:
             [{"text": "Notas", "callback_data": "1:pick:2"}],
         ]
     }
+
+
+async def test_a_button_and_a_link_give_the_callback_row_then_the_url_row() -> None:
+    """D194: a message with one button and one link shows the button first, then the link as a URL button."""
+    msg = _message(
+        text="📧 Revisa el correo",
+        buttons=[Button(id="1:send", title="Enviar")],
+        links=[Link(title="📂 Abrir carpeta", url="https://x.example/f")],
+    )
+    async with _transport() as (transport, sent):
+        await transport(_row(msg))
+
+    assert sent[0]["reply_markup"] == {
+        "inline_keyboard": [
+            [{"text": "Enviar", "callback_data": "1:send"}],
+            [{"text": "📂 Abrir carpeta", "url": "https://x.example/f"}],
+        ]
+    }
+
+
+async def test_only_a_link_still_gets_reply_markup() -> None:
+    """D194: a message with a link and no buttons carries the link as its only URL button row."""
+    msg = _message(links=[Link(title="📂 Abrir carpeta", url="https://x.example/f")])
+    async with _transport() as (transport, sent):
+        await transport(_row(msg))
+
+    assert sent[0]["reply_markup"]["inline_keyboard"] == [
+        [{"text": "📂 Abrir carpeta", "url": "https://x.example/f"}]
+    ]
+
+
+async def test_no_links_and_no_buttons_send_no_reply_markup() -> None:
+    """D194: a message with neither links nor buttons goes out without reply_markup, as before."""
+    async with _transport() as (transport, sent):
+        await transport(_row(_message()))
+
+    assert "reply_markup" not in sent[0]
 
 
 async def test_the_returned_id_is_the_chat_and_message_ids() -> None:
@@ -309,3 +364,150 @@ async def test_a_server_error_is_reraised_for_the_normal_retry() -> None:
     async with _transport(handler) as (transport, _sent):
         with pytest.raises(TelegramError):
             await transport(_row(_message()))
+
+
+async def test_a_document_row_posts_send_document_with_the_file_and_caption(
+    tmp_path: Path,
+) -> None:
+    """D194: a row with a document posts multipart sendDocument with its name, bytes and caption."""
+    path = tmp_path / "factura.xlsx"
+    path.write_bytes(b"xlsx-bytes")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        assert await transport(_row(_message(text="Adjunto", document=_document(path)))) == (
+            f"{CHAT_ID}:{MESSAGE_ID}"
+        )
+
+    request = requests[0]
+    assert request.url.path == f"/bot{TOKEN}/sendDocument"
+    assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+    body = request.content
+    assert b'name="chat_id"' in body
+    assert str(USER_ID).encode() in body
+    assert b'name="caption"' in body
+    assert b"Adjunto" in body
+    assert b'name="document"; filename="factura.xlsx"' in body
+    assert b"xlsx-bytes" in body
+
+
+async def test_a_document_row_carries_its_buttons_in_reply_markup(tmp_path: Path) -> None:
+    """D194: a document's buttons and links travel as the same reply_markup JSON a text row uses."""
+    path = tmp_path / "factura.xlsx"
+    path.write_bytes(b"xlsx-bytes")
+    msg = _message(
+        document=_document(path),
+        buttons=[Button(id="1:send", title="Enviar")],
+        links=[Link(title="📂 Abrir carpeta", url="https://x.example/f")],
+    )
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        await transport(_row(msg))
+
+    body = requests[0].content
+    assert b'name="reply_markup"' in body
+    expected = {
+        "inline_keyboard": [
+            [{"text": "Enviar", "callback_data": "1:send"}],
+            [{"text": "📂 Abrir carpeta", "url": "https://x.example/f"}],
+        ]
+    }
+    assert json.dumps(expected).encode() in body
+
+
+async def test_a_document_over_the_cap_is_permanent_and_sends_nothing(tmp_path: Path) -> None:
+    """D194: a file over 50 MB by stat size is a PermanentSendError and makes no request."""
+    path = tmp_path / "grande.xlsx"
+    with path.open("wb") as file:
+        file.truncate(DOCUMENT_MAX_BYTES + 1)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(document=_document(path))))
+
+    assert requests == []
+
+
+async def test_a_missing_document_is_permanent_and_sends_nothing(tmp_path: Path) -> None:
+    """D194: a document path that does not exist is a PermanentSendError and makes no request."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(document=_document(tmp_path / "falta.xlsx", size=1))))
+
+    assert requests == []
+
+
+async def test_a_caption_over_the_cap_is_permanent_and_sends_nothing(tmp_path: Path) -> None:
+    """D194: a caption over 1024 UTF-16 code units is a PermanentSendError and makes no request."""
+    path = tmp_path / "factura.xlsx"
+    path.write_bytes(b"xlsx-bytes")
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    caption = "😀" * (CAPTION_MAX_CHARS // 2 + 1)
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        with pytest.raises(PermanentSendError):
+            await transport(_row(_message(text=caption, document=_document(path))))
+
+    assert requests == []
+
+
+async def test_a_document_rate_limited_reschedules_by_the_retry_after(tmp_path: Path) -> None:
+    """D194: a 429 on sendDocument maps to SendLater exactly as it does for a text row."""
+    path = tmp_path / "factura.xlsx"
+    path.write_bytes(b"xlsx-bytes")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            429,
+            json={
+                "ok": False,
+                "error_code": 429,
+                "description": "Too Many Requests: retry after 3",
+                "parameters": {"retry_after": 3},
+            },
+        )
+
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
+        with pytest.raises(SendLater) as raised:
+            await transport(_row(_message(document=_document(path))))
+
+    assert raised.value.delay == timedelta(seconds=3)
+    assert raised.value.reason == "telegram_rate_limited"
+
+
+async def test_a_text_row_posts_to_send_message() -> None:
+    """D194: a row without a document still posts sendMessage."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _accept(request)
+
+    async with _transport(handler) as (transport, _sent):
+        await transport(_row(_message()))
+
+    assert requests[0].url.path == f"/bot{TOKEN}/sendMessage"

@@ -149,6 +149,24 @@ async def _outbox(
     return [str(row[0]) for row in rows]
 
 
+async def _outbox_links(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, rule_id: str
+) -> list[Any]:
+    """Return the links of the invoice's queued messages with ``rule_id`` (D194)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            """
+            SELECT payload_json->'links'
+            FROM outbox
+            WHERE invoice_id = %s AND payload_json->>'rule_id' = %s
+            ORDER BY id
+            """,
+            (invoice_id, rule_id),
+        )
+        rows = await cur.fetchall()
+    return [row[0] for row in rows]
+
+
 async def _fetch_attempts(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> int:
     """Return how many fetch attempts the invoice recorded (R-5.7)."""
     async with pool.connection() as conn:
@@ -286,7 +304,7 @@ async def test_a_dni_boleta_routes_to_its_sheet_and_ends_done_with_br_d18(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
 ) -> None:
-    """BR-D18: a QR boleta to the owner's DNI routes by BR-R10, skips fetching and ends DONE."""
+    """D194, BR-D18: a QR boleta to the owner's DNI routes by BR-R10, skips fetching and links its row."""
     cfg, profile_id = _config()
     today = datetime.now(ZoneInfo(cfg.owner.timezone)).date()
     numero = "81001"
@@ -329,7 +347,10 @@ async def test_a_dni_boleta_routes_to_its_sheet_and_ends_done_with_br_d18(
     assert completion[0].startswith(f"✅ Registrado {SERIE_BOLETA}-{numero}")
     assert f"de RUC {ISSUER_RUC}" in completion[0]
     assert "None" not in completion[0]
-    assert f"Fila: {row_link}" in completion[0]
+    assert "Fila:" not in completion[0]
+    assert await _outbox_links(db_pool, invoice_id, "BR-D18") == [
+        [{"title": "📄 Abrir fila", "url": row_link}]
+    ]
 
 
 async def test_the_same_dni_boleta_sent_twice_is_cancelled_as_a_duplicate(

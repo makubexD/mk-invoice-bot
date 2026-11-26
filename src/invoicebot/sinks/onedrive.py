@@ -354,6 +354,33 @@ class GraphDrive:
             raise FolderExists(409)
         raise_graph_error(response, self._account)
 
+    async def web_url(self, path: str) -> str:
+        """Return the browser link of the item at ``path``, as Graph gives it (D194).
+
+        The link is the item's own ``webUrl`` and never a sharing link, so reading
+        it creates no permission. A 404 means the item is missing; an answer
+        without an HTTPS ``webUrl`` raises :class:`GraphError`.
+        """
+        encoded = _encode_path(path)
+        token = await self._tokens.token()
+        response = await self._client.get(
+            f"{GRAPH_BASE_URL}/me/drive/root:{encoded}",
+            params={"$select": "webUrl"},
+            headers=auth_headers(token),
+            timeout=self._timeout_s,
+        )
+        if response.status_code == 404:
+            raise FolderMissing(404)
+        raise_graph_error(response, self._account)
+        body = _json_body(response)
+        url = body.get("webUrl") if isinstance(body, dict) else None
+        if not isinstance(url, str):
+            raise GraphError(response.status_code)
+        parts = urllib.parse.urlparse(url)
+        if parts.scheme != "https" or not parts.netloc:
+            raise GraphError(response.status_code)
+        return url
+
     async def delete(self, path: str) -> None:
         """Delete the item at ``path`` (R-7.14).
 

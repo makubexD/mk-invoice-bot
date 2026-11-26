@@ -12,7 +12,7 @@ import logging
 import os
 import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -91,6 +91,8 @@ class ConsoleReply:
     status: str
     text: str
     buttons: list[Button]
+    links: list[tuple[str, str]] = field(default_factory=list)
+    document: str | None = None
 
 
 async def rehearse_send(
@@ -190,6 +192,8 @@ def _console_reply(row: OutboxRow) -> ConsoleReply:
         status=row.state,
         text=message.text,
         buttons=message.buttons,
+        links=[(link.title, link.url) for link in message.links],
+        document=message.document.filename if message.document else None,
     )
 
 
@@ -197,15 +201,21 @@ def format_replies(replies: Sequence[ConsoleReply], after_id: int) -> list[str]:
     """Render replies for the terminal and the cursor for the next call (D165).
 
     Each reply shows as ``#<id> <rule id or -> <status>``, then its text lines, then
-    one ``[<id>] <title>`` line per button. The last line asks for the next call after
-    the newest reply, or after ``after_id`` when there are none. Text lines are
-    cleaned per line, so a newline between them stays and no control character from
-    invoice data reaches the terminal (R-12.8).
+    one ``<title>: <url>`` line per link, then ``📎 <filename>`` when it sends a
+    document, then one ``[<id>] <title>`` line per button. The last line asks for the
+    next call after the newest reply, or after ``after_id`` when there are none. Text
+    lines are cleaned per line, so a newline between them stays and no control
+    character from invoice data reaches the terminal (R-12.8).
     """
     lines: list[str] = []
     for reply in replies:
         lines.append(f"#{reply.id} {reply.rule_id or '-'} {reply.status}")
         lines.extend(replace_unsafe_chars(line) for line in reply.text.splitlines())
+        lines.extend(
+            f"{replace_unsafe_chars(title)}: {replace_unsafe_chars(url)}" for title, url in reply.links
+        )
+        if reply.document is not None:
+            lines.append(f"📎 {replace_unsafe_chars(reply.document)}")
         lines.extend(
             f"[{replace_unsafe_chars(button.id)}] {replace_unsafe_chars(button.title)}"
             for button in reply.buttons

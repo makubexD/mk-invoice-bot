@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from functools import partial
+from pathlib import Path
 
 import httpx
 
@@ -29,7 +30,6 @@ from invoicebot.secrets import Secrets, SecretStore
 from invoicebot.store.db import Pool
 from invoicebot.wiring.channels import (
     SENDER_HASH_KEY,
-    ChannelBuilder,
     ChannelWiring,
     alert_channel_token,
     channel_secrets,
@@ -39,7 +39,13 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramBuilder:
-    """Builds the Telegram channel, or ``None`` while its config or secrets are missing."""
+    """Builds the Telegram channel, or ``None`` while its config or secrets are missing.
+
+    It is bound to the process's data directory, where the transport reads documents (D194).
+    """
+
+    def __init__(self, data_dir: Path) -> None:
+        self._data_dir = data_dir
 
     def configured(self, cfg: Config) -> bool:
         """Return whether ``cfg`` enables this channel, whatever its secrets (D183)."""
@@ -65,7 +71,7 @@ class TelegramBuilder:
         client = TelegramClient(http, token=secrets.get("telegram_bot_token"))
         return ChannelWiring(
             name=TELEGRAM_ADAPTER,
-            transport=_transport(cfg, client, intake_deps.pool),
+            transport=_transport(cfg, client, intake_deps.pool, self._data_dir),
             media_source=TelegramMediaSource(client),
             router=make_router(_webhook_deps(cfg, secrets, shared, intake_deps, client)),
         )
@@ -84,11 +90,7 @@ class TelegramBuilder:
         return None
 
 
-#: The builder ``app.py`` registers in its channel tuple (D174).
-telegram_wiring: ChannelBuilder = TelegramBuilder()
-
-
-def _transport(cfg: Config, client: TelegramClient, pool: Pool) -> Transport:
+def _transport(cfg: Config, client: TelegramClient, pool: Pool, data_dir: Path) -> Transport:
     """Return the outbox transport that delivers one Telegram message per row (D180, R-1.10)."""
     user_ids = {
         name: user_id
@@ -98,6 +100,7 @@ def _transport(cfg: Config, client: TelegramClient, pool: Pool) -> Transport:
     return make_transport(
         client,
         user_ids=user_ids,
+        data_dir=data_dir,
         on_token_rejected=partial(alert_channel_token, pool, cfg, "Telegram"),
     )
 

@@ -2,29 +2,34 @@
 
 Free-form messages are only allowed inside the customer service window. When the
 window is closed, or Meta answers that it has just closed, the same text goes
-through an approved template instead (BR-S04). A failure that no retry can fix
-(no number for the recipient, no configured template, a permanent Meta error
-code) raises ``PermanentSendError``, so the outbox kills the row at once. The
-window is read on its own pooled connection, never inside a transaction held
-across the HTTP call.
+through an approved template instead (BR-S04). A message that carries a document
+is uploaded and sent as a document inside the window only: outside it, the row
+fails at once (D194). A failure that no retry can fix (no number for the
+recipient, no configured template, a missing or oversized document, a permanent
+Meta error code) raises ``PermanentSendError``, so the outbox kills the row at
+once. The window is read on its own pooled connection, never inside a
+transaction held across the HTTP call.
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
-from invoicebot.channels.base import OutboundMessage
+from invoicebot.channels.base import Document, OutboundMessage
+from invoicebot.channels.documents import read_document
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError, WindowExpired
 from invoicebot.channels.whatsapp.payloads import (
     BUTTONS_MAX_COUNT,
     buttons_payload,
+    document_payload,
     list_payload,
     template_payload,
     text_payload,
 )
-from invoicebot.config.models import ChannelTemplates
+from invoicebot.config.models import ChannelTemplates, WhatsAppChannel
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.queue.retry import RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
 from invoicebot.rules.messages_es import LIST_BUTTON
@@ -69,6 +74,9 @@ TEMPLATE_PARAM_MAX_CHARS = 1024
 TOKEN_REJECTED_STATUS = 401
 TOKEN_REJECTED_CODE = 190
 
+#: Meta's document cap in bytes (D194).
+DOCUMENT_MAX_BYTES = 100 * 1024 * 1024
+
 
 class TemplateMissing(Exception):
     """The message needs a template, but no configured template covers it (R-1.10)."""
@@ -88,8 +96,8 @@ def make_transport(
     pool: Pool,
     *,
     numbers: Mapping[str, str],
-    templates: ChannelTemplates,
-    language: str,
+    data_dir: Path,
+    channel: WhatsAppChannel,
     on_token_rejected: Callable[[], Awaitable[None]],
 ) -> Transport:
     """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4).
@@ -97,7 +105,8 @@ def make_transport(
     The returned id is Meta's message id, or None when Meta's answer carried
     none, which the outbox stores as the row's ``channel_message_id`` (D102).
     A rejected token awaits ``on_token_rejected`` so the owner is alerted, then
-    reschedules the row instead of failing it (BR-O03).
+    reschedules the row instead of failing it (BR-O03). Templates and their
+    language come from ``channel``; a document is read from under ``data_dir`` (D194).
     """
 
     async def transport(row: OutboxRow) -> str | None:
@@ -106,6 +115,12 @@ def make_transport(
             to = numbers[row.to]
         except KeyError as exc:
             raise PermanentSendError(f"no WhatsApp number for {row.to}") from exc
+        document = msg.document
+        if document is not None:
+            if not await _recipient_window_open(pool, msg, row.to):
+                raise PermanentSendError("document outside the 24-hour window")
+            message_id = await _document_message_id(client, msg, document, to, data_dir, on_token_rejected)
+            return _channel_message_id(row, message_id)
         if await _recipient_window_open(pool, msg, row.to):
             try:
                 message_id = await _send(client, _free_form_payload(to, msg), on_token_rejected)
@@ -113,17 +128,44 @@ def make_transport(
             except WindowExpired:
                 pass
         try:
-            name = _template_name(templates, msg)
+            name = _template_name(channel.templates, msg)
         except TemplateMissing as exc:
             raise PermanentSendError(str(exc)) from exc
         message_id = await _send(
             client,
-            template_payload(to, name, language, [_template_parameter(msg.text)]),
+            template_payload(to, name, channel.template_language, [_template_parameter(msg)]),
             on_token_rejected,
         )
         return _channel_message_id(row, message_id)
 
     return transport
+
+
+async def _document_message_id(
+    client: WhatsAppClient,
+    msg: OutboundMessage,
+    document: Document,
+    to: str,
+    data_dir: Path,
+    on_token_rejected: Callable[[], Awaitable[None]],
+) -> str | None:
+    """Upload ``document`` and send it with the message text as its caption (D194).
+
+    A closed window answered by Meta on the document send is permanent: a
+    document has no template to fall back to.
+    """
+    data = await read_document(document, data_dir, DOCUMENT_MAX_BYTES)
+    media_id = await _deliver(
+        lambda: client.upload_media(data, document.filename, document.mime), on_token_rejected
+    )
+    try:
+        return await _send(
+            client,
+            document_payload(to, media_id, document.filename, _caption(msg)),
+            on_token_rejected,
+        )
+    except WindowExpired as exc:
+        raise PermanentSendError("document outside the 24-hour window") from exc
 
 
 async def _send(
@@ -136,8 +178,20 @@ async def _send(
     A permanent Meta code fails at once; a rejected token alerts and waits for
     the token to be renewed instead.
     """
+    return await _deliver(lambda: client.send(payload), on_token_rejected)
+
+
+async def _deliver[T](
+    call: Callable[[], Awaitable[T]],
+    on_token_rejected: Callable[[], Awaitable[None]],
+) -> T:
+    """Run one Graph call and map its failure to a reschedule or a permanent error (BR-O03, R-11.5).
+
+    Both the upload and the send go through here, so a rejected token alerts and
+    waits in exactly the same way for either call.
+    """
     try:
-        return await client.send(payload)
+        return await call()
     except WhatsAppError as exc:
         if exc.status == TOKEN_REJECTED_STATUS or exc.code == TOKEN_REJECTED_CODE:
             await on_token_rejected()
@@ -166,11 +220,23 @@ async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: st
 
 def _free_form_payload(to: str, msg: OutboundMessage) -> dict[str, Any]:
     """Build the in-window payload: a list past Meta's button cap, reply buttons, else plain text."""
+    text = _caption(msg)
     if len(msg.buttons) > BUTTONS_MAX_COUNT:
-        return list_payload(to, msg.text, LIST_BUTTON, msg.buttons)
+        return list_payload(to, text, LIST_BUTTON, msg.buttons)
     if msg.buttons:
-        return buttons_payload(to, msg.text, msg.buttons)
-    return text_payload(to, msg.text)
+        return buttons_payload(to, text, msg.buttons)
+    return text_payload(to, text)
+
+
+def _caption(msg: OutboundMessage) -> str:
+    """Return the text, then one line per link, for a text body or a document caption (D194)."""
+    links = _link_lines(msg)
+    return f"{msg.text}\n{links}" if links else msg.text
+
+
+def _link_lines(msg: OutboundMessage) -> str:
+    """Return one ``title: url`` line per link, or an empty string when there are none (D194)."""
+    return "\n".join(f"{link.title}: {link.url}" for link in msg.links)
 
 
 def _template_name(templates: ChannelTemplates, msg: OutboundMessage) -> str:
@@ -182,10 +248,16 @@ def _template_name(templates: ChannelTemplates, msg: OutboundMessage) -> str:
     return str(name)
 
 
-def _template_parameter(text: str) -> str:
-    """Fit the message text into one template body parameter on a single line.
+def _template_parameter(msg: OutboundMessage) -> str:
+    """Fit the message text and its link lines into one template body parameter (D194).
 
-    Meta rejects newlines, tabs and runs of more than four spaces, so the text
-    is truncated first and every whitespace run is collapsed to one space.
+    Meta rejects newlines, tabs and runs of more than four spaces, so every
+    whitespace run is collapsed to one space. The link lines are kept whole and
+    only the text is truncated, to the room the links leave.
     """
-    return " ".join(text[:TEMPLATE_PARAM_MAX_CHARS].split())
+    links = " ".join(_link_lines(msg).split())
+    if not links:
+        return " ".join(msg.text[:TEMPLATE_PARAM_MAX_CHARS].split())
+    room = max(TEMPLATE_PARAM_MAX_CHARS - len(links) - 1, 0)
+    text = " ".join(msg.text[:room].split())
+    return f"{text} {links}" if text else links

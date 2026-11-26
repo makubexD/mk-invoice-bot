@@ -15,7 +15,9 @@ transient Graph error during an automatic send propagates and leaves the batch `
 the retry treats it as a crashed send: the batch fails, BR-D03 reports it, and the mail is
 never resent (D89). Before the send (filing, Excel upload) a transient error is simply retried.
 A receipt mode follows the same sending-first order, then leaves the batch ``prepared`` with
-its laptop job id recorded and no message to the sender (R-7.14, D108).
+its laptop job id recorded and no message to the sender (R-7.14, D108). A mailer on
+``send: review`` that the owner has not yet reviewed posts the mail to the chat instead:
+a ``review`` batch, BR-D19 and the attachments as documents, nothing sent (D194).
 
 :func:`make_resend_handler` builds the two handlers BR-D11's buttons enqueue. Both act on
 an invoice that was already delivered, rebuild its delivery with the saved folder and
@@ -39,7 +41,7 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.base import Button
+from invoicebot.channels.base import Button, Document, Link
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -58,9 +60,22 @@ from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
-from invoicebot.pipeline.actions import NOT_ARRIVED_ACTION, SENT_ACTION, send_not_confirmed
+from invoicebot.pipeline.actions import (
+    HOLD_ACTION,
+    NOT_ARRIVED_ACTION,
+    SEND_ACTION,
+    SENT_ACTION,
+    send_not_confirmed,
+)
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
-from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
+from invoicebot.pipeline.outgoing import (
+    Addressee,
+    outbound,
+    queue_admin_alert,
+    queue_document,
+    queue_outbound,
+    safe_links,
+)
 from invoicebot.pipeline.pending_auth import (
     GOOGLE,
     MICROSOFT,
@@ -73,19 +88,33 @@ from invoicebot.pipeline.pending_auth import (
     RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
 )
 from invoicebot.pipeline.questions import retry_button
+from invoicebot.pipeline.review import (
+    DIGEST_KEY,
+    REVIEW_BATCH_STATE,
+    REVIEWED_KEY,
+    RULE_REVIEW,
+    mail_digest,
+    queue_review_documents,
+    remove_review_files,
+    review_text,
+    write_review_files,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_HOLD,
     BUTTON_NOT_ARRIVED,
+    BUTTON_SEND,
     BUTTON_SENT,
     KIND_SUBJECT,
+    LINK_TITLE_FOLDER,
     MESSAGES,
     modes_desc,
 )
-from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, OutgoingMail
+from invoicebot.sinks.base import Attachment, DeliveryContext, Drive, FolderLinks, OutgoingMail
 from invoicebot.sinks.excel_template import TemplateInvalid, build_excel
 from invoicebot.sinks.expr import render
 from invoicebot.sinks.folders import comercio_for
@@ -111,6 +140,7 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    lock_invoice,
     set_state,
 )
 from invoicebot.store.mail_jobs import add_mail_job, waiting_job_age_hours
@@ -150,12 +180,15 @@ LAPTOP_OUTLOOK_MODE = "laptop_outlook"
 #: The flow-data key a laptop resend sets before its upload. ``False`` clears it, because
 #: :func:`merge_flow_data` merges and cannot delete a key (D89).
 RESENDING_KEY = "resending"
+#: The flow-data key of the invoice folder's browser link, saved so a retry reuses it (D194).
+FOLDER_URL_KEY = "folder_url"
 #: The invoice states a resend job acts on: delivered, not still in flight (R-7.8, R-7.14).
 RESEND_STATES = frozenset({DONE, BATCHED})
 
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EML_MIME = "message/rfc822"
 
 
 @dataclass(frozen=True)
@@ -163,13 +196,15 @@ class DeliverContext:
     """The handler's dependencies, shared by every delivery branch.
 
     ``laptop_flows`` names the flows whose mailer lists ``laptop_outlook``; a BR-D11
-    resend offers [Por la laptop] only to an invoice in one of them (D109).
+    resend offers [Por la laptop] only to an invoice in one of them (D109). ``links``
+    reads the invoice folder's browser link for the delivery messages (D194).
     """
 
     pool: Pool
     cfg: Config
     directory: StoreDirectory
     drive: Drive
+    links: FolderLinks
     modes: Mapping[str, MailMode]
     data_dir: Path
     laptop_flows: frozenset[str]
@@ -217,6 +252,7 @@ class _Delivery:
     flow_name: str
     folder: str
     folder_path: str
+    folder_url: str
     seq: int
     mail: OutgoingMail
 
@@ -320,11 +356,31 @@ async def _deliver(
     sinks: _Sinks,
     prepared: _Values,
 ) -> tuple[_Delivery, str]:
-    """Prepare the delivery and hand it to the flow's first mail mode (R-7.7)."""
+    """Prepare the delivery and hand it to the flow's first mail mode (R-7.7).
+
+    A mailer on ``send: review`` posts the mail for review instead, until the owner's
+    [Enviar] has set ``reviewed`` in the flow data and the mail rebuilt now is the mail the
+    owner saw, by its digest (D194). Once the mode's completion has committed, the send, the
+    draft or the laptop job holds the attachments, so the review files are removed, and a
+    reviewed delivery clears ``reviewed`` so the next delivery posts a new review (D194).
+    """
     delivery = await _prepare(context, invoice, sinks, prepared)
+    reviewed = sinks.mailer.send == "review"
+    if reviewed and not _was_reviewed(invoice.flow_data, delivery.mail):
+        await _review(context, delivery, prepared)
+        return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
+    await remove_review_files(context.data_dir, delivery.invoice_id)
+    if reviewed:
+        async with context.pool.connection() as conn, conn.transaction():
+            await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})
     return delivery, mode_name
+
+
+def _was_reviewed(flow_data: Mapping[str, Any], mail: OutgoingMail) -> bool:
+    """Return whether the owner pressed [Enviar] on exactly this mail (D194)."""
+    return flow_data.get(REVIEWED_KEY) is True and flow_data.get(DIGEST_KEY) == mail_digest(mail)
 
 
 async def _resend(
@@ -377,13 +433,15 @@ async def _resend_laptop(
                 conn,
                 invoice.head,
                 invoice.job.invoice_id,
-                RULE_STALE,
-                MESSAGES[RULE_STALE].format(
-                    serie=prepared.values["serie"],
-                    numero=prepared.values["numero"],
-                    hours=hours,
+                _Reply(
+                    RULE_STALE,
+                    MESSAGES[RULE_STALE].format(
+                        serie=prepared.values["serie"],
+                        numero=prepared.values["numero"],
+                        hours=hours,
+                    ),
+                    [],
                 ),
-                [],
             )
             return
         await merge_flow_data(conn, invoice.job.invoice_id, {RESENDING_KEY: True})
@@ -403,9 +461,11 @@ async def _resend_laptop(
 
 
 async def _resend_eml(
-    context: DeliverContext, _invoice: _Invoice, delivery: _Delivery, _prepared: _Values
+    context: DeliverContext, _invoice: _Invoice, delivery: _Delivery, prepared: _Values
 ) -> None:
-    """Rewrite the draft and answer BR-D07 with [Ya lo envié] only when prepared (R-7.8, D109).
+    """Rewrite the draft, queue it as a document, then answer BR-D07 (R-7.8, D109, D194).
+
+    The button is [Ya lo envié] only when prepared.
 
     Rewriting the ``.eml`` is harmless, so this step keeps no marker and changes no
     invoice or batch state; a ``prepared`` batch keeps its button, a ``sent`` one has
@@ -418,10 +478,16 @@ async def _resend_eml(
     if not Path(eml_path).is_relative_to(context.data_dir):
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     text, button = _draft_reply(delivery)
+    size = (await asyncio.to_thread(Path(eml_path).stat)).st_size
+    draft = _draft_document(Path(eml_path), prepared, size)
     async with context.pool.connection() as conn, conn.transaction():
-        prepared = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
+        awaiting = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
+        await _queue_draft(conn, delivery, draft)
         await _notify(
-            conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button] if prepared else []
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            _Reply(RULE_BATCHED, text, [button] if awaiting else [], _folder_links(delivery)),
         )
 
 
@@ -559,11 +625,22 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
             saved=invoice.flow_data,
         ),
     )
+    saved_url = invoice.flow_data.get(FOLDER_URL_KEY)
+    folder_url = (
+        saved_url
+        if isinstance(saved_url, str) and saved_url
+        else await _read_folder_url(context.links, folder.path, invoice.job.invoice_id)
+    )
     async with context.pool.connection() as conn, conn.transaction():
         await merge_flow_data(
             conn,
             invoice.job.invoice_id,
-            {"folder": folder.folder, "seq": folder.seq, "folder_path": folder.path},
+            {
+                "folder": folder.folder,
+                "seq": folder.seq,
+                "folder_path": folder.path,
+                FOLDER_URL_KEY: folder_url,
+            },
         )
     excel = await asyncio.to_thread(build_excel, sinks.excel, prepared.values, prepared.overrides)
     await context.drive.upload(f"{folder.path}/{sinks.excel.output}", excel)
@@ -578,9 +655,27 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         flow_name=invoice.flow_name,
         folder=folder.folder,
         folder_path=folder.path,
+        folder_url=folder_url,
         seq=folder.seq,
         mail=mail,
     )
+
+
+async def _read_folder_url(links: FolderLinks, path: str, invoice_id: int) -> str:
+    """Return the folder's browser link, or an empty one when Graph has no usable link (D194).
+
+    A missing folder or a ``webUrl`` that is absent or not HTTPS is final and only costs the
+    link, so the filed delivery goes on and ``safe_links`` drops the empty URL. A sign-in
+    failure and a transient error still propagate.
+    """
+    try:
+        return await links.web_url(path)
+    except GraphError as error:
+        logger.warning(
+            "the folder link could not be read; the message goes without it",
+            extra={"step": DELIVER_STEP, "invoice_id": invoice_id, "status": error.status},
+        )
+        return ""
 
 
 def _mode(modes: Mapping[str, MailMode], mailer: MailerSink) -> tuple[str, MailMode]:
@@ -597,8 +692,29 @@ def _named_mode(modes: Mapping[str, MailMode], name: str) -> MailMode:
     return mode
 
 
-async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Values, mode: MailMode) -> None:
-    """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1)."""
+def _draft_document(eml: Path, prepared: _Values, size: int) -> Document:
+    """Describe the written draft as the document the chat receives (D194)."""
+    name = f"{prepared.values['serie']}-{prepared.values['numero']}.eml"
+    return Document(path=str(eml.resolve()), filename=name, mime=EML_MIME, size=size)
+
+
+async def _queue_draft(conn: AsyncConnection[Any], delivery: _Delivery, draft: Document) -> None:
+    """Queue the draft before BR-D07, in the caller's transaction, so its buttons come last (D194)."""
+    await queue_document(
+        conn,
+        Addressee(delivery.head.origin_channel, delivery.head.profile_id),
+        draft,
+        caption=draft.filename,
+        invoice_id=delivery.invoice_id,
+        rule_id=RULE_BATCHED,
+    )
+
+
+async def _assisted(context: DeliverContext, delivery: _Delivery, prepared: _Values, mode: MailMode) -> None:
+    """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1).
+
+    The same transaction queues the draft as a document, then BR-D07 with [Ya lo envié] (D194).
+    """
     eml_path = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     if eml_path is None:
         raise RuntimeError("an assisted mail mode returned no .eml path")
@@ -607,6 +723,7 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     data = await _read_bytes(eml)
     text, button = _draft_reply(delivery)
+    draft = _draft_document(eml, prepared, len(data))
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
             return
@@ -624,8 +741,50 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
             ),
         )
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
-        await _notify(conn, delivery.head, delivery.invoice_id, RULE_BATCHED, text, [button])
+        await _queue_draft(conn, delivery, draft)
+        await _notify(
+            conn,
+            delivery.head,
+            delivery.invoice_id,
+            _Reply(RULE_BATCHED, text, [button], _folder_links(delivery)),
+        )
         await _close_fixed_gap(conn, context, delivery.invoice_id)
+
+
+async def _review(context: DeliverContext, delivery: _Delivery, prepared: _Values) -> None:
+    """Post the built mail for the owner to check, sending nothing (D194, D88, D89).
+
+    The attachments are written first; a retry rewrites them, which is harmless. One
+    transaction then opens the ``review`` batch (reusing an earlier ``prepared``,
+    ``failed`` or ``review`` one), moves the invoice to ``BATCHED`` with BR-D19, stores
+    the mail's digest, clears ``reviewed`` and queues the attachments as documents, then
+    BR-D19 with [Enviar], [Cancelar] and the folder link. A retry after that commit finds
+    the invoice ``BATCHED`` and the handler does nothing. A batch left ``sending`` is never
+    posted or sent: it fails with BR-D03 and a reprocess starts over (D89).
+    """
+    invoice_id = delivery.invoice_id
+    documents = await write_review_files(context.data_dir, invoice_id, delivery.mail.attachments)
+    buttons = [
+        Button(id=button_id(invoice_id, SEND_ACTION), title=BUTTON_SEND),
+        Button(id=button_id(invoice_id, HOLD_ACTION), title=BUTTON_HOLD),
+    ]
+    async with context.pool.connection() as conn, conn.transaction():
+        if not await _still_delivering(conn, invoice_id):
+            return
+        if await get_batch_state(conn, invoice_id) == SENDING_BATCH_STATE:
+            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
+            return
+        batch_id = await open_batch(conn, invoice_id, delivery.flow_name, REVIEW_BATCH_STATE)
+        await set_batch_state(conn, batch_id, REVIEW_BATCH_STATE)
+        await merge_flow_data(conn, invoice_id, {DIGEST_KEY: mail_digest(delivery.mail), REVIEWED_KEY: False})
+        await set_state(conn, invoice_id, BATCHED, rule_id=RULE_REVIEW)
+        addressee = Addressee(delivery.head.origin_channel, delivery.head.profile_id)
+        await queue_review_documents(conn, addressee, invoice_id, documents)
+        text = review_text(prepared.values, delivery.mail)
+        await _notify(
+            conn, delivery.head, invoice_id, _Reply(RULE_REVIEW, text, buttons, _folder_links(delivery))
+        )
+        await _close_fixed_gap(conn, context, invoice_id)
 
 
 def _draft_reply(delivery: _Delivery) -> tuple[str, Button]:
@@ -653,12 +812,9 @@ async def _automatic(
     same transaction as that state change.
     Before the send (filing, Excel upload) a transient error is simply retried.
     """
-    async with context.pool.connection() as conn, conn.transaction():
-        if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
-            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
-            return
-        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
-        await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
+    batch_id = await _begin_send(context, delivery, prepared)
+    if batch_id is None:
+        return
 
     try:
         await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
@@ -682,9 +838,12 @@ async def _automatic(
             conn,
             delivery.head,
             delivery.invoice_id,
-            mode.done_rule,
-            MESSAGES[mode.done_rule].format(folder=delivery.folder),
-            _done_buttons(delivery.invoice_id, mode.done_rule),
+            _Reply(
+                mode.done_rule,
+                MESSAGES[mode.done_rule].format(folder=delivery.folder),
+                _done_buttons(delivery.invoice_id, mode.done_rule),
+                _folder_links(delivery),
+            ),
         )
         await _close_fixed_gap(conn, context, delivery.invoice_id)
         photos = await take_photo_paths(conn, delivery.invoice_id)
@@ -709,12 +868,9 @@ async def _handed_off(
     ``BATCHED``; no message is queued, because the receipt completes the batch later
     (R-7.14). The photo stays until the mail is sent.
     """
-    async with context.pool.connection() as conn, conn.transaction():
-        if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
-            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
-            return
-        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
-        await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
+    batch_id = await _begin_send(context, delivery, prepared)
+    if batch_id is None:
+        return
 
     try:
         job_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
@@ -737,6 +893,26 @@ async def _handed_off(
             return
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
         await _close_fixed_gap(conn, context, delivery.invoice_id)
+
+
+async def _begin_send(context: DeliverContext, delivery: _Delivery, prepared: _Values) -> int | None:
+    """Commit the batch as ``sending`` before the external call and return its id (D89).
+
+    The invoice's row lock serializes this check against any other job of the same invoice,
+    such as a leased-out job and the one [Enviar] queued, so only one of them can pass it.
+    Returns None when the invoice left ``DELIVERING`` meanwhile, and when a previous attempt
+    left the batch ``sending``: that one is failed with BR-D03 and never sent again.
+    """
+    async with context.pool.connection() as conn, conn.transaction():
+        await lock_invoice(conn, delivery.invoice_id)
+        if not await _still_delivering(conn, delivery.invoice_id):
+            return None
+        if await get_batch_state(conn, delivery.invoice_id) == SENDING_BATCH_STATE:
+            await _crashed_send(conn, delivery, prepared, context.cfg.profiles)
+            return None
+        batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
+        await set_batch_state(conn, batch_id, SENDING_BATCH_STATE)
+        return batch_id
 
 
 async def _close_fixed_gap(conn: AsyncConnection[Any], context: DeliverContext, invoice_id: int) -> None:
@@ -772,14 +948,17 @@ async def _crashed_send(
         return
     batch_id = await open_batch(conn, delivery.invoice_id, delivery.flow_name, SENDING_BATCH_STATE)
     await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+    await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})
     await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
     await _notify(
         conn,
         delivery.head,
         delivery.invoice_id,
-        RULE_SEND_FAILED,
-        _send_failed_text(prepared, delivery.invoice_id),
-        [retry_button(delivery.invoice_id)],
+        _Reply(
+            RULE_SEND_FAILED,
+            _send_failed_text(prepared, delivery.invoice_id),
+            [retry_button(delivery.invoice_id)],
+        ),
     )
     await queue_admin_alert(
         conn,
@@ -800,15 +979,14 @@ async def _send_failed(
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
+        await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_SEND_FAILED)
         text = _send_failed_text(prepared, delivery.invoice_id)
         await _notify(
             conn,
             delivery.head,
             delivery.invoice_id,
-            RULE_SEND_FAILED,
-            text,
-            [retry_button(delivery.invoice_id)],
+            _Reply(RULE_SEND_FAILED, text, [retry_button(delivery.invoice_id)]),
         )
         await queue_admin_alert(
             conn,
@@ -859,9 +1037,7 @@ async def _template_invalid(context: DeliverContext, invoice: _Invoice, sink_nam
             conn,
             invoice.head,
             invoice.job.invoice_id,
-            RULE_TEMPLATE_INVALID,
-            MESSAGES[RULE_TEMPLATE_INVALID],
-            [],
+            _Reply(RULE_TEMPLATE_INVALID, MESSAGES[RULE_TEMPLATE_INVALID], []),
         )
         await raise_gap(
             conn,
@@ -899,23 +1075,36 @@ async def _still_delivering(conn: AsyncConnection[Any], invoice_id: int) -> bool
     return head is not None and head.state == DELIVERING
 
 
+@dataclass(frozen=True)
+class _Reply:
+    """One chat message: its rule, text, buttons and links (D194)."""
+
+    rule_id: str
+    text: str
+    buttons: Sequence[Button]
+    links: Sequence[Link] = ()
+
+
 async def _notify(
     conn: AsyncConnection[Any],
     head: InvoiceHead,
     invoice_id: int,
-    rule_id: str,
-    text: str,
-    buttons: Sequence[Button],
+    reply: _Reply,
 ) -> None:
-    """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    await queue_message(
-        conn,
+    """Queue ``reply`` for the invoice's sender in the caller's transaction (D194)."""
+    message = outbound(
         Addressee(head.origin_channel, head.profile_id),
-        text,
-        invoice_id=invoice_id,
-        rule_id=rule_id,
-        buttons=buttons,
+        reply.text,
+        rule_id=reply.rule_id,
+        buttons=reply.buttons,
+        links=reply.links,
     )
+    await queue_outbound(conn, message, invoice_id=invoice_id)
+
+
+def _folder_links(delivery: _Delivery) -> list[Link]:
+    """Return the invoice folder's link for a delivery message (D194)."""
+    return safe_links([(LINK_TITLE_FOLDER, delivery.folder_url)])
 
 
 def _values(

@@ -413,10 +413,19 @@ async def _outbox(conn: AsyncConnection[Any], profile_id: str) -> list[tuple[str
     return [(str(text), rule_id, buttons) for text, rule_id, buttons in rows]
 
 
+async def _outbox_links(conn: AsyncConnection[Any], profile_id: str) -> list[Any]:
+    """Return the links of each queued message for the profile, in insertion order (D194)."""
+    cur = await conn.execute(
+        "SELECT payload_json->'links' FROM outbox WHERE \"to\" = %s ORDER BY id",
+        (profile_id,),
+    )
+    return [links for (links,) in await cur.fetchall()]
+
+
 async def test_delivering_invoice_files_drive_and_appends_its_row(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-6.1, R-6.2, BR-D16: a DELIVERING invoice ends DONE with files and one row and both links."""
+    """D194, R-6.1, R-6.2, BR-D16: a DELIVERING invoice ends DONE with files, one row and both links."""
     profile_id = f"google-deliver-{uuid4().hex}"
     cfg = _config(profile_id)
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
@@ -436,15 +445,19 @@ async def test_delivering_invoice_files_drive_and_appends_its_row(
         numero=NUMERO,
         razon_social=RAZON_SOCIAL,
         total=TOTAL,
-        link_row=row_link,
-        link_folder=folder_link,
     )
 
     async with db_pool.connection() as conn:
         state = await _invoice_state(conn, seeded.invoice_id)
         outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
 
     assert state == ("DONE", "BR-D16")
+    assert links == [
+        [{"title": "📄 Abrir fila", "url": row_link}, {"title": "📂 Abrir carpeta", "url": folder_link}]
+    ]
+    assert "Fila:" not in outbox[0][0]
+    assert "Carpeta:" not in outbox[0][0]
     assert [uploaded[1] for uploaded in fake.uploaded] == [
         f"{FILE_NAME}.jpg",
         f"{FILE_NAME}.pdf",
@@ -530,7 +543,7 @@ async def test_a_retry_reuses_drive_files_and_updates_the_row(
 async def test_no_pdf_reports_br_d17(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """R-8.1, BR-D17: an invoice with no PDF still files and reports the missing-PDF message."""
+    """D194, R-8.1, BR-D17: an invoice with no PDF files and reports the missing PDF with both links."""
     profile_id = f"google-no-pdf-{uuid4().hex}"
     cfg = _config(profile_id)
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id, pdf=False)
@@ -549,22 +562,24 @@ async def test_no_pdf_reports_br_d17(
         numero=NUMERO,
         razon_social=RAZON_SOCIAL,
         total=TOTAL,
-        link_row=row_link,
-        link_folder=folder_link,
     )
 
     async with db_pool.connection() as conn:
         state = await _invoice_state(conn, seeded.invoice_id)
         outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
 
     assert state == ("DONE", "BR-D17")
+    assert links == [
+        [{"title": "📄 Abrir fila", "url": row_link}, {"title": "📂 Abrir carpeta", "url": folder_link}]
+    ]
     assert outbox == [(expected, "BR-D17", [])]
 
 
 async def test_a_sheets_only_flow_appends_one_row_and_reports_br_d18(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D144: a flow with no Drive sink writes one row, sends no Drive request, ends DONE with BR-D18."""
+    """D194, D144: a Sheets-only flow writes one row, no Drive request, and BR-D18 links only the row."""
     profile_id = f"google-sheets-only-{uuid4().hex}"
     cfg = _sheets_only_config(profile_id)
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
@@ -583,14 +598,15 @@ async def test_a_sheets_only_flow_appends_one_row_and_reports_br_d18(
         numero=NUMERO,
         razon_social=RAZON_SOCIAL,
         total=TOTAL,
-        link_row=row_link,
     )
 
     async with db_pool.connection() as conn:
         state = await _invoice_state(conn, seeded.invoice_id)
         outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
 
     assert state == ("DONE", "BR-D18")
+    assert links == [[{"title": "📄 Abrir fila", "url": row_link}]]
     assert fake.drive_requests == []
     assert len(fake.appended) == 1
     assert fake.appended[0][0] == key

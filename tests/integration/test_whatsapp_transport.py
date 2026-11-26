@@ -7,15 +7,21 @@ import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 import httpx
 import pytest
 
-from invoicebot.channels.base import Button, OutboundMessage
+from invoicebot.channels.base import Button, Document, Link, OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError
-from invoicebot.channels.whatsapp.transport import TEMPLATE_SLOT_BY_RULE, make_transport
-from invoicebot.config.models import ChannelTemplates
+from invoicebot.channels.whatsapp.transport import (
+    DOCUMENT_MAX_BYTES,
+    TEMPLATE_PARAM_MAX_CHARS,
+    TEMPLATE_SLOT_BY_RULE,
+    make_transport,
+)
+from invoicebot.config.models import ChannelTemplates, WhatsAppChannel
 from invoicebot.queue.outbox import (
     OutboxRow,
     OutboxSender,
@@ -34,6 +40,9 @@ NUMBER = "51999999999"
 PHONE_NUMBER_ID = "123456789"
 GRAPH_VERSION = "v23.0"
 BEARER = "synthetic-bearer-value"
+#: The data directory of tests that never send a document (D194).
+NO_DATA_DIR = Path("/nonexistent-data-dir")
+DOCUMENT_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 TEMPLATES = ChannelTemplates(
     completion="invoice_done",
@@ -42,6 +51,13 @@ TEMPLATES = ChannelTemplates(
     pending_user_reminder="pending_user_reminder",
     batch_preview="batch_preview",
     admin_alert="admin_alert",
+)
+
+CHANNEL = WhatsAppChannel(
+    kind="whatsapp_cloud",
+    phone_number_id=PHONE_NUMBER_ID,
+    graph_api_version=GRAPH_VERSION,
+    templates=TEMPLATES,
 )
 
 Handler = Callable[[httpx.Request], httpx.Response]
@@ -78,6 +94,13 @@ def _row(msg: OutboundMessage, *, to: str = PROFILE) -> OutboxRow:
     )
 
 
+def _document(tmp_path: Path, *, name: str = "factura.xlsx", data: bytes = b"xlsx") -> Document:
+    """Write a synthetic document and return the canonical reference the message carries."""
+    path = tmp_path / name
+    path.write_bytes(data)
+    return Document(path=str(path), filename=name, mime=DOCUMENT_MIME, size=len(data))
+
+
 async def _prepare(pool: Pool, *, window_hours_ago: int | None) -> None:
     """Clear the rows a test depends on and set the profile's last inbound time."""
     async with pool.connection() as conn:
@@ -103,15 +126,19 @@ async def _transport(
     pool: Pool,
     handler: Handler = _accept,
     *,
-    templates: ChannelTemplates = TEMPLATES,
-    language: str = "es_PE",
+    channel: WhatsAppChannel = CHANNEL,
+    data_dir: Path = NO_DATA_DIR,
     on_token_rejected: Callable[[], Awaitable[None]] = _noop_token_rejected,
+    requests: list[httpx.Request] | None = None,
 ) -> AsyncIterator[tuple[Transport, list[Payload]]]:
     """Yield a transport plus the payloads it sends, answered through ``handler``."""
     sent: list[Payload] = []
 
     def recording(request: httpx.Request) -> httpx.Response:
-        sent.append(json.loads(request.content))
+        if requests is not None:
+            requests.append(request)
+        if request.headers.get("content-type", "").startswith("application/json"):
+            sent.append(json.loads(request.content))
         return handler(request)
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(recording)) as http:
@@ -125,8 +152,8 @@ async def _transport(
             client,
             pool,
             numbers={PROFILE: NUMBER},
-            templates=templates,
-            language=language,
+            data_dir=data_dir,
+            channel=channel,
             on_token_rejected=on_token_rejected,
         )
         yield transport, sent
@@ -218,6 +245,161 @@ async def test_template_parameter_collapses_tabs_and_space_runs(db_pool: Pool) -
     ]
 
 
+async def test_open_window_appends_the_link_lines(db_pool: Pool) -> None:
+    """D194: in the window, a message with a link sends its line after the text."""
+    await _prepare(db_pool, window_hours_ago=1)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(text="Listo", links=[link])))
+
+    assert sent[0]["type"] == "text"
+    assert sent[0]["text"]["body"].endswith("\n📂 Abrir carpeta: https://x.example/f")
+
+
+async def test_closed_window_template_keeps_the_link_lines(db_pool: Pool) -> None:
+    """D194: outside the window, the template parameter ends with the link line."""
+    await _prepare(db_pool, window_hours_ago=None)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text="Listo", links=[link])))
+
+    parameter = sent[0]["template"]["components"][0]["parameters"][0]["text"]
+    assert parameter.endswith("📂 Abrir carpeta: https://x.example/f")
+
+
+async def test_template_keeps_the_link_lines_when_the_text_is_capped(db_pool: Pool) -> None:
+    """D194: a text longer than the parameter cap is truncated, but its link line survives whole."""
+    await _prepare(db_pool, window_hours_ago=None)
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    text = "x" * (TEMPLATE_PARAM_MAX_CHARS + 100)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text=text, links=[link])))
+
+    parameter = sent[0]["template"]["components"][0]["parameters"][0]["text"]
+    assert parameter.endswith("📂 Abrir carpeta: https://x.example/f")
+    assert len(parameter) <= TEMPLATE_PARAM_MAX_CHARS
+
+
+@pytest.mark.parametrize("window_hours_ago", [1, None])
+async def test_a_message_without_links_keeps_its_text(db_pool: Pool, window_hours_ago: int | None) -> None:
+    """D194: a message with no links sends exactly its text, in and out of the window."""
+    await _prepare(db_pool, window_hours_ago=window_hours_ago)
+    async with _transport(db_pool) as (transport, sent):
+        await transport(_row(_message(rule_id="BR-F07", text="hola")))
+
+    if window_hours_ago is None:
+        assert sent[0]["template"]["components"][0]["parameters"][0]["text"] == "hola"
+    else:
+        assert sent[0]["text"]["body"] == "hola"
+
+
+async def test_a_document_is_uploaded_then_sent_with_its_media_id(db_pool: Pool, tmp_path: Path) -> None:
+    """D194: in the window a document row uploads once, then sends that media id as a document."""
+    await _prepare(db_pool, window_hours_ago=1)
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(200, json={"messages": [{"id": "wamid.D"}]})
+
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/f")
+    document = _document(tmp_path)
+    async with _transport(db_pool, handler, data_dir=tmp_path, requests=requests) as (transport, sent):
+        result = await transport(_row(_message(text="Listo", links=[link], document=document)))
+
+    assert result == "wamid.D"
+    assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == ["media", "messages"]
+    assert len(sent) == 1
+    assert sent[0]["type"] == "document"
+    assert sent[0]["document"]["id"] == "m1"
+    assert sent[0]["document"]["filename"] == "factura.xlsx"
+    assert sent[0]["document"]["caption"] == "Listo\n📂 Abrir carpeta: https://x.example/f"
+
+
+async def test_a_document_outside_the_window_is_permanent(db_pool: Pool, tmp_path: Path) -> None:
+    """D194: outside the window a document posts nothing and fails permanently."""
+    await _prepare(db_pool, window_hours_ago=None)
+    requests: list[httpx.Request] = []
+    async with _transport(db_pool, data_dir=tmp_path, requests=requests) as (transport, sent):
+        with pytest.raises(PermanentSendError, match="outside the 24-hour window"):
+            await transport(_row(_message(document=_document(tmp_path))))
+
+    assert requests == []
+    assert sent == []
+
+
+async def test_a_missing_document_is_permanent(db_pool: Pool, tmp_path: Path) -> None:
+    """D194: a document whose file is gone posts nothing and fails permanently."""
+    await _prepare(db_pool, window_hours_ago=1)
+    missing = Document(path=str(tmp_path / "gone.xlsx"), filename="gone.xlsx", mime=DOCUMENT_MIME, size=1)
+    requests: list[httpx.Request] = []
+    async with _transport(db_pool, data_dir=tmp_path, requests=requests) as (transport, sent):
+        with pytest.raises(PermanentSendError, match="not a sendable file"):
+            await transport(_row(_message(document=missing)))
+
+    assert requests == []
+    assert sent == []
+
+
+async def test_a_document_over_the_cap_is_permanent(db_pool: Pool, tmp_path: Path) -> None:
+    """D194: a document over Meta's 100 MB cap posts nothing and fails permanently."""
+    await _prepare(db_pool, window_hours_ago=1)
+    path = tmp_path / "big.xlsx"
+    with path.open("wb") as file:
+        file.truncate(DOCUMENT_MAX_BYTES + 1)
+    document = Document(path=str(path), filename="big.xlsx", mime=DOCUMENT_MIME, size=DOCUMENT_MAX_BYTES + 1)
+    requests: list[httpx.Request] = []
+    async with _transport(db_pool, data_dir=tmp_path, requests=requests) as (transport, sent):
+        with pytest.raises(PermanentSendError, match="not a sendable file"):
+            await transport(_row(_message(document=document)))
+
+    assert requests == []
+    assert sent == []
+
+
+async def test_a_rejected_token_on_the_upload_reschedules_and_alerts(db_pool: Pool, tmp_path: Path) -> None:
+    """D194, BR-O03: a 401 on the media upload reschedules the row and alerts once, as text does."""
+    await _prepare(db_pool, window_hours_ago=1)
+    rejected: list[None] = []
+
+    async def on_token_rejected() -> None:
+        rejected.append(None)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"code": 190, "message": "Expired"}})
+
+    requests: list[httpx.Request] = []
+    async with _transport(
+        db_pool, handler, data_dir=tmp_path, on_token_rejected=on_token_rejected, requests=requests
+    ) as (
+        transport,
+        sent,
+    ):
+        with pytest.raises(SendLater) as raised:
+            await transport(_row(_message(document=_document(tmp_path))))
+
+    assert raised.value.delay == timedelta(minutes=15)
+    assert raised.value.reason == "BR-O03"
+    assert len(rejected) == 1
+    assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == ["media"]
+    assert sent == []
+
+
+async def test_window_expired_on_the_document_send_is_permanent(db_pool: Pool, tmp_path: Path) -> None:
+    """D194: Meta's closed-window answer on the document send is permanent, not a template fallback."""
+    await _prepare(db_pool, window_hours_ago=1)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/media"):
+            return httpx.Response(200, json={"id": "m1"})
+        return httpx.Response(400, json={"error": {"code": 131047, "message": "Re-engagement"}})
+
+    async with _transport(db_pool, handler, data_dir=tmp_path) as (transport, _sent):
+        with pytest.raises(PermanentSendError, match="outside the 24-hour window"):
+            await transport(_row(_message(document=_document(tmp_path))))
+
+
 async def test_window_expired_on_send_falls_back_to_template(db_pool: Pool) -> None:
     """PT-4: a free-form send answered with Meta code 131047 is retried as a template."""
     await _prepare(db_pool, window_hours_ago=1)
@@ -253,7 +435,10 @@ async def test_empty_template_name_is_permanent(db_pool: Pool) -> None:
     """R-1.10, R-11.5: a configured slot whose name is empty counts as missing, so it is permanent."""
     await _prepare(db_pool, window_hours_ago=None)
     templates = TEMPLATES.model_copy(update={"manual_required": ""})
-    async with _transport(db_pool, templates=templates) as (transport, sent):
+    async with _transport(db_pool, channel=CHANNEL.model_copy(update={"templates": templates})) as (
+        transport,
+        sent,
+    ):
         with pytest.raises(PermanentSendError, match="manual_required"):
             await transport(_row(_message(rule_id="BR-F07")))
 
@@ -370,7 +555,10 @@ async def test_a_non_token_400_keeps_the_whatsapp_error(db_pool: Pool) -> None:
 async def test_template_language_comes_from_the_transport(db_pool: Pool) -> None:
     """R-1.10: a template send uses the configured language, not a hard-coded one."""
     await _prepare(db_pool, window_hours_ago=None)
-    async with _transport(db_pool, language="en_US") as (transport, sent):
+    async with _transport(db_pool, channel=CHANNEL.model_copy(update={"template_language": "en_US"})) as (
+        transport,
+        sent,
+    ):
         await transport(_row(_message(rule_id="BR-F07")))
 
     assert sent[0]["template"]["language"] == {"code": "en_US"}

@@ -140,8 +140,8 @@ from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
 from invoicebot.wiring.channels import ChannelBuilder, ChannelWiring
 from invoicebot.wiring.console import ConsoleBuilder
-from invoicebot.wiring.telegram import telegram_wiring
-from invoicebot.wiring.whatsapp import whatsapp_wiring
+from invoicebot.wiring.telegram import TelegramBuilder
+from invoicebot.wiring.whatsapp import WhatsAppBuilder
 
 logger = logging.getLogger(__name__)
 
@@ -152,9 +152,6 @@ TaskFactory = Callable[[], Awaitable[None]]
 _FetcherBuilder = Callable[[str, Flow], Fetcher | None]
 #: Builds one flow's mailbox and, when it cannot, the reason it is disabled (D98).
 _InboxBuilder = Callable[[FlowInbox], tuple[Mailbox | None, str]]
-
-#: Builds the chat channels that need no process state, or ``None`` when not enabled (D174).
-CHANNEL_BUILDERS: tuple[ChannelBuilder, ...] = (whatsapp_wiring, telegram_wiring)
 
 
 def _build_channels(
@@ -177,8 +174,8 @@ def _build_channels(
 
 
 def _channel_builders(data_dir: Path) -> tuple[ChannelBuilder, ...]:
-    """Return this process's channel builders, the console one bound to ``data_dir`` (D165, D174)."""
-    return (*CHANNEL_BUILDERS, ConsoleBuilder(data_dir))
+    """Return this process's channel builders, each bound to ``data_dir`` (D165, D174, D194)."""
+    return (WhatsAppBuilder(data_dir), TelegramBuilder(data_dir), ConsoleBuilder(data_dir))
 
 
 #: Per-request timeout for the shared HTTP clients and the GitHub App (R-1.4, R-11.10).
@@ -627,7 +624,9 @@ def _deliver_handlers(
         laptop = LaptopOutlook(drive, root, key, partial(datetime.now, UTC))
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
     modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
-    context = DeliverContext(pool, cfg, directory, drive, modes, settings.data_dir, laptop_flows=laptop_flows)
+    context = DeliverContext(
+        pool, cfg, directory, drive, drive, modes, settings.data_dir, laptop_flows=laptop_flows
+    )
     return DeliverHandlers(
         deliver=make_deliver_handler(context),
         folder_status=make_folder_status_handler(pool, cfg, drive),

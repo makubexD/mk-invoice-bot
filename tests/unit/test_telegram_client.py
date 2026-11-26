@@ -245,6 +245,56 @@ async def test_unauthorized_error_logged_writes_no_part_of_the_token(
         assert part not in output
 
 
+async def test_send_document_posts_multipart_to_send_document_and_returns_ids() -> None:
+    """D194: send_document POSTs multipart/form-data to sendDocument with the file, name and caption."""
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 43, "chat": {"id": -100}}})
+
+    async with _make_client(handler) as client:
+        ids = await client.send_document(
+            {"chat_id": "-100", "caption": "factura.xlsx"},
+            "factura.xlsx",
+            b"xlsx-bytes",
+            "application/vnd.ms-excel",
+        )
+
+    assert ids == (-100, 43)
+    request = requests[0]
+    assert request.method == "POST"
+    assert request.url.path == f"/bot{TOKEN}/sendDocument"
+    assert request.headers["content-type"].startswith("multipart/form-data; boundary=")
+    body = request.content
+    assert b'name="chat_id"' in body
+    assert b"-100" in body
+    assert b'name="caption"' in body
+    assert b"factura.xlsx" in body
+    assert b'name="document"; filename="factura.xlsx"' in body
+    assert b"application/vnd.ms-excel" in body
+    assert b"xlsx-bytes" in body
+
+
+async def test_send_document_with_a_bad_result_names_send_document() -> None:
+    """D194: an ok answer without ids raises naming sendDocument, never the token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"ok": True, "result": {"message_id": 43}})
+
+    async with _make_client(handler) as client:
+        with pytest.raises(TelegramError, match="sendDocument result has no chat id") as raised:
+            await client.send_document(
+                {"chat_id": "-100", "caption": "factura.xlsx"},
+                "factura.xlsx",
+                b"xlsx-bytes",
+                "application/vnd.ms-excel",
+            )
+
+    assert raised.value.status != NOT_SENT_STATUS
+    assert TOKEN not in str(raised.value)
+
+
 async def test_send_message_with_a_bad_result_is_not_reported_as_unsent() -> None:
     """R-1.7: an ok answer without ids raises with status 200, never NOT_SENT, so no retry resends it."""
 

@@ -8,7 +8,15 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.channels.base import Attachment, AttachmentKind, ChannelName, InboundMessage
+from invoicebot.channels.base import (
+    Attachment,
+    AttachmentKind,
+    ChannelName,
+    Document,
+    InboundMessage,
+    Link,
+)
+from invoicebot.pipeline.outgoing import Addressee, outbound, queue_document, queue_outbound
 from invoicebot.store.messages import (
     find_open_invoice_for_attachment,
     link_message_to_invoice,
@@ -210,3 +218,49 @@ async def test_invoice_in_another_state_is_not_matched(
         matched = await find_open_invoice_for_attachment(conn, profile_id, None)
 
     assert matched is None
+
+
+async def test_queue_outbound_stores_its_links_in_the_payload(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: a message built with links is queued with them in the outbox row's payload_json."""
+    profile_id = _profile()
+    link = Link(title="📂 Abrir carpeta", url="https://x.example/1")
+
+    async with db_pool.connection() as conn:
+        message = outbound(Addressee("telegram", profile_id), "hola", links=[link])
+        outbox_id = await queue_outbound(conn, message)
+        cur = await conn.execute("SELECT payload_json FROM outbox WHERE id = %s", (outbox_id,))
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert row[0]["links"] == [{"title": "📂 Abrir carpeta", "url": "https://x.example/1"}]
+
+
+async def test_queue_document_stores_the_document_and_caption(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: queue_document stores the document and its caption as the row's text."""
+    profile_id = _profile()
+    document = Document(
+        path="/data/mail/1/factura.xlsx",
+        filename="factura.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        size=10,
+    )
+
+    async with db_pool.connection() as conn:
+        outbox_id = await queue_document(
+            conn, Addressee("telegram", profile_id), document, caption="factura.xlsx"
+        )
+        cur = await conn.execute("SELECT payload_json FROM outbox WHERE id = %s", (outbox_id,))
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert row[0]["text"] == "factura.xlsx"
+    assert row[0]["document"] == {
+        "path": "/data/mail/1/factura.xlsx",
+        "filename": "factura.xlsx",
+        "mime": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "size": 10,
+    }

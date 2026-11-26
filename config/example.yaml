@@ -228,6 +228,9 @@ flows:
         #   laptop_outlook - the laptop agent's receipt for the job file      -> sent, BR-D10
         #   dry_run        - the sender taps [Ya lo envié] on the .eml          -> sent, BR-D08
         modes: [graph]
+        # D194: auto sends at once; review posts the mail and its attachments in the chat and sends
+        # only on [Enviar] (the live flow B runs on review). /revisar <n> reviews a batch prepared earlier.
+        send: auto
         account: personal
         inbox_rule_account: bot         # inbox_rule sends through the bot mailbox (R-7.7)
         to: ["me@example.com"]          # MVP: the owner's test inbox (D68)

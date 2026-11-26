@@ -56,8 +56,15 @@ from invoicebot.pipeline.questions import (
     unreadable_buttons,
 )
 from invoicebot.pipeline.replies import choice_at, resolve_reply
+from invoicebot.pipeline.review import REVIEW_BATCH_STATE, REVIEWED_KEY
 from invoicebot.pipeline.status import status_text
-from invoicebot.pipeline.steps import FETCH_STEP, FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
+from invoicebot.pipeline.steps import (
+    DELIVER_STEP,
+    FETCH_STEP,
+    FOLDER_STATUS_STEP,
+    RESEND_EML_STEP,
+    RESEND_LAPTOP_STEP,
+)
 from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
 from invoicebot.queue.outbox import last_rule
@@ -65,6 +72,7 @@ from invoicebot.routing.router import RULE_ASK
 from invoicebot.rules.messages_es import (
     BUTTON_ARRIVED,
     BUTTON_SELF_SEND,
+    BUTTON_SEND,
     BUTTON_VIA_LAPTOP,
     CANCELLED_BY_USER,
     EDIT_PROMPT,
@@ -77,6 +85,7 @@ from invoicebot.states import (
     CANCELLED,
     CONFIRM_INVALID,
     CONFIRMING,
+    DELIVERING,
     DONE,
     EDITABLE,
     EXTRACT_FAILED,
@@ -110,6 +119,10 @@ SENT_ACTION = "sent"
 NOT_ARRIVED_ACTION = "not_arrived"
 #: BR-D11's [Ya llegó] action (R-7.8).
 ARRIVED_ACTION = "arrived"
+#: BR-D19's [Enviar] action: send the reviewed mail (D194).
+SEND_ACTION = "send"
+#: BR-D19's [Cancelar] action: hold the mail and keep the invoice filed (D194).
+HOLD_ACTION = "hold"
 #: BR-D11's two resend choices (R-7.14, R-7.8, D109).
 VIA_LAPTOP_ACTION = "via_laptop"
 SELF_SEND_ACTION = "self_send"
@@ -119,6 +132,10 @@ RULE_SENT = "BR-D08"
 RULE_DONE = "BR-D10"
 #: BR-D11: the mail's delivery is not confirmed, so the sender is asked (spec 06).
 RULE_NOT_CONFIRMED = "BR-D11"
+#: BR-D20: [Cancelar] held the reviewed mail (D194).
+RULE_HELD = "BR-D20"
+#: BR-D21: [Enviar] sends the reviewed mail (D194).
+RULE_SENDING = "BR-D21"
 
 PREPARED_BATCH_STATE: Literal["prepared"] = "prepared"
 SENT_BATCH_STATE = "sent"
@@ -140,6 +157,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     ARRIVED_ACTION: frozenset({DONE, BATCHED}),
     VIA_LAPTOP_ACTION: frozenset({DONE, BATCHED}),
     SELF_SEND_ACTION: frozenset({DONE, BATCHED}),
+    SEND_ACTION: frozenset({BATCHED}),
+    HOLD_ACTION: frozenset({BATCHED}),
     # BR-F13's three buttons answer only while the first wait is still looking (D189).
     SEND_PDF_ACTION: frozenset({FETCHING_DOCS}),
     WAIT_MAIL_ACTION: frozenset({FETCHING_DOCS}),
@@ -420,6 +439,57 @@ async def _sent(
     return tuple(await take_photo_paths(conn, invoice_id))
 
 
+async def _send(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Send the reviewed mail: mark it reviewed and run the delivery again (D194, BR-D21).
+
+    A batch other than ``review`` gets BR-S02 and changes nothing. The marker, the state
+    change and the ``deliver`` job commit together, so the delivery reuses the saved folder
+    and sequence (D88) and runs the flow's first mail mode.
+    """
+    if await get_batch_state(conn, invoice_id) != REVIEW_BATCH_STATE:
+        await send_stale(conn, msg, invoice_id)
+        return ()
+    await merge_flow_data(conn, invoice_id, {REVIEWED_KEY: True})
+    await set_state(conn, invoice_id, DELIVERING, rule_id=RULE_SENDING)
+    await enqueue(conn, invoice_id, DELIVER_STEP)
+    await _reply(conn, msg, invoice_id, RULE_SENDING, await _review_text(conn, invoice_id, RULE_SENDING))
+    return ()
+
+
+async def _hold(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Hold the reviewed mail and offer [Enviar] again; nothing else changes (D194, BR-D20).
+
+    A batch other than ``review`` gets BR-S02.
+    """
+    if await get_batch_state(conn, invoice_id) != REVIEW_BATCH_STATE:
+        await send_stale(conn, msg, invoice_id)
+        return ()
+    button = Button(id=button_id(invoice_id, SEND_ACTION), title=BUTTON_SEND)
+    text = await _review_text(conn, invoice_id, RULE_HELD)
+    await _reply(conn, msg, invoice_id, RULE_HELD, text, buttons=[button])
+    return ()
+
+
+async def _review_text(conn: AsyncConnection[Any], invoice_id: int, rule_id: str) -> str:
+    """Render a review answer, which names the invoice by its serie and number (D194)."""
+    reading = await load_reading(conn, invoice_id)
+    if reading is None:
+        raise RuntimeError(f"invoice {invoice_id} has no reading to name its mail")
+    return MESSAGES[rule_id].format(serie=reading.value("serie"), numero=reading.value("numero"))
+
+
 async def _not_arrived(
     conn: AsyncConnection[Any],
     invoice_id: int,
@@ -628,6 +698,8 @@ ACTIONS: Mapping[str, Action] = {
     ARRIVED_ACTION: _arrived,
     VIA_LAPTOP_ACTION: _via_laptop,
     SELF_SEND_ACTION: _self_send,
+    SEND_ACTION: _send,
+    HOLD_ACTION: _hold,
     SEND_PDF_ACTION: send_pdf,
     WAIT_MAIL_ACTION: wait_mail,
     TEACH_PORTAL_ACTION: teach_portal,

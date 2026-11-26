@@ -2,17 +2,20 @@
 
 Every channel adapter speaks this one contract, so the core never depends on
 WhatsApp or Telegram specifics. Attachments travel by reference (R-1.4), not as
-bytes, and the sender role lets the pipeline apply admin/owner permissions.
+bytes, and the sender role lets the pipeline apply admin/owner permissions. An
+outbound message may also carry https links and one document (D194).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, NamedTuple, Protocol
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from invoicebot.config.models import MediaLimits
 
@@ -21,6 +24,18 @@ type SenderRole = Literal["owner", "admin", "sender"]
 type AttachmentKind = Literal["photo", "pdf", "xml", "xlsx", "captcha"]
 
 MENU_MAX = 9999
+#: The longest URL, the longest button title and the https port a link may carry (D194).
+LINK_URL_MAX = 2048
+LINK_TITLE_MAX = 64
+HTTPS_PORT = 443
+#: A document's MIME type: a type and a subtype of plain token characters (D194).
+_MIME = re.compile(r"[\w.+-]+/[\w.+-]+", re.ASCII)
+
+
+def _has_control(text: str, *, space: bool) -> bool:
+    """Return whether ``text`` has a control character, a space too when ``space`` is set (D194)."""
+    limit = 0x20 if space else 0x1F
+    return any(ord(char) <= limit or ord(char) == 0x7F for char in text)
 
 
 class Attachment(BaseModel):
@@ -68,6 +83,75 @@ class ButtonPress(NamedTuple):
     menu: int | None
 
 
+class Link(BaseModel):
+    """A titled https link an outbound message carries (D194)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    title: str = Field(min_length=1, max_length=LINK_TITLE_MAX)
+    url: str = Field(max_length=LINK_URL_MAX)
+
+    @field_validator("title")
+    @classmethod
+    def _plain_title(cls, title: str) -> str:
+        """Refuse a title with a control character."""
+        if _has_control(title, space=False):
+            raise ValueError("a link title must not contain a control character")
+        return title
+
+    @field_validator("url")
+    @classmethod
+    def _https_with_host(cls, url: str) -> str:
+        """Refuse a URL that is not a plain https URL with a host and no credentials."""
+        if _has_control(url, space=True):
+            raise ValueError("a link must not contain a control character or a space")
+        parsed = urlparse(url)
+        if parsed.scheme != "https" or not parsed.netloc or not parsed.hostname:
+            raise ValueError("a link must be an https URL with a host")
+        if parsed.username is not None or parsed.password is not None:
+            raise ValueError("a link must not carry credentials")
+        if parsed.port not in (None, HTTPS_PORT):
+            raise ValueError("a link must use the https port")
+        return url
+
+
+class Document(BaseModel):
+    """A file under the data directory that an outbound message sends (D194)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    path: str
+    filename: str = Field(min_length=1, max_length=255)
+    mime: str = Field(min_length=1)
+    size: int = Field(ge=0)
+
+    @field_validator("path")
+    @classmethod
+    def _absolute(cls, path: str) -> str:
+        """Refuse a path that is not absolute."""
+        if not Path(path).is_absolute():
+            raise ValueError("a document path must be absolute")
+        return path
+
+    @field_validator("filename")
+    @classmethod
+    def _plain_name(cls, filename: str) -> str:
+        """Refuse a file name that names another directory or carries a control character."""
+        if "/" in filename or "\\" in filename:
+            raise ValueError("a document filename must not contain a separator")
+        if filename in {".", ".."} or _has_control(filename, space=False):
+            raise ValueError("a document filename must be a plain name")
+        return filename
+
+    @field_validator("mime")
+    @classmethod
+    def _mime_type(cls, mime: str) -> str:
+        """Refuse a MIME type that is not ``type/subtype`` of token characters."""
+        if _MIME.fullmatch(mime) is None:
+            raise ValueError("a document mime must look like type/subtype")
+        return mime
+
+
 class OutboundMessage(BaseModel):
     """One message to send through a channel, in canonical form."""
 
@@ -80,6 +164,8 @@ class OutboundMessage(BaseModel):
     text: str
     buttons: list[Button] = Field(default_factory=list)
     template: str | None = None
+    links: list[Link] = Field(default_factory=list)
+    document: Document | None = None
 
 
 class Channel(Protocol):

@@ -21,6 +21,7 @@ from invoicebot.sinks.onedrive import (
     GraphDrive,
     GraphError,
     GraphTransient,
+    _encode_path,
 )
 
 ACCOUNT = "personal"
@@ -529,6 +530,50 @@ async def test_move_maps_a_failed_status_to_its_error(
             await drive.move("/Reembolsos/Pendientes/F001-123.pdf", "/Reembolsos/2026", "F001-123_Sent.pdf")
 
     assert raised.value.status == status
+
+
+async def test_web_url_returns_the_items_browser_link() -> None:
+    """D194: the item's own webUrl is returned from its encoded item URL, never a share link."""
+    path = "/Reembolsos/Año 2026"
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"webUrl": "https://onedrive.live.com/?id=X"})
+
+    async with _make_drive(handler) as drive:
+        url = await drive.web_url(path)
+
+    assert url == "https://onedrive.live.com/?id=X"
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url.raw_path.split(b"?")[0] == ("/v1.0/me/drive/root:" + _encode_path(path)).encode()
+    assert requests[0].url.params["$select"] == "webUrl"
+    assert requests[0].headers["Authorization"] == f"Bearer {BEARER}"
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "error"),
+    [
+        (404, None, FolderMissing),
+        (200, {"webUrl": "http://x"}, GraphError),
+        (200, {}, GraphError),
+        (503, None, GraphTransient),
+    ],
+)
+async def test_web_url_maps_a_failed_answer_to_its_error(
+    status: int, body: dict[str, object] | None, error: type[GraphError | GraphTransient]
+) -> None:
+    """D194: a 404 is FolderMissing, a missing or non-HTTPS webUrl GraphError and a 5xx GraphTransient."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if body is None:
+            return httpx.Response(status)
+        return httpx.Response(status, json=body)
+
+    async with _make_drive(handler) as drive:
+        with pytest.raises(error):
+            await drive.web_url("/Reembolsos/2026")
 
 
 async def test_delete_sends_a_delete_to_the_encoded_item_url() -> None:

@@ -23,6 +23,7 @@ BUTTONS_LABEL_MAX_CHARS = 20
 BUTTON_ID_MAX_CHARS = 256
 LIST_ROWS_MAX_COUNT = 10
 LIST_ROW_TITLE_MAX_CHARS = 24
+DOCUMENT_CAPTION_MAX_CHARS = 1024
 
 _MIN_LENGTH = 1
 
@@ -101,6 +102,18 @@ def list_payload(to: str, body: str, button_label: str, rows: Sequence[Button]) 
                 "sections": [{"rows": [{"id": row.id, "title": row.title} for row in rows]}],
             },
         },
+    }
+
+
+def document_payload(to: str, media_id: str, filename: str, caption: str) -> dict[str, Any]:
+    """Build a document message that references an already uploaded media id (D194)."""
+    _check_chars(caption, maximum=DOCUMENT_CAPTION_MAX_CHARS, field="caption")
+    return {
+        "messaging_product": PRODUCT,
+        "recipient_type": "individual",
+        "to": to,
+        "type": "document",
+        "document": {"id": media_id, "filename": filename, "caption": caption},
     }
 
 

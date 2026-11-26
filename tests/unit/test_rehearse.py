@@ -66,6 +66,48 @@ def test_format_replies_strips_a_control_character_from_a_button_title() -> None
     assert format_replies(replies, 0)[1] == "[yes] Sí"
 
 
+def test_format_replies_prints_links_after_the_text() -> None:
+    """D194: a reply's link prints as ``<title>: <url>`` after its text line."""
+    replies = [
+        ConsoleReply(
+            id=8,
+            rule_id=None,
+            status="sent",
+            text="Tu reporte",
+            buttons=[],
+            links=[("📂 Abrir carpeta", "https://example.com/folder")],
+        )
+    ]
+
+    assert format_replies(replies, 0) == [
+        "#8 - sent",
+        "Tu reporte",
+        "📂 Abrir carpeta: https://example.com/folder",
+        "next: --after 8",
+    ]
+
+
+def test_format_replies_prints_the_document_after_the_caption() -> None:
+    """D194: a reply with a document prints its caption then ``📎 <filename>``."""
+    replies = [
+        ConsoleReply(
+            id=9,
+            rule_id=None,
+            status="sent",
+            text="Tu reporte",
+            buttons=[],
+            document="factura.xlsx",
+        )
+    ]
+
+    assert format_replies(replies, 0) == [
+        "#9 - sent",
+        "Tu reporte",
+        "📎 factura.xlsx",
+        "next: --after 9",
+    ]
+
+
 def test_rehearse_send_refuses_a_file_with_a_button() -> None:
     """D165: a send naming both a file and a button is refused before anything runs."""
     with pytest.raises(RehearseError, match="D165"):

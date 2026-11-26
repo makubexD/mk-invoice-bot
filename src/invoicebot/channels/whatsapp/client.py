@@ -1,4 +1,4 @@
-"""WhatsApp Graph API client: send messages and fetch media (R-3.2, R-1.4, R-1.10).
+"""WhatsApp Graph API client: send messages, upload and fetch media (R-3.2, R-1.4, R-1.10).
 
 Every call uses the injected ``httpx.AsyncClient``; the token, the phone number
 id and the API version arrive through the constructor, never from the
@@ -176,6 +176,27 @@ class WhatsAppClient:
         if not response.is_success:
             raise _error_for(response)
         return _sent_message_id(_json_body(response))
+
+    async def upload_media(self, data: bytes, filename: str, mime: str) -> str:
+        """Upload a file as multipart and return Meta's media id (D194, R-3.2).
+
+        Raises ``WhatsAppError`` when Meta refuses the upload or answers
+        without a usable ``id``. The error never carries the token or the file.
+        """
+        response = await self._http.post(
+            f"{self._base_url}/{self._phone_number_id}/media",
+            data={"messaging_product": "whatsapp", "type": mime},
+            files={"file": (filename, data, mime)},
+            headers=self._headers(),
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        if not response.is_success:
+            raise _error_for(response)
+        body = _json_body(response)
+        media_id = body.get("id") if isinstance(body, dict) else None
+        if not isinstance(media_id, str) or not media_id:
+            raise WhatsAppError(status=response.status_code, message="media upload answer has no id")
+        return media_id
 
     async def media_info(self, media_id: str) -> MediaInfo:
         """GET a media item's URL and integrity metadata (R-1.4).

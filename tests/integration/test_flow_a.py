@@ -299,12 +299,14 @@ async def _state(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: in
     return str(row[0]), None if row[1] is None else str(row[1])
 
 
-async def _completion_text(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> str:
-    """Return the BR-D16 completion message queued for the invoice."""
+async def _completion_message(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int
+) -> tuple[str, list[dict[str, str]]]:
+    """Return the text and the links of the BR-D16 completion message queued for the invoice (D194)."""
     async with pool.connection() as conn:
         cur = await conn.execute(
             """
-            SELECT payload_json->>'text'
+            SELECT payload_json->>'text', payload_json->'links'
             FROM outbox
             WHERE invoice_id = %s AND payload_json->>'rule_id' = 'BR-D16'
             """,
@@ -312,7 +314,7 @@ async def _completion_text(pool: AsyncConnectionPool[AsyncConnection[Any]], invo
         )
         rows = await cur.fetchall()
     assert len(rows) == 1
-    return str(rows[0][0])
+    return str(rows[0][0]), rows[0][1]
 
 
 async def test_a_photo_is_fetched_and_filed_in_drive_and_sheets(
@@ -320,7 +322,7 @@ async def test_a_photo_is_fetched_and_filed_in_drive_and_sheets(
     tmp_path: Path,
     read_conversation: Any,
 ) -> None:
-    """R-6.1, R-6.4, BR-D16: a routed photo ends DONE with its files in Drive and its row linked."""
+    """D194, R-6.1, R-6.4, BR-D16: a routed photo ends DONE, its row in the links."""
     fake_channel, payload = await read_conversation(True, buyer_ruc=OWNER_RUC, flow=FLOW)
     invoice_id = _invoice_id(fake_channel)
     cfg = _config()
@@ -337,7 +339,10 @@ async def test_a_photo_is_fetched_and_filed_in_drive_and_sheets(
     row_link = ROW_LINK_TEMPLATE.format(
         spreadsheet_id=SPREADSHEET_ID, sheet_id=SHEET_ID, row_number=ROW_NUMBER
     )
-    assert row_link in await _completion_text(db_pool, invoice_id)
+    text, links = await _completion_message(db_pool, invoice_id)
+    assert "Fila:" not in text
+    assert row_link not in text
+    assert {"title": "📄 Abrir fila", "url": row_link} in links
 
 
 async def test_a_revoked_google_token_parks_and_resume_finishes_the_delivery(

@@ -54,7 +54,7 @@ from invoicebot.settings import Settings
 from invoicebot.sunat import token as sunat
 from invoicebot.sunat_origins import SUNAT_SOL
 from invoicebot.wiring.channels import CHANNEL_ADAPTER, CHANNEL_SECRETS, SENDER_HASH_KEY, channel_secrets
-from invoicebot.wiring.whatsapp import WHATSAPP_ADAPTER, WHATSAPP_SECRETS, whatsapp_wiring
+from invoicebot.wiring.whatsapp import WHATSAPP_ADAPTER, WHATSAPP_SECRETS, WhatsAppBuilder
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
@@ -389,7 +389,7 @@ def test_whatsapp_secret_view_no_longer_declares_the_sender_hash_key() -> None:
     cfg = load_config(EXAMPLE)
     store = _RecordingStore({})
 
-    whatsapp_wiring.secret_problem(cfg, store)
+    WhatsAppBuilder(Path("/nonexistent-data-dir")).secret_problem(cfg, store)
 
     assert store.scoped_calls[0] == (WHATSAPP_ADAPTER, WHATSAPP_SECRETS)
 

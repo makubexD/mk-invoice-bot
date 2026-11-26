@@ -1608,3 +1608,132 @@ async def test_status_press_from_another_profile_sends_nothing(
     assert invoice == (DONE, None)
     assert owner_texts == []
     assert other_texts == []
+
+
+async def _review_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, batch_state: str = "review"
+) -> int:
+    """Create a BATCHED BR-D19 invoice whose batch is in ``batch_state`` (D194)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await save_reading(conn, invoice_id, _reading())
+        await set_flow(conn, invoice_id, FLOW)
+        await set_state(conn, invoice_id, BATCHED, rule_id="BR-D19")
+        batch_id = await open_batch(conn, invoice_id, FLOW, "review")
+        await set_batch_state(conn, batch_id, batch_state)
+    return invoice_id
+
+
+async def _press_once(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, action: str, profile_id: str
+) -> None:
+    """Handle one press of ``action`` on the invoice in its own connection."""
+    async with pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, action, profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+
+
+async def test_send_on_a_review_batch_runs_the_delivery_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-D21: [Enviar] marks the mail reviewed, moves the invoice to DELIVERING and queues deliver."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id)
+
+    await _press_once(db_pool, invoice_id, "send", profile_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+    assert invoice == ("DELIVERING", "BR-D21")
+    assert jobs == ["deliver"]
+    assert flow_data["reviewed"] is True
+    assert texts == [("BR-D21", MESSAGES["BR-D21"].format(serie=SERIE, numero=NUMERO))]
+
+
+async def test_a_second_send_press_is_stale_and_queues_no_second_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-S02: [Enviar] again while the invoice is DELIVERING answers BR-S02 and adds no job."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id)
+    await _press_once(db_pool, invoice_id, "send", profile_id)
+
+    await _press_once(db_pool, invoice_id, "send", profile_id)
+
+    async with db_pool.connection() as conn:
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+    assert jobs == ["deliver"]
+    assert [rule_id for rule_id, _ in texts] == ["BR-D21", "BR-S02"]
+
+
+async def test_hold_on_a_review_batch_offers_send_again_and_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-D20: [Cancelar] answers BR-D20 with one [Enviar]; the invoice and batch stay as they are."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id)
+
+    await _press_once(db_pool, invoice_id, "hold", profile_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        messages = await _messages(conn, profile_id)
+    assert invoice == (BATCHED, "BR-D19")
+    assert batch_state == "review"
+    assert jobs == []
+    assert messages == [
+        (
+            "BR-D20",
+            MESSAGES["BR-D20"].format(serie=SERIE, numero=NUMERO),
+            [{"id": button_id(invoice_id, "send"), "title": "Enviar"}],
+        )
+    ]
+
+
+async def test_send_on_a_prepared_batch_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-S02: [Enviar] on a batch that is not under review answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id, batch_state="prepared")
+
+    await _press_once(db_pool, invoice_id, "send", profile_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+    assert invoice == (BATCHED, "BR-D19")
+    assert jobs == []
+    assert [rule_id for rule_id, _ in texts] == ["BR-S02"]
+
+
+async def test_hold_on_a_prepared_batch_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-S02: [Cancelar] on a batch that is not under review answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id, batch_state="prepared")
+
+    await _press_once(db_pool, invoice_id, "hold", profile_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+    assert invoice == (BATCHED, "BR-D19")
+    assert batch_state == "prepared"
+    assert jobs == []
+    assert [rule_id for rule_id, _ in texts] == ["BR-S02"]

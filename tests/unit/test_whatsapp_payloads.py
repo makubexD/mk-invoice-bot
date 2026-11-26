@@ -9,6 +9,7 @@ from invoicebot.channels.whatsapp.payloads import (
     BUTTONS_LABEL_MAX_CHARS,
     LIST_ROW_TITLE_MAX_CHARS,
     buttons_payload,
+    document_payload,
     list_payload,
     template_payload,
     text_payload,
@@ -112,6 +113,23 @@ def test_list_payload_rejects_broken_limits(rows: list[Button], match: str) -> N
     """R-3.2: a list menu outside Meta's limits is rejected before sending."""
     with pytest.raises(ValueError, match=match):
         list_payload(TO, "Elegí el flujo", "Ver opciones", rows)
+
+
+def test_document_payload_matches_meta_shape() -> None:
+    """D194: a document message references the uploaded media id with its filename and caption."""
+    assert document_payload(TO, "m1", "factura.pdf", "Tu factura") == {
+        "messaging_product": "whatsapp",
+        "recipient_type": "individual",
+        "to": TO,
+        "type": "document",
+        "document": {"id": "m1", "filename": "factura.pdf", "caption": "Tu factura"},
+    }
+
+
+def test_document_payload_rejects_a_caption_over_the_limit() -> None:
+    """D194: a caption above 1024 characters is rejected before sending."""
+    with pytest.raises(ValueError, match="1-1024"):
+        document_payload(TO, "m1", "factura.pdf", "x" * 1025)
 
 
 def test_template_payload_builds_body_component() -> None:

@@ -50,6 +50,15 @@ def laptop_flow_ids(cfg: Config) -> frozenset[str]:
     return frozenset(name for name, flow in cfg.flows.items() if lists_laptop(flow))
 
 
+def review_flow_ids(cfg: Config) -> frozenset[str]:
+    """Return the names of the flows whose mailer sink is ``send: review`` (D194)."""
+    return frozenset(
+        name
+        for name, flow in cfg.flows.items()
+        if any(isinstance(sink, MailerSink) and sink.send == "review" for sink in flow.sinks)
+    )
+
+
 def intake_settings(cfg: Config) -> IntakeSettings:
     """Return the intake arguments shared by the webhook and the console CLI (D165)."""
     return IntakeSettings(
@@ -60,6 +69,7 @@ def intake_settings(cfg: Config) -> IntakeSettings:
             admins=admin_profiles(cfg),
             payment_flow=payment_flow(cfg),
             laptop_flows=laptop_flow_ids(cfg),
+            review_flows=review_flow_ids(cfg),
             teach=teach_setup(cfg),
             reprocess_min_interval_s=cfg.limits.reprocess_min_interval_s,
         ),
