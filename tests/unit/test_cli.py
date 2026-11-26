@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 
+from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.cli import main
 from invoicebot.config.loader import load_directory
 from invoicebot.ops.forget import ForgetRefused, ForgetRequest
 from invoicebot.settings import Settings
+from invoicebot.sinks.onedrive import GraphError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_PATH = REPO_ROOT / "config" / "example.yaml"
@@ -243,6 +245,46 @@ def test_invoice_forget_refused_exits_two(
 
     assert code == 2
     assert "not terminal" in capsys.readouterr().err
+
+
+def test_invoice_forget_auth_required_exits_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a missing Microsoft sign-in exits 1 and names the auth command."""
+    _patch_forget(monkeypatch, AuthRequired("personal"))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    assert code == 1
+    assert "auth-microsoft --account personal" in capsys.readouterr().err
+
+
+def test_invoice_forget_graph_error_exits_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a Graph failure exits 1 with one stderr line and no traceback."""
+    _patch_forget(monkeypatch, GraphError(500))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    err = capsys.readouterr().err
+    assert code == 1
+    assert err.startswith("the OneDrive delete failed:")
+    assert len(err.splitlines()) == 1
+
+
+def test_invoice_forget_late_refusal_prints_done_lines(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """D196: a refusal after the drive delete prints the done lines on stdout and exits 2."""
+    _patch_forget(monkeypatch, ForgetRefused("x", done=("drive: deleted /a",)))
+
+    code = main(["invoice", "forget", "34", "--drive"])
+
+    captured = capsys.readouterr()
+    assert code == 2
+    assert "drive: deleted /a" in captured.out
+    assert "x" in captured.err
 
 
 def test_invoice_forget_needs_database_url(

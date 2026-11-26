@@ -132,6 +132,7 @@ async def test_lock_target_returns_invoice_facts(db_pool: AsyncConnectionPool[As
             assert target.flow_id == "flow-x"
             assert (target.serie, target.numero) == ("F001", "1")
             assert target.folder_path == "Facturas/2026-11/F001-1"
+            assert target.paid is False
             assert target.local_paths == ("tmp/a.jpg",)
         finally:
             await conn.rollback()

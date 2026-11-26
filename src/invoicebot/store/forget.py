@@ -35,7 +35,7 @@ _DELETE_BATCH = """
       AND NOT EXISTS (SELECT 1 FROM invoices WHERE batch_id = %s)
 """
 _LOCK_INVOICE = """
-    SELECT state, flow_id, serie, numero, flow_data_json ->> 'folder_path'
+    SELECT state, flow_id, serie, numero, flow_data_json ->> 'folder_path', payment_id IS NOT NULL
     FROM invoices
     WHERE id = %s
     FOR UPDATE
@@ -54,6 +54,7 @@ class ForgetTarget:
     serie: str | None
     numero: str | None
     folder_path: str | None
+    paid: bool
     local_paths: tuple[str, ...]
 
 
@@ -71,6 +72,7 @@ async def lock_target(conn: AsyncConnection[Any], invoice_id: int) -> ForgetTarg
         serie=row[2],
         numero=row[3],
         folder_path=row[4],
+        paid=bool(row[5]),
         local_paths=tuple(str(p[0]) for p in await paths.fetchall()),
     )
 

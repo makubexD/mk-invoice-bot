@@ -101,6 +101,7 @@ from invoicebot.settings import Settings
 from invoicebot.sinks.google_api import GoogleError
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
+from invoicebot.sinks.onedrive import GraphError, GraphTransient
 from invoicebot.store.db import create_pool
 from invoicebot.store.invoices import resume_pending_auth
 from invoicebot.text import normalize_email
@@ -323,7 +324,8 @@ def _invoice_forget(
 ) -> int:
     """Run ``invoice forget``: print what it did, or what it would do without ``--yes`` (D196).
 
-    A refusal exits 2 with its reason on stderr; a missing Microsoft sign-in exits 1.
+    A refusal exits 2 with its reason on stderr (and any part already done on stdout); a missing
+    Microsoft sign-in or a failed OneDrive delete exits 1.
     """
     if settings.database_url is None:
         parser.error("DATABASE_URL must be set to forget an invoice")
@@ -331,10 +333,15 @@ def _invoice_forget(
     try:
         lines = asyncio.run(_run_forget(settings, settings.database_url, cfg, request, transport))
     except ForgetRefused as error:
+        for line in error.done:
+            sys.stdout.write(line + "\n")
         sys.stderr.write(f"{error}\n")
         return 2
     except AuthRequired:
         sys.stderr.write("the personal OneDrive needs a sign-in: run auth-microsoft --account personal\n")
+        return 1
+    except (GraphError, GraphTransient) as error:
+        sys.stderr.write(f"the OneDrive delete failed: {error}\n")
         return 1
     for line in lines:
         sys.stdout.write(line + "\n")

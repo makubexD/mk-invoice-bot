@@ -200,3 +200,63 @@ async def test_local_path_outside_data_dir_is_skipped(
     assert outside.exists()
     assert f"files: skipped outside data dir: {outside}" in lines
     assert await _row(db_pool, invoice_id) is None
+
+
+@pytest.mark.parametrize("case", ["root", "subdirectory"])
+async def test_local_path_naming_a_directory_is_never_removed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, case: str
+) -> None:
+    """D196: a files.local_path equal to the data dir or naming a directory is skipped and survives."""
+    data_dir = tmp_path / "data"
+    tokens = data_dir / "tokens"
+    tokens.mkdir(parents=True)
+    (tokens / "secret").write_bytes(b"x")
+    recorded = str(data_dir) if case == "root" else str(tokens)
+    invoice_id, _, _ = await _seed(db_pool, data_dir, local_path=recorded)
+    lines = await forget(db_pool, data_dir, None, ForgetRequest(invoice_id, False, True, True))
+    assert (tokens / "secret").exists()
+    assert data_dir.is_dir()
+    assert any(line.startswith("files: skipped") and recorded in line for line in lines)
+    assert await _row(db_pool, invoice_id) is None
+
+
+async def test_state_change_after_the_drive_delete_is_refused_with_done_lines(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D196: an invoice leaving its terminal state during the drive delete is refused; done keeps the line."""
+    invoice_id, key, files = await _seed(db_pool, tmp_path)
+
+    class RacingDrive(FakeDrive):
+        async def delete(self, path: str) -> None:
+            """Delete, then move the invoice out of its terminal state."""
+            await super().delete(path)
+            async with db_pool.connection() as conn:
+                await conn.execute("UPDATE invoices SET state = 'RECEIVED' WHERE id = %s", (invoice_id,))
+
+    with pytest.raises(ForgetRefused, match="not finished") as refused:
+        await forget(db_pool, tmp_path, RacingDrive(), ForgetRequest(invoice_id, True, True, True))
+    assert refused.value.done == (f"drive: deleted {FOLDER}",)
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    assert all(p.exists() for p in files)
+
+
+async def test_purge_of_a_paid_invoice_is_refused_but_release_works(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D196: --purge on an invoice in a payment is refused and changes nothing; releasing its key works."""
+    invoice_id, key, files = await _seed(db_pool, tmp_path)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute(
+            "INSERT INTO payments (flow_id, profile_id, paid_on, amount) "
+            "VALUES ('work_microsoft', %s, '2026-11-01', 10) RETURNING id",
+            (f"profile-{uuid4().hex}",),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        await conn.execute("UPDATE invoices SET payment_id = %s WHERE id = %s", (row[0], invoice_id))
+    with pytest.raises(ForgetRefused, match="payment"):
+        await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, True, True))
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    assert all(p.exists() for p in files)
+    await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    assert await _row(db_pool, invoice_id) == (None, 1)
