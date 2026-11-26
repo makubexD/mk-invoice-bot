@@ -116,87 +116,168 @@ def test_photo_re_read_error_keeps_the_reading_without_a_strip(
 
 
 FULL_FIELDS = {name: Field(value="x", source="ocr", confidence=0.9) for name in helper.REQUIRED}
-FIRST_TEXT = OcrText(lines=((OcrWord(text="first", confidence=0.9),),))
-SECOND_TEXT = OcrText(lines=((OcrWord(text="second", confidence=0.9),),))
+SMALL = (100, 300)
+
+
+def _texts(count: int) -> list[OcrText]:
+    """Return ``count`` distinct texts, so a fake parser can tell the reads apart."""
+    return [OcrText(lines=((OcrWord(text=f"read{i}", confidence=0.9),),)) for i in range(count)]
 
 
 def _reading_with(fields: dict[str, Field]) -> Reading:
     """Return a reading with ``fields`` and no URL."""
-    return Reading(fields=fields, document_url=None, printed_url=PRINTED_URL)
+    return Reading(fields=fields, document_url=None, printed_url=None)
 
 
-def _two_reads(
-    monkeypatch: pytest.MonkeyPatch, first: Reading, second: Reading
-) -> list[tuple[np.ndarray, float | None]]:
-    """Fake OCR so the first read yields ``first`` and the second ``second``; return the calls."""
-    calls: list[tuple[np.ndarray, float | None]] = []
-    texts = iter((FIRST_TEXT, SECOND_TEXT))
-    readings = {FIRST_TEXT: first, SECOND_TEXT: second}
+class _Spy:
+    """Fake OCR that yields ``readings`` in order and records the reads and the crop calls."""
 
-    def fake_read(image: np.ndarray, _cfg: Ocr, *, timeout_s: float | None = None) -> OcrText:
-        calls.append((image, timeout_s))
-        return next(texts)
+    def __init__(
+        self, monkeypatch: pytest.MonkeyPatch, readings: list[Reading], *, crop_shape: tuple[int, int]
+    ) -> None:
+        self.calls: list[tuple[np.ndarray, float | None]] = []
+        self.crops = 0
+        texts = _texts(len(readings))
+        by_text = dict(zip(texts, readings, strict=True))
+        queue = iter(texts)
 
-    monkeypatch.setattr(helper, "load_gray", lambda _data, _max_px: np.full(CANVAS, WHITE, dtype=np.uint8))
-    monkeypatch.setattr(helper, "read_invoice_qr", lambda _gray: None)
-    monkeypatch.setattr(helper, "read_text", fake_read)
-    monkeypatch.setattr(helper, "parse_ocr", lambda text, _rules: OcrReading(reading=readings[text]))
-    return calls
+        def fake_read(image: np.ndarray, _cfg: Ocr, *, timeout_s: float | None = None) -> OcrText:
+            self.calls.append((image, timeout_s))
+            return next(queue)
+
+        def fake_crop(_gray: np.ndarray) -> np.ndarray:
+            self.crops += 1
+            return np.full(crop_shape, WHITE, dtype=np.uint8)
+
+        monkeypatch.setattr(
+            helper, "load_gray", lambda _data, _max_px: np.full(CANVAS, WHITE, dtype=np.uint8)
+        )
+        monkeypatch.setattr(helper, "read_invoice_qr", lambda _gray: None)
+        monkeypatch.setattr(helper, "deskew", lambda image: image)
+        monkeypatch.setattr(helper, "binarize", lambda image: np.zeros_like(image))
+        monkeypatch.setattr(helper, "crop_receipt", fake_crop)
+        monkeypatch.setattr(helper, "read_text", fake_read)
+        monkeypatch.setattr(helper, "parse_ocr", lambda text, _rules: OcrReading(reading=by_text[text]))
 
 
-def test_photo_first_read_without_required_fields_returns_the_unbinarized_read(
+def _fields(*names: str) -> Reading:
+    """Return a reading with only the required fields ``names``."""
+    return _reading_with({n: Field(value=n, source="ocr", confidence=0.9) for n in names})
+
+
+def test_photo_first_read_with_every_required_field_runs_no_other_read(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: a binarized read with no required field loses to an unbinarized read with all."""
-    calls = _two_reads(monkeypatch, _reading_with({}), _reading_with(FULL_FIELDS))
-    monkeypatch.setattr(helper, "binarize", np.zeros_like)
+    """D198: a first read that has every required field runs no retry and never crops."""
+    spy = _Spy(monkeypatch, [_reading_with(FULL_FIELDS), _reading_with({})], crop_shape=SMALL)
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 1
+    assert spy.calls[0][1] is None
+    assert spy.crops == 0
+
+
+def test_photo_plain_full_read_that_completes_is_kept_without_cropping(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a plain read of the whole photo that has every required field ends the retries."""
+    spy = _Spy(monkeypatch, [_reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
     assert set(payload["reading"]["fields"]) == set(helper.REQUIRED)
-    assert len(calls) == 2
-    first_image, first_timeout = calls[0]
-    second_image, second_timeout = calls[1]
+    assert len(spy.calls) == 2
+    first_image, first_timeout = spy.calls[0]
+    second_image, second_timeout = spy.calls[1]
     assert first_timeout is None
     assert second_timeout is not None
     assert second_timeout <= OCR_CONFIG.timeout_s
     assert not np.array_equal(first_image, second_image)
+    assert spy.crops == 0
 
 
-def test_photo_first_read_with_every_required_field_skips_the_second_read(
+def test_photo_crop_read_is_the_fallback_when_the_full_reads_miss_fields(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: a first read that has every required field never runs the second read."""
-    calls = _two_reads(monkeypatch, _reading_with(FULL_FIELDS), _reading_with({}))
+    """D198: with both full reads incomplete, the binarized crop read runs and is kept when complete."""
+    spy = _Spy(
+        monkeypatch, [_reading_with({}), _reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL
+    )
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(helper.REQUIRED)
+    assert [image.shape for image, _ in spy.calls] == [CANVAS, CANVAS, SMALL]
+    assert spy.crops == 1
+
+
+def test_photo_crop_with_the_same_shape_adds_no_read(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a crop that keeps the shape of the photo is no new candidate: only two reads."""
+    spy = _Spy(
+        monkeypatch, [_reading_with({}), _reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=CANVAS
+    )
 
     helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(calls) == 1
+    assert len(spy.calls) == 2
+    assert spy.crops == 1
 
 
-def test_photo_first_read_that_used_the_budget_skips_the_second_read(
+def test_photo_first_read_that_used_the_budget_runs_no_retry(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: with less than MIN_RETRY_S left after the first read there is no second read."""
-    calls = _two_reads(monkeypatch, _reading_with({}), _reading_with(FULL_FIELDS))
+    """D198: with less than MIN_RETRY_S left after the first read there is no retry and no crop."""
+    spy = _Spy(monkeypatch, [_reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
     ticks: Callable[[], float] = iter((0.0, OCR_CONFIG.timeout_s - 0.5)).__next__
     monkeypatch.setattr(helper.time, "monotonic", ticks)
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(calls) == 1
+    assert len(spy.calls) == 1
+    assert spy.crops == 0
     assert payload["reading"] is None
 
 
-def test_photo_tied_reads_keep_the_binarized_reading(
+def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: when both reads have the same number of required fields the first one stays."""
-    first = _reading_with({"ruc_emisor": Field(value="first", source="ocr", confidence=0.9)})
-    second = _reading_with({"total": Field(value="second", source="ocr", confidence=0.9)})
-    calls = _two_reads(monkeypatch, first, second)
+    """D198: ties keep the earlier reading, and the strip re-read gets the image that reading came from."""
+    one, two, three, four = sorted(helper.REQUIRED)[:4]
+    spy = _Spy(monkeypatch, [_fields(one), _fields(two), _fields(three), _fields(four)], crop_shape=SMALL)
+    strip_images: list[np.ndarray] = []
+
+    def fake_strip(image: np.ndarray, *_args: object) -> str:
+        strip_images.append(image)
+        return STRIP
+
+    monkeypatch.setattr(helper, "read_url_strip", fake_strip)
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(calls) == 2
-    assert set(payload["reading"]["fields"]) == {"ruc_emisor"}
+    assert len(spy.calls) == 4
+    assert set(payload["reading"]["fields"]) == {one}
+    assert [image.shape for image in strip_images] == [CANVAS]
+
+
+def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: when the crop reading is kept, the strip re-read gets the deskewed crop."""
+    spy = _Spy(
+        monkeypatch, [_fields(), _fields(), _fields(sorted(helper.REQUIRED)[0]), _fields()], crop_shape=SMALL
+    )
+    strip_images: list[np.ndarray] = []
+
+    def fake_strip(image: np.ndarray, *_args: object) -> str:
+        strip_images.append(image)
+        return STRIP
+
+    monkeypatch.setattr(helper, "read_url_strip", fake_strip)
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 4
+    assert [image.shape for image in strip_images] == [SMALL]

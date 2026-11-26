@@ -6,7 +6,9 @@ The extract handler starts this module as ``python -m invoicebot.extract <max_px
 trailing arguments the input is a photo, which keeps the original call working. The file's bytes
 arrive on stdin and the helper never opens a path under the data root (D158). It loads the
 input once, reads its SUNAT QR, reads its text and parses the fields with the configured rules,
-then merges both readings (D81). A text-layer PDF is parsed directly and its fields carry the
+then merges both readings (D81). A photo whose first read misses a required field is read again
+on the plain deskewed photo and then on a crop of the receipt, within the OCR budget (D198).
+A text-layer PDF is parsed directly and its fields carry the
 ``pdf`` source; a PDF without enough text is rendered on page 1 and read as a photo (R-2.15).
 It writes exactly one JSON object to stdout: ``{"reading": {...} | null, "variant": ...,
 "decoder": ..., "ocr": bool, "error": null | "unreadable" | "too_many_pages"}``, where ``ocr``
@@ -25,6 +27,7 @@ import json
 import resource
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -60,7 +63,7 @@ UNUSED_PDF_OPTION = 0
 UNREADABLE = "unreadable"
 #: The helper's value for "the PDF has too many pages" (BR-E07, R-2.15).
 TOO_MANY_PAGES = "too_many_pages"
-#: Seconds of OCR budget below which the second, unbinarized read is not started (D198).
+#: Seconds of OCR budget below which a retry read is not started (D198).
 MIN_RETRY_S = 1.0
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
 #: codecs before it decodes one pixel, and its thread pool reserves more per core, so a
@@ -165,7 +168,7 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     try:
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
-        straight = deskew(crop_receipt(gray))
+        straight = deskew(gray)
         processed = binarize(straight)
     except (ImageUnreadable, cv2.error, MemoryError):
         return _unreadable(ocr=False)
@@ -176,9 +179,9 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     except MemoryError:
         # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
         text, ocr_reading = None, None
-    text, ocr_reading = _retry_unbinarized(straight, ocr_cfg, rules, started, (text, ocr_reading))
+    text, ocr_reading, source = _retries(gray, straight, ocr_cfg, rules, started, (text, ocr_reading))
     if text is not None and ocr_reading is not None and ocr_reading.printed_url is None:
-        ocr_reading = _with_url_strip(straight, text, ocr_cfg, rules, ocr_reading)
+        ocr_reading = _with_url_strip(source, text, ocr_cfg, rules, ocr_reading)
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     return _payload(reading, hit, ocr_ran=text is not None)
 
@@ -188,30 +191,74 @@ def _missing_count(reading: Reading | None) -> int:
     return len(REQUIRED) if reading is None else len(reading.missing_required())
 
 
-def _retry_unbinarized(
+def _crop_candidates(gray: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield the (image to read, deskewed image) pairs of the receipt crop of ``gray`` (D198).
+
+    Nothing is yielded when the crop finds no receipt (it keeps the shape of ``gray``) or fails.
+    The binarized crop comes first, then the deskewed crop as it is.
+    """
+    try:
+        crop = crop_receipt(gray)
+        if crop.shape == gray.shape:
+            return
+        straight = deskew(crop)
+    except (cv2.error, MemoryError):
+        return
+    try:
+        binarized = binarize(straight)
+    except (cv2.error, MemoryError):
+        pass
+    else:
+        yield binarized, straight
+    yield straight, straight
+
+
+def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield the (image to read, deskewed image) pairs to retry, in order, lazily (D198).
+
+    The plain deskewed photo comes first; the crop is only computed when it is asked for.
+    """
+    yield straight, straight
+    yield from _crop_candidates(gray)
+
+
+def _read_candidate(
+    image: np.ndarray, ocr_cfg: Ocr, rules: ParsingRules, left: float
+) -> tuple[OcrText | None, Reading | None] | None:
+    """Return the text and reading of ``image`` read within ``left`` seconds, or ``None`` on failure."""
+    try:
+        text = read_text(image, ocr_cfg, timeout_s=left)
+        return text, None if text is None else parse_ocr(text, rules).reading
+    except (cv2.error, MemoryError):
+        return None
+
+
+def _retries(
+    gray: np.ndarray,
     straight: np.ndarray,
     ocr_cfg: Ocr,
     rules: ParsingRules,
     started: float,
     first: tuple[OcrText | None, Reading | None],
-) -> tuple[OcrText | None, Reading | None]:
-    """Return the better of ``first`` and a read of ``straight`` without binarizing (D198).
+) -> tuple[OcrText | None, Reading | None, np.ndarray]:
+    """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198).
 
-    The retry runs only when ``first`` misses a required field and at least ``MIN_RETRY_S`` of
-    ``ocr_cfg.timeout_s`` is left after ``started``. It replaces ``first`` only when it has more
-    required fields, so a tie keeps the binarized reading.
+    While the best reading misses a required field, the candidates run in order, each only with
+    at least ``MIN_RETRY_S`` of ``ocr_cfg.timeout_s`` left after ``started`` and with only that
+    time. The best has the fewest missing required fields, a tie keeping the earlier reading.
     """
-    if _missing_count(first[1]) == 0:
-        return first
-    left = ocr_cfg.timeout_s - (time.monotonic() - started)
-    if left < MIN_RETRY_S:
-        return first
-    try:
-        text = read_text(straight, ocr_cfg, timeout_s=left)
-        reading = None if text is None else parse_ocr(text, rules).reading
-    except MemoryError:
-        return first
-    return (text, reading) if _missing_count(reading) < _missing_count(first[1]) else first
+    best = (*first, straight)
+    candidates = _candidates(gray, straight)
+    # Time and completeness are checked before a candidate is pulled, so a skipped crop is never made.
+    while _missing_count(best[1]) > 0:
+        left = ocr_cfg.timeout_s - (time.monotonic() - started)
+        candidate = next(candidates, None) if left >= MIN_RETRY_S else None
+        if candidate is None:
+            break
+        read = _read_candidate(candidate[0], ocr_cfg, rules, left)
+        if read is not None and _missing_count(read[1]) < _missing_count(best[1]):
+            best = (*read, candidate[1])
+    return best
 
 
 def _with_url_strip(
