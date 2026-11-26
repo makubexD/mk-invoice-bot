@@ -7,8 +7,8 @@ trailing arguments the input is a photo, which keeps the original call working. 
 arrive on stdin and the helper never opens a path under the data root (D158). It loads the
 input once, reads its SUNAT QR, reads its text and parses the fields with the configured rules,
 then merges both readings (D81). A photo whose first read misses a required field is read again
-on the plain deskewed photo, then on that photo upscaled, then on a crop of the receipt, within the
-OCR budget (D198).
+on the plain deskewed photo, then on that photo upscaled, then on the upscaled photo in block
+mode, then on a crop of the receipt, within the OCR budget (D198).
 A text-layer PDF is parsed directly and its fields carry the
 ``pdf`` source; a PDF without enough text is rendered on page 1 and read as a photo (R-2.15).
 It writes exactly one JSON object to stdout: ``{"reading": {...} | null, "variant": ...,
@@ -70,6 +70,9 @@ MIN_RETRY_S = 1.0
 #: ``UPSCALE_MAX_SIDE`` pixels (D198).
 UPSCALE_FACTOR = 2.0
 UPSCALE_MAX_SIDE = 4000
+#: The page segmentation mode of the block-mode retry read of the upscaled photo; it reads the page as one
+#: uniform block of text, which can catch what the configured mode splits wrongly (D198).
+RETRY_PSM = 6
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
 #: codecs before it decodes one pixel, and its thread pool reserves more per core, so a
 #: 512 MiB cap makes every decode fail to allocate. This value leaves headroom over the
@@ -202,8 +205,13 @@ def _missing_count(ocr: Reading | None, qr: Reading | None) -> int:
     return len(merge(ocr, qr).missing_required())
 
 
-def _crop_candidates(gray: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield the (image to read, deskewed image) pairs of the receipt crop of ``gray`` (D198).
+#: One retry read: the image to read, its deskewed image and the PSM to read it with
+#: (``None`` is the configured one).
+_Candidate = tuple[np.ndarray, np.ndarray, int | None]
+
+
+def _crop_candidates(gray: np.ndarray) -> Iterator[_Candidate]:
+    """Yield the (image to read, deskewed image, psm) candidates of the receipt crop of ``gray`` (D198).
 
     Nothing is yielded when the crop finds no receipt (it keeps the shape of ``gray``) or fails.
     The binarized crop comes first, then the deskewed crop as it is.
@@ -220,12 +228,14 @@ def _crop_candidates(gray: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]
     except (cv2.error, MemoryError):
         pass
     else:
-        yield binarized, straight
-    yield straight, straight
+        yield binarized, straight, None
+    yield straight, straight, None
 
 
-def _upscaled_candidates(straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield ``straight`` upscaled with its own deskewed image, or nothing when it cannot grow (D198).
+def _upscaled_candidates(straight: np.ndarray) -> Iterator[_Candidate]:
+    """Yield ``straight`` upscaled twice, or nothing when it cannot grow (D198).
+
+    The first candidate uses the configured PSM and the second ``RETRY_PSM``; the photo is resized once.
 
     The factor is ``UPSCALE_FACTOR``, capped so the long side stays within ``UPSCALE_MAX_SIDE``; a
     factor of 1 or less, or a failed resize, yields nothing.
@@ -239,26 +249,30 @@ def _upscaled_candidates(straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.
         upscaled = cv2.resize(straight, size, interpolation=cv2.INTER_CUBIC)
     except (cv2.error, MemoryError):
         return
-    yield upscaled, straight
+    yield upscaled, straight, None
+    yield upscaled, straight, RETRY_PSM
 
 
-def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
-    """Yield the (image to read, deskewed image) pairs to retry, in order, lazily (D198).
+def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[_Candidate]:
+    """Yield the (image to read, deskewed image, psm) candidates to retry, in order, lazily (D198).
 
-    The plain deskewed photo comes first, then the upscaled one, then the crop; the last two are
-    only computed when they are asked for.
+    The plain deskewed photo comes first, then the upscaled one, then the upscaled one in block
+    mode, then the crop; the last three are only computed when they are asked for.
     """
-    yield straight, straight
+    yield straight, straight, None
     yield from _upscaled_candidates(straight)
     yield from _crop_candidates(gray)
 
 
 def _read_candidate(
-    image: np.ndarray, ocr_cfg: Ocr, rules: ParsingRules, left: float
+    image: np.ndarray, ocr_cfg: Ocr, rules: ParsingRules, left: float, psm: int | None
 ) -> tuple[OcrText | None, Reading | None] | None:
-    """Return the text and reading of ``image`` read within ``left`` seconds, or ``None`` on failure."""
+    """Return the text and reading of ``image`` read in ``left`` seconds, or ``None`` on failure.
+
+    ``psm`` is the page segmentation mode; ``None`` is the configured one (D198).
+    """
     try:
-        text = read_text(image, ocr_cfg, timeout_s=left)
+        text = read_text(image, ocr_cfg, timeout_s=left, psm=psm)
         return text, None if text is None else parse_ocr(text, rules).reading
     except (cv2.error, MemoryError):
         return None
@@ -288,7 +302,7 @@ def _retries(
         candidate = next(candidates, None) if left >= MIN_RETRY_S else None
         if candidate is None:
             break
-        read = _read_candidate(candidate[0], ocr_cfg, rules, left)
+        read = _read_candidate(candidate[0], ocr_cfg, rules, left, candidate[2])
         if read is not None and _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
             best = (*read, candidate[1])
     return best

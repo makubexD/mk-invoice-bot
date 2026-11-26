@@ -137,13 +137,17 @@ class _Spy:
         self, monkeypatch: pytest.MonkeyPatch, readings: list[Reading], *, crop_shape: tuple[int, int]
     ) -> None:
         self.calls: list[tuple[np.ndarray, float | None]] = []
+        self.psms: list[int | None] = []
         self.crops = 0
         texts = _texts(len(readings))
         by_text = dict(zip(texts, readings, strict=True))
         queue = iter(texts)
 
-        def fake_read(image: np.ndarray, _cfg: Ocr, *, timeout_s: float | None = None) -> OcrText:
+        def fake_read(
+            image: np.ndarray, _cfg: Ocr, *, timeout_s: float | None = None, psm: int | None = None
+        ) -> OcrText:
             self.calls.append((image, timeout_s))
+            self.psms.append(psm)
             return next(queue)
 
         def fake_crop(_gray: np.ndarray) -> np.ndarray:
@@ -201,33 +205,33 @@ def test_photo_plain_full_read_that_completes_is_kept_without_cropping(
 def test_photo_crop_read_is_the_fallback_when_the_full_reads_miss_fields(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: with the plain and upscaled reads incomplete, the binarized crop read runs and is kept."""
+    """D198: with the plain, upscaled and block-mode reads incomplete, the binarized crop read is kept."""
     spy = _Spy(
         monkeypatch,
-        [_reading_with({}), _reading_with({}), _reading_with({}), _reading_with(FULL_FIELDS)],
+        [*[_reading_with({})] * 4, _reading_with(FULL_FIELDS)],
         crop_shape=SMALL,
     )
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
     assert set(payload["reading"]["fields"]) == set(REQUIRED)
-    assert [image.shape for image, _ in spy.calls] == [CANVAS, CANVAS, UPSCALED, SMALL]
+    assert [image.shape for image, _ in spy.calls] == [CANVAS, CANVAS, UPSCALED, UPSCALED, SMALL]
     assert spy.crops == 1
 
 
 def test_photo_crop_with_the_same_shape_adds_no_read(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: a crop that keeps the shape of the photo is no new candidate: no read after the upscaled one."""
+    """D198: a crop that keeps the photo's shape is no new candidate: no read follows the block-mode one."""
     spy = _Spy(
         monkeypatch,
-        [_reading_with({}), _reading_with({}), _reading_with({}), _reading_with(FULL_FIELDS)],
+        [*[_reading_with({})] * 4, _reading_with(FULL_FIELDS)],
         crop_shape=CANVAS,
     )
 
     helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(spy.calls) == 3
+    assert len(spy.calls) == 4
     assert spy.crops == 1
 
 
@@ -250,10 +254,10 @@ def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
     """D198: ties keep the earlier reading, and the strip re-read gets the image that reading came from."""
-    one, two, three, four, five = sorted(REQUIRED)[:5]
+    one, *others = sorted(REQUIRED)[:6]
     spy = _Spy(
         monkeypatch,
-        [_fields(one), _fields(two), _fields(three), _fields(four), _fields(five)],
+        [_fields(one), *(_fields(name) for name in others)],
         crop_shape=SMALL,
     )
     strip_images: list[np.ndarray] = []
@@ -266,7 +270,7 @@ def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(spy.calls) == 5
+    assert len(spy.calls) == 6
     assert set(payload["reading"]["fields"]) == {one}
     assert [image.shape for image in strip_images] == [CANVAS]
 
@@ -277,7 +281,7 @@ def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
     """D198: when the crop reading is kept, the strip re-read gets the deskewed crop."""
     spy = _Spy(
         monkeypatch,
-        [_fields(), _fields(), _fields(), _fields(sorted(REQUIRED)[0]), _fields()],
+        [_fields(), _fields(), _fields(), _fields(), _fields(sorted(REQUIRED)[0]), _fields()],
         crop_shape=SMALL,
     )
     strip_images: list[np.ndarray] = []
@@ -290,7 +294,7 @@ def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
 
     helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert len(spy.calls) == 5
+    assert len(spy.calls) == 6
     assert [image.shape for image in strip_images] == [SMALL]
 
 
@@ -318,6 +322,21 @@ def test_photo_upscaled_read_that_completes_is_kept_and_the_strip_gets_the_strai
     assert [image.shape for image in strip_images] == [CANVAS]
 
 
+def test_photo_block_mode_read_of_the_upscaled_photo_is_kept_without_cropping(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: with the first three reads incomplete, the block-mode read of the upscaled photo is kept."""
+    spy = _Spy(monkeypatch, [*[_reading_with({})] * 3, _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
+    assert len(spy.calls) == 4
+    assert spy.psms == [None, None, None, helper.RETRY_PSM]
+    assert spy.calls[3][0] is spy.calls[2][0]
+    assert spy.crops == 0
+
+
 @pytest.mark.parametrize(
     ("long_side", "expected_long_side"),
     [(3000, 4000), (4000, None), (5000, None)],
@@ -333,9 +352,13 @@ def test_upscaled_candidate_is_capped_at_the_maximum_side(
     if expected_long_side is None:
         assert candidates == []
     else:
-        ((upscaled, deskewed),) = candidates
+        (upscaled, deskewed, psm), (block, block_deskewed, block_psm) = candidates
         assert upscaled.shape == (round(100 * 4000 / 3000), expected_long_side)
         assert deskewed is straight
+        assert psm is None
+        assert block is upscaled
+        assert block_deskewed is straight
+        assert block_psm == helper.RETRY_PSM
 
 
 def _fake_qr(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:

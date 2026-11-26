@@ -128,6 +128,25 @@ def test_read_text_timeout_s_overrides_the_configured_timeout(
     assert seen == [2]
 
 
+def test_read_text_psm_overrides_the_configured_psm(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D198: ``psm`` replaces ``ocr_cfg.psm`` after ``--psm`` in the Tesseract argv."""
+    seen: list[list[str]] = []
+    real_run = subprocess.run
+
+    def spy(argv: list[str], *args: Any, **kwargs: Any) -> Any:
+        seen.append(argv)
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setenv(MODE_ENV, "tsv")
+    monkeypatch.setattr(ocr_module.subprocess, "run", spy)
+
+    read_text(_canvas(100, 100), OCR_CONFIG, command=FAKE_COMMAND, psm=6)
+
+    (argv,) = seen
+    assert argv[argv.index("--psm") + 1] == "6"
+    assert OCR_CONFIG.psm != 6
+
+
 def test_read_text_missing_tesseract_binary_returns_none() -> None:
     """D81: a missing Tesseract binary makes ``read_text`` return ``None`` instead of raising."""
     assert read_text(_canvas(100, 100), OCR_CONFIG, command=(MISSING_TESSERACT,)) is None

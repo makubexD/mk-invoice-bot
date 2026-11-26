@@ -130,12 +130,14 @@ def read_text(
     command: Sequence[str] = (TESSERACT_COMMAND,),
     *,
     timeout_s: float | None = None,
+    psm: int | None = None,
 ) -> OcrText | None:
     """Run Tesseract over ``image`` and return its words, or ``None`` when OCR did not run.
 
     ``command`` is the argv prefix, Tesseract by default; a test passes a fake in its place. The
     fixed arguments follow it. ``timeout_s`` replaces ``ocr_cfg.timeout_s`` for this run, so a
-    second read can use what is left of the budget (D198).
+    second read can use what is left of the budget, and ``psm`` replaces ``ocr_cfg.psm`` so a retry
+    can read in another page segmentation mode (D198).
 
     A missing binary, a timeout or a non-zero exit is treated as "no OCR". Stderr is discarded
     and the text is never logged (R-9.16).
@@ -153,7 +155,7 @@ def read_text(
         "-l",
         ocr_cfg.lang,
         "--psm",
-        str(ocr_cfg.psm),
+        str(ocr_cfg.psm if psm is None else psm),
         "--oem",
         TESSERACT_OEM,
         TSV_CONFIG,
