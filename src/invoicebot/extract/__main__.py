@@ -38,7 +38,7 @@ import yaml
 from pypdfium2 import PdfDocument
 
 from invoicebot.config.models import Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Reading, reading_to_json
+from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
 from invoicebot.extract.image import ImageUnreadable, crop_receipt, load_gray
 from invoicebot.extract.merge import merge
 from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
@@ -179,16 +179,22 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
     except MemoryError:
         # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
         text, ocr_reading = None, None
-    text, ocr_reading, source = _retries(gray, straight, ocr_cfg, rules, started, (text, ocr_reading))
+    qr_reading = None if hit is None else hit.reading
+    text, ocr_reading, source = _retries(
+        gray, ocr_cfg, rules, started, (text, ocr_reading, straight), qr_reading
+    )
     if text is not None and ocr_reading is not None and ocr_reading.printed_url is None:
         ocr_reading = _with_url_strip(source, text, ocr_cfg, rules, ocr_reading)
-    reading = merge(ocr_reading, None if hit is None else hit.reading)
+    reading = merge(ocr_reading, qr_reading)
     return _payload(reading, hit, ocr_ran=text is not None)
 
 
-def _missing_count(reading: Reading | None) -> int:
-    """Return how many required fields ``reading`` lacks; no reading lacks all of them (D198)."""
-    return len(REQUIRED) if reading is None else len(reading.missing_required())
+def _missing_count(ocr: Reading | None, qr: Reading | None) -> int:
+    """Return how many required fields the OCR and QR readings together lack (D198).
+
+    A field the QR reading has is not missing; no reading at all lacks every field.
+    """
+    return len(merge(ocr, qr).missing_required())
 
 
 def _crop_candidates(gray: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
@@ -235,28 +241,30 @@ def _read_candidate(
 
 def _retries(
     gray: np.ndarray,
-    straight: np.ndarray,
     ocr_cfg: Ocr,
     rules: ParsingRules,
     started: float,
-    first: tuple[OcrText | None, Reading | None],
+    first: tuple[OcrText | None, Reading | None, np.ndarray],
+    qr_reading: Reading | None,
 ) -> tuple[OcrText | None, Reading | None, np.ndarray]:
     """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198).
 
     While the best reading misses a required field, the candidates run in order, each only with
     at least ``MIN_RETRY_S`` of ``ocr_cfg.timeout_s`` left after ``started`` and with only that
-    time. The best has the fewest missing required fields, a tie keeping the earlier reading.
+    time. The best has the fewest missing required fields once merged with ``qr_reading``, a tie
+    keeping the earlier reading; the reading kept is the OCR one, unmerged. ``first`` carries the
+    deskewed image it came from.
     """
-    best = (*first, straight)
-    candidates = _candidates(gray, straight)
+    best = first
+    candidates = _candidates(gray, first[2])
     # Time and completeness are checked before a candidate is pulled, so a skipped crop is never made.
-    while _missing_count(best[1]) > 0:
+    while _missing_count(best[1], qr_reading) > 0:
         left = ocr_cfg.timeout_s - (time.monotonic() - started)
         candidate = next(candidates, None) if left >= MIN_RETRY_S else None
         if candidate is None:
             break
         read = _read_candidate(candidate[0], ocr_cfg, rules, left)
-        if read is not None and _missing_count(read[1]) < _missing_count(best[1]):
+        if read is not None and _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
             best = (*read, candidate[1])
     return best
 

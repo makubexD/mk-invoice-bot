@@ -12,7 +12,7 @@ import pytest
 
 from invoicebot.config.models import Ocr
 from invoicebot.extract import __main__ as helper
-from invoicebot.extract.fields import Field, Reading
+from invoicebot.extract.fields import REQUIRED, Field, Reading
 from invoicebot.extract.ocr import OcrText, OcrWord
 from invoicebot.extract.ocr_parse import OcrReading
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
@@ -115,7 +115,7 @@ def test_photo_re_read_error_keeps_the_reading_without_a_strip(
     assert payload["reading"]["fields"]["ruc_emisor"]["value"] == SYNTHETIC_RUC
 
 
-FULL_FIELDS = {name: Field(value="x", source="ocr", confidence=0.9) for name in helper.REQUIRED}
+FULL_FIELDS = {name: Field(value="x", source="ocr", confidence=0.9) for name in REQUIRED}
 SMALL = (100, 300)
 
 
@@ -186,7 +186,7 @@ def test_photo_plain_full_read_that_completes_is_kept_without_cropping(
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert set(payload["reading"]["fields"]) == set(helper.REQUIRED)
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
     assert len(spy.calls) == 2
     first_image, first_timeout = spy.calls[0]
     second_image, second_timeout = spy.calls[1]
@@ -207,7 +207,7 @@ def test_photo_crop_read_is_the_fallback_when_the_full_reads_miss_fields(
 
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
-    assert set(payload["reading"]["fields"]) == set(helper.REQUIRED)
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
     assert [image.shape for image, _ in spy.calls] == [CANVAS, CANVAS, SMALL]
     assert spy.crops == 1
 
@@ -245,7 +245,7 @@ def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
     """D198: ties keep the earlier reading, and the strip re-read gets the image that reading came from."""
-    one, two, three, four = sorted(helper.REQUIRED)[:4]
+    one, two, three, four = sorted(REQUIRED)[:4]
     spy = _Spy(monkeypatch, [_fields(one), _fields(two), _fields(three), _fields(four)], crop_shape=SMALL)
     strip_images: list[np.ndarray] = []
 
@@ -266,9 +266,7 @@ def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
     """D198: when the crop reading is kept, the strip re-read gets the deskewed crop."""
-    spy = _Spy(
-        monkeypatch, [_fields(), _fields(), _fields(sorted(helper.REQUIRED)[0]), _fields()], crop_shape=SMALL
-    )
+    spy = _Spy(monkeypatch, [_fields(), _fields(), _fields(sorted(REQUIRED)[0]), _fields()], crop_shape=SMALL)
     strip_images: list[np.ndarray] = []
 
     def fake_strip(image: np.ndarray, *_args: object) -> str:
@@ -281,3 +279,41 @@ def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
 
     assert len(spy.calls) == 4
     assert [image.shape for image in strip_images] == [SMALL]
+
+
+def _fake_qr(monkeypatch: pytest.MonkeyPatch, *names: str) -> None:
+    """Make the QR reading of the photo carry the required fields ``names``."""
+    reading = Reading(
+        fields={n: Field(value=n, source="qr", confidence=1.0) for n in names},
+        document_url=None,
+        printed_url=None,
+    )
+    hit = helper.QrHit(reading=reading, variant="original", decoder="zxing")
+    monkeypatch.setattr(helper, "read_invoice_qr", lambda _gray: hit)
+
+
+def test_photo_first_read_missing_only_what_the_qr_has_runs_no_retry(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a field the QR reading has is not missing, so the first read needs no retry."""
+    others = sorted(set(REQUIRED) - {"ruc_emisor"})
+    spy = _Spy(monkeypatch, [_fields(*others), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+    _fake_qr(monkeypatch, "ruc_emisor")
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 1
+
+
+def test_photo_retry_is_judged_with_the_qr_reading_and_the_ocr_one_is_kept(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: with the QR having ruc_emisor, a first read missing it and total loses to a full read."""
+    others = sorted(set(REQUIRED) - {"ruc_emisor", "total"})
+    spy = _Spy(monkeypatch, [_fields(*others), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+    _fake_qr(monkeypatch, "ruc_emisor")
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 2
+    assert payload["reading"]["fields"]["total"]["value"] == FULL_FIELDS["total"].value
