@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import cv2
@@ -55,7 +56,7 @@ def _fake_ocr(monkeypatch: pytest.MonkeyPatch, reading: Reading) -> None:
     """Make the photo pass return ``reading`` without running Tesseract or the field rules."""
     monkeypatch.setattr(helper, "load_gray", lambda _data, _max_px: np.full(CANVAS, WHITE, dtype=np.uint8))
     monkeypatch.setattr(helper, "read_invoice_qr", lambda _gray: None)
-    monkeypatch.setattr(helper, "read_text", lambda _image, _cfg: OCR_TEXT)
+    monkeypatch.setattr(helper, "read_text", lambda _image, _cfg, **_kwargs: OCR_TEXT)
     monkeypatch.setattr(helper, "parse_ocr", lambda _text, _rules: OcrReading(reading=reading))
 
 
@@ -112,3 +113,90 @@ def test_photo_re_read_error_keeps_the_reading_without_a_strip(
 
     assert "url_strip" not in payload["reading"]
     assert payload["reading"]["fields"]["ruc_emisor"]["value"] == SYNTHETIC_RUC
+
+
+FULL_FIELDS = {name: Field(value="x", source="ocr", confidence=0.9) for name in helper.REQUIRED}
+FIRST_TEXT = OcrText(lines=((OcrWord(text="first", confidence=0.9),),))
+SECOND_TEXT = OcrText(lines=((OcrWord(text="second", confidence=0.9),),))
+
+
+def _reading_with(fields: dict[str, Field]) -> Reading:
+    """Return a reading with ``fields`` and no URL."""
+    return Reading(fields=fields, document_url=None, printed_url=PRINTED_URL)
+
+
+def _two_reads(
+    monkeypatch: pytest.MonkeyPatch, first: Reading, second: Reading
+) -> list[tuple[np.ndarray, float | None]]:
+    """Fake OCR so the first read yields ``first`` and the second ``second``; return the calls."""
+    calls: list[tuple[np.ndarray, float | None]] = []
+    texts = iter((FIRST_TEXT, SECOND_TEXT))
+    readings = {FIRST_TEXT: first, SECOND_TEXT: second}
+
+    def fake_read(image: np.ndarray, _cfg: Ocr, *, timeout_s: float | None = None) -> OcrText:
+        calls.append((image, timeout_s))
+        return next(texts)
+
+    monkeypatch.setattr(helper, "load_gray", lambda _data, _max_px: np.full(CANVAS, WHITE, dtype=np.uint8))
+    monkeypatch.setattr(helper, "read_invoice_qr", lambda _gray: None)
+    monkeypatch.setattr(helper, "read_text", fake_read)
+    monkeypatch.setattr(helper, "parse_ocr", lambda text, _rules: OcrReading(reading=readings[text]))
+    return calls
+
+
+def test_photo_first_read_without_required_fields_returns_the_unbinarized_read(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a binarized read with no required field loses to an unbinarized read with all."""
+    calls = _two_reads(monkeypatch, _reading_with({}), _reading_with(FULL_FIELDS))
+    monkeypatch.setattr(helper, "binarize", np.zeros_like)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(helper.REQUIRED)
+    assert len(calls) == 2
+    first_image, first_timeout = calls[0]
+    second_image, second_timeout = calls[1]
+    assert first_timeout is None
+    assert second_timeout is not None
+    assert second_timeout <= OCR_CONFIG.timeout_s
+    assert not np.array_equal(first_image, second_image)
+
+
+def test_photo_first_read_with_every_required_field_skips_the_second_read(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a first read that has every required field never runs the second read."""
+    calls = _two_reads(monkeypatch, _reading_with(FULL_FIELDS), _reading_with({}))
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(calls) == 1
+
+
+def test_photo_first_read_that_used_the_budget_skips_the_second_read(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: with less than MIN_RETRY_S left after the first read there is no second read."""
+    calls = _two_reads(monkeypatch, _reading_with({}), _reading_with(FULL_FIELDS))
+    ticks: Callable[[], float] = iter((0.0, OCR_CONFIG.timeout_s - 0.5)).__next__
+    monkeypatch.setattr(helper.time, "monotonic", ticks)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(calls) == 1
+    assert payload["reading"] is None
+
+
+def test_photo_tied_reads_keep_the_binarized_reading(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: when both reads have the same number of required fields the first one stays."""
+    first = _reading_with({"ruc_emisor": Field(value="first", source="ocr", confidence=0.9)})
+    second = _reading_with({"total": Field(value="second", source="ocr", confidence=0.9)})
+    calls = _two_reads(monkeypatch, first, second)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(calls) == 2
+    assert set(payload["reading"]["fields"]) == {"ruc_emisor"}

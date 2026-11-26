@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import resource
 import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,8 @@ import yaml
 from pypdfium2 import PdfDocument
 
 from invoicebot.config.models import Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
-from invoicebot.extract.image import ImageUnreadable, load_gray
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Reading, reading_to_json
+from invoicebot.extract.image import ImageUnreadable, crop_receipt, load_gray
 from invoicebot.extract.merge import merge
 from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
 from invoicebot.extract.ocr_parse import parse_ocr
@@ -59,6 +60,8 @@ UNUSED_PDF_OPTION = 0
 UNREADABLE = "unreadable"
 #: The helper's value for "the PDF has too many pages" (BR-E07, R-2.15).
 TOO_MANY_PAGES = "too_many_pages"
+#: Seconds of OCR budget below which the second, unbinarized read is not started (D198).
+MIN_RETRY_S = 1.0
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
 #: codecs before it decodes one pixel, and its thread pool reserves more per core, so a
 #: 512 MiB cap makes every decode fail to allocate. This value leaves headroom over the
@@ -158,24 +161,57 @@ def _read_invoice(data: bytes, options: _Options) -> dict[str, Any]:
 
 
 def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> dict[str, Any]:
-    """Read one photo from its bytes and return the helper result (R-2.1, R-2.13)."""
+    """Read one photo from its bytes and return the helper result (R-2.1, R-2.13, D198)."""
     try:
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
-        straight = deskew(gray)
+        straight = deskew(crop_receipt(gray))
         processed = binarize(straight)
     except (ImageUnreadable, cv2.error, MemoryError):
         return _unreadable(ocr=False)
+    started = time.monotonic()
     try:
         text = read_text(processed, ocr_cfg)
         ocr_reading = None if text is None else parse_ocr(text, rules).reading
     except MemoryError:
         # OCR ran out of memory: keep any QR reading, as when OCR does not run (BR-E01).
         text, ocr_reading = None, None
+    text, ocr_reading = _retry_unbinarized(straight, ocr_cfg, rules, started, (text, ocr_reading))
     if text is not None and ocr_reading is not None and ocr_reading.printed_url is None:
         ocr_reading = _with_url_strip(straight, text, ocr_cfg, rules, ocr_reading)
     reading = merge(ocr_reading, None if hit is None else hit.reading)
     return _payload(reading, hit, ocr_ran=text is not None)
+
+
+def _missing_count(reading: Reading | None) -> int:
+    """Return how many required fields ``reading`` lacks; no reading lacks all of them (D198)."""
+    return len(REQUIRED) if reading is None else len(reading.missing_required())
+
+
+def _retry_unbinarized(
+    straight: np.ndarray,
+    ocr_cfg: Ocr,
+    rules: ParsingRules,
+    started: float,
+    first: tuple[OcrText | None, Reading | None],
+) -> tuple[OcrText | None, Reading | None]:
+    """Return the better of ``first`` and a read of ``straight`` without binarizing (D198).
+
+    The retry runs only when ``first`` misses a required field and at least ``MIN_RETRY_S`` of
+    ``ocr_cfg.timeout_s`` is left after ``started``. It replaces ``first`` only when it has more
+    required fields, so a tie keeps the binarized reading.
+    """
+    if _missing_count(first[1]) == 0:
+        return first
+    left = ocr_cfg.timeout_s - (time.monotonic() - started)
+    if left < MIN_RETRY_S:
+        return first
+    try:
+        text = read_text(straight, ocr_cfg, timeout_s=left)
+        reading = None if text is None else parse_ocr(text, rules).reading
+    except MemoryError:
+        return first
+    return (text, reading) if _missing_count(reading) < _missing_count(first[1]) else first
 
 
 def _with_url_strip(

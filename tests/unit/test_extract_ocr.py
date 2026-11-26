@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
 import pytest
 
 from invoicebot.config.models import Ocr
+from invoicebot.extract import ocr as ocr_module
 from invoicebot.extract.ocr import (
     OcrBox,
     OcrText,
@@ -104,6 +107,25 @@ def test_read_text_timeout_returns_none(
 
     assert read_text(_canvas(100, 100), SHORT_TIMEOUT_CONFIG, command=FAKE_COMMAND) is None
     assert "tesseract timed out" in caplog.text
+
+
+def test_read_text_timeout_s_overrides_the_configured_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D198: ``timeout_s`` replaces ``ocr_cfg.timeout_s`` as the subprocess timeout."""
+    seen: list[float | None] = []
+    real_run = subprocess.run
+
+    def spy(*args: Any, **kwargs: Any) -> Any:
+        seen.append(kwargs["timeout"])
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setenv(MODE_ENV, "tsv")
+    monkeypatch.setattr(ocr_module.subprocess, "run", spy)
+
+    read_text(_canvas(100, 100), OCR_CONFIG, command=FAKE_COMMAND, timeout_s=2)
+
+    assert seen == [2]
 
 
 def test_read_text_missing_tesseract_binary_returns_none() -> None:
