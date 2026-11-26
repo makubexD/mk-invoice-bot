@@ -227,6 +227,19 @@ class TelegramClient:
         """Acknowledge a button press so the client stops showing it as pending (D177)."""
         await self.call("answerCallbackQuery", {"callback_query_id": callback_query_id})
 
+    async def edit_reply_markup(
+        self, chat_id: int, message_id: int, inline_keyboard: list[list[dict[str, str]]]
+    ) -> None:
+        """Replace a message's inline keyboard, e.g. to drop pressed callback buttons (D195)."""
+        await self.call(
+            "editMessageReplyMarkup",
+            {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "reply_markup": {"inline_keyboard": inline_keyboard},
+            },
+        )
+
     async def get_file(self, file_id: str) -> FileInfo:
         """Resolve a media ``file_id`` to its download path and size (R-1.11)."""
         return _file_info(await self.call("getFile", {"file_id": file_id}))
