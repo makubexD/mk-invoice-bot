@@ -269,3 +269,26 @@ held mail has no reminder and no timeout; `/estado` shows it. With `auto`, the m
    answers BR-D22. `/revisar` is in the admin's Telegram menu only after `invoicebot telegram commands` runs again
    (§11) once the new image is live.
 3. **Going back to `auto`** does not send a mail that is waiting: tap [Enviar] on it first, or it keeps waiting.
+
+## 13. Forget an invoice (D196)
+
+For an emergency, or to send the same invoice again from a clean slate. It runs on the host, never from the chat.
+Only a `DONE`, `CANCELLED` or `FAILED` invoice can be forgotten; cancel a running one with `/cancelar` first.
+
+```sh
+podman exec "$APP" invoicebot invoice forget <id>                       # dry run: prints the plan, changes nothing
+podman exec "$APP" invoicebot invoice forget <id> --yes                 # release its key only
+podman exec "$APP" invoicebot invoice forget <id> --drive --purge --yes # delete its folder, files and rows
+```
+
+- **No flag** releases the invoice's natural key (BR-E04), so the same invoice is accepted again. The row, its
+  history and its folder stay.
+- **`--drive`** deletes the invoice's OneDrive folder (`flow_data.folder_path`, `_Sent` included) through the bot's
+  own Graph access. Flow A (Sheets) is not covered: delete its row and folder by hand.
+- **`--purge`** removes its host files (`tmp/<id>/`, `mail/<id>/`, `mail/<id>.eml`, its photos) and deletes its
+  database rows; LLM cost rows stay without the invoice id.
+- The drive goes first, then the files, then the database. A drive failure stops before anything else changes, and
+  a rerun is safe.
+- With `--drive --purge`, the month's next filing reuses the freed sequence number (D88); with `--drive` alone it
+  does not, since the invoice still holds its number.
+- A mail that was sent stays sent: nothing recalls it.
