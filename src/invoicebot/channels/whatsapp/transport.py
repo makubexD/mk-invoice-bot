@@ -2,24 +2,29 @@
 
 Free-form messages are only allowed inside the customer service window. When the
 window is closed, or Meta answers that it has just closed, the same text goes
-through an approved template instead (BR-S04). A failure that no retry can fix
-(no number for the recipient, no configured template, a permanent Meta error
-code) raises ``PermanentSendError``, so the outbox kills the row at once. The
-window is read on its own pooled connection, never inside a transaction held
-across the HTTP call.
+through an approved template instead (BR-S04). A message that carries a document
+is uploaded and sent as a document inside the window only: outside it, the row
+fails at once (D194). A failure that no retry can fix (no number for the
+recipient, no configured template, a missing or oversized document, a permanent
+Meta error code) raises ``PermanentSendError``, so the outbox kills the row at
+once. The window is read on its own pooled connection, never inside a
+transaction held across the HTTP call.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from pathlib import Path
 from typing import Any
 
-from invoicebot.channels.base import OutboundMessage
+from invoicebot.channels.base import Document, OutboundMessage
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError, WindowExpired
 from invoicebot.channels.whatsapp.payloads import (
     BUTTONS_MAX_COUNT,
     buttons_payload,
+    document_payload,
     list_payload,
     template_payload,
     text_payload,
@@ -69,6 +74,9 @@ TEMPLATE_PARAM_MAX_CHARS = 1024
 TOKEN_REJECTED_STATUS = 401
 TOKEN_REJECTED_CODE = 190
 
+#: Meta's document cap in bytes (D194).
+DOCUMENT_MAX_BYTES = 100 * 1024 * 1024
+
 
 class TemplateMissing(Exception):
     """The message needs a template, but no configured template covers it (R-1.10)."""
@@ -106,6 +114,12 @@ def make_transport(
             to = numbers[row.to]
         except KeyError as exc:
             raise PermanentSendError(f"no WhatsApp number for {row.to}") from exc
+        document = msg.document
+        if document is not None:
+            if not await _recipient_window_open(pool, msg, row.to):
+                raise PermanentSendError("document outside the 24-hour window")
+            message_id = await _document_message_id(client, msg, document, to, on_token_rejected)
+            return _channel_message_id(row, message_id)
         if await _recipient_window_open(pool, msg, row.to):
             try:
                 message_id = await _send(client, _free_form_payload(to, msg), on_token_rejected)
@@ -126,6 +140,44 @@ def make_transport(
     return transport
 
 
+async def _document_message_id(
+    client: WhatsAppClient,
+    msg: OutboundMessage,
+    document: Document,
+    to: str,
+    on_token_rejected: Callable[[], Awaitable[None]],
+) -> str | None:
+    """Upload ``document`` and send it with the message text as its caption (D194).
+
+    A closed window answered by Meta on the document send is permanent: a
+    document has no template to fall back to.
+    """
+    data = await _read_document(document)
+    media_id = await _deliver(
+        lambda: client.upload_media(data, document.filename, document.mime), on_token_rejected
+    )
+    try:
+        return await _send(
+            client,
+            document_payload(to, media_id, document.filename, _caption(msg)),
+            on_token_rejected,
+        )
+    except WindowExpired as exc:
+        raise PermanentSendError("document outside the 24-hour window") from exc
+
+
+async def _read_document(document: Document) -> bytes:
+    """Read the document's bytes, refusing a missing file or one over Meta's cap (D194)."""
+    path = Path(document.path)
+    try:
+        size = (await asyncio.to_thread(path.stat)).st_size
+    except FileNotFoundError as exc:
+        raise PermanentSendError(f"WhatsApp document is missing: {document.filename}") from exc
+    if size > DOCUMENT_MAX_BYTES:
+        raise PermanentSendError(f"WhatsApp document is over {DOCUMENT_MAX_BYTES} bytes")
+    return await asyncio.to_thread(path.read_bytes)
+
+
 async def _send(
     client: WhatsAppClient,
     payload: dict[str, Any],
@@ -136,8 +188,20 @@ async def _send(
     A permanent Meta code fails at once; a rejected token alerts and waits for
     the token to be renewed instead.
     """
+    return await _deliver(lambda: client.send(payload), on_token_rejected)
+
+
+async def _deliver[T](
+    call: Callable[[], Awaitable[T]],
+    on_token_rejected: Callable[[], Awaitable[None]],
+) -> T:
+    """Run one Graph call and map its failure to a reschedule or a permanent error (BR-O03, R-11.5).
+
+    Both the upload and the send go through here, so a rejected token alerts and
+    waits in exactly the same way for either call.
+    """
     try:
-        return await client.send(payload)
+        return await call()
     except WhatsAppError as exc:
         if exc.status == TOKEN_REJECTED_STATUS or exc.code == TOKEN_REJECTED_CODE:
             await on_token_rejected()
@@ -166,13 +230,18 @@ async def _recipient_window_open(pool: Pool, msg: OutboundMessage, recipient: st
 
 def _free_form_payload(to: str, msg: OutboundMessage) -> dict[str, Any]:
     """Build the in-window payload: a list past Meta's button cap, reply buttons, else plain text."""
-    links = _link_lines(msg)
-    text = f"{msg.text}\n{links}" if links else msg.text
+    text = _caption(msg)
     if len(msg.buttons) > BUTTONS_MAX_COUNT:
         return list_payload(to, text, LIST_BUTTON, msg.buttons)
     if msg.buttons:
         return buttons_payload(to, text, msg.buttons)
     return text_payload(to, text)
+
+
+def _caption(msg: OutboundMessage) -> str:
+    """Return the text, then one line per link, for a text body or a document caption (D194)."""
+    links = _link_lines(msg)
+    return f"{msg.text}\n{links}" if links else msg.text
 
 
 def _link_lines(msg: OutboundMessage) -> str:
