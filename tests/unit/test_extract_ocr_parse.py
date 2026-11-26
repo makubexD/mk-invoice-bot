@@ -17,6 +17,8 @@ RULES_PATH = ROOT / "config" / "parsing_rules.yaml"
 # Synthetic RUCs from tests/synthetic_rucs.txt. No real RUC may appear here.
 SYNTHETIC_RUC = "20000000001"
 SYNTHETIC_RUC_OTHER = "51900000000"
+#: A listed synthetic RUC the bare pattern matches, printed before the anchored issuer.
+EARLIER_BARE_RUC = "20000000010"
 WRONG_CHECK_DIGIT_RUC = "20000000002"
 DEFAULT_CONFIDENCE = 0.95
 LONG_FILLER = "A" * 100_000
@@ -438,3 +440,28 @@ def test_parse_ocr_skips_a_punycode_printed_host(rules: ParsingRules) -> None:
     reading = parse_ocr(_ocr("https://xn--sunt-gra.pe/x https://portal.example.pe/y"), rules).reading
 
     assert reading.printed_url == "https://portal.example.pe/y"
+
+
+def test_parse_ocr_misread_ruc_separator_keeps_issuer_and_buyer(rules: ParsingRules) -> None:
+    """D198: a '!' read for the ':' after RUC still anchors the issuer; the buyer's RUC is num_doc_adq."""
+    text = _ocr(
+        "BODEGA EJEMPLO SAC",
+        "AV EJEMPLO 123",
+        f"RUC! {SYNTHETIC_RUC}",
+        "FACTURA ELECTRÓNICA",
+        "CLIENTE: EMPRESA CLIENTE SAC",
+        f"RUC: {SYNTHETIC_RUC_OTHER}",
+    )
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == SYNTHETIC_RUC_OTHER
+
+
+@pytest.mark.parametrize("separator", ["|", ";", ",", "!"])
+def test_parse_ocr_ruc_separator_misreads_anchor_the_issuer(rules: ParsingRules, separator: str) -> None:
+    """D198: '|', ';', ',' or '!' after RUC anchors the issuer ahead of a bare RUC printed earlier."""
+    text = _ocr(f"REF {EARLIER_BARE_RUC}", f"RUC{separator} {SYNTHETIC_RUC}")
+
+    assert _fields(text, rules)["ruc_emisor"] == SYNTHETIC_RUC
