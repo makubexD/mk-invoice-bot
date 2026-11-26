@@ -69,6 +69,7 @@ from invoicebot.rules.messages_es import (
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     REPROCESS_TOO_SOON,
+    REVIEW_STARTED,
     fields_desc,
     state_desc,
 )
@@ -601,6 +602,8 @@ async def _revisar(
 ) -> None:
     """Send a prepared review-mode batch to deliver, which posts its mail for review (D194).
 
+    The sender gets REVIEW_STARTED at once, so the command never looks ignored.
+
     Anything not reviewable, a missing or bad id included, answers BR-D22.
     """
     invoice_id = _invoice_id(arg)
@@ -609,6 +612,7 @@ async def _revisar(
         return
     await set_state(conn, invoice_id, DELIVERING, expected=BATCHED)
     await enqueue(conn, invoice_id, DELIVER_STEP)
+    await _reply(conn, msg, None, REVIEW_STARTED.format(id=invoice_id))
 
 
 async def _reviewable(conn: AsyncConnection[Any], invoice_id: int, review_flows: frozenset[str]) -> bool:

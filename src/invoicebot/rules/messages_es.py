@@ -725,6 +725,9 @@ CANCEL_LATE = "El comprobante #{id} ya está {state_desc}; ya no se puede cancel
 #: ``/reprocesar``'s answer when it requeued the invoice's step (S4.9, D96).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 REPROCESS_STARTED = "Vuelvo a intentar el comprobante #{id}."
+#: ``/revisar``'s answer when it sent a prepared batch back to deliver for review (D194).
+#: Not a spec 06 row, so it stays outside MESSAGES, like REPROCESS_STARTED.
+REVIEW_STARTED = "🔎 Preparo el correo del comprobante #{id} para que lo revises."
 #: ``/reprocesar``'s answer when the invoice's state has no step to restart (S4.9, D96).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 REPROCESS_NOT_ALLOWED = (

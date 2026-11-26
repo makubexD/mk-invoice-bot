@@ -265,5 +265,7 @@ held mail has no reminder and no timeout; `/estado` shows it. With `auto`, the m
    **reload**. The change applies to the next delivery; a mail already waiting for review keeps waiting.
 2. **Review a batch prepared earlier.** A flow B invoice that is `BATCHED` with a `prepared` batch, no laptop job and
    a flow now on `review` (for example a dry_run draft written before the switch) goes through review with
-   `/revisar <n>`, sent by an admin. The bot then posts the review as in step 1. Anything else answers BR-D22.
+   `/revisar <n>`, sent by an admin. The bot answers at once, then posts the review as in step 1. Anything else
+   answers BR-D22. `/revisar` is in the admin's Telegram menu only after `invoicebot telegram commands` runs again
+   (§11) once the new image is live.
 3. **Going back to `auto`** does not send a mail that is waiting: tap [Enviar] on it first, or it keeps waiting.

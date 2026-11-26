@@ -72,6 +72,7 @@ from invoicebot.rules.messages_es import (
     REPROCESS_NOT_ALLOWED,
     REPROCESS_STARTED,
     REPROCESS_TOO_SOON,
+    REVIEW_STARTED,
     STATUS,
     STATUS_RULE,
     state_desc,
@@ -2131,7 +2132,7 @@ async def _revisar(
 async def test_revisar_sends_a_prepared_review_batch_to_deliver(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """D194: /revisar on a prepared batch of a review flow delivers it once."""
+    """D194: /revisar on a prepared batch of a review flow delivers it once and says so."""
     profile_id = _profile()
     invoice_id = await _revisable_invoice(db_pool, profile_id)
 
@@ -2140,7 +2141,7 @@ async def test_revisar_sends_a_prepared_review_batch_to_deliver(
         head = await load_invoice_head(conn, invoice_id)
         jobs = await _jobs(conn, invoice_id)
 
-    assert replies == []
+    assert replies == [(REVIEW_STARTED.format(id=invoice_id), None)]
     assert head is not None
     assert head.state == "DELIVERING"
     assert jobs == ["deliver"]
