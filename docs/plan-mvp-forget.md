@@ -27,7 +27,8 @@ Decision this plan proposes (step 1), **D196 forget an invoice**:
   already gone is fine. A flow without a OneDrive folder sink refuses `--drive` with exit 2 before any change.
 - `--purge`: the invoice's host files (`tmp/<id>/`, `mail/<id>/`, `mail/<id>.eml`, each `files.local_path` under the
   data directory) are removed and its database rows are deleted: every table that references it, then the invoice,
-  then its batch when no other invoice uses it. `llm_usage` rows keep their cost with `invoice_id` set to null.
+  then its batch when no other invoice uses it. `llm_usage` rows are deleted too: nothing writes them
+  yet (2026-11-26), and their `invoice_id` is `NOT NULL`.
 - Order: the drive first, then the host files, then the database in one transaction with the invoice row locked. A
   drive failure stops before anything else changes; rerunning is safe because every part accepts what is already gone.
 - With `--drive --purge` the month's next filing reuses the sequence number, since neither the folder nor the
@@ -58,8 +59,7 @@ caller's connection and never commit.
 - `async def lock_target(conn, invoice_id) -> ForgetTarget | None`: `SELECT ... FOR UPDATE` on the invoice, plus its
   files' local paths; `None` when there is no such invoice.
 - `async def release_key(conn, invoice_id) -> None`: `UPDATE invoices SET natural_key = NULL, updated_at = now()`.
-- `async def purge(conn, invoice_id) -> dict[str, int]`: sets `llm_usage.invoice_id` and `portal_probes.invoice_id`
-  to null, deletes the invoice's rows from `files`, `jobs`, `fetch_attempts`, `invoice_gaps`, `upload_rejections`,
+- `async def purge(conn, invoice_id) -> dict[str, int]`: deletes the invoice's rows from `llm_usage`, `files`, `jobs`, `fetch_attempts`, `invoice_gaps`, `upload_rejections`,
   `pending_actions`, `events`, `messages`, `outbox`, `mail_jobs`, `portal_candidates`, then the invoice, then its
   batch when no other invoice has that `batch_id`. Returns the row count per table. One SQL constant per statement,
   each parameterized; the table list lives in one tuple so a new referencing table is one line. Before writing it,
@@ -72,7 +72,8 @@ Cases (docstrings start with `D196:`; synthetic values only):
 3. `release_key` leaves the row and clears `natural_key`; a new invoice can then claim the same key
    (`claim_natural_key` returns `None`).
 4. `purge` of an invoice with a row in each referencing table deletes them all and the invoice; the counts match.
-5. `purge` keeps an `llm_usage` row with `invoice_id` null and its cost.
+5. `purge` deletes the invoice's `llm_usage` row; a `portal_probes` row is kept with `invoice_id` null (its
+   `ON DELETE SET NULL`).
 6. `purge` deletes the invoice's batch when it is the batch's only invoice, and keeps a batch another invoice uses.
 7. A guard test: every foreign key to `invoices(id)` in the live schema is covered by `purge` (reads `pg_constraint`),
    so a new table fails this test until it is added.

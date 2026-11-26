@@ -286,7 +286,7 @@ podman exec "$APP" invoicebot invoice forget <id> --drive --purge --yes # delete
 - **`--drive`** deletes the invoice's OneDrive folder (`flow_data.folder_path`, `_Sent` included) through the bot's
   own Graph access. Flow A (Sheets) is not covered: delete its row and folder by hand.
 - **`--purge`** removes its host files (`tmp/<id>/`, `mail/<id>/`, `mail/<id>.eml`, its photos) and deletes its
-  database rows; LLM cost rows stay without the invoice id.
+  database rows.
 - The drive goes first, then the files, then the database. A drive failure stops before anything else changes, and
   a rerun is safe.
 - With `--drive --purge`, the month's next filing reuses the freed sequence number (D88); with `--drive` alone it
