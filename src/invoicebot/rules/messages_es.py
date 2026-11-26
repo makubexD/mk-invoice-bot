@@ -160,7 +160,7 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-D08": "👍 Marcada como enviada.",
     "BR-D09": "Recibí {received_desc}. Aún falta {missing_desc} para completar {serie}-{numero}.",
-    "BR-D10": "✅ Archivada en {folder} y enviada por correo.",
+    "BR-D10": "✅ {serie}-{numero} archivada en {folder}. Outlook aceptó el correo para {to}.",
     "BR-D11": "⚠️ El correo de {serie}-{numero} no está confirmado. ¿Cómo lo envío?",
     "BR-D13": "✅ Archivada en {folder}. El correo salió por tu regla de Outlook.",
     "BR-D12": (
@@ -260,6 +260,9 @@ GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo rei
 
 #: ``{razon_social}`` in BR-F02 and BR-S06 when the issuer's name is unknown.
 UNKNOWN_ISSUER = "este emisor"
+
+#: ``{to}`` in BR-D10 when the mail's To addresses are unknown (D195).
+DONE_RECIPIENT_UNKNOWN = "el destinatario"
 
 #: One ``GAP_DIGEST_admin`` line per gap: its missing capability and its subject.
 GAP_DIGEST_LINE = "• {kind_desc} — {subject}"

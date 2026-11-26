@@ -1,10 +1,11 @@
 """``when_desc`` renders look times for sender messages (D190)."""
 
+import string
 from datetime import UTC, date, datetime
 
 import pytest
 
-from invoicebot.rules.messages_es import when_desc
+from invoicebot.rules.messages_es import MESSAGES, when_desc
 
 
 @pytest.mark.parametrize(
@@ -19,3 +20,9 @@ from invoicebot.rules.messages_es import when_desc
 def test_when_desc(at: datetime, today: date, expected: str) -> None:
     """D190: a look time reads as hoy, mañana or a day and month."""
     assert when_desc(at, today) == expected
+
+
+def test_br_d10_formats_with_exactly_its_fields() -> None:
+    """BR-D10, D195: the done text takes serie, numero, folder and to, and nothing else."""
+    fields = {name for _, name, _, _ in string.Formatter().parse(MESSAGES["BR-D10"]) if name}
+    assert fields == {"serie", "numero", "folder", "to"}
