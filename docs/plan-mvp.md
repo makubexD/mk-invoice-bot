@@ -409,3 +409,16 @@ the probe's version; a lone PDF of another invoice is `not_found`.
 - **Later:** a reopened gap or a dead `create_issue` row can queue a second `probe_report` for the same probe; labels in
   the public table keep `.` and `/` (GitHub autolinks `www.x.pe/y`) and long digit runs; path segments that look like
   tokens survive `without_session`; an approved host also approves its subdomains for typing.
+
+## Carried over from the `open-links` live check
+
+From the live run on 2026-11-26 (`specs/spikes/open-links.md`). For a follow-up phase before 9t2, the owner's UI asks:
+
+- A pressed button's message keeps its buttons: [Enviar] and [Cancelar] stay on BR-D19 after either is pressed, so the
+  chat shows two [Enviar]. Remove or replace the keyboard once a press settles it.
+- BR-D10 names neither the invoice (serie-numero) nor the recipient, and says "enviada" when Graph only accepted the
+  mail. Say that Outlook accepted it, for whom and to which address.
+- **9x `inbox-match`:** read the personal mailbox's bounce notices (5.7.501 and others) and tell the owner, with
+  [Reintentar]; this needs `Mail.Read` on the personal account.
+- **Known limit:** the folder link opens in the browser, not the OneDrive app (no share links, D194).
+
