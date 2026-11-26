@@ -95,7 +95,7 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
       remote_ref NULL, sha256, size, xml_trust NULL /*post-MVP, D57*/, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_error) -- queue
-batches(id PK, flow_id, state /*open|prepared|sending|sent|failed*/, opened_at, sent_at, email_ref)
+batches(id PK, flow_id, state /*open|prepared|review|sending|sent|failed*/, opened_at, sent_at, email_ref)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
 payment_proposals(id PK, profile_id, flow_id, paid_on DATE, amount NUMERIC, sets_json,
                   state /*pending|confirmed|rejected|expired*/, created_at)      -- /pagado buttons (D107)
@@ -170,6 +170,9 @@ Side states and exits (each row names the rule that causes it):
 | ROUTING (flow B)                            | Total above `reimbursement_cap` (BR-D06)                                                                                | CONFIRMING                                                                                           |
 | DELIVERING (flow B)                         | Every sink done; added to its batch (a batch of one with `per_invoice`, R-7.5)                                          | BATCHED                                                                                              |
 | BATCHED                                     | The batch is `sent` (R-7.8): Graph accepted the email, the laptop wrote its receipt, or the sender tapped [Ya lo envié] | DONE (files purged, `invoice.delivered`)                                                             |
+| DELIVERING (flow B, `send: review`)         | Folder and Excel filed; the mail waits for review (BR-D19, D194)                                                        | BATCHED; the batch is `review`; nothing is sent                                                      |
+| BATCHED (batch `review`)                    | [Enviar] (BR-D21, D194)                                                                                                 | DELIVERING (`reviewed`; the first mail mode runs)                                                    |
+| BATCHED (batch `prepared`, no laptop job)   | `/revisar <id>` on a `review` flow (D194)                                                                               | DELIVERING (the delivery posts the review)                                                           |
 | BATCHED                                     | The email can't be prepared or sent after retries (BR-D03)                                                              | stays BATCHED; the batch goes `failed`                                                               |
 | BATCHED (batch `failed`)                    | `/reprocesar <id>` (S4.9, D96)                                                                                          | DELIVERING (the delivery runs again and re-adds the invoice to a batch)                              |
 | any non-terminal                            | `/cancelar`, BR-E05                                                                                                     | CANCELLED                                                                                            |
@@ -309,6 +312,7 @@ status: active # active | todo | broken
 - Template expressions use a tiny safe formatter (`str.format_map` with a restricted namespace plus formatting filters), not full Jinja, to save memory. Jinja is used only for email bodies, and imported lazily.
 - **Formula injection (R-6.6, R-7.10):** Sheets writes use `valueInputOption=RAW`; Excel text cells are written as strings; any text starting with `= + - @`, tab or carriage return gets a leading `'`. The Excel template's SHA-256 is pinned in config.
 - **Flow B (D48, D49, D61–D71):** `DELIVERING` builds the invoice's folder, patches the Excel and stores the PDF and XML on each storage target, then prepares the email through the first configured mail mode. Each invoice is a batch of one. The batch is `prepared` until R-7.8 says it is `sent`; then the invoice is `DONE` and a job renames the folder `_Sent`. `/pagado` later renames it `_PAID_…` and moves it into the year folder. The target config (placeholders; `config/example.yaml` moves to this shape in the `file-b` phase):
+- **Review and links (D194):** with the mailer's `send: review`, `DELIVERING` stops after the folder and Excel: the attachments are posted as chat documents, then BR-D19 with [Enviar] [Cancelar]; [Enviar] sets `flow_data.reviewed` and runs `deliver` again, which reuses the saved folder and sequence (D88) and the crash rules of D89. The folder's `webUrl` is read once after filing (`FolderLinks.web_url`) and kept as `flow_data.folder_url`. The canonical outbound message carries `links` (Telegram URL buttons, a text line elsewhere) and at most one `document` (one outbox row each).
 
 ```yaml
 work_microsoft:

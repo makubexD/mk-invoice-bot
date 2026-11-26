@@ -184,6 +184,16 @@ MESSAGES: dict[str, str] = {
         "Carpeta: {link_folder}"
     ),
     "BR-D18": "✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.\nFila: {link_row}",
+    "BR-D19": (
+        "📧 Revisa el correo de {serie}-{numero} antes de enviarlo.\n"
+        "Para: {to}\n"
+        "{cc_line}Asunto: {subject}\n"
+        "{body}\n"
+        "Adjuntos: {files}"
+    ),
+    "BR-D20": "⏸️ No envié el correo de {serie}-{numero}. Toca [Enviar] cuando quieras.",
+    "BR-D21": "📤 Enviando el correo de {serie}-{numero}…",
+    "BR-D22": "No hay un correo por revisar para #{id}.",
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",
@@ -549,6 +559,14 @@ BUTTON_NOT_ARRIVED = "No llegó"
 BUTTON_VIA_LAPTOP = "Por la laptop"
 BUTTON_SELF_SEND = "Lo envío yo"
 BUTTON_ARRIVED = "Ya llegó"
+#: BR-D19's two buttons: send the reviewed mail, or hold it (D194).
+BUTTON_SEND = "Enviar"
+BUTTON_HOLD = "Cancelar"
+#: BR-D19's ``{cc_line}`` when the mail has copies; empty otherwise (D194).
+REVIEW_CC_LINE = "CC: {cc}\n"
+#: The titles of a message's links: Telegram's URL buttons, the text line elsewhere (D194).
+LINK_TITLE_FOLDER = "📂 Abrir carpeta"
+LINK_TITLE_ROW = "📄 Abrir fila"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
@@ -619,6 +637,8 @@ HELP_CANCELAR = "/cancelar 12: cancela el comprobante #12"
 #: ``/reprocesar``'s own line in the command list (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_REPROCESAR = "/reprocesar 12: reintenta el comprobante #12 si falló"
+#: ``/revisar``'s own line in the command list (D194).
+HELP_REVISAR = "/revisar 12: muestra el correo preparado del comprobante #12 para enviarlo"
 #: ``/pendientes``'s own line in the command list (S4.9).
 #: Not a spec 06 row, so it stays outside MESSAGES; the copy is pending the owner's review.
 HELP_PENDIENTES = "/pendientes: lo que espera tu respuesta"
