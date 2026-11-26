@@ -32,6 +32,7 @@ from invoicebot.channels.base import Button, ButtonPress, InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.extract.validate import RULE_BAD_DATE
 from invoicebot.pipeline.docs_help import send_pdf, teach_portal, wait_mail
+from invoicebot.pipeline.done import done_text
 from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.outgoing import RULE_STALE_BUTTON, Addressee, queue_message, queue_stale
 from invoicebot.pipeline.questions import (
@@ -525,8 +526,7 @@ async def _arrived(
         await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
         await set_state(conn, invoice_id, DONE, rule_id=RULE_DONE)
         photos = tuple(await take_photo_paths(conn, invoice_id))
-    folder = (await load_flow_data(conn, invoice_id))["folder"]
-    await _reply(conn, msg, invoice_id, RULE_DONE, MESSAGES[RULE_DONE].format(folder=folder))
+    await _reply(conn, msg, invoice_id, RULE_DONE, await done_text(conn, invoice_id))
     return photos
 
 

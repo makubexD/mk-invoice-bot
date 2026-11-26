@@ -24,6 +24,7 @@ from psycopg import AsyncConnection
 from invoicebot.config.models import Mail
 from invoicebot.pipeline.actions import send_not_confirmed
 from invoicebot.pipeline.deliver import PREPARED_BATCH_STATE, SENT_BATCH_STATE
+from invoicebot.pipeline.done import done_text
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP
 from invoicebot.queue.jobs import enqueue
@@ -35,7 +36,6 @@ from invoicebot.states import DONE
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     get_batch_state,
-    load_flow_data,
     open_batch,
     set_batch_state,
     take_photo_paths,
@@ -225,11 +225,10 @@ async def _sent(conn: AsyncConnection[Any], invoice_id: int, job_id: str) -> lis
 
 async def _queue_done(conn: AsyncConnection[Any], invoice_id: int) -> None:
     """Queue BR-D10 to the invoice's sender with the folder the delivery filed (R-7.8, R-7.14)."""
-    folder = (await load_flow_data(conn, invoice_id))["folder"]
     await queue_message(
         conn,
         await _sender(conn, invoice_id),
-        MESSAGES[RULE_DONE].format(folder=folder),
+        await done_text(conn, invoice_id),
         invoice_id=invoice_id,
         rule_id=RULE_DONE,
         buttons=[],

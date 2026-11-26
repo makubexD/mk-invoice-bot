@@ -17,6 +17,7 @@ from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.actions import INVALID_OK_ACTION, send_not_confirmed
+from invoicebot.pipeline.done import MAIL_TO_KEY
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
 from invoicebot.pipeline.unreadable import unreadable_text
@@ -86,6 +87,8 @@ FLOW_CHOICES = ("flow_a", "flow_b")
 FOLDER = "2026-11-Support_1_LaLena"
 SERIE = "F001"
 NUMERO = "15160"
+MAIL_TO = ["rrhh@example.com"]
+DONE_TEXT = MESSAGES["BR-D10"].format(serie=SERIE, numero=NUMERO, folder=FOLDER, to="rrhh@example.com")
 
 
 def _field(value: str) -> Field:
@@ -271,7 +274,7 @@ async def _done_invoice(
         await save_reading(conn, invoice_id, _reading())
         await set_flow(conn, invoice_id, flow)
         await set_state(conn, invoice_id, DONE, rule_id=RULE_INBOX)
-        await merge_flow_data(conn, invoice_id, {"folder": FOLDER})
+        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, MAIL_TO_KEY: MAIL_TO})
         if batch_state is not None:
             batch_id = await open_batch(conn, invoice_id, FLOW, "prepared")
             await set_batch_state(conn, batch_id, batch_state)
@@ -287,7 +290,7 @@ async def _prepared_laptop_invoice(pool: AsyncConnectionPool[AsyncConnection[Any
         await save_reading(conn, invoice_id, _reading())
         await set_flow(conn, invoice_id, FLOW)
         await set_state(conn, invoice_id, BATCHED, rule_id=RULE_BATCHED)
-        await merge_flow_data(conn, invoice_id, {"folder": FOLDER})
+        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, MAIL_TO_KEY: MAIL_TO})
         await open_batch(conn, invoice_id, FLOW, "prepared")
     return invoice_id
 
@@ -1185,7 +1188,7 @@ async def test_not_arrived_without_a_laptop_flow_sends_two_buttons(
 async def test_arrived_completes_a_prepared_batch_with_br_d10(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8: [Ya llegó] on a prepared laptop batch sends it, files DONE and queues folder_status."""
+    """BR-D10, D195: [Ya llegó] on a prepared laptop batch sends it, files DONE and queues folder_status."""
     profile_id = _profile()
     invoice_id = await _prepared_laptop_invoice(db_pool, profile_id)
     msg = _press(invoice_id, "arrived", profile_id)
@@ -1204,7 +1207,7 @@ async def test_arrived_completes_a_prepared_batch_with_br_d10(
     assert invoice == (DONE, RULE_DONE)
     assert batch_state == "sent"
     assert jobs == ["folder_status"]
-    assert messages == [(RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER), [])]
+    assert messages == [(RULE_DONE, DONE_TEXT, [])]
 
 
 async def test_arrived_on_a_prepared_batch_deletes_the_photo(
@@ -1215,7 +1218,8 @@ async def test_arrived_on_a_prepared_batch_deletes_the_photo(
     profile_id = _profile()
     invoice_id, photo = await _batched_invoice(db_pool, profile_id, tmp_path)
     async with db_pool.connection() as conn, conn.transaction():
-        await merge_flow_data(conn, invoice_id, {"folder": FOLDER})
+        await save_reading(conn, invoice_id, _reading())
+        await merge_flow_data(conn, invoice_id, {"folder": FOLDER, MAIL_TO_KEY: MAIL_TO})
     msg = _press(invoice_id, "arrived", profile_id)
 
     async with db_pool.connection() as conn:
@@ -1231,7 +1235,7 @@ async def test_arrived_on_a_prepared_batch_deletes_the_photo(
 async def test_arrived_on_a_sent_batch_only_answers_br_d10(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
-    """R-7.8: [Ya llegó] on a sent batch changes no state and only sends BR-D10's text."""
+    """BR-D10, D195: [Ya llegó] on a sent batch changes no state and only sends BR-D10's text."""
     profile_id = _profile()
     invoice_id = await _done_invoice(db_pool, profile_id, batch_state="sent")
     msg = _press(invoice_id, "arrived", profile_id)
@@ -1250,7 +1254,7 @@ async def test_arrived_on_a_sent_batch_only_answers_br_d10(
     assert invoice == (DONE, RULE_INBOX)
     assert batch_state == "sent"
     assert jobs == []
-    assert messages == [(RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER), [])]
+    assert messages == [(RULE_DONE, DONE_TEXT, [])]
 
 
 async def test_via_laptop_enqueues_one_resend_job_and_changes_no_state(
@@ -1360,7 +1364,7 @@ async def test_via_laptop_after_br_d10_answers_br_s02(
     assert jobs == []
     assert texts == [
         (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
-        (RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER)),
+        (RULE_DONE, DONE_TEXT),
         ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
     ]
 
@@ -1426,7 +1430,7 @@ async def test_self_send_after_br_d10_answers_br_s02(
     assert jobs == []
     assert texts == [
         (RULE_NOT_CONFIRMED, MESSAGES[RULE_NOT_CONFIRMED].format(serie=SERIE, numero=NUMERO)),
-        (RULE_DONE, MESSAGES[RULE_DONE].format(folder=FOLDER)),
+        (RULE_DONE, DONE_TEXT),
         ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
     ]
 
