@@ -135,7 +135,7 @@ class FolderDrive(Protocol):
 
 
 class FolderLinks(Protocol):
-    """The browser link of one item on a drive, for the console's links (D194).
+    """The browser link of one item on a drive, for the links in the chat messages (D194).
 
     Invariants every implementation keeps:
 

@@ -20,10 +20,12 @@ from invoicebot.config.models import Config, TelegramChannel
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.secrets import SecretStore
 from invoicebot.wiring.channels import CHANNEL_SECRETS, SENDER_HASH_KEY
-from invoicebot.wiring.telegram import telegram_wiring
+from invoicebot.wiring.telegram import TelegramBuilder
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
+#: The builder under test; no test here sends a document, so its data directory is never read (D194).
+telegram_wiring = TelegramBuilder(Path("/nonexistent-data-dir"))
 #: A webhook secret of the strength D184 requires, 43 characters like token_urlsafe(32).
 WEBHOOK_SECRET = "synthetic_webhook_secret_0123456789abcdefgh"  # noqa: S105  # a synthetic test value
 

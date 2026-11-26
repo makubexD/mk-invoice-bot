@@ -30,13 +30,15 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Restore the states 0005 allowed.
 
-    The narrow check comes back ``NOT VALID``: it holds for new rows, while existing
-    ``review`` rows survive.
+    A ``review`` batch holds a built mail that was never sent, which the previous image
+    calls ``prepared``; mapping it keeps the narrow check valid for every row, so a later
+    downgrade that rewrites a batch row cannot trip it.
     """
+    op.execute("UPDATE batches SET state = 'prepared' WHERE state = 'review'")
     op.execute("ALTER TABLE batches DROP CONSTRAINT batches_state_check")
     op.execute(
         """
         ALTER TABLE batches ADD CONSTRAINT batches_state_check
-            CHECK (state IN ('open', 'sending', 'sent', 'failed', 'prepared')) NOT VALID
+            CHECK (state IN ('open', 'sending', 'sent', 'failed', 'prepared'))
         """
     )

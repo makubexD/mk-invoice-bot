@@ -13,7 +13,6 @@ carried no ids, the row is delivered without one (D102).
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
@@ -22,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from invoicebot.channels.base import Button, Document, Link, OutboundMessage
+from invoicebot.channels.documents import read_document
 from invoicebot.channels.telegram.client import OK_STATUS, TelegramClient, TelegramError
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.queue.retry import MAX_BACKOFF_MINUTES, RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
@@ -48,13 +48,15 @@ def make_transport(
     client: TelegramClient,
     *,
     user_ids: Mapping[str, int],
+    data_dir: Path,
     on_token_rejected: Callable[[], Awaitable[None]],
 ) -> Transport:
     """Build the outbox transport that delivers one Telegram message per row (D180).
 
     ``row.to`` is a profile id, resolved to that profile's Telegram user id
-    through ``user_ids``. A rejected token awaits ``on_token_rejected`` so the
-    owner is alerted, then reschedules the row instead of failing it (BR-O03).
+    through ``user_ids``. A document is read from under ``data_dir`` (D194). A
+    rejected token awaits ``on_token_rejected`` so the owner is alerted, then
+    reschedules the row instead of failing it (BR-O03).
     """
 
     async def transport(row: OutboxRow) -> str | None:
@@ -65,7 +67,7 @@ def make_transport(
             if document is None:
                 ids = await client.send_message(_payload(msg, chat_id))
             else:
-                ids = await _send_document(client, msg, chat_id, document)
+                ids = await _send_document(client, msg, chat_id, document, data_dir)
         except TelegramError as exc:
             if exc.status == OK_STATUS:
                 logger.warning("outbox row %d was delivered without a channel message id", row.id)
@@ -84,30 +86,24 @@ async def _send_document(
     msg: OutboundMessage,
     chat_id: int,
     document: Document,
+    data_dir: Path,
 ) -> tuple[int, int]:
     """Send ``msg``'s document, refusing before any request what Telegram would reject (D194)."""
-    fields, data = await _document_request(msg, chat_id, document)
+    fields, data = await _document_request(msg, chat_id, document, data_dir)
     return await client.send_document(fields, document.filename, data, document.mime)
 
 
 async def _document_request(
-    msg: OutboundMessage, chat_id: int, document: Document
+    msg: OutboundMessage, chat_id: int, document: Document, data_dir: Path
 ) -> tuple[dict[str, Any], bytes]:
     """Build the sendDocument fields and read the file, refusing an unsendable one (D194)."""
     if _text_length(msg.text) > CAPTION_MAX_CHARS:
         raise PermanentSendError(f"Telegram caption is over {CAPTION_MAX_CHARS} UTF-16 code units")
-    path = Path(document.path)
-    try:
-        size = (await asyncio.to_thread(path.stat)).st_size
-    except FileNotFoundError as exc:
-        raise PermanentSendError(f"Telegram document is missing: {document.filename}") from exc
-    if size > DOCUMENT_MAX_BYTES:
-        raise PermanentSendError(f"Telegram document is over {DOCUMENT_MAX_BYTES} bytes")
+    data = await read_document(document, data_dir, DOCUMENT_MAX_BYTES)
     fields: dict[str, Any] = {"chat_id": str(chat_id), "caption": msg.text}
     keyboard = _keyboard(msg.buttons) + _link_rows(msg.links)
     if keyboard:
         fields["reply_markup"] = json.dumps({"inline_keyboard": keyboard})
-    data = await asyncio.to_thread(path.read_bytes)
     return fields, data
 
 

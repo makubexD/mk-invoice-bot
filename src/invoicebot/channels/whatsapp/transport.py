@@ -13,13 +13,13 @@ transaction held across the HTTP call.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any
 
 from invoicebot.channels.base import Document, OutboundMessage
+from invoicebot.channels.documents import read_document
 from invoicebot.channels.whatsapp.client import WhatsAppClient, WhatsAppError, WindowExpired
 from invoicebot.channels.whatsapp.payloads import (
     BUTTONS_MAX_COUNT,
@@ -29,7 +29,7 @@ from invoicebot.channels.whatsapp.payloads import (
     template_payload,
     text_payload,
 )
-from invoicebot.config.models import ChannelTemplates
+from invoicebot.config.models import ChannelTemplates, WhatsAppChannel
 from invoicebot.queue.outbox import OutboxRow, PermanentSendError, SendLater, Transport
 from invoicebot.queue.retry import RULE_TOKEN_REJECTED, TOKEN_RETRY_DELAY
 from invoicebot.rules.messages_es import LIST_BUTTON
@@ -96,8 +96,8 @@ def make_transport(
     pool: Pool,
     *,
     numbers: Mapping[str, str],
-    templates: ChannelTemplates,
-    language: str,
+    data_dir: Path,
+    channel: WhatsAppChannel,
     on_token_rejected: Callable[[], Awaitable[None]],
 ) -> Transport:
     """Build the outbox transport that delivers one WhatsApp message per row (R-1.10, PT-4).
@@ -105,7 +105,8 @@ def make_transport(
     The returned id is Meta's message id, or None when Meta's answer carried
     none, which the outbox stores as the row's ``channel_message_id`` (D102).
     A rejected token awaits ``on_token_rejected`` so the owner is alerted, then
-    reschedules the row instead of failing it (BR-O03).
+    reschedules the row instead of failing it (BR-O03). Templates and their
+    language come from ``channel``; a document is read from under ``data_dir`` (D194).
     """
 
     async def transport(row: OutboxRow) -> str | None:
@@ -118,7 +119,7 @@ def make_transport(
         if document is not None:
             if not await _recipient_window_open(pool, msg, row.to):
                 raise PermanentSendError("document outside the 24-hour window")
-            message_id = await _document_message_id(client, msg, document, to, on_token_rejected)
+            message_id = await _document_message_id(client, msg, document, to, data_dir, on_token_rejected)
             return _channel_message_id(row, message_id)
         if await _recipient_window_open(pool, msg, row.to):
             try:
@@ -127,12 +128,12 @@ def make_transport(
             except WindowExpired:
                 pass
         try:
-            name = _template_name(templates, msg)
+            name = _template_name(channel.templates, msg)
         except TemplateMissing as exc:
             raise PermanentSendError(str(exc)) from exc
         message_id = await _send(
             client,
-            template_payload(to, name, language, [_template_parameter(msg)]),
+            template_payload(to, name, channel.template_language, [_template_parameter(msg)]),
             on_token_rejected,
         )
         return _channel_message_id(row, message_id)
@@ -145,6 +146,7 @@ async def _document_message_id(
     msg: OutboundMessage,
     document: Document,
     to: str,
+    data_dir: Path,
     on_token_rejected: Callable[[], Awaitable[None]],
 ) -> str | None:
     """Upload ``document`` and send it with the message text as its caption (D194).
@@ -152,7 +154,7 @@ async def _document_message_id(
     A closed window answered by Meta on the document send is permanent: a
     document has no template to fall back to.
     """
-    data = await _read_document(document)
+    data = await read_document(document, data_dir, DOCUMENT_MAX_BYTES)
     media_id = await _deliver(
         lambda: client.upload_media(data, document.filename, document.mime), on_token_rejected
     )
@@ -164,18 +166,6 @@ async def _document_message_id(
         )
     except WindowExpired as exc:
         raise PermanentSendError("document outside the 24-hour window") from exc
-
-
-async def _read_document(document: Document) -> bytes:
-    """Read the document's bytes, refusing a missing file or one over Meta's cap (D194)."""
-    path = Path(document.path)
-    try:
-        size = (await asyncio.to_thread(path.stat)).st_size
-    except FileNotFoundError as exc:
-        raise PermanentSendError(f"WhatsApp document is missing: {document.filename}") from exc
-    if size > DOCUMENT_MAX_BYTES:
-        raise PermanentSendError(f"WhatsApp document is over {DOCUMENT_MAX_BYTES} bytes")
-    return await asyncio.to_thread(path.read_bytes)
 
 
 async def _send(

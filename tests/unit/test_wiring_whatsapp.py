@@ -18,10 +18,12 @@ from invoicebot.config.models import Config
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.secrets import SecretStore
 from invoicebot.wiring.channels import CHANNEL_SECRETS, SENDER_HASH_KEY
-from invoicebot.wiring.whatsapp import WHATSAPP_SECRETS, whatsapp_wiring
+from invoicebot.wiring.whatsapp import WHATSAPP_SECRETS, WhatsAppBuilder
 
 ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE = ROOT / "config" / "example.yaml"
+#: The builder under test; no test here sends a document, so its data directory is never read (D194).
+whatsapp_wiring = WhatsAppBuilder(Path("/nonexistent-data-dir"))
 
 
 def _config() -> Config:

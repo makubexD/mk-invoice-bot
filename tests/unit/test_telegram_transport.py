@@ -31,6 +31,8 @@ CHAT_ID = 999001
 MESSAGE_ID = 42
 # Split so the scanner does not read the synthetic value as a committed credential.
 TOKEN = "123456" + ":ABC-fake-token"
+#: The data directory of tests that never send a document (D194).
+NO_DATA_DIR = Path("/nonexistent-data-dir")
 
 Handler = Callable[[httpx.Request], httpx.Response]
 Payload = dict[str, Any]
@@ -88,6 +90,7 @@ async def _transport(
     handler: Handler = _accept,
     *,
     user_ids: Mapping[str, int] | None = None,
+    data_dir: Path = NO_DATA_DIR,
     on_token_rejected: Callable[[], Awaitable[None]] = _noop_token_rejected,
 ) -> AsyncIterator[tuple[Transport, list[Payload]]]:
     """Yield a transport plus the payloads it sends, answered through ``handler``."""
@@ -104,6 +107,7 @@ async def _transport(
             make_transport(
                 client,
                 user_ids={PROFILE: USER_ID} if user_ids is None else user_ids,
+                data_dir=data_dir,
                 on_token_rejected=on_token_rejected,
             ),
             sent,
@@ -374,7 +378,7 @@ async def test_a_document_row_posts_send_document_with_the_file_and_caption(
         requests.append(request)
         return _accept(request)
 
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         assert await transport(_row(_message(text="Adjunto", document=_document(path)))) == (
             f"{CHAT_ID}:{MESSAGE_ID}"
         )
@@ -406,7 +410,7 @@ async def test_a_document_row_carries_its_buttons_in_reply_markup(tmp_path: Path
         requests.append(request)
         return _accept(request)
 
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         await transport(_row(msg))
 
     body = requests[0].content
@@ -431,7 +435,7 @@ async def test_a_document_over_the_cap_is_permanent_and_sends_nothing(tmp_path: 
         requests.append(request)
         return _accept(request)
 
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         with pytest.raises(PermanentSendError):
             await transport(_row(_message(document=_document(path))))
 
@@ -446,7 +450,7 @@ async def test_a_missing_document_is_permanent_and_sends_nothing(tmp_path: Path)
         requests.append(request)
         return _accept(request)
 
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         with pytest.raises(PermanentSendError):
             await transport(_row(_message(document=_document(tmp_path / "falta.xlsx", size=1))))
 
@@ -464,7 +468,7 @@ async def test_a_caption_over_the_cap_is_permanent_and_sends_nothing(tmp_path: P
         return _accept(request)
 
     caption = "😀" * (CAPTION_MAX_CHARS // 2 + 1)
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         with pytest.raises(PermanentSendError):
             await transport(_row(_message(text=caption, document=_document(path))))
 
@@ -487,7 +491,7 @@ async def test_a_document_rate_limited_reschedules_by_the_retry_after(tmp_path: 
             },
         )
 
-    async with _transport(handler) as (transport, _sent):
+    async with _transport(handler, data_dir=tmp_path) as (transport, _sent):
         with pytest.raises(SendLater) as raised:
             await transport(_row(_message(document=_document(path))))
 

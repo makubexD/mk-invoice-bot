@@ -45,7 +45,7 @@ from invoicebot.rules.messages_es import BUTTON_RETRY, BUTTON_VIA_LAPTOP, MESSAG
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
 from invoicebot.sinks.mailer import DryRun, LaptopOutlook
-from invoicebot.sinks.onedrive import GraphError, GraphTransient
+from invoicebot.sinks.onedrive import FolderMissing, GraphError, GraphTransient
 from invoicebot.store.flow_b import (
     get_batch_state,
     load_flow_data,
@@ -848,6 +848,32 @@ async def test_a_transient_folder_link_error_keeps_the_invoice_delivering(
         outbox = await _outbox(conn, profile_id)
     assert invoice == ("DELIVERING", None)
     assert outbox == []
+
+
+@pytest.mark.parametrize(
+    "error", [GraphError(200), FolderMissing(404)], ids=["no_https_weburl", "folder_missing"]
+)
+async def test_a_permanent_folder_link_error_still_completes_the_delivery_without_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, error: Exception
+) -> None:
+    """D194: a link that cannot be read costs only the link; the filed delivery ends DONE with BR-D10."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(web_url_error=error), tmp_path, mode, mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        links = await _outbox_links(conn, profile_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+    assert invoice == ("DONE", "BR-D10")
+    assert len(mode.calls) == 1
+    assert links == [[]]
+    assert flow_data["folder_url"] == ""
 
 
 async def test_graph_sends_once_and_closes_as_done(

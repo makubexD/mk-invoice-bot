@@ -9,6 +9,8 @@ renders BR-D19 and queues the attachments as documents. The transaction that ope
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -18,8 +20,9 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Document
 from invoicebot.pipeline.outgoing import Addressee, queue_document
-from invoicebot.rules.messages_es import MESSAGES
+from invoicebot.rules.messages_es import MESSAGES, REVIEW_CC_LINE
 from invoicebot.sinks.base import Attachment, OutgoingMail
+from invoicebot.sinks.mailer import MAIL_DIRECTORY
 
 #: The batch state of a mail posted for the owner to check before it is sent (D194).
 REVIEW_BATCH_STATE: Literal["review"] = "review"
@@ -27,13 +30,13 @@ REVIEW_BATCH_STATE: Literal["review"] = "review"
 RULE_REVIEW = "BR-D19"
 #: The flow-data key [Enviar] sets, so the next delivery sends instead of posting again (D194).
 REVIEWED_KEY = "reviewed"
-#: The directory under the data directory that holds each invoice's review files (D194).
-MAIL_DIR = "mail"
+#: The flow-data key that holds the digest of the mail the owner was shown (D194).
+DIGEST_KEY = "review_digest"
 
 
 def review_dir(data_dir: Path, invoice_id: int) -> Path:
     """Return the directory that holds the invoice's review files (D194)."""
-    return data_dir / MAIL_DIR / str(invoice_id)
+    return data_dir / MAIL_DIRECTORY / str(invoice_id)
 
 
 async def write_review_files(
@@ -85,9 +88,30 @@ def _write(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
+def mail_digest(mail: OutgoingMail) -> str:
+    """Return the SHA-256 of the mail's recipients, subject, body and attachments (D194).
+
+    Each attachment counts by its name and the SHA-256 of its bytes, so a mail the owner
+    reviewed and a mail rebuilt for the send have the same digest only when they are the
+    same mail.
+    """
+    canonical = {
+        "to": list(mail.to),
+        "cc": list(mail.cc),
+        "subject": mail.subject,
+        "body": mail.body,
+        "attachments": [
+            {"name": attachment.name, "sha256": hashlib.sha256(attachment.data).hexdigest()}
+            for attachment in mail.attachments
+        ],
+    }
+    text = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(text.encode("ascii")).hexdigest()
+
+
 def review_text(values: Mapping[str, object], mail: OutgoingMail) -> str:
     """Render BR-D19 for the built mail: recipients, subject, body and file names (D194)."""
-    cc_line = f"CC: {', '.join(mail.cc)}\n" if mail.cc else ""
+    cc_line = REVIEW_CC_LINE.format(cc=", ".join(mail.cc)) if mail.cc else ""
     return MESSAGES[RULE_REVIEW].format(
         serie=values["serie"],
         numero=values["numero"],

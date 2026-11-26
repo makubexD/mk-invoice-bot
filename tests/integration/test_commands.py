@@ -2147,6 +2147,24 @@ async def test_revisar_sends_a_prepared_review_batch_to_deliver(
     assert jobs == ["deliver"]
 
 
+async def test_revisar_posts_a_lost_review_again(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: /revisar on a batch already under review delivers it again, so a lost BR-D19 comes back."""
+    profile_id = _profile()
+    invoice_id = await _revisable_invoice(db_pool, profile_id, batch_state="review")
+
+    replies = await _revisar(db_pool, profile_id, f"/revisar {invoice_id}")
+    async with db_pool.connection() as conn:
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert replies == [(REVIEW_STARTED.format(id=invoice_id), None)]
+    assert head is not None
+    assert head.state == "DELIVERING"
+    assert jobs == ["deliver"]
+
+
 @pytest.mark.parametrize("case", ["laptop_job", "sent", "auto_flow", "unknown", "not_a_number"])
 async def test_revisar_refuses_what_is_not_reviewable(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],

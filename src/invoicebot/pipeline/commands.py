@@ -26,6 +26,7 @@ from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPAR
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
 from invoicebot.pipeline.resume import retry_delivery, retry_documents, retry_reading
+from invoicebot.pipeline.review import REVIEW_BATCH_STATE
 from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
@@ -417,7 +418,7 @@ async def _pendientes(
         msg.profile_id,
         limit=MAX_PENDING_LINES,
         remind_days=PREPARED_REMIND_DAYS,
-        prepared_batch_state=PREPARED_BATCH_STATE,
+        waiting_batch_states=(PREPARED_BATCH_STATE, REVIEW_BATCH_STATE),
         timezone=context.timezone,
     )
     if not rows:
@@ -600,7 +601,7 @@ async def _revisar(
     arg: str,
     context: CommandContext,
 ) -> None:
-    """Send a prepared review-mode batch to deliver, which posts its mail for review (D194).
+    """Send a prepared or review batch to deliver, which posts its mail for review (D194).
 
     The sender gets REVIEW_STARTED at once, so the command never looks ignored.
 
@@ -616,12 +617,15 @@ async def _revisar(
 
 
 async def _reviewable(conn: AsyncConnection[Any], invoice_id: int, review_flows: frozenset[str]) -> bool:
-    """Return whether the invoice is a prepared, unmailed batch on a review flow (D194)."""
+    """Return whether the invoice is a prepared or review, unmailed batch on a review flow (D194).
+
+    A ``review`` batch qualifies so a BR-D19 the owner lost can be posted again.
+    """
     head = await load_invoice_head(conn, invoice_id)
     return (
         head is not None
         and head.state == BATCHED
-        and await get_batch_state(conn, invoice_id) == PREPARED_BATCH_STATE
+        and await get_batch_state(conn, invoice_id) in {PREPARED_BATCH_STATE, REVIEW_BATCH_STATE}
         and not await has_mail_job(conn, invoice_id)
         and await load_flow(conn, invoice_id) in review_flows
     )

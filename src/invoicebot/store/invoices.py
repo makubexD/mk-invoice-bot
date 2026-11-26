@@ -408,14 +408,15 @@ async def list_pending(
     *,
     limit: int,
     remind_days: int,
-    prepared_batch_state: str,
+    waiting_batch_states: Sequence[str],
     timezone: str,
 ) -> tuple[list[PendingRow], int]:
     """Return the profile's invoices that wait on it, oldest first, and how many match.
 
     A row waits on the sender when it is ``PENDING_USER``, ``WAITING_FOR_USER`` or
-    ``MANUAL_REQUIRED``, or when it is ``BATCHED`` on a ``prepared_batch_state`` batch
-    that has sat at least ``remind_days`` days (S4.8, S11.4). ``limit`` caps the rows
+    ``MANUAL_REQUIRED``, or when it is ``BATCHED`` on a ``waiting_batch_states`` batch
+    that has sat at least ``remind_days`` days (S4.8, S11.4). Those states are a draft the
+    sender must send and a mail posted for review (D194). ``limit`` caps the rows
     returned; the count covers every match. ``timezone`` is the owner's zone: a batch's
     ``batch_prepared_at`` is its ``updated_at`` as a date there. The database clock
     measures a batch's age, and ``updated_at`` stamps it because nothing updates a
@@ -441,7 +442,7 @@ async def list_pending(
                 i.state = ANY(%s)
                 OR (
                     i.state = %s
-                    AND b.state = %s
+                    AND b.state = ANY(%s)
                     AND i.updated_at <= now() - make_interval(days => %s)
                 )
               )
@@ -453,7 +454,7 @@ async def list_pending(
             profile_id,
             [PENDING_USER, MANUAL_REQUIRED, *WAITING_FOR_USER],
             BATCHED,
-            prepared_batch_state,
+            list(waiting_batch_states),
             remind_days,
             limit,
         ),

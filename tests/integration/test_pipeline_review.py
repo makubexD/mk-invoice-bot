@@ -7,7 +7,10 @@ is set in the flow data.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +20,7 @@ import pytest
 from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
+from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import (
@@ -24,17 +28,21 @@ from invoicebot.config.models import (
     Config,
     ExcelTemplateSink,
     MailerSink,
+    MediaMaxBytes,
     Store,
     StoreDirectory,
 )
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.deliver import DELIVER_STEP, DeliverContext, make_deliver_handler
-from invoicebot.pipeline.review import remove_review_files
+from invoicebot.pipeline.handlers import MEGABYTE
+from invoicebot.pipeline.intake import IntakeRoles, handle_inbound
+from invoicebot.pipeline.review import mail_digest, remove_review_files, write_review_files
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.sinks.base import OutgoingMail
+from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.mailer import DryRun
-from invoicebot.store.flow_b import get_batch_state, merge_flow_data, open_batch
+from invoicebot.sinks.onedrive import GraphError
+from invoicebot.store.flow_b import get_batch_state, load_flow_data, merge_flow_data, open_batch
 from invoicebot.store.invoices import (
     FileRecord,
     add_file,
@@ -61,14 +69,18 @@ PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
 XML_BYTES = b'<?xml version="1.0" encoding="UTF-8"?>\n<Invoice/>\n'
 FAKE_FOLDER_URL = "https://onedrive.live.com/?id=FAKE"
 FOLDER_LINKS = [{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]
+MAX_QUEUED = 10
+MEDIA_MAX_BYTES = MediaMaxBytes(image=10 * MEGABYTE, pdf=10 * MEGABYTE, xml=MEGABYTE, zip=10 * MEGABYTE)
+TIMEZONE = "America/Lima"
 
 
 class FakeDrive:
     """An in-memory drive: folders hold their entry names and uploads keep their bytes."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_upload: Callable[[], Awaitable[None]] | None = None) -> None:
         self.folders: dict[str, list[str]] = {}
         self.uploads: dict[str, bytes] = {}
+        self._on_upload = on_upload
 
     async def list_names(self, path: str) -> list[str]:
         """Return the entries of a folder; a path that does not exist has none."""
@@ -79,8 +91,10 @@ class FakeDrive:
         self.folders.setdefault(parent, []).append(name)
 
     async def upload(self, path: str, data: bytes) -> None:
-        """Keep the file's bytes at its absolute path."""
+        """Keep the file's bytes at its absolute path, then run the installed hook."""
         self.uploads[path] = data
+        if self._on_upload is not None:
+            await self._on_upload()
 
     async def move(self, path: str, new_parent: str, new_name: str) -> None:
         """Accept the move; the fake does not change its folders."""
@@ -102,6 +116,26 @@ class FakeGraphMode:
     async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
         """Record the send."""
         self.calls.append((invoice_id, mail))
+
+
+class FailingGraphMode:
+    """An automatic mode whose send fails for good, as Graph does for a bad request (BR-D03)."""
+
+    completion = "accepted"
+    done_rule = "BR-D10"
+
+    async def deliver(self, _invoice_id: int, _mail: OutgoingMail, _folder_path: str) -> None:
+        """Fail the send."""
+        raise GraphError(400)
+
+
+class SlowGraphMode(FakeGraphMode):
+    """An automatic mode whose send takes a moment, so a second job can overlap it (D89)."""
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
+        """Wait, then record the send."""
+        await asyncio.sleep(0.2)
+        await super().deliver(invoice_id, mail, _folder_path)
 
 
 def _field(value: str) -> Field:
@@ -161,8 +195,9 @@ def _handler(
     data_dir: Path,
     mode: Any,
     mode_name: str = "graph",
+    drive: FakeDrive | None = None,
 ) -> Handler:
-    drive = FakeDrive()
+    drive = drive or FakeDrive()
     return make_deliver_handler(
         DeliverContext(
             pool, cfg, _directory(), drive, drive, {mode_name: mode}, data_dir, laptop_flows=frozenset()
@@ -280,24 +315,30 @@ async def test_a_retried_review_job_queues_nothing_more(
 
 
 @pytest.mark.parametrize(
-    ("send", "flow_data"),
-    [("review", {"reviewed": True}), ("auto", None)],
+    ("send", "reviewed"),
+    [("review", True), ("auto", False)],
     ids=["reviewed", "auto"],
 )
 async def test_a_reviewed_or_auto_flow_sends_once_with_br_d10(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
     send: str,
-    flow_data: dict[str, Any] | None,
+    reviewed: bool,
 ) -> None:
     """D194: a reviewed mail, like an auto flow's, is sent once and confirmed by BR-D10 alone."""
     profile_id = f"review-{uuid4().hex}"
-    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id, flow_data)
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
     mode = FakeGraphMode()
+    handler = _handler(db_pool, _config(tmp_path, profile_id, send), tmp_path, mode)
+    if reviewed:
+        await _post_review_then_press_send(db_pool, handler, invoice_id)
+        queued = len(await _outbox(db_pool, profile_id))
+    else:
+        queued = 0
 
-    await _handler(db_pool, _config(tmp_path, profile_id, send), tmp_path, mode)(_job(invoice_id))
+    await handler(_job(invoice_id))
 
-    outbox = await _outbox(db_pool, profile_id)
+    outbox = (await _outbox(db_pool, profile_id))[queued:]
     assert len(mode.calls) == 1
     assert await _invoice_state(db_pool, invoice_id) == ("DONE", "BR-D10")
     assert [payload["rule_id"] for payload in outbox] == ["BR-D10"]
@@ -339,14 +380,21 @@ async def _add_photo(
     return photo
 
 
-async def _review_then_send(
+async def _post_review_then_press_send(
     pool: AsyncConnectionPool[AsyncConnection[Any]], handler: Handler, invoice_id: int
 ) -> None:
-    """Post the review, then do what [Enviar] does and run the delivery again (D194)."""
+    """Post the review, then do what [Enviar] does to the flow data and the state (D194)."""
     await handler(_job(invoice_id))
     async with pool.connection() as conn, conn.transaction():
         await merge_flow_data(conn, invoice_id, {"reviewed": True})
         await set_state(conn, invoice_id, "DELIVERING")
+
+
+async def _review_then_send(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], handler: Handler, invoice_id: int
+) -> None:
+    """Post the review, press [Enviar] and run the delivery again (D194)."""
+    await _post_review_then_press_send(pool, handler, invoice_id)
     await handler(_job(invoice_id))
 
 
@@ -390,3 +438,259 @@ async def test_removing_absent_review_files_raises_nothing(tmp_path: Path) -> No
     await remove_review_files(tmp_path, 123456)
 
     assert not (tmp_path / "mail").exists()
+
+
+def _press(invoice_id: int, action: str, profile_id: str) -> InboundMessage:
+    """Build the canonical press of one of the invoice's buttons."""
+    return InboundMessage(
+        channel="telegram",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        button_id=button_id(invoice_id, action),
+        received_at=datetime.now(UTC),
+    )
+
+
+def _command(profile_id: str, text: str) -> InboundMessage:
+    """Build the canonical text message ``text`` from the profile."""
+    return InboundMessage(
+        channel="telegram",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=profile_id,
+        sender_role="owner",
+        text=text,
+        attachments=[],
+        received_at=datetime.now(UTC),
+    )
+
+
+async def _intake(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], msg: InboundMessage, roles: IntakeRoles | None = None
+) -> None:
+    """Handle ``msg`` through the real intake, as the channel's webhook does."""
+    async with pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            msg,
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=roles or IntakeRoles(reprocess_min_interval_s=0),
+        )
+
+
+async def _jobs(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> list[str]:
+    """Return the steps of the invoice's queued jobs, in insertion order."""
+    async with pool.connection() as conn:
+        cur = await conn.execute("SELECT step FROM jobs WHERE invoice_id = %s ORDER BY id", (invoice_id,))
+        return [str(step) for (step,) in await cur.fetchall()]
+
+
+async def _flow_data(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> dict[str, Any]:
+    async with pool.connection() as conn:
+        return await load_flow_data(conn, invoice_id)
+
+
+async def test_a_sending_batch_without_reviewed_fails_with_br_d03(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194, D89: a batch left sending is never posted for review or sent; BR-D03 asks again."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    async with db_pool.connection() as conn, conn.transaction():
+        await open_batch(conn, invoice_id, FLOW, "sending")
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)(_job(invoice_id))
+
+    outbox = await _outbox(db_pool, profile_id)
+    assert mode.calls == []
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D03")
+    assert await _batch_state(db_pool, invoice_id) == "failed"
+    assert [payload["rule_id"] for payload in outbox] == ["BR-D03"]
+
+
+async def test_a_review_for_an_invoice_that_left_delivering_posts_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: an invoice moved on while its mail was built gets no review and no batch."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    async def move_on() -> None:
+        async with db_pool.connection() as conn, conn.transaction():
+            await set_state(conn, invoice_id, "BATCHED")
+
+    mode = FakeGraphMode()
+    handler = _handler(
+        db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode, drive=FakeDrive(on_upload=move_on)
+    )
+
+    await handler(_job(invoice_id))
+
+    assert mode.calls == []
+    assert await _outbox(db_pool, profile_id) == []
+    assert await _batch_state(db_pool, invoice_id) is None
+    assert (await _invoice_state(db_pool, invoice_id))[0] == "BATCHED"
+
+
+@pytest.mark.parametrize("name", ["../escape.pdf", "sub/inside.pdf", "/abs.pdf"])
+async def test_a_review_attachment_name_that_leaves_its_directory_raises(tmp_path: Path, name: str) -> None:
+    """D194, R-9.2: an attachment name that would land outside the review directory is refused."""
+    attachment = Attachment(name, b"data", "application/pdf")
+
+    with pytest.raises(ValueError, match="must not leave its directory"):
+        await write_review_files(tmp_path, 7, [attachment])
+
+    assert not (tmp_path / "escape.pdf").exists()
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["to", "cc", "subject", "body", "attachment_name", "attachment_bytes", "attachment_added"],
+)
+async def test_the_mail_digest_changes_with_every_part_of_the_mail(change: str) -> None:
+    """D194: the digest of the reviewed mail differs when any part of the mail differs."""
+    mail = OutgoingMail(
+        to=("a@example.test",),
+        cc=("b@example.test",),
+        subject="Asunto",
+        body="Cuerpo",
+        attachments=(Attachment("a.pdf", b"one", "application/pdf"),),
+    )
+    changed = {
+        "to": replace(mail, to=("c@example.test",)),
+        "cc": replace(mail, cc=()),
+        "subject": replace(mail, subject="Otro"),
+        "body": replace(mail, body="Otro"),
+        "attachment_name": replace(mail, attachments=(Attachment("b.pdf", b"one", "application/pdf"),)),
+        "attachment_bytes": replace(mail, attachments=(Attachment("a.pdf", b"two", "application/pdf"),)),
+        "attachment_added": replace(
+            mail, attachments=(*mail.attachments, Attachment("c.pdf", b"x", "application/pdf"))
+        ),
+    }[change]
+
+    assert mail_digest(mail) == mail_digest(replace(mail))
+    assert mail_digest(changed) != mail_digest(mail)
+
+
+async def test_the_real_send_press_runs_the_delivery_and_clears_reviewed(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194, BR-D21: the real [Enviar] queues deliver, which sends the reviewed mail and clears reviewed."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
+    await handler(_job(invoice_id))
+    posted = await _flow_data(db_pool, invoice_id)
+    assert len(posted["review_digest"]) == 64
+    assert posted["reviewed"] is False
+
+    await _intake(db_pool, _press(invoice_id, "send", profile_id))
+    assert (await _flow_data(db_pool, invoice_id))["reviewed"] is True
+    assert await _jobs(db_pool, invoice_id) == ["deliver"]
+    await handler(_job(invoice_id))
+
+    assert len(mode.calls) == 1
+    assert await _invoice_state(db_pool, invoice_id) == ("DONE", "BR-D10")
+    assert (await _flow_data(db_pool, invoice_id))["reviewed"] is False
+    assert not (tmp_path / "mail" / str(invoice_id)).exists()
+
+
+async def test_a_mail_that_changed_since_the_review_is_posted_again_and_not_sent(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: [Enviar] on a mail whose attachments no longer match the reviewed ones posts a new review."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
+    await handler(_job(invoice_id))
+    await _intake(db_pool, _press(invoice_id, "send", profile_id))
+    async with db_pool.connection() as conn:
+        pdf_path = await get_file_path(conn, invoice_id, "pdf")
+    assert pdf_path is not None
+    await asyncio.to_thread(Path(pdf_path).write_bytes, b"%PDF-1.4 a different file\n")
+    queued = len(await _outbox(db_pool, profile_id))
+
+    await handler(_job(invoice_id))
+
+    outbox = (await _outbox(db_pool, profile_id))[queued:]
+    assert mode.calls == []
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D19")
+    assert await _batch_state(db_pool, invoice_id) == "review"
+    assert (await _flow_data(db_pool, invoice_id))["reviewed"] is False
+    assert outbox[-1]["text"].startswith(f"📧 Revisa el correo de {SERIE}-{NUMERO}")
+    assert [button["title"] for button in outbox[-1]["buttons"]] == ["Enviar", "Cancelar"]
+    assert (tmp_path / "mail" / str(invoice_id)).is_dir()
+
+
+async def test_a_failed_reviewed_send_clears_reviewed_so_the_next_delivery_posts_a_review(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194, BR-D03: after a reviewed send fails, a reprocess posts a new review instead of sending."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    cfg = _config(tmp_path, profile_id, "review")
+    await _handler(db_pool, cfg, tmp_path, FakeGraphMode())(_job(invoice_id))
+    await _intake(db_pool, _press(invoice_id, "send", profile_id))
+    await _handler(db_pool, cfg, tmp_path, FailingGraphMode())(_job(invoice_id))
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D03")
+    assert (await _flow_data(db_pool, invoice_id))["reviewed"] is False
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, "DELIVERING")
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, tmp_path, mode)(_job(invoice_id))
+
+    assert mode.calls == []
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D19")
+    assert await _batch_state(db_pool, invoice_id) == "review"
+
+
+async def test_revisar_on_a_prepared_batch_posts_the_review_and_the_old_draft_button_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194, BR-S02: after a reviewed dry_run, /revisar posts the review and [Ya lo envié] is stale."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    cfg = _config(tmp_path, profile_id, "review", mode_name="dry_run")
+    handler = _handler(db_pool, cfg, tmp_path, DryRun(tmp_path), mode_name="dry_run")
+    await _review_then_send(db_pool, handler, invoice_id)
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D07")
+    assert await _batch_state(db_pool, invoice_id) == "prepared"
+    queued = len(await _outbox(db_pool, profile_id))
+    roles = IntakeRoles(
+        reprocess_min_interval_s=0, admins=frozenset({profile_id}), review_flows=frozenset({FLOW})
+    )
+
+    await _intake(db_pool, _command(profile_id, f"/revisar {invoice_id}"), roles)
+    await handler(_job(invoice_id))
+
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D19")
+    assert await _batch_state(db_pool, invoice_id) == "review"
+    await _intake(db_pool, _press(invoice_id, "sent", profile_id))
+    outbox = (await _outbox(db_pool, profile_id))[queued:]
+    assert outbox[-1]["rule_id"] == "BR-S02"
+    assert await _batch_state(db_pool, invoice_id) == "review"
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D19")
+
+
+async def test_two_jobs_for_the_same_reviewed_mail_send_it_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194, D89: a leased-out job and the [Enviar] job overlap; the invoice lock lets one of them send."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    cfg = _config(tmp_path, profile_id, "review")
+    await _handler(db_pool, cfg, tmp_path, FakeGraphMode())(_job(invoice_id))
+    await _intake(db_pool, _press(invoice_id, "send", profile_id))
+    mode = SlowGraphMode()
+    barrier = asyncio.Barrier(2)  # both jobs reach the send check together
+    handler = _handler(db_pool, cfg, tmp_path, mode, drive=FakeDrive(on_upload=barrier.wait))
+
+    await asyncio.gather(handler(_job(invoice_id)), handler(_job(invoice_id)))
+
+    assert len(mode.calls) == 1

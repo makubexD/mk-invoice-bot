@@ -1717,3 +1717,23 @@ async def test_send_on_a_prepared_batch_is_stale(
     assert invoice == (BATCHED, "BR-D19")
     assert jobs == []
     assert [rule_id for rule_id, _ in texts] == ["BR-S02"]
+
+
+async def test_hold_on_a_prepared_batch_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194, BR-S02: [Cancelar] on a batch that is not under review answers BR-S02 and changes nothing."""
+    profile_id = _profile()
+    invoice_id = await _review_invoice(db_pool, profile_id, batch_state="prepared")
+
+    await _press_once(db_pool, invoice_id, "hold", profile_id)
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+    assert invoice == (BATCHED, "BR-D19")
+    assert batch_state == "prepared"
+    assert jobs == []
+    assert [rule_id for rule_id, _ in texts] == ["BR-S02"]

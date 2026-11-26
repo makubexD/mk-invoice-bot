@@ -822,12 +822,43 @@ async def test_list_pending_dates_a_prepared_batch_in_the_owner_timezone(
             profile_id,
             limit=20,
             remind_days=2,
-            prepared_batch_state="prepared",
+            waiting_batch_states=("prepared", "review"),
             timezone=timezone,
         )
 
     assert total == 1
     assert [row.batch_prepared_at for row in rows] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("batch_state", "listed"),
+    [("prepared", True), ("review", True), ("failed", False)],
+)
+async def test_list_pending_lists_a_prepared_or_review_batch_after_the_reminder_days(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], batch_state: str, listed: bool
+) -> None:
+    """D194, S11.4: a mail posted for review waits on the sender like a draft; a failed batch does not."""
+    profile_id = f"profile-{uuid4().hex}"
+
+    async with db_pool.connection() as conn:
+        invoice_id = await create_invoice(conn, profile_id, CHANNEL)
+        await set_flow(conn, invoice_id, "work_microsoft")
+        batch_id = await open_batch(conn, invoice_id, "work_microsoft", "prepared")
+        await set_batch_state(conn, batch_id, batch_state)
+        await set_state(conn, invoice_id, BATCHED)
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - interval '3 days' WHERE id = %s", (invoice_id,)
+        )
+        rows, total = await list_pending(
+            conn,
+            profile_id,
+            limit=20,
+            remind_days=2,
+            waiting_batch_states=("prepared", "review"),
+            timezone="UTC",
+        )
+
+    assert (total, [row.id for row in rows]) == ((1, [invoice_id]) if listed else (0, []))
 
 
 async def test_record_upload_rejection_hides_only_its_upload(
@@ -974,7 +1005,12 @@ async def test_list_rows_name_the_issuer_from_the_padron(
         await conn.execute("UPDATE invoices SET razon_social = %s WHERE id = %s", ("NOMBRE PROPIO", own_name))
         recent = await list_recent(conn, profile_id, 5)
         pending, _ = await list_pending(
-            conn, profile_id, limit=20, remind_days=2, prepared_batch_state="prepared", timezone="UTC"
+            conn,
+            profile_id,
+            limit=20,
+            remind_days=2,
+            waiting_batch_states=("prepared", "review"),
+            timezone="UTC",
         )
         await conn.execute("DELETE FROM padron WHERE ruc = %s", (ruc,))
 
