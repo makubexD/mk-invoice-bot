@@ -22,13 +22,14 @@ from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.extract.fields import REQUIRED
 from invoicebot.net.taught_url import TaughtUrlError
 from invoicebot.pipeline.actions import cancel_invoice
-from invoicebot.pipeline.deliver import FAILED_BATCH_STATE, PREPARED_BATCH_STATE
+from invoicebot.pipeline.deliver import DELIVER_STEP, FAILED_BATCH_STATE, PREPARED_BATCH_STATE
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.payments import pagado
 from invoicebot.pipeline.resume import retry_delivery, retry_documents, retry_reading
 from invoicebot.pipeline.status import status_text
 from invoicebot.pipeline.teach import TeachContext, TeachSetup, teach
 from invoicebot.queue import outbox
+from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import (
     BUTTON_MY_INVOICES,
     CANCEL_LATE,
@@ -56,6 +57,7 @@ from invoicebot.rules.messages_es import (
     HELP_PENDIENTES,
     HELP_PORTAL,
     HELP_REPROCESAR,
+    HELP_REVISAR,
     MESSAGES,
     PENDING_BATCH_LINE,
     PENDING_HEADER,
@@ -73,11 +75,13 @@ from invoicebot.rules.messages_es import (
 from invoicebot.states import (
     BATCHED,
     CANCELLABLE,
+    DELIVERING,
     EXTRACT_FAILED,
     FAILED,
     MANUAL_REQUIRED,
     PENDING_USER,
 )
+from invoicebot.store.flow_b import get_batch_state
 from invoicebot.store.gaps import GapRow, ignore_gap, open_gaps
 from invoicebot.store.invoices import (
     InvoiceHead,
@@ -89,10 +93,15 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    set_state,
 )
+from invoicebot.store.mail_jobs import has_mail_job
 
 #: Rule that answers an id the sender cannot see, whether it exists or not (BR-S07).
 RULE_NOT_FOUND = "BR-S07"
+
+#: Rule that answers /revisar for an invoice with no prepared mail to review (D194).
+RULE_NO_REVIEW = "BR-D22"
 #: The most digits an invoice id may have; any 18-digit number fits a BIGINT (R-12.8).
 MAX_ID_DIGITS = 18
 #: A RUC's exact number of digits (R-11.4).
@@ -129,7 +138,8 @@ class CommandContext:
 
     ``reprocess_min_interval_s`` is the least time between two fetch rounds that
     ``/reprocesar`` may start; 0 means no wait (D171). No default, so a new entry
-    point cannot drop D171's brake.
+    point cannot drop D171's brake. ``review_flows`` names the flows whose mailer
+    sends only after a review, the ones ``/revisar`` may act on (D194).
     """
 
     admins: frozenset[str]
@@ -137,6 +147,7 @@ class CommandContext:
     reprocess_min_interval_s: int
     payment_flow: PaymentFlow | None = None
     teach: TeachSetup | None = None
+    review_flows: frozenset[str] = frozenset()
 
 
 #: A command applied in the caller's transaction: its connection, sender, argument and context.
@@ -582,6 +593,36 @@ async def _reply(
     await queue_message(conn, Addressee(msg.channel, msg.profile_id), text, rule_id=rule_id, buttons=buttons)
 
 
+async def _revisar(
+    conn: AsyncConnection[Any],
+    msg: InboundMessage,
+    arg: str,
+    context: CommandContext,
+) -> None:
+    """Send a prepared review-mode batch to deliver, which posts its mail for review (D194).
+
+    Anything not reviewable, a missing or bad id included, answers BR-D22.
+    """
+    invoice_id = _invoice_id(arg)
+    if invoice_id is None or not await _reviewable(conn, invoice_id, context.review_flows):
+        await _reply(conn, msg, RULE_NO_REVIEW, MESSAGES[RULE_NO_REVIEW].format(id=arg))
+        return
+    await set_state(conn, invoice_id, DELIVERING, expected=BATCHED)
+    await enqueue(conn, invoice_id, DELIVER_STEP)
+
+
+async def _reviewable(conn: AsyncConnection[Any], invoice_id: int, review_flows: frozenset[str]) -> bool:
+    """Return whether the invoice is a prepared, unmailed batch on a review flow (D194)."""
+    head = await load_invoice_head(conn, invoice_id)
+    return (
+        head is not None
+        and head.state == BATCHED
+        and await get_batch_state(conn, invoice_id) == PREPARED_BATCH_STATE
+        and not await has_mail_job(conn, invoice_id)
+        and await load_flow(conn, invoice_id) in review_flows
+    )
+
+
 #: The commands a text may name; the help lists them in this order.
 COMMANDS: Mapping[str, Command] = {
     "ayuda": Command(_ayuda, HELP_AYUDA),
@@ -591,6 +632,7 @@ COMMANDS: Mapping[str, Command] = {
     "pendientes": Command(_pendientes, HELP_PENDIENTES),
     "pagado": Command(pagado, HELP_PAGADO),
     "portal": Command(_portal, HELP_PORTAL),
+    "revisar": Command(_revisar, HELP_REVISAR, admin_only=True),
     "gaps": Command(_gaps, HELP_GAPS, admin_only=True),
     "gap": Command(_gap, HELP_GAP, admin_only=True),
 }

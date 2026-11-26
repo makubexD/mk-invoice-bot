@@ -43,6 +43,13 @@ async def add_mail_job(conn: AsyncConnection[Any], job_id: str, invoice_id: int)
     )
 
 
+async def has_mail_job(conn: AsyncConnection[Any], invoice_id: int) -> bool:
+    """Return whether any laptop job exists for the invoice; does not commit (D194)."""
+    cur = await conn.execute("SELECT EXISTS (SELECT 1 FROM mail_jobs WHERE invoice_id = %s)", (invoice_id,))
+    row = await cur.fetchone()
+    return row is not None and bool(row[0])
+
+
 async def get_mail_job(conn: AsyncConnection[Any], job_id: str) -> MailJobState | None:
     """Lock the job and return its invoice and receipt state, or None when unknown; does not commit."""
     cur = await conn.execute(

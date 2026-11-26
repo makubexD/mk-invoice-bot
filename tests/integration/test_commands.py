@@ -61,6 +61,7 @@ from invoicebot.rules.messages_es import (
     HELP_GAPS,
     HELP_HEADER,
     HELP_PORTAL,
+    HELP_REVISAR,
     MESSAGES,
     PENDING_BATCH_LINE,
     PENDING_HEADER,
@@ -90,6 +91,7 @@ from invoicebot.store.invoices import (
     set_flow,
     set_state,
 )
+from invoicebot.store.mail_jobs import add_mail_job
 from invoicebot.store.taught_links import TaughtLink
 
 MAX_QUEUED = 10
@@ -2079,3 +2081,110 @@ async def test_ayuda_lists_the_gap_commands_to_an_admin_only(
     assert HELP_GAP in admin_help[0][0]
     assert HELP_GAPS not in other_help[0][0]
     assert HELP_GAP not in other_help[0][0]
+
+
+#: The flow whose mailer is ``send: review`` in the /revisar tests (D194).
+REVIEW_FLOW = "review_flow"
+
+
+async def _revisable_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    profile_id: str,
+    *,
+    flow: str = REVIEW_FLOW,
+    batch_state: str = "prepared",
+    laptop_job: bool = False,
+) -> int:
+    """Create a BATCHED invoice on ``flow`` whose batch is in ``batch_state`` (D194)."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, profile_id, "whatsapp")
+        await set_flow(conn, invoice_id, flow)
+        batch_id = await open_batch(conn, invoice_id, flow, "prepared")
+        await set_batch_state(conn, batch_id, batch_state)
+        await set_state(conn, invoice_id, "BATCHED", rule_id="BR-D07")
+        if laptop_job:
+            await add_mail_job(conn, f"job-{uuid4().hex}", invoice_id)
+    return invoice_id
+
+
+async def _revisar(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, text: str, *, admin: bool = True
+) -> list[tuple[str, str | None]]:
+    """Send ``text`` as ``profile_id``, with REVIEW_FLOW a review flow, and return its replies."""
+    roles = IntakeRoles(
+        reprocess_min_interval_s=0,
+        admins=frozenset({profile_id}) if admin else frozenset(),
+        review_flows=frozenset({REVIEW_FLOW}),
+    )
+    async with pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _message(profile_id, text),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+            roles=roles,
+        )
+        return await _replies(conn, profile_id)
+
+
+async def test_revisar_sends_a_prepared_review_batch_to_deliver(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: /revisar on a prepared batch of a review flow delivers it once."""
+    profile_id = _profile()
+    invoice_id = await _revisable_invoice(db_pool, profile_id)
+
+    replies = await _revisar(db_pool, profile_id, f"/revisar {invoice_id}")
+    async with db_pool.connection() as conn:
+        head = await load_invoice_head(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+
+    assert replies == []
+    assert head is not None
+    assert head.state == "DELIVERING"
+    assert jobs == ["deliver"]
+
+
+@pytest.mark.parametrize("case", ["laptop_job", "sent", "auto_flow", "unknown", "not_a_number"])
+async def test_revisar_refuses_what_is_not_reviewable(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    case: str,
+) -> None:
+    """D194: /revisar answers BR-D22 and changes nothing for anything but a prepared review batch."""
+    profile_id = _profile()
+    invoice_id: int | None = None
+    if case == "laptop_job":
+        invoice_id = await _revisable_invoice(db_pool, profile_id, laptop_job=True)
+    elif case == "sent":
+        invoice_id = await _revisable_invoice(db_pool, profile_id, batch_state="sent")
+    elif case == "auto_flow":
+        invoice_id = await _revisable_invoice(db_pool, profile_id, flow="auto_flow")
+    arg = {"unknown": str(UNKNOWN_INVOICE_ID), "not_a_number": "abc"}.get(case, str(invoice_id))
+
+    replies = await _revisar(db_pool, profile_id, f"/revisar {arg}")
+
+    assert replies == [(MESSAGES["BR-D22"].format(id=arg), "BR-D22")]
+    if invoice_id is not None:
+        async with db_pool.connection() as conn:
+            head = await load_invoice_head(conn, invoice_id)
+            jobs = await _jobs(conn, invoice_id)
+        assert head is not None
+        assert head.state == "BATCHED"
+        assert jobs == []
+
+
+async def test_revisar_from_a_non_admin_answers_the_help(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D194: a sender who is not an admin gets the help and nothing is queued."""
+    profile_id = _profile()
+    invoice_id = await _revisable_invoice(db_pool, profile_id)
+
+    replies = await _revisar(db_pool, profile_id, f"/revisar {invoice_id}", admin=False)
+    async with db_pool.connection() as conn:
+        jobs = await _jobs(conn, invoice_id)
+
+    assert replies == [(_help(), None)]
+    assert HELP_REVISAR not in replies[0][0]
+    assert jobs == []
