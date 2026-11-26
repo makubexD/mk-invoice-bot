@@ -29,11 +29,21 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.deliver import DELIVER_STEP, DeliverContext, make_deliver_handler
+from invoicebot.pipeline.review import remove_review_files
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
 from invoicebot.sinks.base import OutgoingMail
+from invoicebot.sinks.mailer import DryRun
 from invoicebot.store.flow_b import get_batch_state, merge_flow_data, open_batch
-from invoicebot.store.invoices import FileRecord, add_file, create_invoice, save_reading, set_flow, set_state
+from invoicebot.store.invoices import (
+    FileRecord,
+    add_file,
+    create_invoice,
+    get_file_path,
+    save_reading,
+    set_flow,
+    set_state,
+)
 from xlsx_factory import build_template
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -125,8 +135,8 @@ def _directory() -> StoreDirectory:
     return StoreDirectory(stores={STORE_RUC: store}, portals={})
 
 
-def _config(tmp_path: Path, profile_id: str, send: str) -> Config:
-    """Return example.yaml with a synthetic template, the graph mode and the given ``send``."""
+def _config(tmp_path: Path, profile_id: str, send: str, mode_name: str = "graph") -> Config:
+    """Return example.yaml with a synthetic template, one mail mode and the given ``send``."""
     cfg = load_config(EXAMPLE)
     template = build_template()
     template_path = tmp_path / "template.xlsx"
@@ -138,7 +148,7 @@ def _config(tmp_path: Path, profile_id: str, send: str) -> Config:
                 update={"template": template_path, "template_sha256": hashlib.sha256(template).hexdigest()}
             )
         elif isinstance(sink, MailerSink):
-            sink = sink.model_copy(update={"modes": ["graph"], "send": send})
+            sink = sink.model_copy(update={"modes": [mode_name], "send": send})
         sinks.append(sink)
     flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
     profile = cfg.profiles[PROFILE].model_copy(update={"admin": False})
@@ -146,12 +156,16 @@ def _config(tmp_path: Path, profile_id: str, send: str) -> Config:
 
 
 def _handler(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, data_dir: Path, mode: FakeGraphMode
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    cfg: Config,
+    data_dir: Path,
+    mode: Any,
+    mode_name: str = "graph",
 ) -> Handler:
     drive = FakeDrive()
     return make_deliver_handler(
         DeliverContext(
-            pool, cfg, _directory(), drive, drive, {"graph": mode}, data_dir, laptop_flows=frozenset()
+            pool, cfg, _directory(), drive, drive, {mode_name: mode}, data_dir, laptop_flows=frozenset()
         )
     )
 
@@ -305,3 +319,74 @@ async def test_a_sending_batch_with_reviewed_fails_with_br_d03(
     assert mode.calls == []
     assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D03")
     assert await _batch_state(db_pool, invoice_id) == "failed"
+
+
+async def _add_photo(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int, tmp_path: Path
+) -> Path:
+    """Store a synthetic photo file for the invoice and return its local path."""
+    photo = tmp_path / f"{uuid4().hex}.jpg"
+    photo.write_bytes(b"\xff\xd8\xff synthetic photo\n")
+    record = FileRecord(
+        kind="photo",
+        local_path=str(photo),
+        remote_ref=None,
+        sha256=hashlib.sha256(photo.read_bytes()).hexdigest(),
+        size=photo.stat().st_size,
+    )
+    async with pool.connection() as conn, conn.transaction():
+        await add_file(conn, invoice_id, record)
+    return photo
+
+
+async def _review_then_send(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], handler: Handler, invoice_id: int
+) -> None:
+    """Post the review, then do what [Enviar] does and run the delivery again (D194)."""
+    await handler(_job(invoice_id))
+    async with pool.connection() as conn, conn.transaction():
+        await merge_flow_data(conn, invoice_id, {"reviewed": True})
+        await set_state(conn, invoice_id, "DELIVERING")
+    await handler(_job(invoice_id))
+
+
+async def test_a_reviewed_graph_send_removes_the_review_files_and_the_photo(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: once the reviewed mail is sent, mail/<id>/ and the photo are gone."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    photo = await _add_photo(db_pool, invoice_id, tmp_path)
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, _config(tmp_path, profile_id, "review"), tmp_path, mode)
+
+    await _review_then_send(db_pool, handler, invoice_id)
+
+    async with db_pool.connection() as conn:
+        photo_path = await get_file_path(conn, invoice_id, "photo")
+    assert len(mode.calls) == 1
+    assert not (tmp_path / "mail" / str(invoice_id)).exists()
+    assert photo_path is None
+    assert not photo.exists()
+
+
+async def test_a_reviewed_dry_run_draft_removes_the_review_files(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D194: once the reviewed mail's .eml draft is written, mail/<id>/ is gone; the draft holds the files."""
+    profile_id = f"review-{uuid4().hex}"
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    cfg = _config(tmp_path, profile_id, "review", mode_name="dry_run")
+    handler = _handler(db_pool, cfg, tmp_path, DryRun(tmp_path), mode_name="dry_run")
+
+    await _review_then_send(db_pool, handler, invoice_id)
+
+    assert await _invoice_state(db_pool, invoice_id) == ("BATCHED", "BR-D07")
+    assert not (tmp_path / "mail" / str(invoice_id)).exists()
+
+
+async def test_removing_absent_review_files_raises_nothing(tmp_path: Path) -> None:
+    """D194: an invoice with no review directory is accepted."""
+    await remove_review_files(tmp_path, 123456)
+
+    assert not (tmp_path / "mail").exists()

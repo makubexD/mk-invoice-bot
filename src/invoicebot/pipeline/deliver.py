@@ -92,6 +92,7 @@ from invoicebot.pipeline.review import (
     REVIEWED_KEY,
     RULE_REVIEW,
     queue_review_documents,
+    remove_review_files,
     review_text,
     write_review_files,
 )
@@ -353,7 +354,9 @@ async def _deliver(
     """Prepare the delivery and hand it to the flow's first mail mode (R-7.7).
 
     A mailer on ``send: review`` posts the mail for review instead, until the owner's
-    [Enviar] has set ``reviewed`` in the flow data (D194).
+    [Enviar] has set ``reviewed`` in the flow data (D194). Once the mode's completion has
+    committed, the send, the draft or the laptop job holds the attachments, so the review
+    files are removed (D194).
     """
     delivery = await _prepare(context, invoice, sinks, prepared)
     if sinks.mailer.send == "review" and invoice.flow_data.get(REVIEWED_KEY) is not True:
@@ -361,6 +364,7 @@ async def _deliver(
         return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
+    await remove_review_files(context.data_dir, delivery.invoice_id)
     return delivery, mode_name
 
 

@@ -9,6 +9,7 @@ renders BR-D19 and queues the attachments as documents. The transaction that ope
 from __future__ import annotations
 
 import asyncio
+import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, Literal
@@ -61,6 +62,21 @@ async def write_review_files(
             )
         )
     return documents
+
+
+async def remove_review_files(data_dir: Path, invoice_id: int) -> None:
+    """Delete the invoice's review directory and its files; an absent one is accepted (D194)."""
+    # shortcut: a document row still pending then fails as missing; the owner already
+    # saw the files and pressed [Enviar].
+    await asyncio.to_thread(_remove_tree, review_dir(data_dir, invoice_id))
+
+
+def _remove_tree(directory: Path) -> None:
+    """Remove ``directory`` and everything in it, accepting one that is not there."""
+    try:
+        shutil.rmtree(directory)
+    except FileNotFoundError:
+        return
 
 
 def _write(path: Path, data: bytes) -> None:
