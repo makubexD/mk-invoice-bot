@@ -66,15 +66,15 @@ Files: `specs/05-open-questions.md`, `specs/06-business-rules.md`, `specs/02-req
   `DELIVERING` move on [Enviar], `/revisar`; `06` rows BR-D19 to BR-D22 and BR-D16 to BR-D18 without the link lines.
 - Messages (rule in brackets):
   - `BR-D19`:
-    `📧 Revisa el correo de {serie}-{numero} antes de enviarlo.\nPara: {to}\n{cc_line}Asunto: {subject}\n\n{body}\n\nAdjuntos: {files}`
+    `📧 Revisa el correo de {serie}-{numero} antes de enviarlo.\nPara: {to}\n{cc_line}Asunto: {subject}\n{body}\nAdjuntos: {files}`
     with `{cc_line}` = `CC: {cc}\n` or empty.
   - `BR-D20`: `⏸️ No envié el correo de {serie}-{numero}. Toca [Enviar] cuando quieras.`
   - `BR-D21`: `📤 Enviando el correo de {serie}-{numero}…`
   - `BR-D22`: `No hay un correo por revisar para #{id}.`
-  - `BR-D16`, `BR-D17`, `BR-D18`: drop the `Fila:` and `Carpeta:` lines.
-  - Button and link titles: `BUTTON_SEND = "Enviar"`, `BUTTON_HOLD = "Cancelar"`, `LINK_FOLDER = "📂 Abrir carpeta"`,
-    `LINK_ROW = "📄 Abrir fila"`.
-  - `/revisar` in the command help: `Muestra el correo preparado de una factura para enviarlo.`
+  - Button and link titles: `BUTTON_SEND = "Enviar"`, `BUTTON_HOLD = "Cancelar"`, `LINK_TITLE_FOLDER = "📂 Abrir carpeta"`,
+    `LINK_TITLE_ROW = "📄 Abrir fila"` (`LINK_FOLDER` is already `drive_files`'s value key), `REVIEW_CC_LINE`.
+  - `/revisar` in the command help, as `HELP_REVISAR`: `/revisar 12: muestra el correo preparado del comprobante #12
+para enviarlo`.
 
 Test: `uv run pytest -q tests/unit/test_rules_parity.py tests/unit/test_messages_es.py tests/unit/test_docs.py`
 
@@ -230,7 +230,7 @@ Files: `src/invoicebot/pipeline/deliver.py`, `src/invoicebot/app.py`, `tests/int
 - `DeliverContext` gains `links: FolderLinks` (the same `GraphDrive` in `app.py`).
 - `_prepare`: after `file_folder`, the folder URL is `flow_data.folder_url` when saved, else `links.web_url(path)`,
   saved in the same `merge_flow_data` as `folder`; `_Delivery` gains `folder_url`.
-- BR-D07, BR-D10 and BR-D13 are queued with `links=safe_links([(LINK_FOLDER, folder_url)])`.
+- BR-D07, BR-D10 and BR-D13 are queued with `links=safe_links([(LINK_TITLE_FOLDER, folder_url)])`.
 
 Test cases (docstrings start with `D194`), with the fake drive gaining `web_url`:
 
@@ -241,12 +241,16 @@ Test cases (docstrings start with `D194`), with the fake drive gaining `web_url`
 
 Test: `uv run pytest -q tests/integration/test_pipeline_deliver.py`
 
-## Step 11: Flow A's links move out of the text `[worker]`
+## Step 11: Flow A's links move out of the text `[inline: one change across the spec row, the copy and two test modules, five files]`
 
-Files: `src/invoicebot/pipeline/deliver_google.py`, `tests/integration/test_pipeline_deliver_google.py`.
+Files: `specs/06-business-rules.md`, `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/deliver_google.py`,
+`tests/integration/test_pipeline_deliver_google.py`, `tests/integration/test_flow_dni.py`.
+
+- `BR-D16`, `BR-D17` and `BR-D18` drop their `Fila:` and `Carpeta:` lines (moved here from step 1, so flow A never
+  loses its links between steps); `specs/06-business-rules.md`'s three rows follow.
 
 - `_complete` formats BR-D16, BR-D17 and BR-D18 without `link_row` and `link_folder` and queues
-  `links=safe_links([(LINK_ROW, link_row), (LINK_FOLDER, link_folder)])`, skipping an empty one (BR-D18 has no
+  `links=safe_links([(LINK_TITLE_ROW, link_row), (LINK_TITLE_FOLDER, link_folder)])`, skipping an empty one (BR-D18 has no
   folder).
 
 Test cases (docstrings start with `D194`):
@@ -254,7 +258,7 @@ Test cases (docstrings start with `D194`):
 - BR-D16 has both links, in that order, and its text has no `Fila:` or `Carpeta:` line.
 - BR-D18 has only the row link.
 
-Test: `uv run pytest -q tests/integration/test_pipeline_deliver_google.py`
+Test: `uv run pytest -q tests/integration/test_pipeline_deliver_google.py tests/integration/test_flow_dni.py tests/unit/test_rules_parity.py`
 
 ## Step 12: The `send` setting and the `review` batch state `[worker]`
 
