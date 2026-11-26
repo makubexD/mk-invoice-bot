@@ -1,6 +1,6 @@
 # Spike · OCR on a receipt over a background (D198)
 
-Run on 2026-11-26 for `docs/plan-mvp-ocr-background.md`, step 16. The photos stayed outside the repo: the owner's 6
+Run on 2026-11-26 for `docs/archive/plan-mvp-ocr-background.md`, step 16. The photos stayed outside the repo: the owner's 6
 WhatsApp receipt photos plus the live photo of invoice #37 (a receipt on a wooden table, sent through Telegram at
 1080 px). Each one went through the extract helper (`python -m invoicebot.extract`) in a throwaway container with no
 network. Only aggregates are recorded here: no RUC, store name or amount.
