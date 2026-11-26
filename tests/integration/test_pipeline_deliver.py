@@ -547,6 +547,26 @@ async def _outbox_links(conn: AsyncConnection[Any], profile_id: str) -> list[Any
     return [links for (links,) in await cur.fetchall()]
 
 
+async def _outbox_documents(conn: AsyncConnection[Any], profile_id: str) -> list[Any]:
+    """Return the document of each queued message for the profile, in insertion order (D194)."""
+    cur = await conn.execute(
+        "SELECT payload_json->'document' FROM outbox WHERE \"to\" = %s ORDER BY id",
+        (profile_id,),
+    )
+    return [document for (document,) in await cur.fetchall()]
+
+
+def _draft_document(invoice_id: int, tmp_path: Path) -> dict[str, Any]:
+    """Return the document payload D194 queues for the written .eml draft."""
+    eml = tmp_path / "mail" / f"{invoice_id}.eml"
+    return {
+        "path": str(eml.resolve()),
+        "filename": f"{SERIE}-{NUMERO}.eml",
+        "mime": "message/rfc822",
+        "size": eml.stat().st_size,
+    }
+
+
 def _retry_buttons(invoice_id: int) -> list[dict[str, str]]:
     """Return BR-D03's [Reintentar] button payload, which runs ``/reprocesar <id>`` (D190)."""
     return [{"id": command_button_id("reprocesar", str(invoice_id)), "title": BUTTON_RETRY}]
@@ -590,6 +610,7 @@ async def test_dry_run_batches_the_invoice_with_br_d07(
         flow_data = await load_flow_data(conn, invoice_id)
         emls = await _eml_files(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
+        documents = await _outbox_documents(conn, profile_id)
     folder = f"{FOLDER_PREFIX}{flow_data['seq']}_{COMERCIO}"
     path = f"/Reembolsos/{folder}"
     legal_name = cfg.profiles[profile_id].legal_name
@@ -607,7 +628,11 @@ async def test_dry_run_batches_the_invoice_with_br_d07(
     eml = tmp_path / "mail" / f"{invoice_id}.eml"
     assert emls == [str(eml)]
     assert eml.is_file()
-    text, rule_id, buttons = outbox[0]
+    assert len(outbox) == 2
+    assert documents[0] == _draft_document(invoice_id, tmp_path)
+    assert documents[1] is None
+    assert outbox[0] == (f"{SERIE}-{NUMERO}.eml", "BR-D07", [])
+    text, rule_id, buttons = outbox[1]
     assert text == MESSAGES["BR-D07"].format(folder=folder, modes_desc="borrador .eml")
     assert rule_id == "BR-D07"
     assert buttons == [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}]
@@ -784,7 +809,8 @@ async def test_the_assisted_br_d07_message_carries_the_folder_link(
 
     async with db_pool.connection() as conn:
         links = await _outbox_links(conn, profile_id)
-    assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+    assert len(links) == 2
+    assert links[1] == [{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]
 
 
 async def test_the_inbox_rule_done_message_carries_the_link_and_no_llego(
@@ -1578,12 +1604,15 @@ async def test_resend_eml_on_a_sent_batch_writes_the_draft_without_the_button(
         flow_data = await load_flow_data(conn, invoice_id)
         emls = await _eml_files(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
+        documents = await _outbox_documents(conn, profile_id)
     assert eml.is_file()
     assert emls == []
     assert invoice == ("DONE", None)
     assert batch_state == "sent"
+    assert documents == [_draft_document(invoice_id, tmp_path), None]
     assert outbox == [
-        (MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"), "BR-D07", [])
+        (f"{SERIE}-{NUMERO}.eml", "BR-D07", []),
+        (MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"), "BR-D07", []),
     ]
 
 
@@ -1715,12 +1744,15 @@ async def test_resend_eml_on_a_prepared_batch_offers_ya_lo_envie(
         batch_state = await get_batch_state(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
         outbox = await _outbox(conn, profile_id)
+        documents = await _outbox_documents(conn, profile_id)
     assert invoice == ("BATCHED", None)
     assert batch_state == "prepared"
+    assert documents == [_draft_document(invoice_id, tmp_path), None]
     assert outbox == [
+        (f"{SERIE}-{NUMERO}.eml", "BR-D07", []),
         (
             MESSAGES["BR-D07"].format(folder=flow_data["folder"], modes_desc="borrador .eml"),
             "BR-D07",
             [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}],
-        )
+        ),
     ]

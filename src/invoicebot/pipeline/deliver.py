@@ -41,7 +41,7 @@ from typing import Any, Literal, cast
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.channels.base import Button, Link
+from invoicebot.channels.base import Button, Document, Link
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
@@ -72,6 +72,7 @@ from invoicebot.pipeline.outgoing import (
     Addressee,
     outbound,
     queue_admin_alert,
+    queue_document,
     queue_outbound,
     safe_links,
 )
@@ -184,6 +185,7 @@ RESEND_STATES = frozenset({DONE, BATCHED})
 PDF_MIME = "application/pdf"
 XML_MIME = "application/xml"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+EML_MIME = "message/rfc822"
 
 
 @dataclass(frozen=True)
@@ -446,9 +448,11 @@ async def _resend_laptop(
 
 
 async def _resend_eml(
-    context: DeliverContext, _invoice: _Invoice, delivery: _Delivery, _prepared: _Values
+    context: DeliverContext, _invoice: _Invoice, delivery: _Delivery, prepared: _Values
 ) -> None:
-    """Rewrite the draft and answer BR-D07 with [Ya lo envié] only when prepared (R-7.8, D109).
+    """Rewrite the draft, queue it as a document, then answer BR-D07 (R-7.8, D109, D194).
+
+    The button is [Ya lo envié] only when prepared.
 
     Rewriting the ``.eml`` is harmless, so this step keeps no marker and changes no
     invoice or batch state; a ``prepared`` batch keeps its button, a ``sent`` one has
@@ -461,13 +465,16 @@ async def _resend_eml(
     if not Path(eml_path).is_relative_to(context.data_dir):
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     text, button = _draft_reply(delivery)
+    size = (await asyncio.to_thread(Path(eml_path).stat)).st_size
+    draft = _draft_document(Path(eml_path), prepared, size)
     async with context.pool.connection() as conn, conn.transaction():
-        prepared = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
+        awaiting = await get_batch_state(conn, delivery.invoice_id) == PREPARED_BATCH_STATE
+        await _queue_draft(conn, delivery, draft)
         await _notify(
             conn,
             delivery.head,
             delivery.invoice_id,
-            _Reply(RULE_BATCHED, text, [button] if prepared else [], _folder_links(delivery)),
+            _Reply(RULE_BATCHED, text, [button] if awaiting else [], _folder_links(delivery)),
         )
 
 
@@ -653,8 +660,29 @@ def _named_mode(modes: Mapping[str, MailMode], name: str) -> MailMode:
     return mode
 
 
-async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Values, mode: MailMode) -> None:
-    """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1)."""
+def _draft_document(eml: Path, prepared: _Values, size: int) -> Document:
+    """Describe the written draft as the document the chat receives (D194)."""
+    name = f"{prepared.values['serie']}-{prepared.values['numero']}.eml"
+    return Document(path=str(eml.resolve()), filename=name, mime=EML_MIME, size=size)
+
+
+async def _queue_draft(conn: AsyncConnection[Any], delivery: _Delivery, draft: Document) -> None:
+    """Queue the draft before BR-D07, in the caller's transaction, so its buttons come last (D194)."""
+    await queue_document(
+        conn,
+        Addressee(delivery.head.origin_channel, delivery.head.profile_id),
+        draft,
+        caption=draft.filename,
+        invoice_id=delivery.invoice_id,
+        rule_id=RULE_BATCHED,
+    )
+
+
+async def _assisted(context: DeliverContext, delivery: _Delivery, prepared: _Values, mode: MailMode) -> None:
+    """Write the draft and record the ``prepared`` batch in one transaction (R-7.5, R-7.7, R-8.1).
+
+    The same transaction queues the draft as a document, then BR-D07 with [Ya lo envié] (D194).
+    """
     eml_path = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     if eml_path is None:
         raise RuntimeError("an assisted mail mode returned no .eml path")
@@ -663,6 +691,7 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
         raise RuntimeError("an assisted mail mode wrote outside the data directory")
     data = await _read_bytes(eml)
     text, button = _draft_reply(delivery)
+    draft = _draft_document(eml, prepared, len(data))
     async with context.pool.connection() as conn, conn.transaction():
         if not await _still_delivering(conn, delivery.invoice_id):
             return
@@ -680,6 +709,7 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, _prepared: _Va
             ),
         )
         await set_state(conn, delivery.invoice_id, BATCHED, rule_id=RULE_BATCHED)
+        await _queue_draft(conn, delivery, draft)
         await _notify(
             conn,
             delivery.head,
