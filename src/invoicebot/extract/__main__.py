@@ -7,7 +7,8 @@ trailing arguments the input is a photo, which keeps the original call working. 
 arrive on stdin and the helper never opens a path under the data root (D158). It loads the
 input once, reads its SUNAT QR, reads its text and parses the fields with the configured rules,
 then merges both readings (D81). A photo whose first read misses a required field is read again
-on the plain deskewed photo and then on a crop of the receipt, within the OCR budget (D198).
+on the plain deskewed photo, then on that photo upscaled, then on a crop of the receipt, within the
+OCR budget (D198).
 A text-layer PDF is parsed directly and its fields carry the
 ``pdf`` source; a PDF without enough text is rendered on page 1 and read as a photo (R-2.15).
 It writes exactly one JSON object to stdout: ``{"reading": {...} | null, "variant": ...,
@@ -65,6 +66,10 @@ UNREADABLE = "unreadable"
 TOO_MANY_PAGES = "too_many_pages"
 #: Seconds of OCR budget below which a retry read is not started (D198).
 MIN_RETRY_S = 1.0
+#: The upscaled plain retry scales the deskewed photo by this factor, capped so its long side stays within
+#: ``UPSCALE_MAX_SIDE`` pixels (D198).
+UPSCALE_FACTOR = 2.0
+UPSCALE_MAX_SIDE = 4000
 #: Address space one decode may use (R-9.1). OpenCV maps about 1.5 GiB for its bundled
 #: codecs before it decodes one pixel, and its thread pool reserves more per core, so a
 #: 512 MiB cap makes every decode fail to allocate. This value leaves headroom over the
@@ -219,12 +224,32 @@ def _crop_candidates(gray: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]
     yield straight, straight
 
 
+def _upscaled_candidates(straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
+    """Yield ``straight`` upscaled with its own deskewed image, or nothing when it cannot grow (D198).
+
+    The factor is ``UPSCALE_FACTOR``, capped so the long side stays within ``UPSCALE_MAX_SIDE``; a
+    factor of 1 or less, or a failed resize, yields nothing.
+    """
+    height, width = straight.shape[:2]
+    factor = min(UPSCALE_FACTOR, UPSCALE_MAX_SIDE / max(height, width))
+    if factor <= 1:
+        return
+    size = (max(1, round(width * factor)), max(1, round(height * factor)))
+    try:
+        upscaled = cv2.resize(straight, size, interpolation=cv2.INTER_CUBIC)
+    except (cv2.error, MemoryError):
+        return
+    yield upscaled, straight
+
+
 def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[tuple[np.ndarray, np.ndarray]]:
     """Yield the (image to read, deskewed image) pairs to retry, in order, lazily (D198).
 
-    The plain deskewed photo comes first; the crop is only computed when it is asked for.
+    The plain deskewed photo comes first, then the upscaled one, then the crop; the last two are
+    only computed when they are asked for.
     """
     yield straight, straight
+    yield from _upscaled_candidates(straight)
     yield from _crop_candidates(gray)
 
 
