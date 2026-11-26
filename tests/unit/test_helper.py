@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Callable
+from itertools import chain, repeat
 from pathlib import Path
+from typing import Any
 
 import cv2
 import numpy as np
@@ -298,10 +300,10 @@ def test_photo_better_crop_reading_re_reads_the_strip_on_the_crop(
     assert [image.shape for image in strip_images] == [SMALL]
 
 
-def test_photo_upscaled_read_that_completes_is_kept_and_the_strip_gets_the_straight_image(
+def test_photo_upscaled_read_that_completes_is_kept_and_the_strip_gets_the_upscaled_image(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: a complete upscaled read is kept, twice the size, without cropping; the strip gets straight."""
+    """D198: a complete upscaled read is kept without cropping; the strip gets the upscaled image it read."""
     spy = _Spy(
         monkeypatch, [_reading_with({}), _reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL
     )
@@ -319,7 +321,7 @@ def test_photo_upscaled_read_that_completes_is_kept_and_the_strip_gets_the_strai
     assert len(spy.calls) == 3
     assert spy.calls[2][0].shape == (2 * CANVAS[0], 2 * CANVAS[1])
     assert spy.crops == 0
-    assert [image.shape for image in strip_images] == [CANVAS]
+    assert [image.shape for image in strip_images] == [UPSCALED]
 
 
 def test_photo_block_mode_read_of_the_upscaled_photo_is_kept_without_cropping(
@@ -354,10 +356,10 @@ def test_upscaled_candidate_is_capped_at_the_maximum_side(
     else:
         (upscaled, deskewed, psm), (block, block_deskewed, block_psm) = candidates
         assert upscaled.shape == (round(100 * 4000 / 3000), expected_long_side)
-        assert deskewed is straight
+        assert deskewed is upscaled
         assert psm is None
         assert block is upscaled
-        assert block_deskewed is straight
+        assert block_deskewed is upscaled
         assert block_psm == helper.RETRY_PSM
 
 
@@ -397,3 +399,92 @@ def test_photo_retry_is_judged_with_the_qr_reading_and_the_ocr_one_is_kept(
 
     assert len(spy.calls) == 2
     assert payload["reading"]["fields"]["total"]["value"] == FULL_FIELDS["total"].value
+
+
+def _clock(monkeypatch: pytest.MonkeyPatch, *ticks: float) -> None:
+    """Make ``time.monotonic`` return ``ticks`` in order, then the last one forever."""
+    monkeypatch.setattr(helper.time, "monotonic", chain(ticks, repeat(ticks[-1])).__next__)
+
+
+def test_photo_retries_keep_the_strip_timeout_out_of_the_budget(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: the retries leave STRIP_TIMEOUT_S of ocr.timeout_s for the strip re-read."""
+    spy = _Spy(monkeypatch, [_reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+    spent = OCR_CONFIG.timeout_s - helper.STRIP_TIMEOUT_S - helper.MIN_RETRY_S / 2
+    _clock(monkeypatch, 0.0, spent)
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 1
+
+
+def test_photo_candidate_build_time_is_not_handed_to_the_read(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: time left is checked again once a candidate is built; a build that used it runs no read."""
+    spy = _Spy(monkeypatch, [_reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+    budget = OCR_CONFIG.timeout_s - helper.STRIP_TIMEOUT_S
+    _clock(monkeypatch, 0.0, 0.0, budget - helper.MIN_RETRY_S / 2)
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 1
+
+
+def test_photo_failed_crop_adds_no_read(monkeypatch: pytest.MonkeyPatch, rules: ParsingRules) -> None:
+    """D198: a crop that raises cv2.error yields no candidate; the reads stop after the block-mode one."""
+    spy = _Spy(monkeypatch, [_reading_with({})] * 4, crop_shape=SMALL)
+
+    def explode(_gray: np.ndarray) -> np.ndarray:
+        raise cv2.error("crop")
+
+    monkeypatch.setattr(helper, "crop_receipt", explode)
+
+    helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert len(spy.calls) == 4
+
+
+def test_photo_crop_that_cannot_be_binarized_still_reads_the_plain_crop(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: when binarizing the crop fails, the plain crop is still read and kept."""
+    spy = _Spy(monkeypatch, [*[_reading_with({})] * 4, _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+
+    def binarize(image: np.ndarray) -> np.ndarray:
+        if image.shape == SMALL:
+            raise MemoryError
+        return np.zeros_like(image)
+
+    monkeypatch.setattr(helper, "binarize", binarize)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
+    assert [image.shape for image, _ in spy.calls][-1] == SMALL
+    assert len(spy.calls) == 5
+
+
+def test_photo_retry_read_that_runs_out_of_memory_is_skipped(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D198: a retry read raising MemoryError is skipped and the next candidate is read."""
+    spy = _Spy(monkeypatch, [_reading_with({}), _reading_with(FULL_FIELDS)], crop_shape=SMALL)
+    spy_read = helper.read_text
+    reads = 0
+
+    def flaky_read(image: np.ndarray, cfg: Ocr, **overrides: Any) -> OcrText:
+        nonlocal reads
+        reads += 1
+        if reads == 2:
+            raise MemoryError
+        return spy_read(image, cfg, **overrides)
+
+    monkeypatch.setattr(helper, "read_text", flaky_read)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
+    assert reads == 3
+    assert [image.shape for image, _ in spy.calls] == [CANVAS, UPSCALED]

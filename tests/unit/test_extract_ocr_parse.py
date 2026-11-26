@@ -472,7 +472,7 @@ BUYER_RUC = "20000000028"
 
 @pytest.mark.parametrize("label", ["SR.:", "SRES.:", "SEÑOR(ES):", "SENOR:", "CLIENTE:", "ADQUIRIENTE:"])
 def test_buyer_label_matches_every_printed_form(rules: ParsingRules, label: str) -> None:
-    """D198: each buyer label form, with the punctuation OCR keeps after it, is recognized."""
+    """D198: each buyer label form starting a line, with the punctuation OCR keeps after it, matches."""
     assert rules.buyer_label.search(f"{label} EMPRESA SAC")
 
 
@@ -518,3 +518,31 @@ def test_parse_ocr_buyer_label_three_lines_above_does_not_make_a_buyer(rules: Pa
 
     assert fields["ruc_emisor"] == SYNTHETIC_RUC
     assert "num_doc_adq" not in fields
+
+
+@pytest.mark.parametrize(
+    "line", ["INVERSIONES EL SEÑOR DE SIPAN SAC", "SEÑOR DE LUREN SAC", f"RUC: {SYNTHETIC_RUC} SEÑOR(ES): X"]
+)
+def test_buyer_label_needs_the_line_start_and_a_separator(rules: ParsingRules, line: str) -> None:
+    """D198: SEÑOR inside an issuer name, without a separator or after other text, is no buyer label."""
+    assert not rules.buyer_label.search(line)
+
+
+def test_parse_ocr_issuer_named_senor_keeps_its_ruc(rules: ParsingRules) -> None:
+    """D198: an issuer whose name holds SEÑOR keeps the RUC printed under it."""
+    fields = _fields(_ocr("INVERSIONES EL SEÑOR DE SIPAN SAC", f"RUC: {SYNTHETIC_RUC}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert "num_doc_adq" not in fields
+
+
+def test_parse_ocr_labelled_buyer_wins_over_a_second_unlabelled_ruc(rules: ParsingRules) -> None:
+    """D198: with two unlabelled RUCs and one under CLIENTE, the labelled one is the buyer."""
+    text = _ocr(
+        f"RUC: {SYNTHETIC_RUC}", f"REF {EARLIER_BARE_RUC}", "CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"
+    )
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC

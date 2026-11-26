@@ -25,5 +25,5 @@ amounts:   # field -> keywords; the first keyword (in list order) with a match w
 # The line just above a printed portal address; OCR may read the colon as `;` (D191, spike).
 printed_url_anchor: '\bconsult\w*\b.*\ben\s*[:;.,]?\s*$'
 # A line naming the buyer; a RUC on it or just below it is the buyer's, never the issuer's (D198).
-# The trailing (?!\w) stands in for \b, which cannot follow the dot of SR. / SRES.
-buyer_label: '\b(?:CLIENTE|SE[ÑN]OR(?:\(?ES\)?)?|SR(?:\(?ES\)?)?\.|ADQUIRIENTE)(?!\w)'
+# The label starts the line and its separator follows, so an issuer named "EL SEÑOR DE ..." is no buyer.
+buyer_label: '^\W*(?:CLIENTE|SE[ÑN]OR(?:\(?ES\)?)?|SR(?:\(?ES\)?)?\.?|ADQUIRIENTE)\s*[:;.,!|]'

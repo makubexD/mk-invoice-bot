@@ -47,7 +47,7 @@ from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 from invoicebot.extract.pdf import TooManyPages, open_pdf, page_text, render_gray, text_to_ocr
 from invoicebot.extract.qr import QrHit, read_invoice_qr
-from invoicebot.extract.url_strip import read_url_strip
+from invoicebot.extract.url_strip import STRIP_TIMEOUT_S, read_url_strip
 
 #: Exit code for a bad invocation or an unreadable rules file; the handler retries these (R-9.4).
 EXIT_FAILURE = 1
@@ -173,6 +173,7 @@ def _read_invoice(data: bytes, options: _Options) -> dict[str, Any]:
 
 def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> dict[str, Any]:
     """Read one photo from its bytes and return the helper result (R-2.1, R-2.13, D198)."""
+    started = time.monotonic()
     try:
         gray = load_gray(data, max_px)
         hit = read_invoice_qr(gray)
@@ -180,7 +181,6 @@ def _read_photo(data: bytes, max_px: int, ocr_cfg: Ocr, rules: ParsingRules) -> 
         processed = binarize(straight)
     except (ImageUnreadable, cv2.error, MemoryError):
         return _unreadable(ocr=False)
-    started = time.monotonic()
     try:
         text = read_text(processed, ocr_cfg)
         ocr_reading = None if text is None else parse_ocr(text, rules).reading
@@ -244,13 +244,14 @@ def _upscaled_candidates(straight: np.ndarray) -> Iterator[_Candidate]:
     factor = min(UPSCALE_FACTOR, UPSCALE_MAX_SIDE / max(height, width))
     if factor <= 1:
         return
-    size = (max(1, round(width * factor)), max(1, round(height * factor)))
+    size = (round(width * factor), round(height * factor))
     try:
         upscaled = cv2.resize(straight, size, interpolation=cv2.INTER_CUBIC)
     except (cv2.error, MemoryError):
         return
-    yield upscaled, straight, None
-    yield upscaled, straight, RETRY_PSM
+    # The upscaled image is its own deskewed image: the strip re-read needs the read's coordinates.
+    yield upscaled, upscaled, None
+    yield upscaled, upscaled, RETRY_PSM
 
 
 def _candidates(gray: np.ndarray, straight: np.ndarray) -> Iterator[_Candidate]:
@@ -278,6 +279,11 @@ def _read_candidate(
         return None
 
 
+def _left(budget: float, started: float) -> float:
+    """Return the seconds of ``budget`` left after ``started`` (D198)."""
+    return budget - (time.monotonic() - started)
+
+
 def _retries(
     gray: np.ndarray,
     ocr_cfg: Ocr,
@@ -289,18 +295,21 @@ def _retries(
     """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198).
 
     While the best reading misses a required field, the candidates run in order, each only with
-    at least ``MIN_RETRY_S`` of ``ocr_cfg.timeout_s`` left after ``started`` and with only that
-    time. The best has the fewest missing required fields once merged with ``qr_reading``, a tie
-    keeping the earlier reading; the reading kept is the OCR one, unmerged. ``first`` carries the
-    deskewed image it came from.
+    at least ``MIN_RETRY_S`` of the retry budget left after ``started`` (the helper's start) and
+    with only that time. The budget is ``ocr_cfg.timeout_s`` less ``STRIP_TIMEOUT_S``, kept for
+    the strip re-read that follows. The best has the fewest missing required fields once merged
+    with ``qr_reading``, a tie keeping the earlier reading; the reading kept is the OCR one,
+    unmerged. ``first`` carries the deskewed image it came from.
     """
     best = first
     candidates = _candidates(gray, first[2])
-    # Time and completeness are checked before a candidate is pulled, so a skipped crop is never made.
-    while _missing_count(best[1], qr_reading) > 0:
-        left = ocr_cfg.timeout_s - (time.monotonic() - started)
-        candidate = next(candidates, None) if left >= MIN_RETRY_S else None
-        if candidate is None:
+    budget = ocr_cfg.timeout_s - STRIP_TIMEOUT_S
+    # Time is checked before a candidate is built, so a skipped crop is never made, and again after,
+    # so the time the build took is not handed to the read.
+    while _missing_count(best[1], qr_reading) > 0 and _left(budget, started) >= MIN_RETRY_S:
+        candidate = next(candidates, None)
+        left = _left(budget, started)
+        if candidate is None or left < MIN_RETRY_S:
             break
         read = _read_candidate(candidate[0], ocr_cfg, rules, left, candidate[2])
         if read is not None and _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
