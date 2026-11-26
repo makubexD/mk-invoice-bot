@@ -204,7 +204,38 @@ Files: `config/parsing_rules.yaml`, `tests/unit/test_extract_ocr_parse.py`.
 
 Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py`
 
-## Step 10: private photos, deploy and #37 again `[inline: private samples and the live bot]`
+## Step 10: D198, a field the QR has is not missing `[inline: spec text from the second private run]`
+
+The second private run (step 9's commit) met the bar on #37 (issuer empty, buyer's RUC as `num_doc_adq`) but not on one
+private photo: its first read missed only `ruc_emisor`, which the QR had, so the old merge was right; the retry ran
+anyway, and a plain read with the buyer's RUC as issuer replaced it (a QR conflict).
+
+Files: `specs/05-open-questions.md`.
+
+- D198's **Retries**: "misses a required field" becomes "misses a required field that the QR reading does not
+  have"; readings are compared after the merge with the QR reading.
+
+Test: `npx prettier --check specs/05-open-questions.md`
+
+## Step 11: retries count the QR reading `[worker]`
+
+Files: `src/invoicebot/extract/__main__.py`, `tests/unit/test_helper.py`.
+
+- `_read_photo` passes `None if hit is None else hit.reading` to `_retries`. `_retries` counts the missing required
+  fields of `merge(reading, qr_reading)` (from `extract/merge.py`, as the payload does) both for "is a retry needed"
+  and for "is this candidate better". The kept OCR reading is still the unmerged one; the merge for the payload runs
+  as today.
+
+Cases (docstrings start with `D198:`):
+
+1. A first read missing only `ruc_emisor` with a QR reading that has it: no retry.
+2. A first read missing `ruc_emisor` and `total`, the QR having `ruc_emisor`, a plain read with every field: the plain
+   read is kept.
+3. With no QR, the step 7 cases still pass unchanged.
+
+Test: `uv run pytest -q tests/unit/test_helper.py`
+
+## Step 12: private photos, deploy and #37 again `[inline: private samples and the live bot]`
 
 Files: `specs/spikes/ocr-background.md` (new).
 
