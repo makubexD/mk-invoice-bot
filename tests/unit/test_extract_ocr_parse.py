@@ -465,3 +465,56 @@ def test_parse_ocr_ruc_separator_misreads_anchor_the_issuer(rules: ParsingRules,
     text = _ocr(f"REF {EARLIER_BARE_RUC}", f"RUC{separator} {SYNTHETIC_RUC}")
 
     assert _fields(text, rules)["ruc_emisor"] == SYNTHETIC_RUC
+
+
+BUYER_RUC = "20000000028"
+
+
+@pytest.mark.parametrize("label", ["SR.:", "SRES.:", "SEÑOR(ES):", "SENOR:", "CLIENTE:", "ADQUIRIENTE:"])
+def test_buyer_label_matches_every_printed_form(rules: ParsingRules, label: str) -> None:
+    """D198: each buyer label form, with the punctuation OCR keeps after it, is recognized."""
+    assert rules.buyer_label.search(f"{label} EMPRESA SAC")
+
+
+def test_parse_ocr_ruc_under_buyer_label_alone_is_no_issuer(rules: ParsingRules) -> None:
+    """D198: a lone RUC under CLIENTE is the buyer's; there is no ruc_emisor."""
+    fields = _fields(_ocr("CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"), rules)
+
+    assert "ruc_emisor" not in fields
+    assert fields["num_doc_adq"] == BUYER_RUC
+    assert fields["tipo_doc_adq"] == "6"
+
+
+def test_parse_ocr_issuer_on_top_and_buyer_under_label(rules: ParsingRules) -> None:
+    """D198: the RUC at the top is the issuer and the one under CLIENTE is the buyer."""
+    fields = _fields(_ocr(f"RUC: {SYNTHETIC_RUC}", "CLIENTE: EMPRESA SAC", f"RUC: {BUYER_RUC}"), rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_buyer_ruc_on_the_label_line_is_not_the_issuer(rules: ParsingRules) -> None:
+    """D198: a RUC on the SEÑOR(ES) line itself is the buyer's."""
+    fields = _fields(
+        _ocr(
+            f"SEÑOR(ES): EMPRESA SAC RUC {BUYER_RUC}",
+            "AV EJEMPLO 123",
+            "LIMA",
+            "TELEFONO",
+            f"RUC: {SYNTHETIC_RUC}",
+        ),
+        rules,
+    )
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_buyer_label_three_lines_above_does_not_make_a_buyer(rules: ParsingRules) -> None:
+    """D198: a RUC more than two lines below the buyer label stays the issuer's."""
+    text = _ocr("CLIENTE: EMPRESA SAC", "AV EJEMPLO 123", "LIMA", f"RUC: {SYNTHETIC_RUC}")
+
+    fields = _fields(text, rules)
+
+    assert fields["ruc_emisor"] == SYNTHETIC_RUC
+    assert "num_doc_adq" not in fields
