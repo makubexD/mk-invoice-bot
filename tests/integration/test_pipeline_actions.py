@@ -1058,6 +1058,60 @@ async def test_a_second_sent_press_is_stale_and_changes_nothing(
     ]
 
 
+async def test_sent_on_a_bounced_batch_marks_it_sent_and_keeps_the_invoice_done(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-D08, D207: [Ya lo envié] after a bounce sets the batch sent and the invoice stays DONE."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id, batch_state="bounced")
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "sent", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        invoice = await _invoice_row(conn, invoice_id)
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert invoice == (DONE, RULE_INBOX)
+    assert batch_state == "sent"
+    assert jobs == ["folder_status"]
+    assert texts == [(RULE_SENT, MESSAGES[RULE_SENT])]
+
+
+async def test_a_second_sent_press_after_a_bounce_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """BR-S02: a second [Ya lo envié] after a bounce answers BR-S02 and queues nothing more."""
+    profile_id = _profile()
+    invoice_id = await _done_invoice(db_pool, profile_id, batch_state="bounced")
+    for _ in range(2):
+        async with db_pool.connection() as conn:
+            await handle_inbound(
+                conn,
+                _press(invoice_id, "sent", profile_id),
+                max_queued_per_sender=MAX_QUEUED,
+                media_max_bytes=MEDIA_MAX_BYTES,
+                timezone=TIMEZONE,
+            )
+    async with db_pool.connection() as conn:
+        batch_state = await get_batch_state(conn, invoice_id)
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert batch_state == "sent"
+    assert jobs == ["folder_status"]
+    assert texts == [
+        (RULE_SENT, MESSAGES[RULE_SENT]),
+        ("BR-S02", MESSAGES["BR-S02"].format(id=invoice_id, state_desc=state_desc(DONE))),
+    ]
+
+
 async def test_a_press_from_another_profile_changes_nothing(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

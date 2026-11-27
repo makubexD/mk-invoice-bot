@@ -64,7 +64,8 @@ def make_folder_status_handler(pool: Pool, cfg: Config, drive: Drive) -> Handler
 
     An invoice without a folder yet, or whose flow has no OneDrive folder sink, is left
     alone. The folder moves from wherever it is now to the target name, so a payment
-    recorded before the ``_Sent`` rename ran still ends in one correct name.
+    recorded before the ``_Sent`` rename ran still ends in one correct name. A ``bounced``
+    batch is not sent, so its folder has no ``_Sent`` until [Ya lo envié] sets it (D207).
     """
 
     async def handle(job: Job) -> None:
