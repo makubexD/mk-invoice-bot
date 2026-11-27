@@ -39,7 +39,8 @@ NEXT_FETCHER = "qr_url"
 ANSWER = "ab12"
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
 PNG_BYTES = b"\x89PNG synthetic captcha"
-TIMEOUT_MINUTES = 5
+#: The example config's ask_user_timeout_s of 150 s, in whole minutes rounded down (BR-F18).
+TIMEOUT_MINUTES = 2
 
 
 def _config() -> Config:

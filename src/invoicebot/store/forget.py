@@ -23,6 +23,8 @@ PURGED_TABLES = (
     "outbox",
     "mail_jobs",
     "portal_candidates",
+    # shortcut: the row goes; its captcha PNG (no invoice values, <= 64 KiB) stays in data_dir/captchas.
+    "portal_captchas",
 )
 #: Referencing tables whose foreign key nulls itself (``ON DELETE SET NULL``): the rows stay.
 NULLED_TABLES = ("portal_probes",)

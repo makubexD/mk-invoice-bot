@@ -107,6 +107,11 @@ async def _insert_children(conn: AsyncConnection[Any], invoice_id: int) -> None:
         "INSERT INTO portal_candidates (invoice_id, url) VALUES (%s, 'https://example.invalid/x')",
         (invoice_id,),
     )
+    await conn.execute(
+        "INSERT INTO portal_captchas (invoice_id, portal_key, form_json, image_path, expires_at) "
+        "VALUES (%s, 'synthetic_portal', %s, 'captcha.png', now())",
+        (invoice_id, Jsonb({})),
+    )
 
 
 async def _count(conn: AsyncConnection[Any], query: str | sql.Composable, params: tuple[Any, ...]) -> int:
