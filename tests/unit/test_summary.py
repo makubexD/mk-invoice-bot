@@ -3,14 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import get_args
 
 from invoicebot.config.checks import ISSUER_NAME_MAX
 from invoicebot.config.models import Extraction, Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Flag, Reading, Source
-from invoicebot.pipeline.summary import issuer_desc, summary_text
+from invoicebot.pipeline.summary import issuer_desc, review_fields, summary_text
 from invoicebot.rules.messages_es import SOURCE_DESC
 
 # From tests/synthetic_rucs.txt; no real RUC may appear here.
@@ -158,3 +158,30 @@ def test_issuer_desc_cuts_a_long_name() -> None:
     )
 
     assert issuer_desc(reading) == "A" * (ISSUER_NAME_MAX - 1) + "… (RUC 20100000001)"
+
+
+def test_review_fields_empty_when_every_field_is_confident() -> None:
+    """D203: a reading with every field at full confidence and today's date needs no review."""
+    assert review_fields(_reading(), _extraction(), TODAY) == ()
+
+
+def test_review_fields_names_a_low_confidence_field() -> None:
+    """D203: a field below review_threshold is named."""
+    reading = _reading(overrides={"serie": Field(REQUIRED_VALUES["serie"], "ocr", 0.43)})
+
+    assert review_fields(reading, _extraction(), TODAY) == ("serie",)
+
+
+def test_review_fields_names_a_missing_date() -> None:
+    """D203: a reading without fecha_emision names the date."""
+    reading = _reading(missing=("fecha_emision",))
+
+    assert review_fields(reading, _extraction(), TODAY) == ("fecha_emision",)
+
+
+def test_review_fields_names_an_old_date() -> None:
+    """D203: a date older than max_invoice_age_days names the date."""
+    old = (TODAY - timedelta(days=400)).isoformat()
+    reading = _reading(overrides={"fecha_emision": Field(old, "qr", FULL_CONFIDENCE)})
+
+    assert "fecha_emision" in review_fields(reading, _extraction(), TODAY)
