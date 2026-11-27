@@ -46,10 +46,12 @@ from invoicebot.rules.messages_es import (
     BUTTON_WRITE_PORTAL,
     CONFIRMED_LINE,
     FETCH_NO_PORTAL_LINE,
+    FETCH_TAUGHT_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     FETCH_WAITING,
     FOUND_LINE,
     GAP_LINE_PORTAL,
+    LINK_OPEN_PORTAL,
     MESSAGES,
     SUMMARY_MOVING_QUIET,
     fetcher_desc,
@@ -68,6 +70,8 @@ STORE_RUC = "20000000001"
 # A synthetic issuer the store directory does not know.
 UNKNOWN_RUC = "20000000010"
 PORTAL_KEY = "synthetic_portal"
+PORTAL_URL = "https://portal.ejemplo.pe/consulta"
+TAUGHT_URL = "https://portal.ejemplo.pe/enseñado"
 FLOW = "work_microsoft"
 PROFILE = "yo"
 SERIE = "F001"
@@ -436,6 +440,34 @@ async def _outbox_button_dicts(conn: AsyncConnection[Any], profile_id: str) -> l
         (profile_id,),
     )
     return [cast(list[dict[str, str]], buttons) for (buttons,) in await cur.fetchall()]
+
+
+async def _outbox_links(conn: AsyncConnection[Any], profile_id: str) -> list[list[dict[str, str]]]:
+    """Return each outbox row's links as their wire dicts, oldest first."""
+    cur = await conn.execute(
+        """
+        SELECT COALESCE(payload_json->'links', '[]'::jsonb)
+        FROM outbox
+        WHERE "to" = %s
+        ORDER BY id
+        """,
+        (profile_id,),
+    )
+    return [cast(list[dict[str, str]], links) for (links,) in await cur.fetchall()]
+
+
+async def _teach_link(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], ruc_emisor: str, profile_id: str, state: str
+) -> None:
+    """Store a taught link for ``ruc_emisor`` in ``state``."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (int(ruc_emisor), TAUGHT_URL, profile_id, state),
+        )
 
 
 @pytest_asyncio.fixture(autouse=True, loop_scope="session")
@@ -1503,6 +1535,95 @@ async def test_teach_existing_taught_link_queues_f07_only(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+
+
+async def test_captcha_portal_exhaustion_carries_the_open_portal_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D208, BR-F07: a portal with an image captcha ends MANUAL_REQUIRED with the portal's link."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+    directory = _directory()
+    portal = directory.portals[PORTAL_KEY].model_copy(update={"captcha": "image", "url": PORTAL_URL})
+    directory = directory.model_copy(update={"portals": {PORTAL_KEY: portal}})
+    handler = make_fetch_handler(
+        db_pool,
+        _config(),
+        directory,
+        {FLOW: {"portal_registry": FakeFetcher(FetchReason.CAPTCHA_UNSOLVABLE)}},
+        tmp_path,
+        schedules={PORTAL_FETCHER: _portal_schedule(directory)},
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, next_job_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
+    assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
+    assert links == [[{"title": LINK_OPEN_PORTAL, "url": PORTAL_URL}]]
+
+
+async def test_inbox_wait_with_an_approved_taught_link_carries_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D208, BR-F13: an issuer with no portal and an approved taught link gets the link, not [🔗]."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    await _teach_link(db_pool, UNKNOWN_RUC, profile_id, "approved")
+
+    await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+        buttons = await _outbox_buttons(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [RULE_DOCS_NEEDED]
+    assert FETCH_TAUGHT_PORTAL_LINE in outbox[0][0]
+    assert links == [[{"title": LINK_OPEN_PORTAL, "url": TAUGHT_URL}]]
+    assert buttons == [[f"{invoice_id}:{SEND_PDF_ACTION}"]]
+
+
+async def test_no_portal_exhaustion_without_a_taught_link_carries_no_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D208, BR-F07: an issuer with no portal and no taught link gets the no-portal bullet and no link."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    assert outbox[0][1] == "BR-F07"
+    assert FETCH_NO_PORTAL_LINE in outbox[0][0]
+    assert links[0] == []
+
+
+async def test_no_portal_exhaustion_with_a_proposed_taught_link_carries_no_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D208, BR-F07: a taught link the owner has not approved gives no link and still says "no lo conozco"."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+    await _teach_link(db_pool, UNKNOWN_RUC, profile_id, "proposed")
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    assert outbox[0][1] == "BR-F07"
+    assert "no lo conozco" in outbox[0][0]
+    assert links[0] == []
 
 
 @pytest_asyncio.fixture(loop_scope="session")

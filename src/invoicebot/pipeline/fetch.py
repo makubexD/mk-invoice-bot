@@ -25,7 +25,7 @@ from zoneinfo import ZoneInfo
 
 from psycopg import AsyncConnection
 
-from invoicebot.channels.base import Button
+from invoicebot.channels.base import Button, Link
 from invoicebot.channels.buttons import command_button_id
 from invoicebot.channels.media_limits import DIRECTORY_MODE
 from invoicebot.config.digest import config_digest
@@ -71,7 +71,8 @@ from invoicebot.pipeline.manual_message import (
     manual_message,
     portal_for,
 )
-from invoicebot.pipeline.outgoing import Addressee, queue_admin_alert, queue_message
+from invoicebot.pipeline.outgoing import Addressee, outbound, queue_admin_alert, queue_outbound
+from invoicebot.pipeline.portal_link import open_portal_link
 from invoicebot.pipeline.questions import (
     RULE_DOCS_NEEDED,
     ask_portal_buttons,
@@ -466,7 +467,7 @@ async def _found_notice(
     """
     text = await _found_lines(conn, inputs, reading, fetcher, result)
     if not await post_summary(conn, inputs.cfg, inputs.job.invoice_id, found_lines=text.split("\n")):
-        await _notify(conn, inputs.head, inputs.job.invoice_id, "BR-F16", text)
+        await _notify(conn, inputs, "BR-F16", text)
 
 
 async def _found_lines(
@@ -514,39 +515,48 @@ async def _wait_notice(
     """Queue the first wait's message: BR-F13 for the inbox, the portal line for any other (D100, D189)."""
     invoice_id = inputs.job.invoice_id
     if fetcher != EMAIL_INBOX_FETCHER:
-        await _notify(conn, inputs.head, invoice_id, None, FETCH_WAITING.format(id=invoice_id))
+        await _notify(conn, inputs, None, FETCH_WAITING.format(id=invoice_id))
         return
     owner_timezone = ZoneInfo(inputs.cfg.owner.timezone)
     inbox_schedule = _schedule_entries(EMAIL_INBOX_FETCHER, inputs.flow, inputs.invoice, inputs.schedules)
     last_at = next_at + sum(inbox_schedule[1:], timedelta())
     today = await owner_today(conn, inputs.cfg.owner.timezone)
     looks = LookTimes(last_at.astimezone(owner_timezone), today)
+    taught_url = await _approved_link_url(conn, reading)
     text = docs_needed_text(
         invoice_id,
         reading,
         inputs.flow,
         inputs.attempts,
-        StoreFacts(inputs.directory, await _has_approved_link(conn, reading)),
+        StoreFacts(inputs.directory, taught_url is not None),
         looks,
     )
     offer_portal = await _offer_portal(conn, inputs, reading)
     await _notify(
         conn,
-        inputs.head,
-        invoice_id,
+        inputs,
         RULE_DOCS_NEEDED,
         text,
         docs_needed_buttons(invoice_id, offer_portal),
+        _portal_links(inputs, reading, taught_url),
     )
 
 
-async def _has_approved_link(conn: AsyncConnection[Any], reading: Reading) -> bool:
-    """Return True when the issuer has an approved taught link (D208)."""
+async def _approved_link_url(conn: AsyncConnection[Any], reading: Reading) -> str | None:
+    """Return the URL of the issuer's approved taught link, or None when it has none (D208)."""
     ruc_emisor = reading.value("ruc_emisor")
     if ruc_emisor is None:
-        return False
+        return None
     link = await taught_links.get(conn, int(ruc_emisor))
-    return link is not None and link.state == "approved"
+    return link.url if link is not None and link.state == "approved" else None
+
+
+def _portal_links(inputs: _Inputs, reading: Reading, taught_url: str | None) -> Sequence[Link]:
+    """Return the one "open the portal" link D208 offers for this reading, or no link."""
+    ruc_emisor = reading.value("ruc_emisor")
+    portal = None if ruc_emisor is None else portal_for(ruc_emisor, inputs.directory)
+    link = open_portal_link(inputs.attempts, portal, taught_url)
+    return () if link is None else (link,)
 
 
 async def _offer_portal(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> bool:
@@ -578,13 +588,14 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
         await post_summary(conn, inputs.cfg, inputs.job.invoice_id)
         gap = await _raise_portal_gap(conn, inputs, reading)
+        taught_url = await _approved_link_url(conn, reading)
         text = manual_message(
             reading,
             inputs.flow,
             inputs.attempts,
             StoreFacts(
                 inputs.directory,
-                await _has_approved_link(conn, reading),
+                taught_url is not None,
                 await _portal_is_broken(conn, reading, inputs.directory),
             ),
             gap_line=_gap_line(gap),
@@ -594,14 +605,14 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
         )
         await _notify(
             conn,
-            inputs.head,
-            inputs.job.invoice_id,
+            inputs,
             RULE_EXHAUSTED,
             text,
             [
                 retry_button(inputs.job.invoice_id),
                 Button(id=command_button_id("cancelar", str(inputs.job.invoice_id)), title=BUTTON_VOID),
             ],
+            _portal_links(inputs, reading, taught_url),
         )
         await _ask_for_portal(conn, inputs, gap, reading)
     return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
@@ -644,14 +655,7 @@ async def _ask_for_portal(
         return
     razon_social = reading.value("razon_social") or UNKNOWN_ISSUER
     text = MESSAGES[RULE_ASK_PORTAL].format(razon_social=razon_social, ruc_emisor=ruc_emisor)
-    await _notify(
-        conn,
-        inputs.head,
-        inputs.job.invoice_id,
-        RULE_ASK_PORTAL,
-        text,
-        ask_portal_buttons(inputs.job.invoice_id),
-    )
+    await _notify(conn, inputs, RULE_ASK_PORTAL, text, ask_portal_buttons(inputs.job.invoice_id))
 
 
 def _saw_no_portal(attempts: Sequence[Attempt]) -> bool:
@@ -682,21 +686,18 @@ def _portal_sighting(inputs: _Inputs, reading: Reading, ruc_emisor: str) -> GapS
 
 async def _notify(
     conn: AsyncConnection[Any],
-    head: InvoiceHead,
-    invoice_id: int,
+    inputs: _Inputs,
     rule_id: str | None,
     text: str,
     buttons: Sequence[Button] = (),
+    links: Sequence[Link] = (),
 ) -> None:
-    """Queue ``text`` for the invoice's sender in the caller's transaction."""
-    await queue_message(
-        conn,
-        Addressee(head.origin_channel, head.profile_id),
-        invoice_id=invoice_id,
-        rule_id=rule_id,
-        text=text,
-        buttons=buttons,
+    """Queue ``text`` with its buttons and links for the invoice's sender in the caller's transaction."""
+    head = inputs.head
+    message = outbound(
+        Addressee(head.origin_channel, head.profile_id), text, rule_id=rule_id, buttons=buttons, links=links
     )
+    await queue_outbound(conn, message, invoice_id=inputs.job.invoice_id)
 
 
 async def run_after_delay(conn: AsyncConnection[Any], delay: timedelta) -> datetime:
