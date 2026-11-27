@@ -253,6 +253,7 @@ retrieval:
   captcha:
     local_ocr_attempts: 2
     ask_user_timeout_s: 300
+    ask_user_tries: 2                   # how many times the sender may retype a wrong captcha (D209)
     paid_solver: { enabled: false, provider: 2captcha }   # secret: TWOCAPTCHA_KEY
   paid_api: { enabled: false, provider: factiliza }       # never receives SOL credentials (R-9.10)
 

@@ -45,6 +45,12 @@ class FetchReason(StrEnum):
     NO_WEBSITE = "no_website"
     #: The portal shows a captcha the bot cannot solve (D99, R-5.4).
     CAPTCHA_UNSOLVABLE = "captcha_unsolvable"
+    #: The sender was asked to type the portal's captcha and has not answered yet (D209).
+    CAPTCHA_ASKED = "captcha_asked"
+    #: The portal refused the sender's captcha answer; the bot may ask again (D209).
+    CAPTCHA_WRONG = "captcha_wrong"
+    #: The sender did not answer the captcha in time (D209).
+    CAPTCHA_TIMEOUT = "captcha_timeout"
     #: The source needs credentials the bot does not have (R-5.4).
     AUTH_REQUIRED = "auth_required"
     NO_PORTAL = "no_portal"

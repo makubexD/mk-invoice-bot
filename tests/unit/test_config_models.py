@@ -35,6 +35,7 @@ from invoicebot.config.models import (
     Padron,
     PickField,
     Portal,
+    PortalCaptcha,
     Profile,
     WhatsAppChannel,
     google_accounts_in,
@@ -1600,3 +1601,38 @@ def test_zero_bounce_watch_limit_fails(tmp_path: Path, key: str) -> None:
 
     with pytest.raises(ValidationError, match=key):
         load_config(path)
+
+
+def test_captcha_ask_user_tries_defaults_to_two(tmp_path: Path) -> None:
+    """D209: a config without ask_user_tries loads with two tries."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["retrieval"]["captcha"]["ask_user_tries"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert cfg.retrieval.captcha.ask_user_tries == 2
+
+
+def test_zero_captcha_ask_user_tries_fails(tmp_path: Path) -> None:
+    """D209: the sender is asked at least once."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["retrieval"]["captcha"]["ask_user_tries"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="ask_user_tries"):
+        load_config(path)
+
+
+@pytest.mark.parametrize("solver", [["tesseract"], []])
+def test_portal_captcha_solver_other_than_user_fails(solver: list[str]) -> None:
+    """D209: a portal captcha solver is ``user`` and nothing else, and not empty."""
+    with pytest.raises(ValidationError, match="solver"):
+        PortalCaptcha.model_validate({"image": "img", "input": "inp", "solver": solver})
+
+
+def test_portal_captcha_solver_user_loads() -> None:
+    """D209: ``solver: [user]`` is the one valid value."""
+    captcha = PortalCaptcha.model_validate({"image": "img", "input": "inp", "solver": ["user"]})
+
+    assert captcha.solver == ("user",)

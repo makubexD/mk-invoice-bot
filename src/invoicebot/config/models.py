@@ -720,7 +720,9 @@ class Captcha(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     local_ocr_attempts: int
-    ask_user_timeout_s: int
+    ask_user_timeout_s: int = Field(ge=60, le=900)
+    #: How many times the sender is asked to type the captcha (D209).
+    ask_user_tries: int = Field(default=2, ge=1, le=5)
     paid_solver: PaidSolver
 
 
@@ -1161,13 +1163,16 @@ class CalendarField(BaseModel):
 
 
 class PortalCaptcha(BaseModel):
-    """Captcha selectors and solvers for a portal (spec 03 §6)."""
+    """Captcha selectors and solvers for a portal (spec 03 §6).
+
+    Only the sender can solve it: ``solver`` lists ``user`` and nothing else (D209).
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     image: str
     input: str
-    solver: list[str]
+    solver: tuple[Literal["user"], ...] = Field(min_length=1)
 
 
 class PortalDownloads(BaseModel):
