@@ -305,3 +305,17 @@ podman exec "$APP" invoicebot invoice forget <id> --drive --purge --yes # delete
 - With `--drive --purge`, the month's next filing reuses the freed sequence number (D88); with `--drive` alone it
   does not, since the invoice still holds its number.
 - A mail that was sent stays sent: nothing recalls it.
+
+## 14. Choose the documents a flow keeps for the chat (D206)
+
+The final message of a flow carries **[📎 Ver documentos]** when the flow lists `chat_documents` and at least one of
+those files was kept at completion. The press posts each kept file as a document, in name order (BR-D24).
+
+1. **Set them.** Under the flow in the live config, list any of `photo`, `pdf`, `xml` and `excel`, e.g.
+   `chat_documents: [pdf, xml, excel]`; `excel` needs the flow to have a `kind: excel_template` sink. An empty list
+   (the default) means no button. **Reload**; the change applies to invoices completed afterwards.
+2. **Where they are.** `/data/docs/<invoice_id>/` inside the app container (`podman exec "$APP" ls /data/docs/<id>`), written when
+   the invoice completes.
+3. **How long they stay.** Housekeeping removes a finished invoice's folder once its last state change is
+   `ops.retention_days.chat_documents` days old (default 30). A press after that answers BR-D25 with the folder link.
+   `invoice forget --purge` (§13) leaves the folder; the next housekeeping run removes it, since its invoice is gone.
