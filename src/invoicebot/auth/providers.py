@@ -27,6 +27,7 @@ from invoicebot.config.models import (
     google_sink_accounts_in,
     mail_read_accounts,
     mail_send_accounts,
+    smtp_send_accounts,
 )
 from invoicebot.secrets import load_identity
 from invoicebot.settings import Settings
@@ -40,6 +41,8 @@ FILES_SCOPE = "Files.ReadWrite"
 MAIL_READ_SCOPE = "Mail.Read"
 #: The scope the invoice email needs; only a Graph mailer from the account adds it (R-7.9).
 MAIL_SEND_SCOPE = "Mail.Send"
+#: The scope the ``smtp`` mail mode signs in with to send through SMTP (D205).
+SMTP_SEND_SCOPE = "https://outlook.office.com/SMTP.Send"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
 #: The scope that returns an id_token naming the signed-in mailbox (R-6.5, D138).
@@ -101,17 +104,30 @@ def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
     return tuple(scopes)
 
 
+def smtp_scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
+    """Return the SMTP scope ``account`` needs: only an ``smtp`` mailer sends from it (D205)."""
+    return (SMTP_SEND_SCOPE,) if account in smtp_send_accounts(cfg) else ()
+
+
 def microsoft_accounts(cfg: Config) -> frozenset[str]:
     """Return every account a flow uses, each with a scope beyond ``offline_access`` (R-6.5, R-7.9, D98)."""
-    candidates = files_accounts(cfg) | mail_send_accounts(cfg) | mail_read_accounts(cfg)
-    return frozenset(account for account in candidates if len(scopes_for(cfg, account)) > len(BASE_SCOPES))
+    candidates = (
+        files_accounts(cfg) | mail_send_accounts(cfg) | smtp_send_accounts(cfg) | mail_read_accounts(cfg)
+    )
+    return frozenset(
+        account
+        for account in candidates
+        if len(scopes_for(cfg, account)) > len(BASE_SCOPES) or smtp_scopes_for(cfg, account)
+    )
 
 
 def delivery_accounts(cfg: Config) -> frozenset[str]:
     """Return the used accounts whose sign-in delivers files or mail (R-6.5, R-7.9, D98)."""
     delivery = {FILES_SCOPE, MAIL_SEND_SCOPE}
     return frozenset(
-        account for account in microsoft_accounts(cfg) if delivery.intersection(scopes_for(cfg, account))
+        account
+        for account in microsoft_accounts(cfg)
+        if delivery.intersection(scopes_for(cfg, account)) or smtp_scopes_for(cfg, account)
     )
 
 

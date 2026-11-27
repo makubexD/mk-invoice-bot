@@ -11,7 +11,12 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from invoicebot.auth.providers import microsoft_accounts
+from invoicebot.auth.providers import (
+    SMTP_SEND_SCOPE,
+    delivery_accounts,
+    microsoft_accounts,
+    smtp_scopes_for,
+)
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
     GMAIL_PROVIDER,
@@ -34,6 +39,7 @@ from invoicebot.config.models import (
     WhatsAppChannel,
     google_accounts_in,
     parse_delay,
+    smtp_send_accounts,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -658,6 +664,58 @@ def test_mailer_send_setting_loads(tmp_path: Path, send: str | None, expected: s
 
     assert isinstance(sink, MailerSink)
     assert sink.send == expected
+
+
+def _smtp_only_config(tmp_path: Path, **microsoft: Any) -> Path:
+    """Write the example with its one mailer on ``smtp`` and nothing else using ``personal``."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["work_microsoft"]["sinks"][2]["modes"] = ["smtp"]
+    document["microsoft"].update(microsoft)
+    return _write_yaml(tmp_path / "example.yaml", document)
+
+
+def test_smtp_mailer_loads_with_default_host_and_port(tmp_path: Path) -> None:
+    """D205: a mailer with ``modes: [smtp]`` loads; the host and port default to Outlook's."""
+    cfg = load_config(_smtp_only_config(tmp_path))
+
+    sink = cfg.flows["work_microsoft"].sinks[2]
+    assert isinstance(sink, MailerSink)
+    assert sink.modes == ["smtp"]
+    assert cfg.microsoft.smtp_host == "smtp-mail.outlook.com"
+    assert cfg.microsoft.smtp_port == 587
+
+
+def test_smtp_port_zero_fails(tmp_path: Path) -> None:
+    """D205: ``smtp_port`` must be a real port, so 0 is refused at load."""
+    with pytest.raises(ValidationError, match="smtp_port"):
+        load_config(_smtp_only_config(tmp_path, smtp_port=0))
+
+
+def test_smtp_send_accounts_names_the_smtp_mailer_account_only(tmp_path: Path) -> None:
+    """D205: an ``smtp`` mailer's account is an smtp send account; a ``graph``-only mailer's is not."""
+    assert smtp_send_accounts(load_config(_smtp_only_config(tmp_path))) == {"personal"}
+    assert smtp_send_accounts(load_config(EXAMPLE)) == set()
+
+
+def test_smtp_scopes_for_gives_the_send_scope_to_the_smtp_account_only(tmp_path: Path) -> None:
+    """D205: the smtp account signs in with SMTP.Send; any other account asks for none."""
+    cfg = load_config(_smtp_only_config(tmp_path))
+
+    assert smtp_scopes_for(cfg, "personal") == (SMTP_SEND_SCOPE,)
+    assert smtp_scopes_for(cfg, "bot") == ()
+
+
+def test_account_used_only_by_an_smtp_mailer_is_a_delivery_account(tmp_path: Path) -> None:
+    """D205: an account whose only use is an ``smtp`` mailer still signs in and delivers mail."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["sinks"] = [sink for sink in flow["sinks"] if sink["kind"] == "mailer"]
+    flow["sinks"][0]["modes"] = ["smtp"]
+    flow["email_inbox"]["account"] = "bot"
+    cfg = load_config(_write_yaml(tmp_path / "example.yaml", document))
+
+    assert "personal" in microsoft_accounts(cfg)
+    assert "personal" in delivery_accounts(cfg)
 
 
 def test_mailer_send_unknown_value_fails(tmp_path: Path) -> None:
