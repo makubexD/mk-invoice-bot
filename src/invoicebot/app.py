@@ -74,6 +74,7 @@ from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
+from invoicebot.pipeline.chat_docs_post import make_send_documents_handler
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
     DeliverContext,
@@ -111,6 +112,7 @@ from invoicebot.pipeline.steps import (
     FOLDER_STATUS_STEP,
     PORTAL_CHECK_STEP,
     PORTAL_PROBE_STEP,
+    SEND_DOCUMENTS_STEP,
     SUNAT_RECHECK_STEP,
 )
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
@@ -380,6 +382,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 schedules=_fetch_schedules(directory),
             ),
             FETCH_PROGRESS_STEP: make_fetch_progress_handler(pool),
+            SEND_DOCUMENTS_STEP: make_send_documents_handler(pool, settings.data_dir),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)

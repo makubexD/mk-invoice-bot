@@ -41,6 +41,7 @@ from invoicebot.pipeline.questions import (
     CHANGE_ACTION,
     CONFIRM_ACTION,
     CONTINUE_ACTION,
+    DOCS_ACTION,
     EDIT_ACTION,
     INVALID_OK_ACTION,
     PICK_ACTION,
@@ -65,6 +66,7 @@ from invoicebot.pipeline.steps import (
     FOLDER_STATUS_STEP,
     RESEND_EML_STEP,
     RESEND_LAPTOP_STEP,
+    SEND_DOCUMENTS_STEP,
 )
 from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import enqueue
@@ -93,6 +95,7 @@ from invoicebot.states import (
     FETCHING_DOCS,
     PENDING_USER,
     ROUTING,
+    TERMINAL,
 )
 from invoicebot.store.flow_b import (
     get_batch_state,
@@ -164,6 +167,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     TEACH_PORTAL_ACTION: frozenset({FETCHING_DOCS}),
     # [Ver #{id}] asks for the invoice's status, so every state answers it (D188).
     STATUS_ACTION: ALL_STATES,
+    # [📎 Ver documentos] sits on a final message, so only a finished invoice answers it (D206).
+    DOCS_ACTION: TERMINAL,
 }
 
 #: The rules each question action answers; a parked invoice resumes only for its own (D94).
@@ -410,6 +415,22 @@ async def _status(
     cannot drift apart. It changes no state and asks no question.
     """
     await _reply(conn, msg, invoice_id, None, await status_text(conn, invoice_id))
+    return ()
+
+
+async def _docs(
+    conn: AsyncConnection[Any],
+    invoice_id: int,
+    _msg: InboundMessage,
+    _press: ButtonPress,
+    _laptop_flows: frozenset[str],
+) -> tuple[Path, ...]:
+    """Queue the job that sends the invoice's kept documents (D206, BR-D24, BR-D25).
+
+    The files are read in the job, not here: a press runs inside the inbound transaction
+    and knows no data directory.
+    """
+    await enqueue(conn, invoice_id, SEND_DOCUMENTS_STEP)
     return ()
 
 
@@ -691,6 +712,7 @@ ACTIONS: Mapping[str, Action] = {
     CANCEL_ACTION: _cancel,
     EDIT_ACTION: _edit,
     STATUS_ACTION: _status,
+    DOCS_ACTION: _docs,
     SENT_ACTION: _sent,
     NOT_ARRIVED_ACTION: _not_arrived,
     ARRIVED_ACTION: _arrived,
@@ -703,4 +725,4 @@ ACTIONS: Mapping[str, Action] = {
     TEACH_PORTAL_ACTION: teach_portal,
 }
 #: Actions that only answer and change nothing, so a press keeps a pending [Editar] (D188, D189).
-READ_ONLY_ACTIONS = frozenset({STATUS_ACTION, WAIT_MAIL_ACTION, TEACH_PORTAL_ACTION})
+READ_ONLY_ACTIONS = frozenset({STATUS_ACTION, DOCS_ACTION, WAIT_MAIL_ACTION, TEACH_PORTAL_ACTION})

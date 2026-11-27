@@ -12,6 +12,8 @@ FETCH_STEP = "fetch"
 #: Job step that tells the sender the fetch is still running, after a short wait (D206).
 FETCH_PROGRESS_STEP = "fetch_progress"
 DELIVER_STEP = "deliver"
+#: Job step that sends an invoice's kept documents after [📎 Ver documentos] (D206, BR-D24).
+SEND_DOCUMENTS_STEP = "send_documents"
 #: Job step that asks SUNAT again after a BR-V01/BR-V04 answer (BR-V01, D125).
 SUNAT_RECHECK_STEP = "sunat_recheck"
 #: Job step that tries a ticket's printed URL or strip and offers the portal found (BR-F14, D192).
