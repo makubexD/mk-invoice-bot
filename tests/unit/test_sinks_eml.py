@@ -164,3 +164,21 @@ def test_defaults_have_no_from_and_no_html_part() -> None:
 
     assert message["From"] is None
     assert message.get_body(preferencelist=("html",)) is None
+
+
+def test_message_id_is_written() -> None:
+    """D207: a given message id becomes the Message-ID header."""
+    message = _parse(build_eml(MAIL, message_id="<abc@example.com>"))
+
+    assert message["Message-ID"] == "<abc@example.com>"
+
+
+def test_no_message_id_adds_no_header() -> None:
+    """D207: without a message id there is no Message-ID header."""
+    assert _parse(build_eml(MAIL))["Message-ID"] is None
+
+
+def test_newline_in_message_id_raises() -> None:
+    """D207: a CR or LF in the message id is refused like any other header."""
+    with pytest.raises(ValueError, match="message id"):
+        build_eml(MAIL, message_id="<abc@example.com>\r\nBcc: evil@example.com")

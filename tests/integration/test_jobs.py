@@ -18,6 +18,7 @@ from invoicebot.queue.jobs import (
     backoff_minutes,
     claim,
     complete,
+    db_now_plus,
     enqueue,
     fail,
     is_dead,
@@ -546,3 +547,20 @@ async def test_a_dead_job_leaves_a_done_invoice_done(
 
     assert invoice == ("DONE", None)
     assert deaths.calls == [(invoice_id, "folder_status", "boom")]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "interval"),
+    [({"seconds": 60}, "60 seconds"), ({"hours": 1, "minutes": 2}, "1 hour 2 minutes")],
+)
+async def test_db_now_plus_is_the_database_clock_plus_the_interval(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], kwargs: dict[str, int], interval: str
+) -> None:
+    """D207: ``db_now_plus`` equals ``now()`` plus the interval within one transaction."""
+    async with db_pool.connection() as conn:
+        got = await db_now_plus(conn, **kwargs)
+        cur = await conn.execute("SELECT now() + %s::interval", (interval,))
+        row = await cur.fetchone()
+
+    assert row is not None
+    assert got == row[0]

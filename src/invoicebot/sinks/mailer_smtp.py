@@ -16,6 +16,7 @@ import smtplib
 import ssl
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from email.utils import make_msgid
 from typing import Protocol
 
 from invoicebot.auth.msal_cache import AuthRequired
@@ -89,8 +90,11 @@ class SmtpMailer:
         self._account = account
         self._connect = connect
 
-    async def send(self, mail: OutgoingMail) -> None:
-        """Send ``mail`` and return once the server accepts it (D205).
+    async def send(self, mail: OutgoingMail) -> str:
+        """Send ``mail`` and return its ``Message-ID`` once the server accepts it (D205, D207).
+
+        The id lets the bounce watch find the report. Outlook.com rewrites the
+        header and keeps ours as ``X-Microsoft-Original-Message-ID``.
 
         The token never reaches a log or an exception.
 
@@ -99,8 +103,10 @@ class SmtpMailer:
             SmtpError: any other failure, with its reply code (0: no connection).
         """
         token = await self._tokens.token_for((SMTP_SEND_SCOPE,))
-        data = build_eml(mail, sender=self._sender, html=True)
+        message_id = make_msgid(domain=self._sender.rpartition("@")[2])
+        data = build_eml(mail, sender=self._sender, html=True, message_id=message_id)
         await asyncio.to_thread(self._deliver, token, data, [*mail.to, *mail.cc])
+        return message_id
 
     def _deliver(self, token: str, data: bytes, recipients: list[str]) -> None:
         """Run one SMTP session: STARTTLS, XOAUTH2, send, then close (D205)."""

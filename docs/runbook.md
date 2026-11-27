@@ -319,3 +319,23 @@ those files was kept at completion. The press posts each kept file as a document
 3. **How long they stay.** Housekeeping removes a finished invoice's folder once its last state change is
    `ops.retention_days.chat_documents` days old (default 30). A press after that answers BR-D25 with the folder link.
    `invoice forget --purge` (§13) removes the folder at once.
+
+## 15. When a mail bounces (D207)
+
+An `smtp` send (flow B live) can be accepted and then bounce. The bot watches the sending account's inbox for the
+delivery report and tells the sender in the chat.
+
+1. **What the sender sees.** BR-D26: the mail to `{to}` bounced with `{status}` (the report's code, `sin código` when
+   it has none), and a draft of the same mail is waiting in Outlook: **[✉️ Abrir borrador]** opens it, the owner fixes
+   the address with ✏️ and sends it. BR-D27 says the same without a draft (no Sent copy, too big, or Graph refused):
+   resend it from Enviados. The batch is `bounced`, the invoice stays `DONE` and the folder loses `_Sent`.
+2. **After the resend.** **[Ya lo envié]** sets the batch `sent` again, answers BR-D08 and puts `_Sent` back. A
+   second press answers BR-S02. Each bounce is reported once.
+3. **The limits** (`limits` in the live config, seconds): `bounce_check_after_s` (120) until the first check,
+   `bounce_check_every_s` (300) between checks, `bounce_watch_s` (1800) after the send, when the watch ends with
+   `bounce watch clear` in the journal.
+4. **`bounce watch blocked`.** A WARNING with `invoice_id` and `status`: `auth_required` (the account lacks
+   `Mail.ReadWrite`, see below), `no_reader` (the flow has no `smtp` mailer), or Graph's HTTP status. That invoice's
+   watch ends there; the mail was already sent, so nothing else changes.
+5. **The sign-in.** The watch reads the inbox and writes the draft with `Mail.ReadWrite`, new with D207. Run §1's
+   `auth-microsoft --account personal` once after the deploy that brings it.

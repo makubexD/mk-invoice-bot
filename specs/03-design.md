@@ -95,7 +95,8 @@ invoices(id INTEGER PK, profile_id, origin_channel /*whatsapp|telegram*/, flow_i
 files(id PK, invoice_id, kind /*photo|pdf|xml|xlsx|captcha*/, local_path NULL,
       remote_ref NULL, sha256, size, xml_trust NULL /*post-MVP, D57*/, created_at)
 jobs(id PK, invoice_id, step, run_after, attempts, crashes, lease_until, last_error) -- queue
-batches(id PK, flow_id, state /*open|prepared|review|sending|sent|failed*/, opened_at, sent_at, email_ref)
+batches(id PK, flow_id, state /*open|prepared|review|sending|sent|failed|bounced*/, opened_at, sent_at,
+        email_ref /*the SMTP Message-ID of an smtp send (D207)*/)
 payments(id PK, flow_id, profile_id, paid_on DATE, amount NUMERIC, created_at)   -- R-7.12; one row per reimbursement
 payment_proposals(id PK, profile_id, flow_id, paid_on DATE, amount NUMERIC, sets_json,
                   state /*pending|confirmed|rejected|expired*/, created_at)      -- /pagado buttons (D107)

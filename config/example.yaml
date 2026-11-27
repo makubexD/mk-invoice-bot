@@ -300,4 +300,7 @@ limits:
   browser_idle_close_s: 60
   per_domain_min_interval_s: 10
   fetch_progress_after_s: 20      # D206 · one progress message when a fetch runs longer than this
+  bounce_check_after_s: 120       # D207 · first inbox check after an smtp send
+  bounce_check_every_s: 300       # D207 · seconds between bounce checks
+  bounce_watch_s: 1800            # D207 · the bounce watch ends this long after the send
   reprocess_min_interval_s: 600   # D171 · /reprocesar waits this long after the last fetch round

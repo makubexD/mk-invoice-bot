@@ -28,3 +28,5 @@ FOLDER_STATUS_STEP = "folder_status"
 RESEND_LAPTOP_STEP = "resend_laptop"
 #: Job step that rewrites and answers a [Lo envío yo] mail (R-7.8).
 RESEND_EML_STEP = "resend_eml"
+#: Job step that looks for a bounce of an smtp send in the inbox (D207).
+BOUNCE_CHECK_STEP = "bounce_check"

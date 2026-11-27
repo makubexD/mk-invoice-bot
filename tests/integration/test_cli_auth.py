@@ -232,6 +232,40 @@ async def test_scopes_for_personal_cover_files_and_mail_send() -> None:
     assert scopes_for(cfg, ACCOUNT) == ("offline_access", "Files.ReadWrite", "Mail.Send")
 
 
+async def test_scopes_for_smtp_account_gets_mail_readwrite(tmp_path: Path) -> None:
+    """D207: an account with an smtp mailer also signs in with Mail.ReadWrite."""
+    cfg = load_config(_config_with_smtp(tmp_path))
+
+    assert "Mail.ReadWrite" in scopes_for(cfg, ACCOUNT)
+
+
+async def test_scopes_for_graph_or_onedrive_only_account_has_no_mail_readwrite() -> None:
+    """D207: a graph-only mailer account and an inbox-only account do not get Mail.ReadWrite."""
+    cfg = load_config(EXAMPLE_CONFIG)
+
+    assert "Mail.ReadWrite" not in scopes_for(cfg, ACCOUNT)
+    assert "Mail.ReadWrite" not in scopes_for(cfg, "bot")
+
+
+async def test_scopes_for_smtp_account_that_reads_its_inbox_has_each_scope_once(tmp_path: Path) -> None:
+    """D207: an smtp account that also reads its inbox gets Mail.Read and Mail.ReadWrite once each."""
+    cfg = load_config(_config_with_smtp(tmp_path))
+    flows = {
+        name: flow.model_copy(
+            update={"email_inbox": flow.email_inbox.model_copy(update={"account": ACCOUNT})}
+        )
+        if flow.email_inbox is not None
+        else flow
+        for name, flow in cfg.flows.items()
+    }
+    reading = cfg.model_copy(update={"flows": flows})
+
+    scopes = scopes_for(reading, ACCOUNT)
+
+    assert scopes.count("Mail.Read") == 1
+    assert scopes.count("Mail.ReadWrite") == 1
+
+
 async def test_scopes_for_bot_reads_the_inbox_only() -> None:
     """R-6.5, R-7.9, D98: the inbox-only account gets Mail.Read and no delivery scope."""
     cfg = load_config(EXAMPLE_CONFIG)

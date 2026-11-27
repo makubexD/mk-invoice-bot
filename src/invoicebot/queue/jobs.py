@@ -15,7 +15,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 from psycopg import AsyncConnection
 
@@ -78,6 +78,22 @@ async def _notify_parked(conn: AsyncConnection[Any], on_dead: OnDead, invoice_id
             await on_dead(conn, invoice_id, step, CRASH_LOOP_ERROR)
     except Exception:  # the queue's boundary: no notice failure may stop it
         logger.exception("job for invoice %d parked without its BR-S03 notice", invoice_id)
+
+
+async def db_now_plus(
+    conn: AsyncConnection[Any], *, hours: int = 0, minutes: int = 0, seconds: int = 0
+) -> datetime:
+    """Return ``now()`` plus the given hours, minutes and seconds from the database clock, never Python's.
+
+    It is what a delayed ``enqueue`` passes as ``run_after``.
+    """
+    cur = await conn.execute(
+        "SELECT now() + make_interval(hours => %s, mins => %s, secs => %s)", (hours, minutes, seconds)
+    )
+    row = await cur.fetchone()
+    if row is None:
+        raise RuntimeError("the database returned no time")
+    return cast(datetime, row[0])
 
 
 async def enqueue(

@@ -5,6 +5,8 @@ the transaction (R-7.1, R-7.5, R-7.8, R-9.7, D88).
 """
 
 from collections.abc import Mapping
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal, cast, get_args
 
@@ -13,6 +15,8 @@ from psycopg.types.json import Jsonb
 
 #: The states a newly opened batch may start in (R-7.5, R-7.8, D194).
 BatchState = Literal["prepared", "sending", "review"]
+#: The batch state of a sent mail whose delivery report came back (D207).
+BOUNCED_BATCH_STATE = "bounced"
 
 
 async def load_flow_data(conn: AsyncConnection[Any], invoice_id: int) -> dict[str, Any]:
@@ -167,3 +171,35 @@ async def take_photo_paths(conn: AsyncConnection[Any], invoice_id: int) -> list[
     )
     rows = await cur.fetchall()
     return [Path(str(row[0])) for row in rows]
+
+
+async def set_batch_email_ref(conn: AsyncConnection[Any], batch_id: int, ref: str) -> None:
+    """Store the Message-ID of the mail a batch sent; does not commit (D207)."""
+    await conn.execute("UPDATE batches SET email_ref = %s WHERE id = %s", (ref, batch_id))
+
+
+@dataclass(frozen=True)
+class SentBatch:
+    """The batch an invoice's mail went out in, as the bounce check reads it (D207)."""
+
+    id: int
+    state: str
+    email_ref: str | None
+    sent_at: datetime | None
+
+
+async def load_sent_batch(conn: AsyncConnection[Any], invoice_id: int) -> SentBatch | None:
+    """Return the invoice's batch, or None when it has none; does not commit (D207)."""
+    cur = await conn.execute(
+        """
+        SELECT b.id, b.state, b.email_ref, b.sent_at
+        FROM invoices AS i
+        JOIN batches AS b ON b.id = i.batch_id
+        WHERE i.id = %s
+        """,
+        (invoice_id,),
+    )
+    row = await cur.fetchone()
+    if row is None:
+        return None
+    return SentBatch(id=int(row[0]), state=str(row[1]), email_ref=row[2], sent_at=row[3])

@@ -71,8 +71,12 @@ def build_mail(
 class Mailer(Protocol):
     """The sender a real mode needs; :class:`GraphMailer` implements it."""
 
-    async def send(self, mail: OutgoingMail) -> None:
-        """Send ``mail`` once, raising when the delivery fails."""
+    async def send(self, mail: OutgoingMail) -> str | None:
+        """Send ``mail`` once, raising when the delivery fails.
+
+        Returns:
+            The ``Message-ID`` when the mailer sets one (D207), else ``None``.
+        """
         ...
 
 
@@ -98,7 +102,8 @@ class MailMode(Protocol):
 
         Returns:
             The ``.eml`` path for an assisted mode, the job id for a receipt mode,
-            ``None`` when the mode sent it.
+            ``None`` when the mode sent it. An accepted mode may return the
+            mail's ``Message-ID`` (D207).
         """
         ...
 
@@ -139,9 +144,13 @@ class MailerSend:
     def __init__(self, mailer: Mailer) -> None:
         self._mailer = mailer
 
-    async def deliver(self, _invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
-        """Send ``mail`` through the injected mailer, once per call (D89)."""
-        await self._mailer.send(mail)
+    async def deliver(self, _invoice_id: int, mail: OutgoingMail, _folder_path: str) -> str | None:
+        """Send ``mail`` through the injected mailer, once per call (D89).
+
+        Returns:
+            What the mailer returns: the ``Message-ID`` when it sets one (D207).
+        """
+        return await self._mailer.send(mail)
 
 
 class InboxRule:

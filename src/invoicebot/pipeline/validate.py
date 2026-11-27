@@ -19,7 +19,7 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, cast
+from typing import Any
 
 import httpx
 from psycopg import AsyncConnection
@@ -31,7 +31,7 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import invalid_question
 from invoicebot.pipeline.steps import FETCH_PROGRESS_STEP, FETCH_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.summary_post import discard_summary_inputs, save_summary_inputs
-from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.jobs import Job, db_now_plus, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import MESSAGES
@@ -210,7 +210,7 @@ async def _start_fetching(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Conf
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
     await enqueue(conn, inputs.invoice_id, FETCH_STEP)
-    progress_at = await _now_plus(conn, seconds=cfg.limits.fetch_progress_after_s)
+    progress_at = await db_now_plus(conn, seconds=cfg.limits.fetch_progress_after_s)
     await enqueue(conn, inputs.invoice_id, FETCH_PROGRESS_STEP, progress_at)
 
 
@@ -246,21 +246,8 @@ async def recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict, attemp
     if not verdict.recheck:
         return None
     if verdict.rule_id == RULE_MISSING:
-        return await _now_plus(conn, hours=MISSING_RECHECK_HOURS)
-    return await _now_plus(conn, minutes=backoff_minutes(attempt))
-
-
-async def _now_plus(
-    conn: AsyncConnection[Any], *, hours: int = 0, minutes: int = 0, seconds: int = 0
-) -> datetime:
-    """Return ``now() + hours/minutes/seconds`` from the database clock."""
-    cur = await conn.execute(
-        "SELECT now() + make_interval(hours => %s, mins => %s, secs => %s)", (hours, minutes, seconds)
-    )
-    row = await cur.fetchone()
-    if row is None:
-        raise RuntimeError("the database returned no time")
-    return cast(datetime, row[0])
+        return await db_now_plus(conn, hours=MISSING_RECHECK_HOURS)
+    return await db_now_plus(conn, minutes=backoff_minutes(attempt))
 
 
 async def _reply(

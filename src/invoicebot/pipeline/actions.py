@@ -98,6 +98,7 @@ from invoicebot.states import (
     TERMINAL,
 )
 from invoicebot.store.flow_b import (
+    BOUNCED_BATCH_STATE,
     get_batch_state,
     load_flow_data,
     merge_flow_data,
@@ -154,7 +155,8 @@ VALID_STATES: Mapping[str, frozenset[str]] = {
     # A parked invoice resumes to the state it waited in instead of answering here (D94).
     EDIT_ACTION: EDITABLE - frozenset({PENDING_USER}),
     INVALID_OK_ACTION: frozenset({CONFIRM_INVALID}),
-    SENT_ACTION: frozenset({BATCHED}),
+    # A bounced mail leaves the invoice DONE with a bounced batch (D207).
+    SENT_ACTION: frozenset({BATCHED, DONE}),
     NOT_ARRIVED_ACTION: frozenset({DONE, BATCHED}),
     ARRIVED_ACTION: frozenset({DONE, BATCHED}),
     VIA_LAPTOP_ACTION: frozenset({DONE, BATCHED}),
@@ -441,19 +443,25 @@ async def _sent(
     _press: ButtonPress,
     _laptop_flows: frozenset[str],
 ) -> tuple[Path, ...]:
-    """Close the invoice's prepared batch as sent and clear its photos (R-7.8, R-7.11, BR-D08).
+    """Close the invoice's prepared or bounced batch as sent (R-7.8, R-7.11, BR-D08, D207).
 
     A BATCHED invoice whose batch is not ``prepared`` (a failed send, for example) gets
-    BR-S02 and changes nothing. A sent batch enqueues the ``folder_status`` job in the same
-    transaction.
+    BR-S02 and changes nothing. A prepared batch also clears the photos and sets the invoice
+    DONE. A ``bounced`` batch on a DONE invoice only becomes ``sent``: the owner sent the
+    mail by hand, so the state does not change and the photos are already gone. Either way
+    the ``folder_status`` job is enqueued in the same transaction.
     """
     flow_id = await load_flow(conn, invoice_id)
-    if flow_id is None or await get_batch_state(conn, invoice_id) != PREPARED_BATCH_STATE:
+    batch_state = await get_batch_state(conn, invoice_id)
+    if flow_id is None or batch_state not in (PREPARED_BATCH_STATE, BOUNCED_BATCH_STATE):
         await send_stale(conn, msg, invoice_id)
         return ()
     batch_id = await open_batch(conn, invoice_id, flow_id, PREPARED_BATCH_STATE)
     await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
     await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
+    if batch_state == BOUNCED_BATCH_STATE:
+        await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
+        return ()
     await set_state(conn, invoice_id, DONE, rule_id=RULE_SENT)
     await _reply(conn, msg, invoice_id, RULE_SENT, MESSAGES[RULE_SENT])
     return tuple(await take_photo_paths(conn, invoice_id))
