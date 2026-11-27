@@ -1798,7 +1798,7 @@ async def test_broken_third_invoices_br_f07_names_the_broken_portal(
         outbox = await _outbox(conn, profile_id)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
     text = outbox[0][0]
-    assert MESSAGES["BR-F03"].format(portal=PORTAL_KEY) in text
+    assert MESSAGES["BR-F03"].format(portal="de Tienda Sintética") in text
     assert FETCH_TECHNICAL_LINE.format(fetcher=fetcher_desc(PORTAL_FETCHER)) not in text
 
 

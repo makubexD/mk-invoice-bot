@@ -131,7 +131,7 @@ def test_each_reason_renders_its_table_bullet(reason: FetchReason, bullet: str |
 
 def _placeholders() -> dict[str, str]:
     """Return the synthetic values the BR-F templates fill in."""
-    return {"fetcher": fetcher_desc(PORTAL_FETCHER), "portal": PORTAL_HOST, "comercio": COMERCIO}
+    return {"fetcher": fetcher_desc(PORTAL_FETCHER), "portal": f"de {COMERCIO}", "comercio": COMERCIO}
 
 
 def test_br_f01_is_added_when_the_flow_lacks_sunat_sol() -> None:
@@ -178,18 +178,18 @@ def test_bullet_order_follows_each_fetcher_first_attempt() -> None:
 @pytest.mark.parametrize(
     ("directory", "portal"),
     [
-        (_directory(_store(), _portal(url=None)), PORTAL_KEY),
-        (_directory(_store(portal=None), None), "del comercio"),
+        (_directory(_store(), _portal()), f"de {COMERCIO}"),
+        (_directory(_store(), _portal(url=None)), f"de {COMERCIO}"),
+        (_directory(_store(portal=None), None), f"de {COMERCIO}"),
         (_directory(None, None), "del comercio"),
     ],
 )
-def test_portal_placeholder_falls_back_to_key_or_a_generic_name(
-    directory: StoreDirectory, portal: str
-) -> None:
-    """BR-F07 (S7.4): {portal} is the URL's host, else the portal key, else "del comercio"."""
-    assert _bullets(FetchReason.PORTAL_INACTIVE, directory=directory) == [
-        FETCH_PORTAL_TODO_LINE.format(portal=portal)
-    ]
+def test_portal_placeholder_names_the_comercio_never_the_host(directory: StoreDirectory, portal: str) -> None:
+    """D208, BR-F07: {portal} is "de" and the comercio, else "del comercio"; never the portal's host."""
+    bullets = _bullets(FetchReason.PORTAL_INACTIVE, directory=directory)
+
+    assert bullets == [FETCH_PORTAL_TODO_LINE.format(portal=portal)]
+    assert PORTAL_HOST not in bullets[0]
 
 
 def test_docs_needed_text_names_the_docs_the_fetcher_bullets_and_the_mailbox() -> None:

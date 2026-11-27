@@ -546,6 +546,8 @@ SEARCHED_HEADER = "Ya busqué:"
 STORE_FALLBACK = "el comercio"
 #: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
 STORE_FALLBACK_OF = "del comercio"
+#: BR-F07's ``{portal}`` for a known store: its comercio, never the portal's host (D208).
+STORE_OF = "de {comercio}"
 #: es-PE names of the fetchers, used in BR-F07's bullets.
 FETCHER_DESC: dict[str, str] = {
     "qr_url": "Enlace del QR",

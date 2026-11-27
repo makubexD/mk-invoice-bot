@@ -1,7 +1,7 @@
 """Build BR-F07's text for an invoice no fetcher could complete (BR-F07, S7.4).
 
 The message names the fetchers that failed, in the order they were first tried, and
-says which documents the sender can supply by hand. Store facts (the portal host and
+says which documents the sender can supply by hand. Store facts (the comercio's name
 the comercio's name) come from the store directory; the flow decides whether SUNAT's
 "not applicable" line belongs in the list.
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
-from urllib.parse import urlsplit
 
 from invoicebot.config.checks import MANUAL_PORTAL
 from invoicebot.config.models import Flow, Portal, Store, StoreDirectory
@@ -30,6 +29,7 @@ from invoicebot.rules.messages_es import (
     SEARCHED_HEADER,
     STORE_FALLBACK,
     STORE_FALLBACK_OF,
+    STORE_OF,
     docs_desc,
     fetcher_desc,
     when_desc,
@@ -75,8 +75,7 @@ def manual_message(
     ``facts.taught_portal``, a missing portal reads as taught but unsupported (D208).
     """
     store = _store_for(reading, facts.directory)
-    portal = portal_for(reading.value("ruc_emisor") or "", facts.directory)
-    lines = fetcher_lines(attempts, store, portal, facts)
+    lines = fetcher_lines(attempts, store, facts)
     if SUNAT_SOL not in flow.fetchers:
         lines = "\n".join(line for line in (lines, MESSAGES["BR-F01"]) if line)
     return (
@@ -121,8 +120,7 @@ def docs_needed_text(
     if inbox is None:
         raise ValueError("BR-F13 needs a flow with an email_inbox")
     store = _store_for(reading, facts.directory)
-    portal = portal_for(reading.value("ruc_emisor") or "", facts.directory)
-    bullets = fetcher_lines(attempts, store, portal, facts)
+    bullets = fetcher_lines(attempts, store, facts)
     searched_lines = "\n".join((SEARCHED_HEADER, bullets)) if bullets else ""
     text = MESSAGES["BR-F13"].format(
         id=invoice_id,
@@ -142,12 +140,11 @@ def _store_for(reading: Reading, directory: StoreDirectory) -> Store | None:
 def fetcher_lines(
     attempts: Sequence[Attempt],
     store: Store | None,
-    portal: Portal | None,
     facts: StoreFacts,
 ) -> str:
     """Return one bullet per fetcher in first-attempt order, from its last reason (BR-F07, BR-F13)."""
     last: dict[str, FetchReason] = {attempt.fetcher: attempt.reason for attempt in attempts}
-    lines = (_reason_line(fetcher, reason, store, portal, facts) for fetcher, reason in last.items())
+    lines = (_reason_line(fetcher, reason, store, facts) for fetcher, reason in last.items())
     return "\n".join(line for line in lines if line)
 
 
@@ -162,7 +159,6 @@ def _reason_line(
     fetcher: str,
     reason: FetchReason,
     store: Store | None,
-    portal: Portal | None,
     facts: StoreFacts,
 ) -> str:
     """Return the BR-F07 bullet for one fetcher's final reason (BR-F07, BR-F03, D208)."""
@@ -171,18 +167,18 @@ def _reason_line(
     if reason is FetchReason.NO_PORTAL and facts.taught_portal:
         return FETCH_TAUGHT_PORTAL_LINE
     if facts.portal_broken and fetcher == PORTAL_FETCHER and reason in TECHNICAL_REASONS:
-        return MESSAGES["BR-F03"].format(portal=_portal_desc(store, portal))
+        return MESSAGES["BR-F03"].format(portal=_portal_desc(store))
     if reason in (FetchReason.PORTAL_INACTIVE, FetchReason.CAPTCHA_UNSOLVABLE):
-        return _portal_line(reason, store, portal)
+        return _portal_line(reason, store)
     if reason is FetchReason.NO_WEBSITE:
         return MESSAGES["BR-F11"].format(comercio=_comercio(store))
     return _fetcher_line(fetcher, reason)
 
 
-def _portal_line(reason: FetchReason, store: Store | None, portal: Portal | None) -> str:
+def _portal_line(reason: FetchReason, store: Store | None) -> str:
     """Return a BR-F07 bullet that names the store's portal (BR-F07)."""
     template = FETCH_PORTAL_TODO_LINE if reason is FetchReason.PORTAL_INACTIVE else MESSAGES["BR-F04"]
-    return template.format(portal=_portal_desc(store, portal))
+    return template.format(portal=_portal_desc(store))
 
 
 def _fetcher_line(fetcher: str, reason: FetchReason) -> str:
@@ -203,13 +199,13 @@ def _comercio(store: Store | None) -> str:
     return STORE_FALLBACK if store is None else store.brands[0].comercio
 
 
-def _portal_desc(store: Store | None, portal: Portal | None) -> str:
-    """Return ``{portal}``: the portal URL's host, else its key, else a generic name (BR-F07)."""
-    if store is None or store.portal is None or store.portal == MANUAL_PORTAL:
-        return STORE_FALLBACK_OF
-    if portal is None or portal.url is None:
-        return store.portal
-    return urlsplit(portal.url).hostname or store.portal
+def _portal_desc(store: Store | None) -> str:
+    """Return ``{portal}``: ``de`` and the comercio's name, else a generic name (BR-F07, D208).
+
+    Never the portal's host: a chat app turns a bare host into a link to the site's root,
+    which may not answer; D208's [🔗 Abrir el portal] is the one way to open it.
+    """
+    return STORE_FALLBACK_OF if store is None else STORE_OF.format(comercio=_comercio(store))
 
 
 def portal_for(ruc_emisor: str, directory: StoreDirectory) -> Portal | None:
