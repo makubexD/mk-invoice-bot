@@ -612,6 +612,37 @@ async def test_own_ruc_read_as_issuer_is_saved_as_the_buyer(
     assert (str(row[0]), row[1]) == (SYNTHETIC_RUC, WORK_RUC)
 
 
+async def test_own_ruc_read_as_issuer_on_a_partial_reading_counts_the_store(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D199, BR-E06: a BR-E01 reading with the work RUC as issuer counts the gap on the store RUC."""
+    await _clear_gaps(db_pool)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"swapped-partial{PNG}"))
+    read = _partial_ocr_reading()
+    swapped = replace(
+        read,
+        fields={
+            **read.fields,
+            "ruc_emisor": Field(WORK_RUC, "ocr", FULL_CONFIDENCE),
+            "num_doc_adq": Field(SYNTHETIC_RUC, "ocr", FULL_CONFIDENCE),
+        },
+    )
+
+    await _run_handler_with_reading(db_pool, invoice_id, swapped, monkeypatch)
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_row(conn, invoice_id)
+        store_gap = await _gap_state(conn, PARSER_MISS_FINGERPRINT)
+        work_gap = await _gap_state(conn, fingerprint("PARSER_MISS", WORK_RUC))
+
+    assert state == ("EXTRACT_FAILED", "BR-E01")
+    assert store_gap is not None
+    assert store_gap[0] == 1
+    assert work_gap is None
+
+
 async def test_seeded_padron_replaces_the_ocr_razon_social(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,

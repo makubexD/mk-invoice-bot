@@ -87,24 +87,25 @@ def _iso_date(text: str) -> date | None:
 _SERIE_NUMERO = ("serie", "numero")
 
 
-def fill_missing(kept: Reading, others: Sequence[Reading]) -> Reading:
+def fill_missing(kept: Reading, others: Sequence[Reading], qr_names: frozenset[str] = frozenset()) -> Reading:
     """Return ``kept`` with its missing required fields taken from ``others`` (D200).
 
     Each missing required field comes from the first reading in ``others`` that has it, except
     ``serie`` and ``numero``, which move together: both are taken from the first reading with both
-    when ``kept`` has neither, and neither when ``kept`` has one. A ``ruc_emisor`` equal to the
-    buyer's ``num_doc_adq`` is skipped. Filled fields come after the existing ones and the URLs stay
-    ``kept``'s; with nothing to fill, ``kept`` itself is returned.
+    when neither ``kept`` nor the QR has either. A field named in ``qr_names`` (the QR reading's
+    fields) is not filled, so the QR value is the one the merge keeps. A ``ruc_emisor`` equal to
+    the buyer's ``num_doc_adq`` is skipped, and a filled ``ruc_emisor`` brings that read's
+    ``num_doc_adq`` when there is no buyer yet, so D199 can still swap them. Filled fields come
+    after the existing ones and the URLs stay ``kept``'s; with nothing to fill, ``kept`` itself is
+    returned.
     """
+
+    present = {name for name in (*REQUIRED, "num_doc_adq") if kept.value(name) is not None} | qr_names
     filled: dict[str, Field] = {}
     for name in REQUIRED:
-        if name in _SERIE_NUMERO or kept.value(name) is not None:
-            continue
-        for other in others:
-            if (field := _fillable(name, kept, other)) is not None:
-                filled[name] = field
-                break
-    if kept.value("serie") is None and kept.value("numero") is None:
+        if name not in _SERIE_NUMERO and name not in present:
+            filled.update(_first_fill(name, kept, others, present))
+    if present.isdisjoint(_SERIE_NUMERO):
         for other in others:
             if other.value("serie") is not None and other.value("numero") is not None:
                 filled.update(serie=other.fields["serie"], numero=other.fields["numero"])
@@ -112,6 +113,20 @@ def fill_missing(kept: Reading, others: Sequence[Reading]) -> Reading:
     if not filled:
         return kept
     return replace(kept, fields={**kept.fields, **filled})
+
+
+def _first_fill(name: str, kept: Reading, others: Sequence[Reading], present: set[str]) -> dict[str, Field]:
+    """Return the fields the first fitting read in ``others`` gives for ``name`` (D200).
+
+    An issuer comes with that read's buyer when no buyer is ``present``, so D199 sees both.
+    """
+    for other in others:
+        if (field := _fillable(name, kept, other)) is None:
+            continue
+        if name == "ruc_emisor" and "num_doc_adq" not in present and other.value("num_doc_adq") is not None:
+            return {name: field, "num_doc_adq": other.fields["num_doc_adq"]}
+        return {name: field}
+    return {}
 
 
 def _fillable(name: str, kept: Reading, other: Reading) -> Field | None:

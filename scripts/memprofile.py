@@ -52,7 +52,7 @@ from invoicebot.channels.fake import FakeChannel
 from invoicebot.channels.profiles import ProfileIndex
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, RoutingRule, StoreDirectory
-from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.extract import ROUTE_STEP, ExtractInputs, make_extract_handler
 from invoicebot.pipeline.fetch import FETCH_STEP
 from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP
@@ -367,9 +367,9 @@ def _handlers(pool: Pool, setup: _Setup, media: FakeChannel, http: httpx.AsyncCl
         DOWNLOAD_STEP: _fake_download(pool, media),
         EXTRACT_STEP: make_extract_handler(
             pool,
-            cfg.extraction,
-            cfg.limits.media,
-            PARSING_RULES,
+            ExtractInputs(
+                cfg.extraction, cfg.limits.media, PARSING_RULES, frozenset({cfg.owner.ruc, cfg.work.ruc})
+            ),
             GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             helper_prefix=(),
         ),

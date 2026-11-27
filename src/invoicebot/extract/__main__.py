@@ -309,7 +309,10 @@ def _retries(
     budget = ocr_cfg.timeout_s - STRIP_TIMEOUT_S
     # Time is checked before a candidate is built, so a skipped crop is never made, and again after,
     # so the time the build took is not handed to the read.
-    while _missing_count(_filled(best[1], reads), qr_reading) > 0 and _left(budget, started) >= MIN_RETRY_S:
+    while (
+        _missing_count(_filled(best[1], reads, qr_reading), qr_reading) > 0
+        and _left(budget, started) >= MIN_RETRY_S
+    ):
         candidate = next(candidates, None)
         left = _left(budget, started)
         if candidate is None or left < MIN_RETRY_S:
@@ -321,14 +324,18 @@ def _retries(
             reads.append(read[1])
         if _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
             best = (*read, candidate[1])
-    return best[0], _filled(best[1], reads), best[2]
+    return best[0], _filled(best[1], reads, qr_reading), best[2]
 
 
-def _filled(best: Reading | None, reads: list[Reading]) -> Reading | None:
-    """Return ``best`` with its gaps filled from the other ``reads``, or ``None`` with no ``best`` (D200)."""
+def _filled(best: Reading | None, reads: list[Reading], qr: Reading | None) -> Reading | None:
+    """Return ``best`` with the gaps ``qr`` leaves filled from the other ``reads`` (D200).
+
+    With no ``best`` there is nothing to fill and ``None`` is returned.
+    """
     if best is None:
         return None
-    return fill_missing(best, [read for read in reads if read is not best])
+    qr_names = frozenset() if qr is None else frozenset(qr.fields)
+    return fill_missing(best, [read for read in reads if read is not best], qr_names)
 
 
 def _with_url_strip(

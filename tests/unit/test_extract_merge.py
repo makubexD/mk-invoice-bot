@@ -225,3 +225,43 @@ def test_fill_missing_with_no_others_returns_kept() -> None:
     kept = _reading({}, document_url=DOCUMENT_URL)
 
     assert fill_missing(kept, []) is kept
+
+
+def test_fill_missing_leaves_a_field_the_qr_has() -> None:
+    """D200: `kept` lacks `total`, the QR has it and `others[0]` read 4990: `total` is not filled."""
+    kept = _reading({"fecha_emision": _ocr_field("2026-11-01")})
+
+    result = fill_missing(kept, [_reading({"total": _ocr_field("4990")})], frozenset({"total"}))
+
+    assert result is kept
+
+
+def test_fill_missing_leaves_serie_and_numero_when_the_qr_has_one() -> None:
+    """D200: `kept` lacks both, the QR has `serie` and `others[0]` has both: neither is filled."""
+    other = _reading({"serie": _ocr_field("F002"), "numero": _ocr_field("15")})
+
+    result = fill_missing(_reading({}), [other], frozenset({"serie"}))
+
+    assert "serie" not in result.fields
+    assert "numero" not in result.fields
+
+
+def test_fill_missing_brings_the_buyer_with_a_filled_issuer() -> None:
+    """D200, D199: `kept` has no RUCs and `others[0]` has issuer and buyer: both come from it."""
+    other = _reading({"ruc_emisor": _ocr_field(OTHER_RUC), "num_doc_adq": _ocr_field(BUYER_RUC)})
+
+    result = fill_missing(_reading({}), [other])
+
+    assert result.fields["ruc_emisor"].value == OTHER_RUC
+    assert result.fields["num_doc_adq"].value == BUYER_RUC
+
+
+def test_fill_missing_keeps_the_buyer_kept_has() -> None:
+    """D200: `kept` has a buyer, `others[0]` has issuer and another buyer: only the issuer is filled."""
+    kept = _reading({"num_doc_adq": _ocr_field(BUYER_RUC)})
+    other = _reading({"ruc_emisor": _ocr_field(OTHER_RUC), "num_doc_adq": _ocr_field("20000000002")})
+
+    result = fill_missing(kept, [other])
+
+    assert result.fields["num_doc_adq"].value == BUYER_RUC
+    assert result.fields["ruc_emisor"].value == OTHER_RUC
