@@ -43,6 +43,8 @@ MAIL_READ_SCOPE = "Mail.Read"
 MAIL_SEND_SCOPE = "Mail.Send"
 #: The scope the ``smtp`` mail mode signs in with to send through SMTP (D205).
 SMTP_SEND_SCOPE = "https://outlook.office.com/SMTP.Send"
+#: An ``smtp`` account reads its bounce reports and makes a draft from the Sent copy (D207).
+MAIL_READWRITE_SCOPE = "Mail.ReadWrite"
 #: Where each account's encrypted MSAL cache lives under ``data_dir`` (D85).
 TOKENS_DIRECTORY = "tokens"
 #: The scope that returns an id_token naming the signed-in mailbox (R-6.5, D138).
@@ -93,7 +95,7 @@ def google_token_path(data_dir: Path, account: str) -> Path:
 
 
 def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
-    """Return the scopes ``account`` needs for the configured flows (R-6.5, R-7.9, D98)."""
+    """Return the scopes ``account`` needs for the configured flows (R-6.5, R-7.9, D98, D207)."""
     scopes = list(BASE_SCOPES)
     if account in files_accounts(cfg):
         scopes.append(FILES_SCOPE)
@@ -101,6 +103,8 @@ def scopes_for(cfg: Config, account: str) -> tuple[str, ...]:
         scopes.append(MAIL_SEND_SCOPE)
     if account in mail_read_accounts(cfg):
         scopes.append(MAIL_READ_SCOPE)
+    if account in smtp_send_accounts(cfg):
+        scopes.append(MAIL_READWRITE_SCOPE)
     return tuple(scopes)
 
 
