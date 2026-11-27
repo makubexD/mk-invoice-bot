@@ -15,13 +15,16 @@ Decision this plan proposes (step 2), **D207 The bot watches for a bounce and le
   when it goes `sent`.
 - **A `bounce_check` job reads the sending account's inbox** first `limits.bounce_check_after_s` (default 120) after
   the send, then every `limits.bounce_check_every_s` (default 300), until `limits.bounce_watch_s` (default 1800) after
-  `batches.sent_at`. A bounce is a delivery report (an NDR) received after the send that carries the mail's
-  `Message-ID`. Subject and time alone never decide a match. From the report the bot keeps only the enhanced status
+  `batches.sent_at`. Outlook.com rewrites the `Message-ID` at submission and keeps the bot's id as
+  `X-Microsoft-Original-Message-ID` (`specs/spikes/bounce-watch.md`). A bounce is a delivery report (an NDR) received
+  after the send whose `message/rfc822` part carries the bot's id in that header. Subject and time alone never
+  decide a match. From the report the bot keeps only the enhanced status
   code (e.g. `5.7.501`), never the server's text or an address (R-9.16).
 - **On a bounce** the batch goes `bounced`; the invoice stays `DONE` (filed is filed), the folder loses its `_Sent`
-  name (R-7.11), and the bot makes a draft in the account's Drafts folder from the mail's copy in Sent Items.
+  name (R-7.11), and the bot makes a draft in the account's Drafts folder from the mail's copy in Sent Items, found
+  by the report's `In-Reply-To` (Outlook's id).
   - With the draft: BR-D26 `⚠️ El correo de #{id} {serie}-{numero} a {to} rebotó ({status}). Te dejé un borrador
-igual en Outlook: ábrelo y envíalo tú. Cuando lo envíes, toca [Ya lo envié].` with [✉️ Abrir borrador] (the
+igual en Outlook: ábrelo, toca ✏️ y envíalo. Cuando lo envíes, toca [Ya lo envié].` with [✉️ Abrir borrador] (the
     draft's `webLink`) and [Ya lo envié].
   - Without one: BR-D27, the same first sentence plus `No pude dejarte el borrador: reenvíalo desde Enviados en
 Outlook y toca [Ya lo envié].`, with [Ya lo envié].
@@ -162,25 +165,33 @@ into a draft (D207). It uses plain `httpx` over Graph like `fetchers/graph_mail.
 `auth_headers`, `raise_graph_error`, the `_GRAPH_ID` check before any id goes into a path). Errors carry the status
 only (R-9.16).
 
-- `bounce_status(raw: bytes, message_id: str) -> str | None` (pure): parse with `email.parser.BytesParser(policy=
-email.policy.default)`. Return `None` unless a `message/delivery-status`, `text/rfc822-headers` or
-  `message/rfc822` part (or the report's `In-Reply-To`/`References`) holds `message_id`, compared case-sensitively
-  inside the angle brackets. On a match, return the first `Status:` matching `^[245]\.\d{1,3}\.\d{1,3}$` from the
-  delivery-status part, or `"?"` when there is none.
-- `async find_bounce(http, tokens, *, message_id, since) -> str | None`: list `/me/mailFolders/inbox/messages` with
-  `$filter=receivedDateTime ge {since}`, `$select=id,subject`, `$top=50`. For each message, read `$value` streamed
-  and capped at `MAX_REPORT_BYTES = 2 MiB` (a bigger one is skipped and logged), then return the first
-  `bounce_status` that is not `None`.
-- `async draft_from_sent(http, tokens, *, message_id) -> str`: find the Sent Items message with `$filter=
-internetMessageId eq '{message_id}'` (the id quoted as OData requires; `message_id` must match
-  `^<[^<>'\s]{1,250}>$` or `ValueError`), read its `$value` capped at `MAX_DRAFT_BYTES = 3 MiB` (Graph's MIME
-  create limit; step 1 confirms it), `POST /me/messages` with the base64 MIME as `text/plain`, and return the created message's
-  `webLink`, checked as `https` on an `outlook.live.com` or `outlook.office.com` host. Raises `DraftUnavailable`
-  when the copy is missing, too big, or the link fails the check.
-- Tests with `httpx.MockTransport` and a synthetic report built from step 1's skeleton: it matches `<fixture-1@example.com>` with its status; another id gives
-  `None`; a report over the cap is skipped; a 403 raises `GraphError` with the status only; a draft round trip
-  returns the link; a missing Sent copy, a too-big copy, a `javascript:` or other-host `webLink`, and a quote inside
-  `message_id` each raise.
+- `Bounce` (frozen dataclass): `status: str` and `sent_id: str`, the id Outlook gave the mail.
+- `MESSAGE_ID = re.compile(r"^<[^<>'\s]{1,250}>$")`: the only shape an id may have before it goes into an OData
+  filter.
+- `parse_bounce(raw: bytes, message_id: str) -> Bounce | None` (pure, the shape in `specs/spikes/bounce-watch.md`):
+  parse with `email.parser.BytesParser(policy=email.policy.default)`. Return `None` unless the report has a
+  `message/rfc822` part whose headers have `X-Microsoft-Original-Message-ID` equal to `message_id` (whitespace
+  stripped, case-sensitive). `status` is the first `Status:` in the `message/delivery-status` part that matches
+  `^[245]\.\d{1,3}\.\d{1,3}$`, else `"?"`. `sent_id` is the report's `In-Reply-To`, else the `message/rfc822`
+  part's `Message-ID`. Return `None` when neither matches `MESSAGE_ID`.
+- `async find_bounce(http, tokens, *, message_id, since) -> Bounce | None`: list `/me/mailFolders/inbox/messages`
+  with `$filter=receivedDateTime ge {since}`, `$select=id,subject`, `$top=50`. For each message, read `$value`
+  streamed and capped at `MAX_REPORT_BYTES = 2 MiB` (a bigger one is skipped and logged), then return the first
+  `parse_bounce` that is not `None`.
+- `async draft_from_sent(http, tokens, *, sent_id) -> str`: `sent_id` must match `MESSAGE_ID`, else `ValueError`.
+  Find the Sent Items message with `$filter=internetMessageId eq '{sent_id}'`. Read its `$value`, capped at
+  `MAX_DRAFT_BYTES = 3 MiB`. `POST /me/messages` with the base64 MIME as `text/plain` (201, `isDraft`). Return the
+  created message's `webLink`, which must be `https` on an `outlook.live.com` or `outlook.office.com` host. Raises
+  `DraftUnavailable` when the copy is missing or too big, or the link fails the check.
+- Tests with `httpx.MockTransport` and a synthetic report in the spike's shape (built in the test with
+  `email.message`, `example.com` addresses):
+  - It matches `<fixture-1@example.com>` and returns the status and `sent_id`.
+  - Another id gives `None`, and so does a report whose only match is in its text part.
+  - A missing `Status:` gives `"?"`.
+  - A report over the cap is skipped, and a 403 raises `GraphError` with the status only.
+  - A draft round trip returns the link.
+  - Each of these raises: a missing Sent copy, a too-big copy, a `javascript:` or other-host `webLink`, and a quote
+    inside `sent_id`.
 
 Test: `uv run pytest -q tests/unit/test_sinks_mail_bounce.py`
 
@@ -201,9 +212,9 @@ Files: `src/invoicebot/pipeline/bounce_watch.py` (new), `src/invoicebot/rules/me
      the worker's retry.
   3. No report: when `now() < sent_at + bounce_watch_s`, enqueue itself at `db_now_plus(seconds=bounce_check_every_s)`;
      otherwise log INFO `bounce watch clear`.
-  4. A report: try `draft_from_sent`. `DraftUnavailable`, `GraphError` or `AuthRequired` means no draft, logged
+  4. A report: try `draft_from_sent(sent_id=bounce.sent_id)`. `DraftUnavailable`, `GraphError` or `AuthRequired` means no draft, logged
      WARNING without the link. Then one transaction locks the invoice, re-reads the batch (stop if it is no longer
-     `sent`), sets it `bounced`, merges `{"bounce": {"status": …, "draft": bool}}` into flow data, enqueues
+     `sent`), sets it `bounced`, merges `{"bounce": {"status": bounce.status, "draft": bool}}` into flow data, enqueues
      `FOLDER_STATUS_STEP`, and queues BR-D26 (link button with the `webLink`, plus [Ya lo envié]) or BR-D27 ([Ya lo
      envié]) to the invoice's origin addressee, `{to}` being the mailer's first `to` and `{status}` the code (`?`
      shown as `sin código`).
