@@ -27,10 +27,12 @@ Decision this plan proposes (step 2):
   question is the newest, is the answer: 1 to 12 ASCII letters or digits, else BR-F20 asks again. The answer moves the
   invoice back to `FETCHING_DOCS` and the fetch job runs the helper in _resume_ mode: a fresh browser posts the saved
   fields plus the answer to the action URL (which must be `https` on the portal's own host), through the guard proxy,
-  then reads the result page as a normal fetch does. (4) A result page that shows the captcha input again is
-  `captcha_wrong`: the bot asks again with a new captcha, up to `retrieval.captcha.ask_user_tries` (default 2) asks in
+  then reads the result page as a normal fetch does. (4) A result page with no file and no not-found marker that
+  shows the captcha input again is `captcha_wrong` (PEBSA's not-found page shows the captcha input too, so the
+  not-found marker is checked first): the bot asks again with a new captcha, up to `retrieval.captcha.ask_user_tries` (default 2) asks in
   the round, then the reason is `captcha_unsolvable` and the chain moves on. (5) No answer within
-  `ask_user_timeout_s` (default 300) is `captcha_timeout`: BR-F05 is sent and the chain moves on. A late answer gets
+  `ask_user_timeout_s` (150 in the shipped configs: the step 1 spike measured PEBSA's captcha living 180–240 s) is
+  `captcha_timeout`: BR-F05 is sent and the chain moves on. A late answer gets
   BR-F19. (6) One helper per fetch (D82) and the 300 s lease hold: no helper waits for a person.
 
 Out of scope: local OCR (S10.3), reCAPTCHA and paid solvers (R-5.4 stays BR-F04), inline photos (the PNG goes as a
@@ -169,12 +171,13 @@ Files: `src/invoicebot/fetchers/browser/captcha_resume.py` (new), `src/invoicebo
   (D209)."): `async def resume_captcha(page, portal, resume, out_dir, max_bytes) -> FetchResult`. It routes the one
   navigation to `resume.form.action_url` as a `POST` (`application/x-www-form-urlencoded`) of the saved fields, the
   captcha input's `name` with the answer, and the submit name and value, in that order; it then calls step 6's
-  `read_result` on the loaded page. If `portal.captcha.input` is visible on the result page and no file was saved,
-  the reason is `captcha_wrong`.
+  `read_result` on the loaded page. If no file was saved, the not-found marker is absent and `portal.captcha.input`
+  is visible on the result page, the reason is `captcha_wrong`; the not-found marker wins over the captcha input.
 - `__main__.py`: a request with `resume` runs `resume_captcha`.
 - Tests (`D209`), on a local server that checks the posted body: (a) the right answer gives the files and `ok`;
   (b) a wrong answer re-serves the form and gives `captcha_wrong`; (c) the body carries the hidden fields unchanged and
-  in order; (d) the not-found marker gives `not_found_yet` as a normal fetch does.
+  in order; (d) the not-found marker gives `not_found_yet` as a normal fetch does, even when the page also shows the
+  captcha input again.
 
 Test: `uv run pytest -q tests/integration/test_browser_captcha_resume.py tests/unit/test_browser_main.py`.
 
@@ -285,9 +288,14 @@ Test: `uv run pytest -q tests/integration/test_pipeline_captcha_timeout.py`.
 
 ## Step 15: PEBSA's store and portal files `[inline: values from the step 1 spike]`
 
-Files: `config/portals/pebsa.yaml` (new), `config/stores/<PEBSA's RUC>.yaml` (new, D47).
+Files: `config/portals/pebsa.yaml` (new), `config/stores/<PEBSA's RUC>.yaml` (new, D47), `config/example.yaml`,
+`config/config.yaml`.
 
-- The portal file from the live config, with the spike's fields, `captcha: {image: "img[src*='CaptchaImage.axd']",
+- `example.yaml` and `config.yaml`: `retrieval.captcha.ask_user_timeout_s: 150`, with a comment citing D209 and the
+  spike (the captcha lives 180–240 s).
+
+- The portal file from the live config, with `url` set to `frmAutentificacionEstandar.aspx` (the spike: the
+  Convivencia page never answers), the spike's fields, `captcha: {image: "img[src*='CaptchaImage.axd']",
 input: "#ctl00_bodyContentPlace_txtCaptcha", solver: [user]}`, `submit`, `downloads`, `not_found`,
   `tipo_labels`, and `status: active`. Its notes cite D209 and the spike.
   Test: `uv run pytest -q tests/unit/test_config_checks.py tests/unit/test_config_models.py`.
@@ -297,7 +305,9 @@ input: "#ctl00_bodyContentPlace_txtCaptcha", solver: [user]}`, `submit`, `downlo
 Files: `specs/spikes/portal-guide.md`.
 
 Tag the live commit, back up the live config, deploy the branch's image, and install PEBSA's files in the live config.
-Then **ask the owner** to resend the PEBSA ticket on Telegram (flow A). Rows: (a) the captcha PNG arrives with BR-F18;
+The live config also sets `ask_user_timeout_s: 150`. Then **ask the owner** to send a recent PEBSA ticket on
+Telegram (flow A): the portal has no record of #52's ticket (step 1), so (b) needs one it knows, and that run also
+records the result page and download buttons step 1 deferred. Rows: (a) the captcha PNG arrives with BR-F18;
 (b) the right answer gives the files and delivery; (c) a wrong answer gives BR-F20 and a new image; (d) no answer for
 `ask_user_timeout_s` gives BR-F05 and the next fetcher; (e) a late answer gives BR-F19; (f) flow B untouched. Record
 the rows, with image ids and no invoice values.
