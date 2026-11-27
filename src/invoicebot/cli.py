@@ -12,7 +12,8 @@ takes a flow name: it creates the flow's Drive folder (only when the flow has a 
 sink) and either creates its spreadsheet with the header or checks an existing one, then
 prints the ids for the private config (R-6.2, D129, D145). ``telegram`` lists the private
 senders who pressed Start and registers, inspects or deletes the bot's webhook, reading its
-token and secret from the age store (D186, R-9.9).
+token and secret from the age store (D186, R-9.9); ``telegram webhook --check`` exits 3
+when Telegram holds updates it cannot deliver (D201).
 """
 
 from __future__ import annotations
@@ -70,12 +71,14 @@ from invoicebot.channels.telegram.client import (
     webhook_secret_is_strong,
 )
 from invoicebot.channels.telegram.setup import (
+    STUCK_WAIT_S,
     WebhookActive,
     delete_webhook,
     publish_menus,
     sender_ids,
     set_webhook,
     webhook_info,
+    webhook_stuck,
 )
 from invoicebot.config.loader import load_config, load_directory
 from invoicebot.config.models import (
@@ -109,6 +112,7 @@ from invoicebot.text import normalize_email
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: How long the Google sign-in waits for the browser's redirect (D128).
 SIGN_IN_TIMEOUT_S = 300
+STUCK_EXIT = 3  # D201: `telegram webhook --check` stuck; 1 stays the TelegramError exit
 #: The request-line cap of the one-request loopback listener (R-6.5).
 _REQUEST_LINE_LIMIT = 8192
 #: The page the browser shows once the redirect arrives (R-6.5).
@@ -229,6 +233,11 @@ def _parser() -> argparse.ArgumentParser:
     webhook_action.add_argument("--url", help="the public https URL to register")
     webhook_action.add_argument("--info", action="store_true", help="print the webhook's current state")
     webhook_action.add_argument("--delete", action="store_true", help="delete the webhook")
+    webhook_action.add_argument(
+        "--check",
+        action="store_true",
+        help="exit 3 when Telegram holds updates it cannot deliver",
+    )
     rehearse = subparsers.add_parser(
         "rehearse",
         help="run the live pipeline through the dev-only console channel (D165)",
@@ -529,8 +538,7 @@ async def _run_telegram(
         if args.telegram_command == "commands":
             await _telegram_commands(client, cfg, show)
             return 0
-        await _telegram_webhook(client, secrets, args, show)
-    return 0
+        return await _telegram_webhook(client, secrets, args, show)
 
 
 async def _telegram_ids(client: TelegramClient, show: Callable[[str], None]) -> int:
@@ -563,8 +571,8 @@ async def _telegram_webhook(
     secrets: Secrets,
     args: argparse.Namespace,
     show: Callable[[str], None],
-) -> None:
-    """Set, print or delete the bot's webhook (D186)."""
+) -> int:
+    """Set, print, check or delete the bot's webhook; return the exit code (D186, D201)."""
     if args.url is not None:
         await set_webhook(client, args.url, secrets.get("telegram_webhook_secret"))
         show("webhook set")
@@ -574,9 +582,16 @@ async def _telegram_webhook(
         show(f"pending: {info.pending}")
         show(f"last_error_date: {_shown(info.last_error_date)}")
         show(f"last_error_message: {_shown(info.last_error_message)}")
+    elif args.check:
+        pending = await webhook_stuck(client, STUCK_WAIT_S, asyncio.sleep)
+        if pending:
+            sys.stderr.write(f"webhook: stuck (pending {pending})\n")
+            return STUCK_EXIT
+        show("webhook: ok")
     else:
         await delete_webhook(client)
         show("webhook deleted")
+    return 0
 
 
 def _shown(value: object) -> str:

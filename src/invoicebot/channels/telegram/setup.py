@@ -6,8 +6,9 @@ imported by the running bot.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from invoicebot.channels.telegram.client import (
     OK_STATUS,
@@ -18,6 +19,7 @@ from invoicebot.config.models import Profile
 
 WEBHOOK_PATH = "/webhook/telegram"  # D186: the path the funnel and the API route share
 WEBHOOK_ACTIVE_STATUS = 409  # getUpdates is refused while a webhook is set
+STUCK_WAIT_S = 60  # D201: how long pending updates get to drain before the route counts as stuck
 
 
 class WebhookActive(Exception):
@@ -88,18 +90,28 @@ async def sender_ids(client: TelegramClient) -> list[tuple[int, str | None]]:
 async def set_webhook(client: TelegramClient, url: str, secret: str) -> None:
     """Register the bot's webhook with the stored secret (D186).
 
-    Raises ``ValueError`` for a URL that is not ``https://`` or does not end in
-    ``/webhook/telegram``.
+    Re-registering keeps Telegram's pending updates, so re-pointing the webhook
+    to a new tunnel URL loses nothing (D201).
+
+    Raises ``ValueError`` for a URL that is not ``https://`` with a host, the path
+    ``/webhook/telegram`` and no query or fragment.
     """
-    if not url.startswith("https://") or not url.endswith(WEBHOOK_PATH):
-        raise ValueError(f"the webhook URL must be https:// and end in {WEBHOOK_PATH}")
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or not parts.netloc
+        or parts.path != WEBHOOK_PATH
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(f"the webhook URL must be https://<host>{WEBHOOK_PATH}")
     await client.call(
         "setWebhook",
         {
             "url": url,
             "secret_token": secret,
             "allowed_updates": ["message", "callback_query"],
-            "drop_pending_updates": True,
+            "drop_pending_updates": False,
         },
     )
 
@@ -117,6 +129,25 @@ async def webhook_info(client: TelegramClient) -> WebhookInfo:
         last_error_date=_int_field(result.get("last_error_date")),
         last_error_message=last_error_message if isinstance(last_error_message, str) else None,
     )
+
+
+async def webhook_stuck(
+    client: TelegramClient,
+    wait_s: float,
+    sleep: Callable[[float], Awaitable[None]],
+) -> int:
+    """Return the pending count when Telegram is stuck on updates it cannot deliver, else 0 (D201).
+
+    No pending updates returns 0 at once; otherwise it waits ``wait_s`` and reads the count again.
+    The route is stuck only when the second count is above 0 and not below the first: a queue that
+    drains, even slowly, is delivering.
+    """
+    first = (await webhook_info(client)).pending
+    if first == 0:
+        return 0
+    await sleep(wait_s)
+    second = (await webhook_info(client)).pending
+    return second if second > 0 and second >= first else 0
 
 
 async def delete_webhook(client: TelegramClient) -> None:

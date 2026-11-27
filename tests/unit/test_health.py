@@ -189,3 +189,10 @@ async def test_sighup_without_a_runtime_is_ignored_and_keeps_running(
 
     os.kill(os.getpid(), 0)  # the process still exists after SIGHUP
     assert "config reload ignored: no runtime config is loaded" in caplog.text
+
+
+@pytest.mark.parametrize("path", ["/docs", "/redoc", "/openapi.json"])
+def test_interactive_docs_are_not_served(path: str) -> None:
+    """D201: the tunnel forwards every path, so the docs and schema routes answer 404."""
+    with TestClient(create_app(_no_ping)) as client:
+        assert client.get(path).status_code == 404

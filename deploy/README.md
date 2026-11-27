@@ -193,30 +193,57 @@ needs Podman, or Docker with a profile that allows it. The check is:
 bash tests/deploy/test_helper_sandbox.sh
 ```
 
-### 5. Tailscale Funnel (D146)
+### 5. Public tunnel (D146, D201)
 
-Install Tailscale from tailscale.com, then sign in:
+Telegram reaches the webhook through one of two tunnels, and the watch below
+swaps them when one fails:
+
+- `funnel`: Tailscale Funnel, a fixed `https://<machine>.<tailnet>.ts.net`
+  URL, exposing only `/health`, `/webhook/telegram` and `/webhook/whatsapp`.
+- `cloudflare`: a Cloudflare quick tunnel in the user unit
+  `invoicebot-cftunnel`. Its `https://<words>.trycloudflare.com` URL changes on
+  every start, and it forwards every path of the app's port.
+
+Install Tailscale from tailscale.com, sign in and make your user its operator,
+once, so the tunnel and the watch need no sudo:
 
 ```sh
 sudo tailscale up
+sudo tailscale set --operator=$USER
 ```
 
-Expose only the webhooks and the health endpoint, both proxied to the app's
-loopback port:
+Link the units and start a tunnel. `tunnel.sh up <name>` stops the other one,
+records the name in `~/.local/state/invoicebot/tunnel` and prints the public
+base URL. The first Funnel start asks to allow Funnel in the tailnet policy.
 
 ```sh
-sudo tailscale funnel --bg --set-path /webhook/whatsapp http://127.0.0.1:8080/webhook/whatsapp
-sudo tailscale funnel --bg --set-path /health http://127.0.0.1:8080/health
-sudo tailscale funnel --bg --set-path /webhook/telegram http://127.0.0.1:8080/webhook/telegram  # when Telegram is enabled
-tailscale funnel status
+mkdir -p ~/.config/systemd/user
+ln -sf "$PWD"/deploy/systemd/invoicebot-*.{service,timer} ~/.config/systemd/user/
+systemctl --user daemon-reload
+deploy/tunnel.sh up cloudflare     # or: deploy/tunnel.sh up funnel
+deploy/tunnel.sh url               # the current tunnel's public URL
 ```
 
-The public URL is `https://<machine>.<tailnet>.ts.net`. The first `funnel`
-command asks to allow Funnel in the tailnet policy. Turn it off with:
+#### Webhook watch (D201)
+
+A timer runs `deploy/webhook-watch.sh` every 5 minutes. It starts the tunnel
+when it is down and re-points the Telegram webhook when its URL is not the
+tunnel's. When Telegram holds updates for 60 seconds it restarts the tunnel,
+then switches to the other one, re-pointing the webhook each time; if both
+fail it sends a desktop notification. Re-pointing keeps Telegram's pending
+updates.
 
 ```sh
-tailscale funnel reset
+systemctl --user enable --now invoicebot-webhook-watch.timer
+loginctl enable-linger $USER       # run it without a login
+systemctl --user start invoicebot-webhook-watch    # run it now
+journalctl --user -u invoicebot-webhook-watch      # what it did
 ```
+
+Never delete or drop the webhook to unstick it: that loses the pending
+updates. Run the watch instead. The service finds the checkout through
+`INVOICEBOT_REPO` in `invoicebot-webhook-watch.service`; edit that one line for
+another path.
 
 ### 6. Dev and live side by side
 

@@ -139,7 +139,7 @@ def test_webhook_url_registers_the_stored_secret(
         "url": WEBHOOK_URL,
         "secret_token": WEBHOOK_SECRET,
         "allowed_updates": ["message", "callback_query"],
-        "drop_pending_updates": True,
+        "drop_pending_updates": False,
     }
 
 
@@ -254,3 +254,63 @@ def test_commands_sets_default_and_admin_menus_without_printing_user_ids(
     assert "menu set: default" in captured.out
     assert "menu set: yo" in captured.out
     assert "100000001" not in captured.out + captured.err
+
+
+class PendingApi(BotApi):
+    """Answer getWebhookInfo with the next pending count each time (D201)."""
+
+    def __init__(self, counts: list[int]) -> None:
+        super().__init__("getWebhookInfo")
+        self.counts = counts
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.result = {"pending_update_count": self.counts.pop(0)}
+        return super().__call__(request)
+
+
+def test_webhook_check_with_nothing_pending_prints_ok(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D201: webhook --check exits 0 and prints ``webhook: ok`` when nothing is pending."""
+    assert _run(_settings(tmp_path), PendingApi([0]), "webhook", "--check") == 0
+
+    assert capsys.readouterr().out == "webhook: ok\n"
+
+
+def test_webhook_check_with_updates_still_pending_exits_three(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D201: webhook --check exits 3 and reports the second pending count on stderr."""
+    monkeypatch.setattr("invoicebot.cli.STUCK_WAIT_S", 0)
+
+    assert _run(_settings(tmp_path), PendingApi([2, 3]), "webhook", "--check") == 3
+
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "webhook: stuck (pending 3)\n"
+
+
+def test_webhook_check_with_an_api_error_exits_one_with_nothing_on_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D201: a Bot API failure during --check exits 1, apart from the stuck exit 3."""
+    api = BotApi("getWebhookInfo", status=ERROR_STATUS)
+
+    assert _run(_settings(tmp_path), api, "webhook", "--check") == 1
+
+    assert capsys.readouterr().out == ""
+
+
+def test_check_and_info_together_exit_two(tmp_path: Path) -> None:
+    """D201: --check and --info are mutually exclusive; both together exit 2."""
+    api = BotApi("getWebhookInfo")
+
+    with pytest.raises(SystemExit) as exit_info:
+        _run(_settings(tmp_path), api, "webhook", "--check", "--info")
+
+    assert exit_info.value.code == 2
+    assert api.requests == []

@@ -19,6 +19,7 @@ from invoicebot.channels.telegram.setup import (
     set_commands,
     set_webhook,
     webhook_info,
+    webhook_stuck,
 )
 from invoicebot.config.models import Profile
 
@@ -108,8 +109,8 @@ async def test_sender_ids_raises_webhook_active_on_409() -> None:
             await sender_ids(client)
 
 
-async def test_set_webhook_posts_the_url_secret_and_allowed_updates() -> None:
-    """D186: setWebhook carries the URL, the secret and the two allowed update kinds."""
+async def test_set_webhook_posts_the_url_secret_and_keeps_pending_updates() -> None:
+    """D201: setWebhook keeps pending updates and carries the URL, secret and allowed kinds (D186)."""
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -124,13 +125,20 @@ async def test_set_webhook_posts_the_url_secret_and_allowed_updates() -> None:
         "url": "https://h.example.ts.net/webhook/telegram",
         "secret_token": SECRET,
         "allowed_updates": ["message", "callback_query"],
-        "drop_pending_updates": True,
+        "drop_pending_updates": False,
     }
 
 
 @pytest.mark.parametrize(
     "url",
-    ["http://h.example.ts.net/webhook/telegram", "https://h.example.ts.net/webhook/whatsapp"],
+    [
+        "http://h.example.ts.net/webhook/telegram",
+        "https://h.example.ts.net/webhook/whatsapp",
+        "https://evil.example/x?/webhook/telegram",
+        "https://h.example/webhook/telegram#x",
+        "https:///webhook/telegram",
+        "https://h.example/a/webhook/telegram",
+    ],
 )
 async def test_set_webhook_refuses_a_bad_url_without_a_request(url: str) -> None:
     """D186: a URL that is not https or not the Telegram path is refused before any call."""
@@ -331,3 +339,69 @@ async def test_publish_menus_skips_an_admin_without_a_telegram_id() -> None:
     assert names == ["default"]
     assert len(requests) == 1
     assert json.loads(requests[0].content)["scope"] == {"type": "default"}
+
+
+def _pending_handler(counts: list[int], calls: list[str]) -> Handler:
+    """Answer each getWebhookInfo with the next pending count."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"ok": True, "result": {"pending_update_count": counts.pop(0)}})
+
+    return handler
+
+
+class _FakeSleep:
+    """Record the seconds each sleep was asked for, without waiting."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+async def test_webhook_stuck_with_nothing_pending_returns_zero_without_sleeping() -> None:
+    """D201: no pending updates means the route delivers; one call, no wait."""
+    calls: list[str] = []
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([0], calls)) as client:
+        assert await webhook_stuck(client, 60, sleep) == 0
+
+    assert len(calls) == 1
+    assert sleep.waits == []
+
+
+async def test_webhook_stuck_that_drains_after_the_wait_returns_zero() -> None:
+    """D201: pending 2 then 0 after one sleep of wait_s is not stuck."""
+    calls: list[str] = []
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([2, 0], calls)) as client:
+        assert await webhook_stuck(client, 60, sleep) == 0
+
+    assert len(calls) == 2
+    assert sleep.waits == [60]
+
+
+async def test_webhook_stuck_that_grows_returns_the_second_count() -> None:
+    """D201: pending 2 then 3 is stuck; the second count is returned."""
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([2, 3], [])) as client:
+        assert await webhook_stuck(client, 60, sleep) == 3
+
+    assert sleep.waits == [60]
+
+
+async def test_webhook_stuck_that_drains_slowly_returns_zero() -> None:
+    """D201: pending 5 then 2 is draining, not stuck."""
+    async with _make_client(_pending_handler([5, 2], [])) as client:
+        assert await webhook_stuck(client, 60, _FakeSleep()) == 0
+
+
+async def test_webhook_stuck_that_does_not_move_returns_the_count() -> None:
+    """D201: pending 2 then 2 is stuck; the count is returned."""
+    async with _make_client(_pending_handler([2, 2], [])) as client:
+        assert await webhook_stuck(client, 60, _FakeSleep()) == 2
