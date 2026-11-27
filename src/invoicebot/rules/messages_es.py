@@ -598,6 +598,8 @@ REVIEW_CC_LINE = "CC: {cc}\n"
 #: The titles of a message's links: Telegram's URL buttons, the text line elsewhere (D194).
 LINK_TITLE_FOLDER = "📂 Abrir carpeta"
 LINK_TITLE_ROW = "📄 Abrir fila"
+#: The link BR-F07 and BR-F13 offer to a portal the bot cannot query (D208).
+LINK_OPEN_PORTAL = "🔗 Abrir el portal"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
