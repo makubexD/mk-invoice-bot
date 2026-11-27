@@ -41,6 +41,7 @@ EXPECTED_TABLES = {
     "padron",
     "pending_actions",
     "portal_candidates",
+    "portal_captchas",
     "portal_probes",
     "taught_links",
     "upload_rejections",
