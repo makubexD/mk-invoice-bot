@@ -50,12 +50,19 @@ def laptop_flow_ids(cfg: Config) -> frozenset[str]:
     return frozenset(name for name, flow in cfg.flows.items() if lists_laptop(flow))
 
 
+#: The mailer ``send`` settings that can hold a mail for review (D194, D203).
+_REVIEW_SENDS = frozenset({"review", "if_doubtful"})
+
+
 def review_flow_ids(cfg: Config) -> frozenset[str]:
-    """Return the names of the flows whose mailer sink is ``send: review`` (D194)."""
+    """Return the names of the flows whose mailer can post BR-D19 for review (D194, D203).
+
+    Those are the mailers on ``send: review`` or ``send: if_doubtful``.
+    """
     return frozenset(
         name
         for name, flow in cfg.flows.items()
-        if any(isinstance(sink, MailerSink) and sink.send == "review" for sink in flow.sinks)
+        if any(isinstance(sink, MailerSink) and sink.send in _REVIEW_SENDS for sink in flow.sinks)
     )
 
 

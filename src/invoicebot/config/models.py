@@ -593,8 +593,8 @@ class MailerSink(BaseModel):
     trigger: Literal["per_invoice"]
     modes: list[MailMode] = Field(min_length=1)
     #: D194: ``review`` holds each mail for the owner to check in the chat before it is sent;
-    #: ``auto`` sends at once.
-    send: Literal["review", "auto"] = "auto"
+    #: ``auto`` sends at once. D203: ``if_doubtful`` holds it only when a field needs review.
+    send: Literal["review", "auto", "if_doubtful"] = "auto"
     account: Literal["personal"]
     #: R-7.7: the inbox_rule mode sends through the bot's own mailbox.
     inbox_rule_account: Literal["bot"] = "bot"
