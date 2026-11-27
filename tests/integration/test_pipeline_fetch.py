@@ -49,11 +49,12 @@ from invoicebot.rules.messages_es import (
     GAP_LINE_PORTAL,
     MESSAGES,
     fetcher_desc,
+    fields_desc,
     when_desc,
 )
 from invoicebot.states import StateMoved
 from invoicebot.store.fetch_attempts import record_attempt
-from invoicebot.store.invoices import create_invoice, save_reading, set_flow, set_state
+from invoicebot.store.invoices import create_invoice, load_reading, save_reading, set_flow, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -68,7 +69,19 @@ PROFILE = "yo"
 SERIE = "F001"
 NUMERO = "15160"
 PDF_BYTES = b"%PDF-1.4 synthetic invoice\n"
-XML_BYTES = b"<Invoice><ID>F001-15160</ID></Invoice>"
+XML_BYTES = (
+    '<Invoice xmlns="urn:oasis:names:specification:ubl:schema:xsd:Invoice-2"'
+    ' xmlns:cac="urn:oasis:names:specification:ubl:schema:xsd:CommonAggregateComponents-2"'
+    ' xmlns:cbc="urn:oasis:names:specification:ubl:schema:xsd:CommonBasicComponents-2">'
+    f"<cbc:ID>{SERIE}-{NUMERO}</cbc:ID>"
+    "<cbc:IssueDate>2026-11-13</cbc:IssueDate>"
+    "<cbc:InvoiceTypeCode>01</cbc:InvoiceTypeCode>"
+    "<cac:AccountingSupplierParty><cac:Party><cac:PartyIdentification>"
+    f'<cbc:ID schemeID="6">{STORE_RUC}</cbc:ID>'
+    "</cac:PartyIdentification></cac:Party></cac:AccountingSupplierParty>"
+    '<cac:LegalMonetaryTotal><cbc:PayableAmount currencyID="PEN">49.90</cbc:PayableAmount>'
+    "</cac:LegalMonetaryTotal></Invoice>"
+).encode()
 MINUTES_55 = 55
 HOURS_5_5 = 5.5
 HOURS_6_5 = 6.5
@@ -1734,3 +1747,62 @@ async def test_open_broken_gap_ends_the_retry_without_a_streak(
     assert gaps == [(f"portal_broken:{PORTAL_KEY}", "PORTAL_BROKEN")]
     assert len(jobs) == 1
     assert abs((jobs[-1] - datetime.now(UTC)).total_seconds()) < 10
+
+
+def _with_serie_at(confidence: float) -> Reading:
+    """Return the synthetic reading with its serie read from a photo at ``confidence``."""
+    fields = dict(_reading().fields)
+    fields["serie"] = Field(value=SERIE, source="ocr", confidence=confidence)
+    return Reading(fields=fields, document_url=None)
+
+
+async def _ok_run_outbox(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    reading: Reading,
+    kinds: tuple[Literal["pdf", "xml"], ...],
+) -> tuple[Reading | None, list[tuple[str, str | None]]]:
+    """Run an ok fetch of ``kinds`` over ``reading``; return the stored reading and the outbox."""
+    profile = f"u-{uuid4().hex[:8]}"
+    invoice_id = await _fetching_invoice(pool, profile, reading=reading)
+    cfg = _config(required_docs=kinds)
+    await _run(pool, FakeFetcher(FetchReason.OK, kinds), invoice_id, tmp_path, cfg=cfg)
+    async with pool.connection() as conn:
+        return await load_reading(conn, invoice_id), await _outbox(conn, profile)
+
+
+async def test_xml_confirms_a_doubtful_serie_and_br_f16_names_it(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D202, BR-F16: a matching XML makes serie an xml field at 1.0, and BR-F16 says so."""
+    stored, outbox = await _ok_run_outbox(db_pool, tmp_path, _with_serie_at(0.43), ("pdf", "xml"))
+
+    assert stored is not None
+    assert stored.fields["serie"] == Field(value=SERIE, source="xml", confidence=1.0)
+    first, second = MESSAGES["BR-F16"].split("\n")
+    expected = (
+        f"{first.format(docs_desc='el PDF y el XML')}\n{second.format(fields_desc=fields_desc(['serie']))}"
+    )
+    assert outbox == [(expected, "BR-F16")]
+
+
+async def test_pdf_only_leaves_the_reading_and_br_f16_has_one_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D202, BR-F16: with no XML the reading is unchanged and BR-F16 names the PDF only."""
+    reading = _with_serie_at(0.43)
+    stored, outbox = await _ok_run_outbox(db_pool, tmp_path, reading, ("pdf",))
+
+    assert stored == reading
+    first = MESSAGES["BR-F16"].split("\n")[0]
+    assert outbox == [(first.format(docs_desc="el PDF"), "BR-F16")]
+
+
+async def test_xml_over_confident_fields_adds_no_second_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """BR-F16: an XML that confirms only already confident fields leaves the second line out."""
+    _stored, outbox = await _ok_run_outbox(db_pool, tmp_path, _reading(), ("pdf", "xml"))
+
+    first = MESSAGES["BR-F16"].split("\n")[0]
+    assert outbox == [(first.format(docs_desc="el PDF y el XML"), "BR-F16")]

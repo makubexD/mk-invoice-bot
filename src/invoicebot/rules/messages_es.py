@@ -17,6 +17,11 @@ the placeholders spec 06 §1 describes in prose.
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 
+#: BR-F16's first line, sent on every ``ok`` fetch; ``{docs_desc}`` names the kinds found (D202).
+FOUND_LINE = "📄 Encontré {docs_desc}. Lo archivo…"
+#: BR-F16's second line, only when the XML cleared a field the summary's ⚠️ Revisa named (D202).
+CONFIRMED_LINE = "✅ El XML de SUNAT confirma: {fields_desc}"
+
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
     "BR-R02": "➡️ {flow.label}",
@@ -89,6 +94,7 @@ MESSAGES: dict[str, str] = {
     "BR-F10": (
         "ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos."
     ),
+    "BR-F16": f"{FOUND_LINE}\n{CONFIRMED_LINE}",
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F13": (
         "⏳ Comprobante #{id}: no pude descargar {docs_desc}.\n"

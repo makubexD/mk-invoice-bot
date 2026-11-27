@@ -11,6 +11,7 @@ A flow with no fetchers and no required documents goes straight to ``DELIVERING`
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
@@ -35,7 +36,9 @@ from invoicebot.config.models import (
     Flow,
     StoreDirectory,
 )
+from invoicebot.extract.confirm import confirmed_by_xml, confirmed_names
 from invoicebot.extract.fields import Reading
+from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.fetchers.base import (
     TECHNICAL_REASONS,
     Fetcher,
@@ -75,15 +78,20 @@ from invoicebot.pipeline.questions import (
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
+from invoicebot.pipeline.summary import review_fields
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BUTTON_VOID,
+    CONFIRMED_LINE,
     FETCH_WAITING,
+    FOUND_LINE,
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
     MESSAGES,
     UNKNOWN_ISSUER,
+    docs_desc,
+    fields_desc,
 )
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import taught_links
@@ -98,6 +106,7 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    save_reading,
     set_state,
 )
 
@@ -389,6 +398,7 @@ async def _record_result(
                     size=fetched.size,
                 ),
             )
+        await _found_notice(conn, inputs, reading, result)
         await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
         # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
@@ -409,6 +419,29 @@ async def _record_result(
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await run_after_delay(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
+
+
+async def _found_notice(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, result: FetchResult
+) -> None:
+    """Confirm the reading with the fetched XML and queue BR-F16 for every ``ok`` fetch (D202, BR-F16).
+
+    The XML was matched to the invoice by R-5.6, so a parse failure here is a bug and
+    raises. The second line names only the fields that the summary's ⚠️ Revisa would name.
+    """
+    invoice_id = inputs.job.invoice_id
+    text = FOUND_LINE.format(docs_desc=docs_desc(sorted({fetched.kind for fetched in result.files})))
+    xml_file = next((fetched for fetched in result.files if fetched.kind == "xml"), None)
+    if xml_file is not None:
+        xml_reading = parse_invoice_xml(await asyncio.to_thread(xml_file.path.read_bytes))
+        confirmed = confirmed_by_xml(reading, xml_reading)
+        await save_reading(conn, invoice_id, confirmed)
+        today = await owner_today(conn, inputs.cfg.owner.timezone)
+        doubtful = review_fields(reading, inputs.cfg.extraction, today)
+        cleared = [name for name in confirmed_names(reading, confirmed) if name in doubtful]
+        if cleared:
+            text += "\n" + CONFIRMED_LINE.format(fields_desc=fields_desc(cleared))
+    await _notify(conn, inputs.head, invoice_id, "BR-F16", text)
 
 
 def _is_first_attempt(attempts: Sequence[Attempt], fetcher: str, reasons: Collection[FetchReason]) -> bool:
