@@ -30,6 +30,7 @@ from invoicebot.config.models import Extraction, MediaLimits
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.padron import with_padron
+from invoicebot.extract.parties import with_own_buyer
 from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
@@ -88,6 +89,20 @@ class _Failure:
     reading: Reading | None
 
 
+@dataclass(frozen=True)
+class ExtractInputs:
+    """What the extract handler reads an invoice with (S3.11, D199).
+
+    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
+    ``own_rucs`` are the RUCs the bot files invoices for (``owner.ruc``, ``work.ruc``).
+    """
+
+    extraction: Extraction
+    media: MediaLimits
+    rules_path: Path
+    own_rucs: frozenset[str]
+
+
 class _HelperResult(BaseModel):
     """The one JSON object :mod:`invoicebot.extract` writes to stdout."""
 
@@ -102,15 +117,13 @@ class _HelperResult(BaseModel):
 
 def make_extract_handler(
     pool: Pool,
-    extraction_cfg: Extraction,
-    media: MediaLimits,
-    rules_path: Path,
+    inputs: ExtractInputs,
     gaps: GapContext,
     helper_prefix: Sequence[str],
 ) -> Handler:
     """Build the handler that reads an invoice's photo or PDF and queues its routing (S3.11).
 
-    ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
+    ``inputs`` carries the config the helper reads with and the bot's own RUCs, and
     ``gaps`` is who hears about an issuer whose invoices keep being unreadable (BR-E06).
     ``helper_prefix`` is prepended to the helper's argv; empty outside the image (D147).
     The handler acts only on an invoice in ``RECEIVED`` or ``EXTRACTING``. An invoice with no
@@ -121,7 +134,9 @@ def make_extract_handler(
     unsupported document type end the invoice with BR-E01, BR-E02 or BR-E05 and a message to
     the sender. A BR-E01 reading that still shows the issuer's 11-digit RUC counts one
     PARSER_MISS sighting for that issuer. A reading that passes them is stored and the invoice
-    moves to ``ROUTING`` with a ``route`` job. A helper that exits non-zero for any other
+    moves to ``ROUTING`` with a ``route`` job. A reading whose issuer is one of
+    ``inputs.own_rucs`` and whose buyer is not has the two swapped before any of this (D199).
+    A helper that exits non-zero for any other
     reason raises, so the queue retries and, after its limit, fails the invoice with BR-S03.
     """
 
@@ -144,7 +159,9 @@ def make_extract_handler(
                 return
 
         try:
-            result = await run_extract_helper(path, kind, extraction_cfg, media, rules_path, helper_prefix)
+            result = await run_extract_helper(
+                path, kind, inputs.extraction, inputs.media, inputs.rules_path, helper_prefix
+            )
         except TimeoutError:
             await _finish(
                 pool,
@@ -165,14 +182,14 @@ def make_extract_handler(
                     Addressee(invoice.origin_channel, invoice.profile_id),
                     kind,
                     TOO_MANY_PAGES,
-                    media,
+                    inputs.media,
                     expected=EXTRACTING,
                 ),
             )
             _log_outcome(job.invoice_id, result, RULE_MEDIA_REJECTED, started)
             return
 
-        rule_id, reading = _classify(result, extraction_cfg.supported_tipos)
+        rule_id, reading = _classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
         if rule_id is not None:
             await _finish(
                 pool, job.invoice_id, invoice, _Failure(rule_id, reading), gaps, expected=EXTRACTING
@@ -319,8 +336,14 @@ def _parse_result(stdout: bytes) -> _HelperResult:
         raise RuntimeError("extract helper printed malformed JSON") from None
 
 
-def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId | None, Reading | None]:
-    """Return the rule the reading breaks and the reading itself (R-2.13, BR-E02, BR-E05)."""
+def _classify(
+    result: _HelperResult, supported: Sequence[str], own_rucs: frozenset[str]
+) -> tuple[RuleId | None, Reading | None]:
+    """Return the rule the reading breaks and the reading itself (R-2.13, BR-E02, BR-E05).
+
+    An own RUC read as the issuer is swapped with the buyer first, so a partial BR-E01
+    reading names the store too (D199).
+    """
     if result.error is not None or result.reading is None:
         return RULE_UNREADABLE, None
     try:
@@ -328,6 +351,7 @@ def _classify(result: _HelperResult, supported: Sequence[str]) -> tuple[RuleId |
     except ValueError:
         # The helper's payload quotes values such as a RUC or an amount (R-9.16).
         raise RuntimeError("extract helper printed malformed JSON") from None
+    reading = with_own_buyer(reading, own_rucs)
     if reading.missing_required():
         # Keep the partial reading so BR-E06 can still see an issuer RUC it did read.
         return RULE_UNREADABLE, reading

@@ -26,7 +26,7 @@ from invoicebot.channels.fake import FakeChannel
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config as AppConfig
 from invoicebot.config.models import MediaMaxBytes, RoutingRule, StoreDirectory
-from invoicebot.pipeline.extract import ROUTE_STEP, make_extract_handler
+from invoicebot.pipeline.extract import ROUTE_STEP, ExtractInputs, make_extract_handler
 from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
@@ -262,9 +262,12 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
 
         await make_extract_handler(
             db_pool,
-            cfg.extraction,
-            cfg.limits.media,
-            PARSING_RULES_PATH,
+            ExtractInputs(
+                cfg.extraction,
+                cfg.limits.media,
+                PARSING_RULES_PATH,
+                frozenset({cfg.owner.ruc, cfg.work.ruc}),
+            ),
             GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             helper_prefix=(),
         )(_job(extract_job, invoice_id, EXTRACT_STEP))

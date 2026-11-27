@@ -255,7 +255,11 @@ def test_photo_first_read_that_used_the_budget_runs_no_retry(
 def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
     monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
 ) -> None:
-    """D198: ties keep the earlier reading, and the strip re-read gets the image that reading came from."""
+    """D198, D200: ties keep the earlier reading, filled from the others, and the strip gets its image.
+
+    The earlier reading's field comes first; ``serie`` and ``numero`` come from different reads, so
+    neither is filled.
+    """
     one, *others = sorted(REQUIRED)[:6]
     spy = _Spy(
         monkeypatch,
@@ -273,7 +277,7 @@ def test_photo_tied_reads_keep_the_earlier_and_re_read_the_strip_on_its_image(
     payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
 
     assert len(spy.calls) == 6
-    assert set(payload["reading"]["fields"]) == {one}
+    assert list(payload["reading"]["fields"]) == [one, "ruc_emisor", "tipo", "total"]
     assert [image.shape for image in strip_images] == [CANVAS]
 
 
@@ -337,6 +341,67 @@ def test_photo_block_mode_read_of_the_upscaled_photo_is_kept_without_cropping(
     assert spy.psms == [None, None, None, helper.RETRY_PSM]
     assert spy.calls[3][0] is spy.calls[2][0]
     assert spy.crops == 0
+
+
+def _without(*names: str) -> Reading:
+    """Return a reading with every required field except ``names``, each valued with its own name."""
+    return _fields(*(name for name in REQUIRED if name not in names))
+
+
+def test_photo_retries_fill_gaps_across_reads(monkeypatch: pytest.MonkeyPatch, rules: ParsingRules) -> None:
+    """D200: #41's shape: the date comes from the fourth read, the number from the first."""
+    first = _reading_with(
+        {
+            **_without("fecha_emision").fields,
+            "serie": Field(value="first-serie", source="ocr", confidence=0.9),
+        }
+    )
+    fourth = _reading_with(
+        {
+            **_without("serie", "numero").fields,
+            "fecha_emision": Field(value="fourth-fecha", source="ocr", confidence=0.9),
+        }
+    )
+    spy = _Spy(
+        monkeypatch,
+        [first, _fields("ruc_emisor", "tipo"), _fields("ruc_emisor", "tipo"), fourth],
+        crop_shape=SMALL,
+    )
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    fields = payload["reading"]["fields"]
+    assert set(fields) == set(REQUIRED)
+    assert fields["fecha_emision"]["value"] == "fourth-fecha"
+    assert fields["serie"]["value"] == "first-serie"
+    assert len(spy.calls) == 4
+    assert spy.crops == 0
+
+
+def test_photo_retries_stop_once_the_fills_leave_nothing_missing(
+    monkeypatch: pytest.MonkeyPatch, rules: ParsingRules
+) -> None:
+    """D200: two reads that each supply one gap complete the first read, so no fourth read runs."""
+    spy = _Spy(
+        monkeypatch,
+        [_without("fecha_emision", "total"), _fields("total"), _fields("fecha_emision")],
+        crop_shape=SMALL,
+    )
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(REQUIRED)
+    assert len(spy.calls) == 3
+
+
+def test_photo_field_no_read_has_stays_missing(monkeypatch: pytest.MonkeyPatch, rules: ParsingRules) -> None:
+    """D200: with no read having fecha_emision, the payload lacks only that field."""
+    spy = _Spy(monkeypatch, [_without("fecha_emision")] * 6, crop_shape=SMALL)
+
+    payload = helper._read_photo(b"photo", MAX_PX, OCR_CONFIG, rules)
+
+    assert set(payload["reading"]["fields"]) == set(REQUIRED) - {"fecha_emision"}
+    assert len(spy.calls) == 6
 
 
 @pytest.mark.parametrize(

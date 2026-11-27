@@ -1,16 +1,19 @@
-"""Merge the OCR and QR readings into the one reading the pipeline carries (D81).
+"""Combine readings of one document into the reading the pipeline carries.
 
-OCR is the primary reading; the QR confirms it. A field both readers give with the same value
-reaches full confidence, a field they disagree on keeps the OCR value and is flagged
-``conflict``, and a field only one reader gives keeps that reader's confidence and flag (R-2.6).
+Two jobs. ``merge`` joins the OCR and QR readings (D81): OCR is the primary reading and the QR
+confirms it. A field both readers give with the same value reaches full confidence, a field they
+disagree on keeps the OCR value and is flagged ``conflict``, and a field only one reader gives
+keeps that reader's confidence and flag (R-2.6). ``fill_missing`` fills a reading's missing
+required fields from other OCR reads of the same document (D200).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date
 
-from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, Field, Reading, finite_decimal
+from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, REQUIRED, Field, Reading, finite_decimal
 
 
 def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
@@ -78,3 +81,57 @@ def _iso_date(text: str) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+#: The invoice number's two parts, filled together or not at all (D200).
+_SERIE_NUMERO = ("serie", "numero")
+
+
+def fill_missing(kept: Reading, others: Sequence[Reading], qr_names: frozenset[str] = frozenset()) -> Reading:
+    """Return ``kept`` with its missing required fields taken from ``others`` (D200).
+
+    Each missing required field comes from the first reading in ``others`` that has it, except
+    ``serie`` and ``numero``, which move together: both are taken from the first reading with both
+    when neither ``kept`` nor the QR has either. A field named in ``qr_names`` (the QR reading's
+    fields) is not filled, so the QR value is the one the merge keeps. A ``ruc_emisor`` equal to
+    the buyer's ``num_doc_adq`` is skipped, and a filled ``ruc_emisor`` brings that read's
+    ``num_doc_adq`` when there is no buyer yet, so D199 can still swap them. Filled fields come
+    after the existing ones and the URLs stay ``kept``'s; with nothing to fill, ``kept`` itself is
+    returned.
+    """
+
+    present = {name for name in (*REQUIRED, "num_doc_adq") if kept.value(name) is not None} | qr_names
+    filled: dict[str, Field] = {}
+    for name in REQUIRED:
+        if name not in _SERIE_NUMERO and name not in present:
+            filled.update(_first_fill(name, kept, others, present))
+    if present.isdisjoint(_SERIE_NUMERO):
+        for other in others:
+            if other.value("serie") is not None and other.value("numero") is not None:
+                filled.update(serie=other.fields["serie"], numero=other.fields["numero"])
+                break
+    if not filled:
+        return kept
+    return replace(kept, fields={**kept.fields, **filled})
+
+
+def _first_fill(name: str, kept: Reading, others: Sequence[Reading], present: set[str]) -> dict[str, Field]:
+    """Return the fields the first fitting read in ``others`` gives for ``name`` (D200).
+
+    An issuer comes with that read's buyer when no buyer is ``present``, so D199 sees both.
+    """
+    for other in others:
+        if (field := _fillable(name, kept, other)) is None:
+            continue
+        if name == "ruc_emisor" and "num_doc_adq" not in present and other.value("num_doc_adq") is not None:
+            return {name: field, "num_doc_adq": other.fields["num_doc_adq"]}
+        return {name: field}
+    return {}
+
+
+def _fillable(name: str, kept: Reading, other: Reading) -> Field | None:
+    """Return ``other``'s field ``name`` when it may fill ``kept``'s gap, else ``None`` (D200)."""
+    value = other.value(name)
+    if value is None or (name == "ruc_emisor" and value == kept.value("num_doc_adq")):
+        return None
+    return other.fields[name]
