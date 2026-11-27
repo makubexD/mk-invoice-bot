@@ -111,7 +111,7 @@ Test: `uv run pytest -q tests/integration/test_pipeline_fetch.py`.
 Files: `config/stores/<pebsa-ruc>.yaml` (new), `config/portals/pebsa.yaml` (new).
 
 - The RUC and razón social come from the live `taught_links` row and the invoice's reading, never typed into the plan
-  or a commit message. Store file as `config/stores/20486765454.yaml` with `portal: pebsa` and `comercio: PEBSA`.
+  or a commit message. Store file as La Leña's store file with `portal: pebsa` and `comercio: PEBSA`.
 - `pebsa.yaml`: `url:` the approved taught link's base `https` URL (session id cleaned, as the probe stored it),
   `adapter: generic_form`, `captcha: image`, `status: todo`, and `notes:` listing the probe's fields (emisor, serie,
   correlativo, tipo, fecha, monto, image captcha) as `lalucha-ddns.yaml` does. No `fields` yet: 9t4 adds them.
