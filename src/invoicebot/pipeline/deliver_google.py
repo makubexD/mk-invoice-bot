@@ -293,8 +293,12 @@ async def _keep_chat_documents(
     try:
         files = await asyncio.to_thread(_chat_files, invoice, values, sinks, kinds)
         return await asyncio.to_thread(keep_documents, context.data_dir, invoice.job.invoice_id, files) > 0
-    except (OSError, ValueError):
-        logger.exception("could not keep the chat documents of invoice %s (D206)", invoice.job.invoice_id)
+    except (OSError, ValueError) as exc:  # the error's text may hold a file name with a legal name
+        logger.warning(
+            "could not keep the chat documents of invoice %s (D206)",
+            invoice.job.invoice_id,
+            extra={"error": type(exc).__name__},
+        )
         return False
 
 

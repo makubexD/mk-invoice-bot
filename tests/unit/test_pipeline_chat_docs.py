@@ -23,6 +23,15 @@ def test_kept_files_are_listed_with_mime_and_size(tmp_path: Path) -> None:
     assert all(Path(d.path).parent == tmp_path / DOCS_DIRECTORY / "7" for d in documents)
 
 
+def test_keeping_again_replaces_the_earlier_files(tmp_path: Path) -> None:
+    """D206: a second keep for the same invoice leaves only its own files, never an earlier attempt's."""
+    keep_documents(tmp_path, 5, [("old.pdf", b"old")])
+
+    keep_documents(tmp_path, 5, [("new.pdf", b"new")])
+
+    assert [d.filename for d in kept_documents(tmp_path, 5)] == ["new.pdf"]
+
+
 def test_nothing_kept_lists_nothing(tmp_path: Path) -> None:
     """D206: an invoice with no kept folder has no documents."""
     assert kept_documents(tmp_path, 9) == []

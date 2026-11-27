@@ -88,6 +88,7 @@ async def _seed(
         data_dir / "tmp" / str(invoice_id) / "photo.jpg",
         data_dir / "mail" / str(invoice_id) / "review.pdf",
         data_dir / "mail" / f"{invoice_id}.eml",
+        data_dir / "docs" / str(invoice_id) / "a.pdf",
     ]
     for path in files:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -115,7 +116,7 @@ async def test_dry_run_changes_nothing(
     lines = await forget(db_pool, tmp_path, drive, ForgetRequest(invoice_id, True, True, False))
     assert lines[0] == f"invoice {invoice_id} (F014-15828, DONE, flow work_microsoft)"
     assert f"drive: would delete {FOLDER}" in lines
-    assert "files: would remove 3" in lines
+    assert "files: would remove 4" in lines
     assert "database: would purge" in lines
     assert lines[-1] == "dry run: nothing changed"
     assert drive.deleted == []
@@ -153,12 +154,12 @@ async def test_apply_drive_deletes_folder_once(
 async def test_apply_drive_purge_removes_everything(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D196: apply with drive and purge deletes the folder, the host files and the rows."""
+    """D196, D206: apply with drive and purge deletes the folder, the host files and docs, and the rows."""
     invoice_id, _, files = await _seed(db_pool, tmp_path)
     drive = FakeDrive()
     lines = await forget(db_pool, tmp_path, drive, ForgetRequest(invoice_id, True, True, True))
     assert drive.deleted == [FOLDER]
-    assert "files: removed 3" in lines
+    assert "files: removed 4" in lines
     assert lines[-1] == "database: purged (files 1, invoices 1)"
     assert await _row(db_pool, invoice_id) is None
     assert not any(p.exists() for p in files)

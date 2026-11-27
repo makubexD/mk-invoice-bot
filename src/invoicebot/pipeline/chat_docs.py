@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -35,13 +36,16 @@ def _document(path: Path, size: int) -> Document:
 def keep_documents(data_dir: Path, invoice_id: int, files: Sequence[tuple[str, bytes]]) -> int:
     """Write each ``(file name, bytes)`` under the invoice's folder and return how many.
 
-    Every name is checked first, so a bad name raises ``ValueError`` and writes nothing.
+    Every name is checked first, so a bad name raises ``ValueError`` and writes nothing. A
+    folder left by an earlier attempt is replaced, so only these files are ever posted.
     """
     folder = _folder(data_dir, invoice_id)
     for name, content in files:
         _document(folder / name, len(content))
         if (folder / name).parent != folder:
             raise ValueError("a document name must be a plain file name")
+    if folder.is_dir() and not folder.is_symlink():
+        shutil.rmtree(folder)
     folder.mkdir(parents=True, exist_ok=True)
     for name, content in files:
         (folder / name).write_bytes(content)

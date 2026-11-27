@@ -298,7 +298,7 @@ podman exec "$APP" invoicebot invoice forget <id> --drive --purge --yes # delete
   history and its folder stay.
 - **`--drive`** deletes the invoice's OneDrive folder (`flow_data.folder_path`, `_Sent` included) through the bot's
   own Graph access. Flow A (Sheets) is not covered: delete its row and folder by hand.
-- **`--purge`** removes its host files (`tmp/<id>/`, `mail/<id>/`, `mail/<id>.eml`, its photos) and deletes its
+- **`--purge`** removes its host files (`tmp/<id>/`, `mail/<id>/`, `mail/<id>.eml`, `docs/<id>/`, its photos) and deletes its
   database rows.
 - The drive goes first, then the files, then the database. A drive failure stops before anything else changes, and
   a rerun is safe.
@@ -318,4 +318,4 @@ those files was kept at completion. The press posts each kept file as a document
    the invoice completes.
 3. **How long they stay.** Housekeeping removes a finished invoice's folder once its last state change is
    `ops.retention_days.chat_documents` days old (default 30). A press after that answers BR-D25 with the folder link.
-   `invoice forget --purge` (§13) leaves the folder; the next housekeeping run removes it, since its invoice is gone.
+   `invoice forget --purge` (§13) removes the folder at once.

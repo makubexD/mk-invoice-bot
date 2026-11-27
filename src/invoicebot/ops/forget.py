@@ -6,6 +6,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from invoicebot.pipeline.chat_docs import DOCS_DIRECTORY
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.sinks.base import Drive
 from invoicebot.sinks.mailer import MAIL_DIRECTORY
@@ -123,6 +124,7 @@ def _plan_files(data_dir: Path, target: ForgetTarget) -> _Files:
         data_dir / TMP_DIRECTORY / str(target.invoice_id),
         data_dir / MAIL_DIRECTORY / str(target.invoice_id),
         data_dir / MAIL_DIRECTORY / f"{target.invoice_id}.eml",
+        data_dir / DOCS_DIRECTORY / str(target.invoice_id),
     )
     candidates = [data_dir / p for p in target.local_paths]
     derived = tuple(p for p in derived_candidates if _is_inside(data_dir, p))
