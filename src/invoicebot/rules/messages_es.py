@@ -532,6 +532,8 @@ FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar 
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
 #: BR-F07 bullet: the store has no known portal to fetch from (S7.4).
 FETCH_NO_PORTAL_LINE = "• Portal del comercio: no lo conozco"
+#: BR-F07 and BR-F13 bullet: the issuer has an approved taught link no fetcher reads yet (D208).
+FETCH_TAUGHT_PORTAL_LINE = "• Portal del comercio: me lo enseñaste, pero todavía no sé consultarlo"
 #: BR-F07 bullet: the store's portal is configured but not implemented yet (S7.4).
 FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
 #: BR-F07 bullet: the fetcher failed for a technical reason or a timeout (S7.4).
@@ -544,6 +546,8 @@ SEARCHED_HEADER = "Ya busqué:"
 STORE_FALLBACK = "el comercio"
 #: BR-F07's ``{portal}`` when the store has no portal to name (BR-F07).
 STORE_FALLBACK_OF = "del comercio"
+#: BR-F07's ``{portal}`` for a known store: its comercio, never the portal's host (D208).
+STORE_OF = "de {comercio}"
 #: es-PE names of the fetchers, used in BR-F07's bullets.
 FETCHER_DESC: dict[str, str] = {
     "qr_url": "Enlace del QR",
@@ -596,6 +600,8 @@ REVIEW_CC_LINE = "CC: {cc}\n"
 #: The titles of a message's links: Telegram's URL buttons, the text line elsewhere (D194).
 LINK_TITLE_FOLDER = "📂 Abrir carpeta"
 LINK_TITLE_ROW = "📄 Abrir fila"
+#: The link BR-F07 and BR-F13 offer to a portal the bot cannot query (D208).
+LINK_OPEN_PORTAL = "🔗 Abrir el portal"
 #: BR-D06's two reply buttons (R-7.13).
 BUTTON_CONTINUE = "Continuar"
 BUTTON_CANCEL = "Cancelar"
