@@ -18,10 +18,15 @@ import asyncio
 import logging
 import sys
 
-from invoicebot.fetchers.base import FetchReason
+from playwright.async_api import Page
+
+from invoicebot.config.models import PortalCaptcha
+from invoicebot.fetchers.base import FetchReason, FetchResult
+from invoicebot.fetchers.browser.captcha_ask import ask_captcha
 from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import (
     BadRequest,
+    CaptchaChallenge,
     HelperOutput,
     HelperRequest,
     error_class_of,
@@ -68,10 +73,24 @@ async def _run_browser(request: HelperRequest, chromium_sandbox: bool) -> None:
     result, block = await browse(
         portal_options(portal),
         request.page_timeout_ms,
-        lambda page: fill_and_download(page, portal, request.invoice, request.out_dir, request.max_bytes),
+        lambda page: _fetch(page, request),
         chromium_sandbox=chromium_sandbox,
     )
+    if isinstance(result, CaptchaChallenge):
+        emit(HelperOutput(reason=FetchReason.CAPTCHA_ASKED, captcha=result))
+        return
     emit(output(guarded_result(result, block)))
+
+
+async def _fetch(page: Page, request: HelperRequest) -> FetchResult | CaptchaChallenge:
+    """Ask the sender's captcha, or fill and download for a portal without one (D209)."""
+    portal = request.portal
+    if not isinstance(portal.captcha, PortalCaptcha):
+        return await fill_and_download(page, portal, request.invoice, request.out_dir, request.max_bytes)
+    if request.resume is not None:
+        # shortcut: step 8 replaces this with the resume of the stopped form.
+        return FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key=portal.key)
+    return await ask_captcha(page, portal, request.invoice, request.out_dir)
 
 
 if __name__ == "__main__":

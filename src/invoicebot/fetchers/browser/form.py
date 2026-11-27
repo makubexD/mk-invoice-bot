@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import string
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -54,7 +55,7 @@ class FieldAction:
     prev: str | None = None
 
 
-class _Technical(Exception):
+class TechnicalFailure(Exception):
     """An expected technical failure inside one fetch attempt."""
 
 
@@ -103,19 +104,34 @@ async def fill_and_download(
     try:
         actions = render_fields(portal, invoice)
     except ValueError:
-        return _result(portal, FetchReason.TECHNICAL)
+        return empty_result(portal, FetchReason.TECHNICAL)
     saved: list[Path] = []
+    return await guard_attempt(
+        portal, saved, lambda: _fetch(page, portal, actions, out_dir, max_bytes, saved)
+    )
+
+
+async def guard_attempt[T](
+    portal: Portal,
+    saved: list[Path],
+    attempt: Callable[[], Awaitable[T]],
+) -> T | FetchResult:
+    """Run one attempt; an expected failure or Playwright error becomes a result (R-5.8).
+
+    A timeout gives ``timeout`` and every other failure ``technical``. Both remove the
+    files in ``saved`` first.
+    """
     try:
-        return await _fetch(page, portal, actions, out_dir, max_bytes, saved)
-    except _Technical:
+        return await attempt()
+    except TechnicalFailure:
         _remove(saved)
-        return _result(portal, FetchReason.TECHNICAL)
+        return empty_result(portal, FetchReason.TECHNICAL)
     except PlaywrightTimeoutError:
         _remove(saved)
-        return _result(portal, FetchReason.TIMEOUT)
+        return empty_result(portal, FetchReason.TIMEOUT)
     except PlaywrightError:
         _remove(saved)
-        return _result(portal, FetchReason.TECHNICAL)
+        return empty_result(portal, FetchReason.TECHNICAL)
 
 
 async def _fetch(
@@ -128,11 +144,11 @@ async def _fetch(
 ) -> FetchResult:
     """Go to the portal, fill the form, submit it, and save what it downloads."""
     if portal.url is None:
-        raise _Technical
+        raise TechnicalFailure
     await page.goto(portal.url)
     await fill_form(page, actions)
     if portal.submit is None:
-        raise _Technical
+        raise TechnicalFailure
     await page.locator(portal.submit).click()
     return await read_result(page, portal, out_dir, max_bytes, saved)
 
@@ -165,20 +181,20 @@ async def read_result(
         saved: Receives each path saved, so the caller can remove them on failure.
 
     Raises:
-        _Technical: the portal names no download, or a download is missing or too big.
+        TechnicalFailure: the portal names no download, or a download is missing or too big.
     """
     selectors = _download_selectors(portal)
     if not selectors:
-        raise _Technical
+        raise TechnicalFailure
     if await _wait_for_result(page, portal, selectors[0][1]):
-        return _result(portal, FetchReason.NOT_FOUND_YET)
+        return empty_result(portal, FetchReason.NOT_FOUND_YET)
     files = [
         await _download_one(page, kind, selector, out_dir, max_bytes, saved)
         for kind, selector in selectors
         if await page.locator(selector).count() > 0
     ]
     if len(files) != len(selectors):
-        raise _Technical
+        raise TechnicalFailure
     return FetchResult(reason=FetchReason.OK, files=tuple(files), portal_key=portal.key)
 
 
@@ -223,7 +239,7 @@ async def _perform(page: Page, action: FieldAction) -> None:
 async def _calendar(page: Page, action: FieldAction) -> None:
     """Open the date picker and step back until the invoice's day shows, then click it."""
     if action.prev is None:
-        raise _Technical
+        raise TechnicalFailure
     await page.locator(action.selector).click()
     cell = page.locator(action.value)
     for _ in range(_CALENDAR_STEPS):
@@ -231,7 +247,7 @@ async def _calendar(page: Page, action: FieldAction) -> None:
             await cell.click()
             return
         await page.locator(action.prev).click()
-    raise _Technical
+    raise TechnicalFailure
 
 
 async def _download_one(
@@ -259,7 +275,7 @@ async def _download_one(
     await download.save_as(path)
     size = path.stat().st_size
     if size > _limit(max_bytes, kind):
-        raise _Technical
+        raise TechnicalFailure
     return FetchedFile(kind=kind, path=path, size=size, sha256=file_sha256(path))
 
 
@@ -283,7 +299,7 @@ def _remove(paths: list[Path]) -> None:
         path.unlink(missing_ok=True)
 
 
-def _result(portal: Portal, reason: FetchReason) -> FetchResult:
+def empty_result(portal: Portal, reason: FetchReason) -> FetchResult:
     """A result with no files, always keyed to this portal."""
     return FetchResult(reason=reason, files=(), portal_key=portal.key)
 
