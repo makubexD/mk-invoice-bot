@@ -1,5 +1,6 @@
 """Integration tests for the forget operation (D196)."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,7 +10,10 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.ops.forget import ForgetRefused, ForgetRequest, forget
+from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.buttons import button_id
+from invoicebot.ops.forget import HELD_LINE, ForgetRefused, ForgetRequest, forget
+from invoicebot.pipeline.actions import SEND_ACTION, handle_press
 from invoicebot.sinks.onedrive import GraphError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -39,18 +43,37 @@ async def _seed(
     state: str = "DONE",
     folder: str | None = FOLDER,
     local_path: str | None = None,
+    batch_state: str | None = None,
 ) -> tuple[int, str, list[Path]]:
-    """Insert an invoice with a key, a file row and host files; return its id, key and files."""
+    """Insert an invoice with a key, a file row and host files; return its id, key and files.
+
+    ``batch_state`` also inserts a batch in that state and puts the invoice on it.
+    """
     key = f"20000000001-F014-{uuid4().hex}"
     async with pool.connection() as conn:
+        batch_id = None
+        if batch_state is not None:
+            cur = await conn.execute(
+                "INSERT INTO batches (flow_id, state) VALUES ('work_microsoft', %s) RETURNING id",
+                (batch_state,),
+            )
+            batch_row = await cur.fetchone()
+            assert batch_row is not None
+            batch_id = int(batch_row[0])
         cur = await conn.execute(
             """
             INSERT INTO invoices (profile_id, origin_channel, state, flow_id, serie, numero, natural_key,
-                                  flow_data_json)
-            VALUES (%s, 'whatsapp', %s, 'work_microsoft', 'F014', '15828', %s, %s)
+                                  flow_data_json, batch_id)
+            VALUES (%s, 'whatsapp', %s, 'work_microsoft', 'F014', '15828', %s, %s, %s)
             RETURNING id
             """,
-            (f"profile-{uuid4().hex}", state, key, Jsonb({"folder_path": folder} if folder else {})),
+            (
+                f"profile-{uuid4().hex}",
+                state,
+                key,
+                Jsonb({"folder_path": folder} if folder else {}),
+                batch_id,
+            ),
         )
         row = await cur.fetchone()
         assert row is not None
@@ -144,8 +167,8 @@ async def test_apply_drive_purge_removes_everything(
 async def test_non_terminal_invoice_is_refused(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D196: a BATCHED invoice is refused, naming /cancelar, and nothing changes."""
-    invoice_id, key, files = await _seed(db_pool, tmp_path, state="BATCHED")
+    """D196: an unfinished invoice is refused, naming /cancelar, and nothing changes."""
+    invoice_id, key, files = await _seed(db_pool, tmp_path, state="CONFIRMING")
     drive = FakeDrive()
     with pytest.raises(ForgetRefused, match="/cancelar"):
         await forget(db_pool, tmp_path, drive, ForgetRequest(invoice_id, True, True, True))
@@ -260,3 +283,127 @@ async def test_purge_of_a_paid_invoice_is_refused_but_release_works(
     assert all(p.exists() for p in files)
     await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
     assert await _row(db_pool, invoice_id) == (None, 1)
+
+
+async def _batch_count(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> int:
+    """Return how many batches the invoice's ``batch_id`` still points at (0 once it is gone)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM batches WHERE id = (SELECT batch_id FROM invoices WHERE id = %s)",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+async def test_held_dry_run_reports_and_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a dry run on a held invoice says it will be cancelled and changes nothing."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    lines = await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, False))
+    assert HELD_LINE in lines
+    assert lines[-1] == "dry run: nothing changed"
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("BATCHED",)
+
+
+async def test_held_apply_cancels_and_releases_key(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: --yes on a held invoice sets it CANCELLED with BR-D23 and releases its key."""
+    invoice_id, _, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    lines = await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    assert lines[-1] == "database: key released"
+    assert await _row(db_pool, invoice_id) == (None, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("CANCELLED", "BR-D23")
+
+
+async def test_held_purge_removes_rows_and_unused_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: --purge --yes on a held invoice deletes its rows and its now-unused batch."""
+    invoice_id, _, files = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT batch_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+        assert row is not None
+        batch_id = row[0]
+    await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, True, True))
+    assert await _row(db_pool, invoice_id) is None
+    assert not any(p.exists() for p in files)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM batches WHERE id = %s", (batch_id,))
+        assert await cur.fetchone() == (0,)
+
+
+async def test_batched_on_prepared_batch_is_still_refused(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a BATCHED invoice on a prepared batch is refused, as before, and nothing changes."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="prepared")
+    with pytest.raises(ForgetRefused, match="not held for review"):
+        await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    assert await _batch_count(db_pool, invoice_id) == 1
+
+
+async def test_held_race_to_delivering_is_refused_and_not_cancelled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a held invoice that [Enviar] moves to DELIVERING mid-delete is refused, not cancelled."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+
+    class RacingDrive(FakeDrive):
+        async def delete(self, path: str) -> None:
+            """Delete, then let [Enviar] win the race."""
+            await super().delete(path)
+            async with db_pool.connection() as conn:
+                await conn.execute("UPDATE invoices SET state = 'DELIVERING' WHERE id = %s", (invoice_id,))
+
+    with pytest.raises(ForgetRefused, match="not finished") as refused:
+        await forget(db_pool, tmp_path, RacingDrive(), ForgetRequest(invoice_id, True, False, True))
+    assert refused.value.done == (f"drive: deleted {FOLDER}",)
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("DELIVERING",)
+
+
+async def test_enviar_after_forgetting_a_held_invoice_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204, BR-S02: [Enviar] on a forgotten held invoice answers BR-S02 and queues no delivery."""
+    invoice_id, _, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT profile_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    press = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=row[0],
+        sender_role="owner",
+        button_id=button_id(invoice_id, SEND_ACTION),
+        received_at=datetime.now(UTC),
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        result = await handle_press(conn, press, frozenset())
+    assert result.invoice_id is None
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("CANCELLED",)
+        cur = await conn.execute(
+            "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = 'deliver'", (invoice_id,)
+        )
+        assert await cur.fetchone() == (0,)
+        cur = await conn.execute(
+            "SELECT payload_json->>'rule_id' FROM outbox WHERE invoice_id = %s", (invoice_id,)
+        )
+        assert await cur.fetchall() == [("BR-S02",)]
