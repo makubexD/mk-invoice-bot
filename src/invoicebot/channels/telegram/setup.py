@@ -6,7 +6,7 @@ imported by the running bot.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from invoicebot.channels.telegram.client import (
@@ -18,6 +18,7 @@ from invoicebot.config.models import Profile
 
 WEBHOOK_PATH = "/webhook/telegram"  # D186: the path the funnel and the API route share
 WEBHOOK_ACTIVE_STATUS = 409  # getUpdates is refused while a webhook is set
+STUCK_WAIT_S = 60  # D201: how long pending updates get to drain before the route counts as stuck
 
 
 class WebhookActive(Exception):
@@ -120,6 +121,21 @@ async def webhook_info(client: TelegramClient) -> WebhookInfo:
         last_error_date=_int_field(result.get("last_error_date")),
         last_error_message=last_error_message if isinstance(last_error_message, str) else None,
     )
+
+
+async def webhook_stuck(
+    client: TelegramClient,
+    wait_s: float,
+    sleep: Callable[[float], Awaitable[None]],
+) -> int:
+    """Return the number of updates Telegram still holds after the wait, 0 when the route delivers (D201).
+
+    No pending updates returns 0 at once; otherwise it waits ``wait_s`` and reads the count again.
+    """
+    if (await webhook_info(client)).pending == 0:
+        return 0
+    await sleep(wait_s)
+    return (await webhook_info(client)).pending
 
 
 async def delete_webhook(client: TelegramClient) -> None:

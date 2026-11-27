@@ -19,6 +19,7 @@ from invoicebot.channels.telegram.setup import (
     set_commands,
     set_webhook,
     webhook_info,
+    webhook_stuck,
 )
 from invoicebot.config.models import Profile
 
@@ -331,3 +332,55 @@ async def test_publish_menus_skips_an_admin_without_a_telegram_id() -> None:
     assert names == ["default"]
     assert len(requests) == 1
     assert json.loads(requests[0].content)["scope"] == {"type": "default"}
+
+
+def _pending_handler(counts: list[int], calls: list[str]) -> Handler:
+    """Answer each getWebhookInfo with the next pending count."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"ok": True, "result": {"pending_update_count": counts.pop(0)}})
+
+    return handler
+
+
+class _FakeSleep:
+    """Record the seconds each sleep was asked for, without waiting."""
+
+    def __init__(self) -> None:
+        self.waits: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.waits.append(seconds)
+
+
+async def test_webhook_stuck_with_nothing_pending_returns_zero_without_sleeping() -> None:
+    """D201: no pending updates means the route delivers; one call, no wait."""
+    calls: list[str] = []
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([0], calls)) as client:
+        assert await webhook_stuck(client, 60, sleep) == 0
+
+    assert len(calls) == 1
+    assert sleep.waits == []
+
+
+async def test_webhook_stuck_that_drains_after_the_wait_returns_zero() -> None:
+    """D201: pending 2 then 0 after one sleep of wait_s is not stuck."""
+    calls: list[str] = []
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([2, 0], calls)) as client:
+        assert await webhook_stuck(client, 60, sleep) == 0
+
+    assert len(calls) == 2
+    assert sleep.waits == [60]
+
+
+async def test_webhook_stuck_that_grows_returns_the_second_count() -> None:
+    """D201: pending 2 then 3 is stuck; the second count is returned."""
+    sleep = _FakeSleep()
+
+    async with _make_client(_pending_handler([2, 3], [])) as client:
+        assert await webhook_stuck(client, 60, sleep) == 3
