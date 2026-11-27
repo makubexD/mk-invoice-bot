@@ -181,7 +181,12 @@ def test_main_never_prints_a_password_from_a_bad_request(
     assert main() == 0
 
     captured = capsys.readouterr()
-    assert json.loads(captured.out) == {"reason": "technical", "files": [], "error_class": None}
+    assert json.loads(captured.out) == {
+        "reason": "technical",
+        "files": [],
+        "error_class": None,
+        "captcha": None,
+    }
     assert HIDDEN_TEXT not in captured.out
     assert HIDDEN_TEXT not in captured.err
 
@@ -206,7 +211,12 @@ def test_main_prints_the_failure_class_without_page_text(
     assert main() == 0
 
     printed = capsys.readouterr().out
-    assert json.loads(printed) == {"reason": "technical", "files": [], "error_class": "ValueError"}
+    assert json.loads(printed) == {
+        "reason": "technical",
+        "files": [],
+        "error_class": "ValueError",
+        "captcha": None,
+    }
     assert "secret page text" not in printed
 
 

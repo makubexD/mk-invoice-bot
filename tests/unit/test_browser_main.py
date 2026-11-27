@@ -32,7 +32,12 @@ def test_main_prints_the_failure_class_without_page_text(
     assert browser_main.main() == 0
 
     printed = capsys.readouterr().out
-    assert json.loads(printed) == {"reason": "technical", "files": [], "error_class": "ValueError"}
+    assert json.loads(printed) == {
+        "reason": "technical",
+        "files": [],
+        "error_class": "ValueError",
+        "captcha": None,
+    }
     assert "secret page text" not in printed
 
 
@@ -54,4 +59,5 @@ def test_main_prints_no_error_class_for_a_bad_request(
         "reason": "technical",
         "files": [],
         "error_class": None,
+        "captcha": None,
     }

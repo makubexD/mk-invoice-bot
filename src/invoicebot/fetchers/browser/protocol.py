@@ -9,9 +9,9 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 
 from invoicebot.config.models import MediaMaxBytes, Portal, SunatSolSite
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
@@ -37,6 +37,57 @@ def parse_helper_args(argv: Sequence[str]) -> bool:
     raise BadRequest
 
 
+#: Caps on the captcha form the helper hands to the bot (D209).
+MAX_CAPTCHA_FORM_BYTES = 256 * 1024
+MAX_CAPTCHA_FIELDS = 200
+MAX_CAPTCHA_NAME_CHARS = 128
+MAX_CAPTCHA_SUBMIT_VALUE_CHARS = 256
+#: The captcha PNG the sender sees is at most 64 KiB (D209).
+MAX_CAPTCHA_IMAGE_BYTES = 64 * 1024
+#: What the sender may type back: letters and digits, one to twelve (D209).
+CAPTCHA_ANSWER_PATTERN = r"^[A-Za-z0-9]{1,12}$"
+
+
+class CaptchaForm(BaseModel):
+    """The portal's captcha form, frozen at the moment the helper stopped (D209)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    page_url: str
+    action_url: str
+    fields: tuple[tuple[str, str], ...] = Field(max_length=MAX_CAPTCHA_FIELDS)
+    submit_name: str = Field(max_length=MAX_CAPTCHA_NAME_CHARS)
+    submit_value: str = Field(max_length=MAX_CAPTCHA_SUBMIT_VALUE_CHARS)
+
+    @model_validator(mode="after")
+    def _check_size(self) -> Self:
+        if any(len(name) > MAX_CAPTCHA_NAME_CHARS for name, _ in self.fields):
+            raise ValueError("a captcha form field name is too long")
+        if len(self.model_dump_json().encode()) > MAX_CAPTCHA_FORM_BYTES:
+            raise ValueError("the captcha form is too large")
+        return self
+
+
+class CaptchaChallenge(BaseModel):
+    """The captcha image the helper saved and the form it belongs to (D209)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    path: Path
+    size: int = Field(ge=1, le=MAX_CAPTCHA_IMAGE_BYTES)
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    form: CaptchaForm
+
+
+class CaptchaResume(BaseModel):
+    """The sender's answer and the form it fills, to resume a stopped fetch (D209)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    form: CaptchaForm
+    answer: str = Field(pattern=CAPTCHA_ANSWER_PATTERN)
+
+
 class HelperRequest(BaseModel):
     """The fetch the helper performs (D82)."""
 
@@ -47,6 +98,7 @@ class HelperRequest(BaseModel):
     out_dir: Path
     max_bytes: MediaMaxBytes
     page_timeout_ms: int = Field(gt=0)
+    resume: CaptchaResume | None = None
 
 
 class SolCredentialsIn(BaseModel):
@@ -110,3 +162,10 @@ class HelperOutput(BaseModel):
     reason: FetchReason
     files: tuple[HelperFile, ...] = ()
     error_class: str | None = Field(default=None, pattern=ERROR_CLASS_PATTERN)
+    captcha: CaptchaChallenge | None = None
+
+    @model_validator(mode="after")
+    def _captcha_iff_asked(self) -> Self:
+        if (self.captcha is not None) != (self.reason is FetchReason.CAPTCHA_ASKED):
+            raise ValueError("captcha is present exactly when the reason is captcha_asked")
+        return self
