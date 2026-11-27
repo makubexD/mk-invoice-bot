@@ -13,7 +13,8 @@ Decision this plan proposes (step 1), **D204 A held mail can be forgotten**:
 - `invoicebot invoice forget` also accepts a `BATCHED` invoice whose batch is in state `review` (its mail is waiting
   for [Enviar] and was never sent, D194). Any other `BATCHED` invoice is still refused.
 - On `--yes`, in the same transaction as the key release or the purge, such an invoice is first set `CANCELLED`, so
-  a later [Enviar] on its old BR-D19 finds no review to send (BR-D22) instead of sending.
+  a later [Enviar] on its old BR-D19 finds no review to send (BR-D22) instead of sending. The cancellation records
+  the new rule BR-D23 (owner decision 2026-11-27, added in step 2), which carries no chat message.
 - The dry run says it is held and will be cancelled.
 
 Out of scope: letting `/cancelar` in the chat cancel a held mail (the owner asked for the host cleanup; [Cancelar]
@@ -31,18 +32,22 @@ Test: `npx prettier --check docs/plan-mvp.md specs/05-open-questions.md`
 
 ## Step 2: the target knows when its mail is held `[worker]`
 
-Files: `src/invoicebot/store/forget.py`, `tests/integration/test_store_forget.py`.
+Files: `src/invoicebot/store/forget.py`, `tests/integration/test_store_forget.py`, `src/invoicebot/rules/catalog.py`,
+`specs/06-business-rules.md`.
 
+- `specs/06-business-rules.md`: add row BR-D23 after BR-D22: condition "`invoicebot invoice forget --yes` on an
+  invoice whose mail is held for review (D204)", result "`CANCELLED`", message "_(no message; the CLI reports it)_".
+  `catalog.py`: `"BR-D23": Rule("BR-D23", "CANCELLED", None)` after BR-D22.
 - `_LOCK_INVOICE` adds `b.state = 'review'` through `LEFT JOIN batches AS b ON b.id = invoices.batch_id` (the lock
-  stays `FOR UPDATE OF invoices`); `ForgetTarget` gets `held: bool` (true only for that case).
+  stays `FOR UPDATE OF invoices`); `ForgetTarget` gets `held: bool`, true only for a `BATCHED` invoice on a `review` batch.
 - New `async def cancel_held(conn, invoice_id) -> None`: sets the invoice `CANCELLED` through the store's existing
-  `set_state` (expected `BATCHED`); does not commit. Docstrings cite D204.
+  `set_state` (expected `BATCHED`, rule `BR-D23`); does not commit. Docstrings cite D204.
 
 Cases (docstrings start with `D204:`; real Postgres): a `BATCHED` invoice on a `review` batch locks with
 `held=True`; one on a `prepared` batch with `held=False`; a `DONE` invoice with `held=False`; `cancel_held` leaves
 the invoice `CANCELLED`.
 
-Test: `uv run pytest -q tests/integration/test_store_forget.py`
+Test: `uv run pytest -q tests/integration/test_store_forget.py tests/unit/test_rules_parity.py`
 
 ## Step 3: forget accepts and cancels a held invoice `[worker]`
 
