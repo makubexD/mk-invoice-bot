@@ -1,0 +1,7 @@
+[Unit]
+Description=Invoice bot Cloudflare quick tunnel (D146, D201)
+
+[Service]
+ExecStart=/usr/local/bin/cloudflared tunnel --no-autoupdate --metrics 127.0.0.1:20241 --url http://127.0.0.1:8080
+Restart=on-failure
+RestartSec=10
