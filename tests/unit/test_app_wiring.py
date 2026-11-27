@@ -14,6 +14,7 @@ import pyrage
 import pytest
 import yaml
 
+from invoicebot import app as app_module
 from invoicebot.app import (
     GITHUB_APP_PRIVATE_KEY,
     GOOGLE_CLIENT_SECRET,
@@ -780,3 +781,36 @@ async def test_single_microsoft_account_builds_flow_b_without_the_bot_mailbox(tm
         )
 
     assert handlers is not None
+
+
+@pytest.mark.parametrize(("smtp", "expected"), [(True, True), (False, False)])
+async def test_smtp_mode_is_wired_only_when_a_mailer_lists_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, smtp: bool, expected: bool
+) -> None:
+    """D205: a flow B mailer that lists ``smtp`` wires the mode; one without it wires none."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    flow = document["flows"]["work_microsoft"]
+    flow["email_inbox"]["account"] = "personal"
+    for sink in flow["sinks"]:
+        if sink["kind"] == "mailer":
+            sink["modes"] = ["graph", "smtp"] if smtp else ["graph"]
+    document["microsoft"]["accounts"] = {"personal": "personal@example.com"}
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(document), encoding="utf-8")
+    cfg = load_config(config_path)
+    identity_path = tmp_path / "identity.key"
+    identity_path.write_text(str(pyrage.x25519.Identity.generate()) + "\n", encoding="utf-8")
+    settings = Settings(age_identity_path=identity_path, data_dir=tmp_path)
+    seen: list[Any] = []
+    real = app_module.mail_modes
+
+    def _capture(*args: Any) -> Any:
+        seen.append(args[-1])
+        return real(*args)
+
+    monkeypatch.setattr(app_module, "mail_modes", _capture)
+
+    async with httpx.AsyncClient() as http:
+        _deliver_handlers(settings, cfg, cast(Any, None), http, cast(Any, None), _RecordingStore({}))
+
+    assert (seen[0] is not None) is expected

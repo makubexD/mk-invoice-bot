@@ -408,6 +408,9 @@ class Microsoft(BaseModel):
     timeout_s: float = Field(gt=0)
     #: D164: the mailbox each account name is pinned to, checked at sign-in and on every token.
     accounts: dict[str, str] = Field(default_factory=dict)
+    #: D205: the SMTP server the ``smtp`` mail mode sends through, with OAuth (SMTP.Send).
+    smtp_host: str = "smtp-mail.outlook.com"
+    smtp_port: int = Field(default=587, gt=0, lt=65536)
 
     @field_validator("accounts")
     @classmethod
@@ -581,7 +584,7 @@ class ExcelTemplateSink(BaseModel):
         return self
 
 
-type MailMode = Literal["dry_run", "graph", "inbox_rule", "laptop_outlook"]
+type MailMode = Literal["dry_run", "graph", "smtp", "inbox_rule", "laptop_outlook"]
 
 
 class MailerSink(BaseModel):
@@ -875,6 +878,8 @@ def _has_personal_onedrive_sink(flow: Flow) -> bool:
 PERSONAL_MICROSOFT_ACCOUNT = "personal"
 #: The mail mode and the inbox provider that go through Microsoft Graph (R-6.5, R-7.6).
 GRAPH_MODE = "graph"
+#: The mail mode that sends through SMTP with OAuth, from the sink's account (D205).
+SMTP_MODE = "smtp"
 #: The mail mode that sends through another account's mailbox to the owner's work address (D108).
 INBOX_RULE_MODE = "inbox_rule"
 #: An OneDrive target is this prefix plus the account name (R-7.1).
@@ -908,6 +913,16 @@ def mail_send_accounts(cfg: Config) -> set[str]:
             if INBOX_RULE_MODE in sink.modes:
                 accounts.add(sink.inbox_rule_account)
     return accounts
+
+
+def smtp_send_accounts(cfg: Config) -> set[str]:
+    """Return the accounts an ``smtp`` mailer sends from across every flow (D205)."""
+    return {
+        sink.account
+        for flow in cfg.flows.values()
+        for sink in flow.sinks
+        if isinstance(sink, MailerSink) and SMTP_MODE in sink.modes
+    }
 
 
 def mail_read_accounts(cfg: Config) -> set[str]:

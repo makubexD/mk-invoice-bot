@@ -549,12 +549,13 @@ The work tenant may never approve the bot's app. Everything signed in to the wor
   - **Agent log** `agent.log` beside the script (`-LogFile` overrides it), on the laptop only: a refused job is logged with its id and the reason, never its content.
 - **Mail modes and how each completes** (D108; the sink lists them in order, `config/example.yaml`). Delivery picks its path from a mapping keyed by `completion`:
 
-  | Mode             | Sends through                                           | `completion` | Batch becomes `sent` when                         | Done rule |
-  | ---------------- | ------------------------------------------------------- | ------------ | ------------------------------------------------- | --------- |
-  | `graph`          | Graph, account `personal`                               | `accepted`   | Graph accepts the message                         | BR-D10    |
-  | `inbox_rule`     | Graph, account `bot`, to `mail.owner_work_address` only | `accepted`   | Graph accepts the mail; the rule is trusted (D67) | BR-D13    |
-  | `laptop_outlook` | job file → laptop agent → Outlook classic               | `receipt`    | the agent's sent receipt arrives                  | BR-D10    |
-  | `dry_run`        | an `.eml` the owner sends                               | `tap`        | the sender taps [Ya lo envié]                     | BR-D08    |
+  | Mode             | Sends through                                                 | `completion` | Batch becomes `sent` when                         | Done rule |
+  | ---------------- | ------------------------------------------------------------- | ------------ | ------------------------------------------------- | --------- |
+  | `graph`          | Graph, account `personal`                                     | `accepted`   | Graph accepts the message                         | BR-D10    |
+  | `smtp`           | SMTP with OAuth (`AUTH XOAUTH2`), the sink's `account` (D205) | `accepted`   | the SMTP server accepts the message               | BR-D10    |
+  | `inbox_rule`     | Graph, account `bot`, to `mail.owner_work_address` only       | `accepted`   | Graph accepts the mail; the rule is trusted (D67) | BR-D13    |
+  | `laptop_outlook` | job file → laptop agent → Outlook classic                     | `receipt`    | the agent's sent receipt arrives                  | BR-D10    |
+  | `dry_run`        | an `.eml` the owner sends                                     | `tap`        | the sender taps [Ya lo envié]                     | BR-D08    |
 
 - **No double sending:** one automatic mode sends; another mode is used only when the sender asks (BR-D11).
 - **Why not a mobile app:** Android never lets one app use another app's sign-in, and Intune's app protection treats a custom app like WhatsApp when it hands files to Outlook or OneDrive. A native app would need the same tenant consent to send as the owner. The laptop is the one place where "already signed in" can be used (the OneDrive sync folder and Outlook classic's COM interface).

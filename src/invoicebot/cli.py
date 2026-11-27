@@ -63,6 +63,7 @@ from invoicebot.auth.providers import (
     microsoft_accounts,
     personal_drive,
     scopes_for,
+    smtp_scopes_for,
 )
 from invoicebot.channels.telegram.client import (
     TelegramClient,
@@ -300,6 +301,10 @@ def _auth_microsoft(
     provider = provider_factory(settings, cfg, account, scopes_for(cfg, account))
     try:
         provider.login_device_code(_show)
+        smtp_scopes = smtp_scopes_for(cfg, account)
+        if smtp_scopes:
+            sys.stdout.write("a second code adds sending through SMTP\n")
+            provider.add_scopes_device_code(_show, smtp_scopes)
     except AuthRequired as error:
         sys.stderr.write(f"sign-in failed: {error}\n")
         return 1

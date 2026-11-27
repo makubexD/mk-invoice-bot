@@ -14,7 +14,8 @@ import pytest
 
 from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.sinks.base import Attachment, OutgoingMail
-from invoicebot.sinks.mailer_graph import BODY_STYLE, MAX_INLINE_ATTACHMENT_BYTES, GraphMailer, html_body
+from invoicebot.sinks.mail_body import BODY_STYLE, html_body
+from invoicebot.sinks.mailer_graph import MAX_INLINE_ATTACHMENT_BYTES, GraphMailer
 from invoicebot.sinks.onedrive import (
     GRAPH_BASE_URL,
     NOT_SENT_STATUS,

@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
+from invoicebot.auth.msal_cache import TokenProvider
 from invoicebot.auth.providers import (
     build_token_provider,
     google_accounts,
@@ -52,6 +53,7 @@ from invoicebot.config.models import (
     OneDriveFolderSink,
     StoreDirectory,
     SunatSolSite,
+    smtp_send_accounts,
 )
 from invoicebot.extract.fields import Reading, reading_from_json
 from invoicebot.fetchers.base import Fetcher, FetchInvoice
@@ -130,8 +132,9 @@ from invoicebot.settings import Settings
 from invoicebot.sinks.base import Drive
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
-from invoicebot.sinks.mailer import DryRun, GraphSend, LaptopOutlook, mail_modes
+from invoicebot.sinks.mailer import DryRun, LaptopOutlook, MailerSend, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
+from invoicebot.sinks.mailer_smtp import SmtpEndpoint, SmtpMailer
 from invoicebot.sinks.onedrive import GraphDrive
 from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool, create_pool, ping
@@ -592,6 +595,22 @@ def _validation_handlers(
     return {VALIDATE_STEP: make_validate_handler(pool, http, secrets, cfg), SUNAT_RECHECK_STEP: recheck}
 
 
+def _smtp_send(cfg: Config, provider: TokenProvider) -> MailerSend | None:
+    """Build the ``smtp`` mode's sender when a flow lists it for the personal account (D205).
+
+    It shares the Graph mailer's provider; config load pins a mailbox for every account in
+    use (D164), so ``accounts`` always holds the sender address.
+    """
+    if MICROSOFT_ACCOUNT not in smtp_send_accounts(cfg):
+        return None
+    microsoft = cfg.microsoft
+    endpoint = SmtpEndpoint(microsoft.smtp_host, microsoft.smtp_port, microsoft.timeout_s)
+    smtp = SmtpMailer(
+        provider, endpoint, sender=microsoft.accounts[MICROSOFT_ACCOUNT], account=MICROSOFT_ACCOUNT
+    )
+    return MailerSend(smtp)
+
+
 def _deliver_handlers(
     settings: Settings,
     cfg: Config,
@@ -627,7 +646,9 @@ def _deliver_handlers(
         root, key = found
         laptop = LaptopOutlook(drive, root, key, partial(datetime.now, UTC))
         laptop_task = partial(_laptop_forever, pool, drive, root, key, cfg.mail, laptop_flows)
-    modes = mail_modes(cfg, DryRun(settings.data_dir), GraphSend(mailer), bot_mailer, laptop)
+    modes = mail_modes(
+        cfg, DryRun(settings.data_dir), MailerSend(mailer), bot_mailer, laptop, _smtp_send(cfg, provider)
+    )
     context = DeliverContext(
         pool, cfg, directory, drive, drive, modes, settings.data_dir, laptop_flows=laptop_flows
     )

@@ -25,6 +25,7 @@ OTHER_MAILBOX = "other@example.test"
 CLIENT_ID = "synthetic-client-id"
 #: MSAL adds offline_access, openid and profile itself and rejects them as input.
 SCOPES = ("Files.ReadWrite", "Mail.Send")
+SMTP_SCOPE = "https://outlook.office.com/SMTP.Send"
 SIGNED_IN_ACCESS = "synthetic-access-token"
 REFRESHED_ACCESS = "synthetic-refreshed-access-token"
 DEVICE_MESSAGE = "Use code ABCD-1234 at https://microsoft.com/devicelogin"
@@ -394,3 +395,64 @@ async def test_invalid_grant_requires_sign_in(tmp_path: Path) -> None:
         await provider.token()
 
     assert [post["grant_type"] for post in fake.token_posts()] == ["refresh_token"]
+
+
+async def test_token_for_asks_msal_silently_for_the_given_scope(tmp_path: Path) -> None:
+    """D205: token_for asks MSAL's silent call for the scope given and returns its token."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, _ = _provider(tmp_path, fake)
+    _login(provider)
+    posts_before = len(fake.token_posts())
+
+    token = await provider.token_for([SMTP_SCOPE])
+
+    # No cached token holds the SMTP scope, so MSAL redeems the refresh token for it.
+    refresh = fake.token_posts()[posts_before:]
+    assert [post["grant_type"] for post in refresh] == ["refresh_token"]
+    assert SMTP_SCOPE in refresh[0]["scope"].split()
+    assert token == REFRESHED_ACCESS
+
+
+async def test_token_still_asks_for_the_provider_scopes(tmp_path: Path) -> None:
+    """D205: token() keeps asking MSAL's silent call for the provider's own scopes."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, _ = _provider(tmp_path, fake)
+    _login(provider)
+    posts_before = len(fake.token_posts())
+
+    # The cached sign-in token covers exactly the provider's scopes, so no refresh is needed.
+    assert await provider.token() == SIGNED_IN_ACCESS
+    assert fake.token_posts()[posts_before:] == []
+
+
+async def test_add_scopes_device_code_keeps_the_account_and_saves_the_merged_cache(tmp_path: Path) -> None:
+    """D205: adding the SMTP scope keeps the cached account and saves the merged cache."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, identity, cache_path = _provider(tmp_path, fake)
+    _login(provider)
+    before = cache_path.read_bytes()
+    shown: list[str] = []
+
+    provider.add_scopes_device_code(shown.append, [SMTP_SCOPE])
+
+    assert shown == [DEVICE_MESSAGE]
+    assert cache_path.read_bytes() != before
+    saved = json.loads(pyrage.decrypt(cache_path.read_bytes(), [identity]).decode("utf-8"))
+    assert len(saved["Account"]) == 1
+    assert await provider.token() == SIGNED_IN_ACCESS
+
+
+async def test_add_scopes_device_code_as_another_mailbox_is_refused_and_leaves_the_file(
+    tmp_path: Path,
+) -> None:
+    """D205, D164: a flow signed into another mailbox raises WrongMailbox and the file is unchanged."""
+    fake = FakeHttpClient(ACCOUNT)
+    provider, _, cache_path = _provider(tmp_path, fake)
+    _login(provider)
+    before = cache_path.read_bytes()
+    fake.mailbox = OTHER_MAILBOX
+
+    with pytest.raises(WrongMailbox):
+        provider.add_scopes_device_code(lambda _message: None, [SMTP_SCOPE])
+
+    assert cache_path.read_bytes() == before
