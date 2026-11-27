@@ -59,8 +59,10 @@ class MailAttachment:
     size: int
 
 
-def _encoded_id(value: str) -> str:
+def encoded_graph_id(value: str) -> str:
     """Return ``value`` percent-encoded for a URL path; raise if it is not a Graph id.
+
+    Shared with ``sinks/mail_bounce.py`` (D207).
 
     Raises:
         GraphError: the value is not a plausible Graph id, so no request is sent.
@@ -111,7 +113,7 @@ def _message(item: object) -> MailMessage | None:
     received = item.get("receivedDateTime")
     if not isinstance(message_id, str) or not isinstance(received, str):
         raise GraphError(NOT_SENT_STATUS)
-    _encoded_id(message_id)
+    encoded_graph_id(message_id)
     try:
         received_at = datetime.fromisoformat(received)
     except ValueError as err:
@@ -139,7 +141,7 @@ def _attachment(item: object) -> MailAttachment | None:
         or not isinstance(size, int)
     ):
         raise GraphError(NOT_SENT_STATUS)
-    _encoded_id(attachment_id)
+    encoded_graph_id(attachment_id)
     return MailAttachment(id=attachment_id, name=name, size=size)
 
 
@@ -205,7 +207,7 @@ class GraphMailbox:
                 Graph answers with an error or a malformed body.
         """
         async with _mailbox_errors():
-            message_path = _encoded_id(message_id)
+            message_path = encoded_graph_id(message_id)
             token = await self._tokens.token()
             response = await self._http.get(
                 f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments",
@@ -226,8 +228,8 @@ class GraphMailbox:
             ValueError: the attachment is larger than ``max_bytes``.
         """
         async with _mailbox_errors():
-            message_path = _encoded_id(message_id)
-            attachment_path = _encoded_id(attachment_id)
+            message_path = encoded_graph_id(message_id)
+            attachment_path = encoded_graph_id(attachment_id)
             url = f"{GRAPH_BASE_URL}/me/messages/{message_path}/attachments/{attachment_path}/$value"
             token = await self._tokens.token()
             chunks: list[bytes] = []
