@@ -1570,3 +1570,33 @@ def test_zero_fetch_progress_delay_fails(tmp_path: Path) -> None:
 
     with pytest.raises(ValidationError, match="fetch_progress_after_s"):
         load_config(path)
+
+
+@pytest.mark.parametrize(
+    ("key", "default"),
+    [
+        ("bounce_check_after_s", 120),
+        ("bounce_check_every_s", 300),
+        ("bounce_watch_s", 1800),
+    ],
+)
+def test_bounce_watch_limit_defaults(tmp_path: Path, key: str, default: int) -> None:
+    """D207: a config without the bounce watch limits loads with the defaults."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["limits"][key]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert getattr(cfg.limits, key) == default
+
+
+@pytest.mark.parametrize("key", ["bounce_check_after_s", "bounce_check_every_s", "bounce_watch_s"])
+def test_zero_bounce_watch_limit_fails(tmp_path: Path, key: str) -> None:
+    """D207: each bounce watch limit must be positive."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["limits"][key] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match=key):
+        load_config(path)

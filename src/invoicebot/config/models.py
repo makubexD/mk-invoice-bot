@@ -874,6 +874,12 @@ class Limits(BaseModel):
     reprocess_min_interval_s: int = Field(default=600, ge=0)
     #: D206: one progress message goes out when a fetch runs longer than this.
     fetch_progress_after_s: int = Field(default=20, gt=0)
+    #: D207: the first inbox check after an smtp send waits this long.
+    bounce_check_after_s: int = Field(default=120, gt=0)
+    #: D207: seconds between two bounce checks of one send.
+    bounce_check_every_s: int = Field(default=300, gt=0)
+    #: D207: the bounce watch of one send ends this long after the send.
+    bounce_watch_s: int = Field(default=1800, gt=0)
 
 
 #: D93: a profile id is the natural key, so it cannot carry the ``|`` the key encodes.
