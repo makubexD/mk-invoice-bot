@@ -40,3 +40,19 @@ alternative) and three attachments as #45's bounced mail.
 
 D205: flow B sends through SMTP with OAuth (`smtp` mail mode); Graph keeps OneDrive and the inbox. Bounce reading and
 a draft fallback come in 9z11 `bounce-watch`; the chat changes in 9z12 `chat-tidy`.
+
+## Live run
+
+2026-11-27, image `3cfe2543c462` (9z10 merged), live flow B on `modes: [smtp]`.
+
+| Check                                          | Result                                                                          |
+| ---------------------------------------------- | ------------------------------------------------------------------------------- |
+| `auth-microsoft --account personal`            | pass: two device codes, the second for `SMTP.Send`; `resumed 0 invoice(s)`      |
+| Silent `SMTP.Send` token from the live cache   | pass                                                                            |
+| #47, the #45 receipt resent after `forget`     | filed, XML confirmed, mail sent through SMTP (deliver 14:19 UTC), BR-D10 posted |
+| Bounce in the personal mailbox, next 8 minutes | none; the only new item is the mail's copy in Sent                              |
+| The work inbox                                 | delivered with its three attachments (owner)                                    |
+
+Seen on the way, not caused by 9z10: the host lost its connection 13:44–13:53 UTC (Telegram `ConnectError`, two
+outbox rows waited and then went out), and at 14:15 the Cloudflare tunnel stalled until the webhook watch restarted it
+(D201), which held one photo two minutes. The resent photo first answered BR-E04 (a duplicate of #45), as it should.
