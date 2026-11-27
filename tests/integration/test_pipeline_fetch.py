@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, cast
+from urllib.parse import urlsplit
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -71,7 +72,7 @@ STORE_RUC = "20000000001"
 UNKNOWN_RUC = "20000000010"
 PORTAL_KEY = "synthetic_portal"
 PORTAL_URL = "https://portal.ejemplo.pe/consulta"
-TAUGHT_URL = "https://portal.ejemplo.pe/enseñado"
+TAUGHT_URL = "https://portal.ejemplo.pe/ensenado"
 FLOW = "work_microsoft"
 PROFILE = "yo"
 SERIE = "F001"
@@ -457,7 +458,11 @@ async def _outbox_links(conn: AsyncConnection[Any], profile_id: str) -> list[lis
 
 
 async def _teach_link(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], ruc_emisor: str, profile_id: str, state: str
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    ruc_emisor: str,
+    profile_id: str,
+    state: str,
+    url: str = TAUGHT_URL,
 ) -> None:
     """Store a taught link for ``ruc_emisor`` in ``state``."""
     async with pool.connection() as conn, conn.transaction():
@@ -466,7 +471,7 @@ async def _teach_link(
             INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
             VALUES (%s, %s, %s, %s)
             """,
-            (int(ruc_emisor), TAUGHT_URL, profile_id, state),
+            (int(ruc_emisor), url, profile_id, state),
         )
 
 
@@ -1314,14 +1319,7 @@ async def test_inbox_first_wait_hides_the_portal_button_with_a_taught_link(
     """D189, D190 (BR-F13): an issuer with a taught link gets [📎] only."""
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
-    async with db_pool.connection() as conn, conn.transaction():
-        await conn.execute(
-            """
-            INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
-            VALUES (%s, %s, %s, 'proposed')
-            """,
-            (int(UNKNOWN_RUC), "https://portal.example.pe/consulta", profile_id),
-        )
+    await _teach_link(db_pool, UNKNOWN_RUC, profile_id, "proposed", url="https://portal.example.pe/consulta")
 
     await _run_portal_then_inbox(db_pool, invoice_id, tmp_path)
 
@@ -1521,14 +1519,7 @@ async def test_teach_existing_taught_link_queues_f07_only(
     profile_id = f"fetch-{uuid4().hex}"
     invoice_id = await _fetching_invoice(db_pool, profile_id)
     await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
-    async with db_pool.connection() as conn, conn.transaction():
-        await conn.execute(
-            """
-            INSERT INTO taught_links (ruc_emisor, url, profile_id, state)
-            VALUES (%s, %s, %s, 'proposed')
-            """,
-            (int(STORE_RUC), "https://portal.example.pe/consulta", profile_id),
-        )
+    await _teach_link(db_pool, STORE_RUC, profile_id, "proposed", url="https://portal.example.pe/consulta")
 
     await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
 
@@ -1567,6 +1558,8 @@ async def test_captcha_portal_exhaustion_carries_the_open_portal_link(
     assert invoice == ("MANUAL_REQUIRED", "BR-F07", FLOW)
     assert [rule_id for _text, rule_id in outbox] == ["BR-F07"]
     assert links == [[{"title": LINK_OPEN_PORTAL, "url": PORTAL_URL}]]
+    assert MESSAGES["BR-F04"].format(portal="de Tienda Sintética") in outbox[0][0]
+    assert urlsplit(PORTAL_URL).hostname not in outbox[0][0]
 
 
 async def test_inbox_wait_with_an_approved_taught_link_carries_the_link(
@@ -1605,6 +1598,25 @@ async def test_no_portal_exhaustion_without_a_taught_link_carries_no_link(
     assert outbox[0][1] == "BR-F07"
     assert FETCH_NO_PORTAL_LINE in outbox[0][0]
     assert links[0] == []
+
+
+async def test_no_portal_exhaustion_with_an_approved_taught_link_carries_the_link(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D208, BR-F07: an issuer with no portal and an approved taught link gets the taught bullet and link."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id, reading=_reading_for(UNKNOWN_RUC))
+    await _seed_attempts(db_pool, invoice_id, "no_portal", 1)
+    await _teach_link(db_pool, UNKNOWN_RUC, profile_id, "approved")
+
+    await _run(db_pool, FakeFetcher(FetchReason.NO_PORTAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    assert outbox[0][1] == "BR-F07"
+    assert FETCH_TAUGHT_PORTAL_LINE in outbox[0][0]
+    assert links[0] == [{"title": LINK_OPEN_PORTAL, "url": TAUGHT_URL}]
 
 
 async def test_no_portal_exhaustion_with_a_proposed_taught_link_carries_no_link(

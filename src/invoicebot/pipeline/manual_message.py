@@ -1,9 +1,9 @@
 """Build BR-F07's text for an invoice no fetcher could complete (BR-F07, S7.4).
 
 The message names the fetchers that failed, in the order they were first tried, and
-says which documents the sender can supply by hand. Store facts (the comercio's name
-the comercio's name) come from the store directory; the flow decides whether SUNAT's
-"not applicable" line belongs in the list.
+says which documents the sender can supply by hand. Store facts (the comercio's name and
+whether a taught portal exists) come from the store directory and the caller; the flow
+decides whether SUNAT's "not applicable" line belongs in the list.
 """
 
 from __future__ import annotations

@@ -10,7 +10,7 @@ from invoicebot.pipeline.portal_link import open_portal_link
 from invoicebot.rules.messages_es import LINK_OPEN_PORTAL
 
 PORTAL_URL = "https://portal.ejemplo.pe/consulta"
-TAUGHT_URL = "https://portal.ejemplo.pe/enseñado"
+TAUGHT_URL = "https://portal.ejemplo.pe/ensenado"
 
 
 def _portal(url: str | None = PORTAL_URL, *, allow_http: bool = False) -> Portal:
@@ -39,6 +39,14 @@ def test_http_portal_url_gives_no_link() -> None:
     """D208: a portal URL that is not https gives no link."""
     portal = _portal("http://portal.ejemplo.pe/consulta", allow_http=True)
     assert open_portal_link([_attempt(FetchReason.CAPTCHA_UNSOLVABLE)], portal, None) is None
+
+
+def test_http_portal_url_falls_back_to_the_taught_url() -> None:
+    """D208: a portal URL that is not https gives way to the approved taught link."""
+    portal = _portal("http://portal.ejemplo.pe/consulta", allow_http=True)
+    link = open_portal_link([_attempt(FetchReason.CAPTCHA_UNSOLVABLE)], portal, TAUGHT_URL)
+    assert link is not None
+    assert link.url == TAUGHT_URL
 
 
 def test_no_portal_links_the_taught_url() -> None:
