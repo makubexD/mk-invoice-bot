@@ -58,3 +58,18 @@ multipart/report
 - BR-D26 tells the owner to tap ✏️ in the draft and send it.
 - Gate: both conditions hold (the report carries the bot's id, and the draft opens ready to send in one tap), so the
   plan goes on.
+
+## Live run
+
+2026-11-27, image `aa49e52d6441`, after the owner signed in again with `Mail.ReadWrite`
+(`invoicebot auth-microsoft --account personal`).
+
+| Check                                     | Result                                                                 |
+| ----------------------------------------- | ---------------------------------------------------------------------- |
+| #49 (flow B, La Leña) sent by SMTP        | 18:12:43 UTC; the owner received it in the work inbox                  |
+| `bounce_check` runs                       | 7, from 18:14:45 to 18:45:42, about every 5 min                        |
+| Result                                    | `bounce watch clear` for invoice 49 at 18:45:42, 33 min after the send |
+| `bounce watch blocked` or a BR-D26 notice | none                                                                   |
+
+The bounce path itself was proven by the probe above and is covered by the tests against its report; a forced bounce
+through the pipeline was not run (step 12).
