@@ -13,7 +13,7 @@ from email.message import EmailMessage
 from email.utils import formatdate
 
 from invoicebot.sinks.base import OutgoingMail
-from invoicebot.sinks.mailer_graph import html_body
+from invoicebot.sinks.mail_body import html_body
 
 #: Characters that would let a value inject or split a header.
 _HEADER_INJECTION_CHARS = ("\r", "\n")

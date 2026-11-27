@@ -11,7 +11,7 @@ import pytest
 
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.eml import build_eml
-from invoicebot.sinks.mailer_graph import html_body
+from invoicebot.sinks.mail_body import html_body
 
 PDF_BYTES = b"%PDF-1.4 synthetic"
 XLSX_BYTES = b"PK\x03\x04 synthetic"

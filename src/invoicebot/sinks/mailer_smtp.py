@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import smtplib
 import ssl
 from collections.abc import Callable, Sequence
@@ -21,6 +22,8 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.auth.providers import SMTP_SEND_SCOPE
 from invoicebot.sinks.base import OutgoingMail
 from invoicebot.sinks.eml import build_eml
+
+logger = logging.getLogger(__name__)
 
 #: The reply code of a successful AUTH.
 _AUTH_OK = 235
@@ -100,22 +103,46 @@ class SmtpMailer:
         await asyncio.to_thread(self._deliver, token, data, [*mail.to, *mail.cc])
 
     def _deliver(self, token: str, data: bytes, recipients: list[str]) -> None:
-        """Run one SMTP session: STARTTLS, XOAUTH2, send, quit (D205)."""
+        """Run one SMTP session: STARTTLS, XOAUTH2, send, then close (D205)."""
+        endpoint = self._endpoint
         try:
-            with self._connect(self._endpoint.host, self._endpoint.port, self._endpoint.timeout_s) as smtp:
-                smtp.ehlo()
-                smtp.starttls(context=ssl.create_default_context())
-                smtp.ehlo()
-                code, _ = smtp.docmd("AUTH", "XOAUTH2 " + _xoauth2(self._sender, token))
-                if code == _AUTH_REJECTED:
-                    raise AuthRequired(self._account)
-                if code != _AUTH_OK:
-                    raise SmtpError(code)
-                smtp.sendmail(self._sender, recipients, data)
+            smtp = self._connect(endpoint.host, endpoint.port, endpoint.timeout_s)
+        except OSError as exc:
+            raise SmtpError(0) from exc
+        try:
+            self._session(smtp, token, data, recipients)
+        finally:
+            _close(smtp)
+
+    def _session(self, smtp: smtplib.SMTP, token: str, data: bytes, recipients: list[str]) -> None:
+        """Authenticate and send; the server's text and the addresses never leave here (R-9.16)."""
+        try:
+            smtp.ehlo()
+            smtp.starttls(context=ssl.create_default_context())
+            smtp.ehlo()
+            code, _ = smtp.docmd("AUTH", "XOAUTH2 " + _xoauth2(self._sender, token))
+            if code == _AUTH_REJECTED:
+                raise AuthRequired(self._account)
+            if code != _AUTH_OK:
+                raise SmtpError(code)
+            refused = smtp.sendmail(self._sender, recipients, data)
         except smtplib.SMTPRecipientsRefused as exc:
             codes = [code for code, _ in exc.recipients.values()]
-            raise SmtpError(codes[0] if codes else 0) from exc
+            # `from None`: the cause would carry the addresses and the server's text into the log.
+            raise SmtpError(codes[0] if codes else 0) from None
         except smtplib.SMTPResponseException as exc:
-            raise SmtpError(exc.smtp_code) from exc
+            raise SmtpError(exc.smtp_code) from None
         except OSError as exc:  # includes SMTPServerDisconnected and TLS errors
             raise SmtpError(0) from exc
+        if refused:
+            # The others got the mail, so raising would send it twice on the retry; log the codes only.
+            codes = sorted(code for code, _ in refused.values())
+            logger.warning("smtp recipients refused", extra={"refused": len(refused), "codes": codes})
+
+
+def _close(smtp: smtplib.SMTP) -> None:
+    """Say QUIT, or drop the socket; the send's outcome is already decided (D205)."""
+    try:
+        smtp.quit()
+    except OSError:  # SMTPException is an OSError; a failed QUIT changes nothing that was sent
+        smtp.close()

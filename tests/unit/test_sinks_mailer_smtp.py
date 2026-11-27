@@ -5,9 +5,10 @@ from __future__ import annotations
 import base64
 import email
 import email.policy
+import logging
 import smtplib
 from collections.abc import Sequence
-from typing import Any, Self
+from typing import Any
 
 import pytest
 
@@ -43,6 +44,8 @@ class FakeSmtp:
     auth_code = 235
     refuse: dict[str, tuple[int, bytes]] | None = None
     connect_error: OSError | None = None
+    quit_error: OSError | None = None
+    partial: dict[str, tuple[int, bytes]] | None = None
 
     def __init__(self, host: str, port: int, timeout: float) -> None:
         if self.connect_error is not None:
@@ -52,11 +55,13 @@ class FakeSmtp:
 
     last: FakeSmtp
 
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *_exc: object) -> None:
+    def quit(self) -> None:
         self.calls.append(("quit", None))
+        if self.quit_error is not None:
+            raise self.quit_error
+
+    def close(self) -> None:
+        self.calls.append(("close", None))
 
     def ehlo(self) -> None:
         self.calls.append(("ehlo", None))
@@ -68,10 +73,11 @@ class FakeSmtp:
         self.calls.append(("docmd", (cmd, args)))
         return self.auth_code, b"reply"
 
-    def sendmail(self, sender: str, recipients: list[str], data: bytes) -> None:
+    def sendmail(self, sender: str, recipients: list[str], data: bytes) -> dict[str, tuple[int, bytes]]:
         self.calls.append(("sendmail", (sender, recipients, data)))
         if self.refuse is not None:
             raise smtplib.SMTPRecipientsRefused(self.refuse)
+        return self.partial or {}
 
     def names(self) -> list[str]:
         return [name for name, _ in self.calls]
@@ -145,6 +151,8 @@ async def test_refused_recipient_raises_smtp_error_without_address() -> None:
     assert info.value.code == 550
     assert "example.com" not in str(info.value)
     assert "no such user" not in str(info.value)
+    assert info.value.__cause__ is None
+    assert info.value.__suppress_context__
 
 
 async def test_connection_error_raises_smtp_error_zero() -> None:
@@ -174,3 +182,29 @@ async def test_token_is_in_no_exception_text() -> None:
             assert BEARER not in repr(exc)
             assert BEARER not in str(exc)
             exc = exc.__cause__
+
+
+async def test_failed_quit_after_the_send_still_counts_as_sent() -> None:
+    """D205: a QUIT answered with an error after the server took the mail does not fail the send."""
+    fake = _fake(quit_error=smtplib.SMTPResponseException(421, b"timeout"))
+    await _mailer(fake).send(MAIL)
+    assert fake.last.names()[-3:] == ["sendmail", "quit", "close"]
+
+
+async def test_failed_quit_after_auth_535_keeps_auth_required() -> None:
+    """D205: a failed QUIT after a 535 still asks for a new sign-in."""
+    fake = _fake(auth_code=535, quit_error=smtplib.SMTPServerDisconnected("gone"))
+    with pytest.raises(AuthRequired):
+        await _mailer(fake).send(MAIL)
+
+
+async def test_partly_refused_recipients_are_logged_without_addresses(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """D205: some recipients refused is not an error (the rest got it); the log holds codes, no address."""
+    fake = _fake(partial={"accounting@example.com": (452, b"4.5.3 too many")})
+    with caplog.at_level(logging.WARNING):
+        await _mailer(fake).send(MAIL)
+    [record] = [r for r in caplog.records if r.message == "smtp recipients refused"]
+    assert record.__dict__["codes"] == [452]
+    assert "example.com" not in repr(record.__dict__)
