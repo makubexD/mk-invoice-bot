@@ -7,7 +7,14 @@ from psycopg import AsyncConnection, sql
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.store.forget import NULLED_TABLES, PURGED_TABLES, lock_target, purge, release_key
+from invoicebot.store.forget import (
+    NULLED_TABLES,
+    PURGED_TABLES,
+    cancel_held,
+    lock_target,
+    purge,
+    release_key,
+)
 from invoicebot.store.invoices import claim_natural_key
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -16,26 +23,32 @@ KEY = "20000000001-F001-1"
 
 
 async def _insert_invoice(
-    conn: AsyncConnection[Any], *, batch_id: int | None = None, natural_key: str | None = None
+    conn: AsyncConnection[Any],
+    *,
+    batch_id: int | None = None,
+    natural_key: str | None = None,
+    state: str = "DONE",
 ) -> int:
-    """Insert a synthetic DONE invoice and return its id."""
+    """Insert a synthetic invoice (DONE unless ``state`` says otherwise) and return its id."""
     cur = await conn.execute(
         """
         INSERT INTO invoices (profile_id, origin_channel, state, flow_id, serie, numero, natural_key,
                               batch_id, flow_data_json)
-        VALUES ('profile-forget', 'whatsapp', 'DONE', 'flow-x', 'F001', '1', %s, %s, %s)
+        VALUES ('profile-forget', 'whatsapp', %s, 'flow-x', 'F001', '1', %s, %s, %s)
         RETURNING id
         """,
-        (natural_key, batch_id, Jsonb({"folder_path": "Facturas/2026-11/F001-1"})),
+        (state, natural_key, batch_id, Jsonb({"folder_path": "Facturas/2026-11/F001-1"})),
     )
     row = await cur.fetchone()
     assert row is not None
     return int(row[0])
 
 
-async def _insert_batch(conn: AsyncConnection[Any]) -> int:
-    """Insert a batch and return its id."""
-    cur = await conn.execute("INSERT INTO batches (flow_id, state) VALUES ('flow-x', 'open') RETURNING id")
+async def _insert_batch(conn: AsyncConnection[Any], state: str = "open") -> int:
+    """Insert a batch (``open`` unless ``state`` says otherwise) and return its id."""
+    cur = await conn.execute(
+        "INSERT INTO batches (flow_id, state) VALUES ('flow-x', %s) RETURNING id", (state,)
+    )
     row = await cur.fetchone()
     assert row is not None
     return int(row[0])
@@ -133,6 +146,7 @@ async def test_lock_target_returns_invoice_facts(db_pool: AsyncConnectionPool[As
             assert (target.serie, target.numero) == ("F001", "1")
             assert target.folder_path == "Facturas/2026-11/F001-1"
             assert target.paid is False
+            assert target.held is False
             assert target.local_paths == ("tmp/a.jpg",)
         finally:
             await conn.rollback()
@@ -237,3 +251,62 @@ async def test_every_foreign_key_to_invoices_is_covered(
         )
         referencing = {row[0] for row in await cur.fetchall()}
     assert referencing == set(PURGED_TABLES) | set(NULLED_TABLES)
+
+
+async def test_lock_target_batched_on_review_batch_is_held(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D204: a BATCHED invoice on a batch in state review locks as held."""
+    async with db_pool.connection() as conn:
+        try:
+            batch_id = await _insert_batch(conn, "review")
+            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state="BATCHED")
+            target = await lock_target(conn, invoice_id)
+            assert target is not None
+            assert target.held is True
+        finally:
+            await conn.rollback()
+
+
+async def test_lock_target_batched_on_prepared_batch_is_not_held(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D204: a BATCHED invoice on a batch in state prepared is not held."""
+    async with db_pool.connection() as conn:
+        try:
+            batch_id = await _insert_batch(conn, "prepared")
+            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state="BATCHED")
+            target = await lock_target(conn, invoice_id)
+            assert target is not None
+            assert target.held is False
+        finally:
+            await conn.rollback()
+
+
+async def test_lock_target_done_invoice_is_not_held(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D204: a DONE invoice is never held."""
+    async with db_pool.connection() as conn:
+        try:
+            invoice_id = await _insert_invoice(conn)
+            target = await lock_target(conn, invoice_id)
+            assert target is not None
+            assert target.held is False
+        finally:
+            await conn.rollback()
+
+
+async def test_cancel_held_leaves_invoice_cancelled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D204: cancel_held sets a BATCHED invoice CANCELLED with rule BR-D23."""
+    async with db_pool.connection() as conn:
+        try:
+            batch_id = await _insert_batch(conn, "review")
+            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state="BATCHED")
+            await cancel_held(conn, invoice_id)
+            cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+            assert await cur.fetchone() == ("CANCELLED", "BR-D23")
+        finally:
+            await conn.rollback()
