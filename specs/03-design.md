@@ -162,7 +162,7 @@ Side states and exits (each row names the rule that causes it):
 | CONFIRM_INVALID                             | The user continues / cancels                                                                                            | FETCHING_DOCS / CANCELLED                                                                            |
 | EXTRACT_FAILED, CONFIRMING, CONFIRM_INVALID | No answer within `question_timeout` (BR-S08)                                                                            | PENDING_USER (the waiting state is stored in `waiting_state`)                                        |
 | PENDING_USER                                | The user answers the pending question, directly or from `/pendientes`                                                   | the stored waiting state                                                                             |
-| WAITING_CAPTCHA                             | The user answers / times out (BR-F05)                                                                                   | FETCHING_DOCS (same fetcher / next fetcher)                                                          |
+| WAITING_CAPTCHA                             | The user answers / times out (BR-F05), D209                                                                             | FETCHING_DOCS (same fetcher / next fetcher)                                                          |
 | FETCHING_DOCS                               | A portal says the invoice doesn't exist yet (D65)                                                                       | stays FETCHING_DOCS ("esperando al portal"); retried on the portal's schedule, then the next fetcher |
 | FETCHING_DOCS                               | The chain ends in `manual` (BR-F07)                                                                                     | MANUAL_REQUIRED                                                                                      |
 | MANUAL_REQUIRED                             | The user sends the files (R-1.5) / a linked gap is fixed (R-11.9)                                                       | DELIVERING / FETCHING_DOCS                                                                           |
@@ -241,7 +241,7 @@ Terminal states: `DONE`, `CANCELLED`, `FAILED` (reprocessable).
 Interface: `async def fetch(inv: Invoice, ctx: FetchContext) -> FetchResult(ok, files[], reason)`. `reason` is an enum code, never response text. The `FetchContext` gives access to:
 
 - the browser, which runs in a helper process per fetch (D82),
-- `ask_user(image, prompt, timeout)` for captchas,
+- save and resume for image captchas (D209): the helper saves the form and exits, the sender's answer starts a new one,
 - the HTTP client, wrapped by the request guard (R-5.10),
 - **only the secrets the adapter declares** (R-9.10).
 
@@ -276,8 +276,8 @@ captcha: {
     kind: image,
     image: "#captchaImg",
     input: "#captcha",
-    solver: [tesseract, user],
-  } # none | image | recaptcha
+    solver: [user],
+  } # none | image | recaptcha; solver [user] only, no local OCR yet (D209)
 submit: "#btnBuscar"
 downloads: { xml: "a:has-text('XML')", pdf: "a:has-text('PDF')" }
 status: active # active | todo | broken

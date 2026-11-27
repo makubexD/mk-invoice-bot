@@ -401,8 +401,8 @@ Anything bigger gets split before work starts.
 |---|---|---|---|---|
 | S10.1 | Browser helper process per fetch (D82; replaces the BrowserPool), with resource blocking | M | Chromium is never resident while idle; peak RSS < budget (S0.9) | R-9.1 |
 | S10.2 | `generic_form` adapter driven by a `portals/<key>.yaml` file | M | Fills, submits and downloads using only YAML; ≥ 3 seeded portals pass `portal-test` | R-5.8 |
-| S10.3 | Captcha: local OCR attempts (D99: built when `lalucha-ddns` is completed) | S | ≤ 2 attempts, then hand over to S10.4 | R-5.3 |
-| S10.4 | Captcha: ask the user in chat (D99: built when `lalucha-ddns` is completed; until then any captcha → BR-F04) | M | Sends the image, waits up to 5 min, BR-F05 on timeout; reCAPTCHA → BR-F04 | R-5.3, R-5.4 |
+| S10.3 | Captcha: local OCR attempts (deferred, D209) | S | ≤ 2 attempts, then hand over to S10.4 | R-5.3 |
+| S10.4 | Captcha: ask the user in chat (built in 9t4, D209: save and resume) | M | Sends the image, waits up to `ask_user_timeout_s` (150 s shipped), BR-F05 on timeout; reCAPTCHA → BR-F04 | R-5.3, R-5.4 |
 | S10.5 | `invoicebot portal-test <key>` CLI | S | Runs one portal end to end against a sample; used in the runbook's "add a portal" steps | R-5.7 |
 | S10.6 | `sunat_sol` fetcher (flow A only; blocked by S0.4) | M | Secondary SOL user; selectors in a file; credentials typed only when `page.url` matches the hard-coded SUNAT origins (test with a look-alike page); skipped in flow B with BR-F01 | R-5.2, R-9.10, D134 |
 | S10.7 | Custom adapters for the 2–3 portals the generic adapter can't handle (D99: built with the first portal file that needs one) | M each | Each passes `portal-test` | R-5.8 |

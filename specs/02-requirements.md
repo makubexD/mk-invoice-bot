@@ -117,7 +117,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   - The list order is only the default for flow A (`qr_url, portal_registry, email_inbox, manual`; `sunat_sol` joins after S0.4, D153); each flow sets its own order.
   5. **`paid_api`:** _(optional, off by default)_ Factiliza, json.pe or similar.
   6. **`manual`:** always the last step.
-- **R-5.3 (M)** WHEN a portal shows an image captcha, THE SYSTEM SHALL first try local OCR (≤ 2 attempts). It SHALL then send the captcha image to the user and wait up to 5 min for a text reply.
+- **R-5.3 (M)** WHEN a portal shows an image captcha, THE SYSTEM SHALL first try local OCR (≤ 2 attempts; local OCR deferred, D209). It SHALL then send the captcha image to the user and wait up to 5 min for a text reply.
 - **R-5.4 (S)** WHEN a portal shows reCAPTCHA/hCaptcha, THE SYSTEM SHALL skip to the next fetcher, unless a paid solver is enabled.
 - **R-5.5 (M)** IF every fetcher fails, THE SYSTEM SHALL set `MANUAL_REQUIRED` and send BR-F07: which fetchers failed and why, one line each, using the BR-F catalog. It SHALL accept the files later (R-1.5).
 - **R-5.6 (M)** A fetched XML SHALL be checked to match the invoice: its RUC, serie, número and total equal the confirmed data.
