@@ -9,9 +9,9 @@ Status: waiting for the deploy of 9z8 and a live receipt.
 
 ## What to record
 
-| Check                                                                                       | Result |
-| ------------------------------------------------------------------------------------------- | ------ |
-| BR-F16 `📄 Encontré el PDF y el XML. Lo archivo…` arrives after the summary                 |        |
-| A summary with `⚠️ Revisa: serie, número` gets `✅ El XML de SUNAT confirma: serie, número` |        |
-| The mail goes out without [Enviar] (also 9z4 step 3's live HTML send)                       |        |
-| A receipt with a field the XML does not confirm is held with BR-D19 naming it               |        |
+| Check                                                                              | Result |
+| ---------------------------------------------------------------------------------- | ------ |
+| BR-F16 `📄 Encontré el PDF y el XML. Lo archivo…` arrives after the summary        |        |
+| A summary with `⚠️ Revisa: serie, número` gets `✅ El XML confirma: serie, número` |        |
+| The mail goes out without [Enviar] (also 9z4 step 3's live HTML send)              |        |
+| A receipt with a field the XML does not confirm is held with BR-D19 naming it      |        |

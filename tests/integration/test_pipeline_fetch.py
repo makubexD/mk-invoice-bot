@@ -1806,3 +1806,28 @@ async def test_xml_over_confident_fields_adds_no_second_line(
 
     first = MESSAGES["BR-F16"].split("\n")[0]
     assert outbox == [(first.format(docs_desc="el PDF y el XML"), "BR-F16")]
+
+
+async def test_mailbox_xml_does_not_confirm_the_reading(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D202: a mailbox XML is unsigned until BR-F10, so it is filed but the reading stays as read."""
+    profile = f"u-{uuid4().hex[:8]}"
+    reading = _with_serie_at(0.43)
+    invoice_id = await _fetching_invoice(db_pool, profile, reading=reading)
+    cfg = _config((EMAIL_INBOX_FETCHER,), required_docs=("pdf", "xml"))
+    handler = make_fetch_handler(
+        db_pool,
+        cfg,
+        _directory(),
+        {FLOW: {EMAIL_INBOX_FETCHER: FakeFetcher(FetchReason.OK, ("pdf", "xml"))}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id, 1))
+
+    async with db_pool.connection() as conn:
+        stored, outbox = await load_reading(conn, invoice_id), await _outbox(conn, profile)
+    assert stored == reading
+    first = MESSAGES["BR-F16"].split("\n")[0]
+    assert outbox == [(first.format(docs_desc="el PDF y el XML"), "BR-F16")]

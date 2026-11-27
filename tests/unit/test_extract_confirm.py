@@ -46,13 +46,12 @@ def test_amount_agrees_by_value() -> None:
 
 
 def test_disagreeing_field_keeps_the_reading() -> None:
-    """D202: a fecha_emision that differs stays as the photo read it."""
+    """D202: a fecha_emision that differs keeps the photo's value, flagged conflict."""
     result = confirmed_by_xml(
         _reading({"fecha_emision": _ocr("2026-10-27")}), _reading({"fecha_emision": _xml("2026-10-28")})
     )
 
-    assert result.fields["fecha_emision"] == _ocr("2026-10-27")
-    assert result.fields["fecha_emision"].source == "ocr"
+    assert result.fields["fecha_emision"] == _ocr("2026-10-27", flag="conflict")
 
 
 def test_missing_field_is_added_from_the_xml() -> None:
@@ -88,3 +87,20 @@ def test_confirmed_names_lists_only_fields_that_changed_to_xml() -> None:
     xml = _reading({"ruc_emisor": _xml(RUC), "serie": _xml("F001")})
 
     assert confirmed_names(before, confirmed_by_xml(before, xml)) == ("serie",)
+
+
+def test_empty_field_is_filled_from_the_xml() -> None:
+    """D202: a field the photo left empty counts as missing, so the XML fills it."""
+    result = confirmed_by_xml(
+        _reading({"fecha_emision": _ocr("")}), _reading({"fecha_emision": _xml("2026-10-27")})
+    )
+
+    assert result.fields["fecha_emision"] == _xml("2026-10-27")
+
+
+def test_confirmed_names_include_a_field_the_xml_filled() -> None:
+    """D202, BR-F16: a field absent from the photo and filled by the XML is named."""
+    before = _reading({"serie": _ocr("F001")})
+    after = confirmed_by_xml(before, _reading({"serie": _xml("F001"), "fecha_emision": _xml("2026-10-27")}))
+
+    assert confirmed_names(before, after) == ("serie", "fecha_emision")

@@ -199,8 +199,8 @@ def matches_invoice(xml: Reading, invoice: Reading) -> bool:
     xml_serie = xml.value("serie")
     if xml_serie is None or xml_serie != invoice.value("serie"):
         return False
-    xml_number = _integer(xml.value("numero"))
-    invoice_number = _integer(invoice.value("numero"))
+    xml_number = integer(xml.value("numero"))
+    invoice_number = integer(invoice.value("numero"))
     if xml_number is None or invoice_number is None or xml_number != invoice_number:
         return False
     xml_total = xml.amount("total")
@@ -318,7 +318,7 @@ def _attribute(element: etree._Element, name: str) -> str | None:
     return value.strip() or None
 
 
-def _integer(value: str | None) -> int | None:
+def integer(value: str | None) -> int | None:
     """Return ``value`` as an integer, or ``None`` when it is absent or not a number.
 
     Only ASCII digits count: ``int`` accepts underscores and Unicode digits, which would

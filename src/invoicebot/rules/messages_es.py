@@ -20,7 +20,7 @@ from datetime import date, datetime, timedelta
 #: BR-F16's first line, sent on every ``ok`` fetch; ``{docs_desc}`` names the kinds found (D202).
 FOUND_LINE = "📄 Encontré {docs_desc}. Lo archivo…"
 #: BR-F16's second line, only when the XML cleared a field the summary's ⚠️ Revisa named (D202).
-CONFIRMED_LINE = "✅ El XML de SUNAT confirma: {fields_desc}"
+CONFIRMED_LINE = "✅ El XML confirma: {fields_desc}"
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",

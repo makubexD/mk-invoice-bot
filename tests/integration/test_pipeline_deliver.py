@@ -1931,8 +1931,32 @@ async def test_if_doubtful_sends_a_held_mail_after_enviar(
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
     assert len(mode.calls) == 1
     assert invoice == ("DONE", "BR-D10")
+    assert flow_data["reviewed"] is False
+
+
+async def test_if_doubtful_holds_a_mail_missing_a_required_field(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: send if_doubtful holds a mail whose reading lacks a required field, even with no doubtful one."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="if_doubtful")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    reading = _reading()
+    fields = {name: field for name, field in reading.fields.items() if name != "tipo"}
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, Reading(fields=fields, document_url=None))
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert mode.calls == []
+    assert outbox[-1][1] == "BR-D19"
+    assert outbox[-1][0].split("\n")[1].startswith("⚠️ Revisa: ")
 
 
 async def test_review_still_holds_a_confident_mail_without_a_revisa_line(
