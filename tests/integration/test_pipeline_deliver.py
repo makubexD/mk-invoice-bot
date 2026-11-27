@@ -49,6 +49,7 @@ from invoicebot.sinks.onedrive import FolderMissing, GraphError, GraphTransient
 from invoicebot.store.flow_b import (
     get_batch_state,
     load_flow_data,
+    load_sent_batch,
     merge_flow_data,
     open_batch,
     set_batch_state,
@@ -173,9 +174,23 @@ class FakeGraphMode:
     def __init__(self) -> None:
         self.calls: list[tuple[int, OutgoingMail]] = []
 
-    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> None:
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> str | None:
         """Record the send; an automatic mode sends once per call (D89)."""
         self.calls.append((invoice_id, mail))
+        return None
+
+
+class SmtpLikeMode(FakeGraphMode):
+    """An accepted mode that, like smtp, returns the sent mail's Message-ID (D207)."""
+
+    def __init__(self, message_id: str | None) -> None:
+        super().__init__()
+        self._message_id = message_id
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, _folder_path: str) -> str | None:
+        """Record the send and return the installed Message-ID."""
+        await super().deliver(invoice_id, mail, _folder_path)
+        return self._message_id
 
 
 class FakeInboxRuleMode(FakeGraphMode):
@@ -1142,6 +1157,51 @@ async def test_a_sent_graph_delivery_leaves_one_folder_status_job(
         jobs = await _jobs(conn, invoice_id)
     assert [call[0] for call in mode.calls] == [invoice_id]
     assert jobs == ["folder_status"]
+
+
+async def test_an_smtp_like_send_stores_its_ref_and_queues_a_bounce_check(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D207: a Message-ID from the send is stored on the sent batch and one bounce_check job follows."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, SmtpLikeMode("<m1@example.com>"), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        batch = await load_sent_batch(conn, invoice_id)
+        cur = await conn.execute(
+            "SELECT extract(epoch FROM run_after - now()) FROM jobs WHERE invoice_id = %s AND step = %s",
+            (invoice_id, "bounce_check"),
+        )
+        delays = [float(delay) for (delay,) in await cur.fetchall()]
+    assert batch is not None
+    assert (batch.state, batch.email_ref) == ("sent", "<m1@example.com>")
+    assert len(delays) == 1
+    assert 100 <= delays[0] <= 140
+
+
+async def test_a_send_without_a_message_id_queues_no_bounce_check(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D207: an accepted mode that returns no Message-ID leaves no bounce_check job."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, SmtpLikeMode(None), mode_name="graph")(
+        _job(invoice_id)
+    )
+
+    async with db_pool.connection() as conn:
+        jobs = await _jobs(conn, invoice_id)
+        batch = await load_sent_batch(conn, invoice_id)
+    assert "bounce_check" not in jobs
+    assert batch is not None
+    assert batch.email_ref is None
 
 
 async def test_a_failed_send_leaves_no_folder_status_job(

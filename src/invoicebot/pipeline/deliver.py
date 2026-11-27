@@ -103,11 +103,16 @@ from invoicebot.pipeline.review import (
     review_text,
     write_review_files,
 )
+from invoicebot.pipeline.steps import (
+    BOUNCE_CHECK_STEP,
+    FOLDER_STATUS_STEP,
+    RESEND_EML_STEP,
+    RESEND_LAPTOP_STEP,
+)
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
-from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
 from invoicebot.pipeline.summary import review_fields
 from invoicebot.pipeline.values import invoice_values
-from invoicebot.queue.jobs import Job, enqueue
+from invoicebot.queue.jobs import Job, db_now_plus, enqueue
 from invoicebot.queue.outbox import has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
@@ -137,6 +142,7 @@ from invoicebot.store.flow_b import (
     load_flow_data,
     merge_flow_data,
     open_batch,
+    set_batch_email_ref,
     set_batch_state,
     take_photo_paths,
 )
@@ -845,6 +851,15 @@ def _draft_reply(delivery: _Delivery) -> tuple[str, Button]:
     return text, button
 
 
+async def _watch_for_bounce(
+    conn: AsyncConnection[Any], context: DeliverContext, invoice_id: int, batch_id: int, message_id: str
+) -> None:
+    """Store the sent mail's Message-ID and queue its first bounce check (D207)."""
+    await set_batch_email_ref(conn, batch_id, message_id)
+    after = await db_now_plus(conn, seconds=context.cfg.limits.bounce_check_after_s)
+    await enqueue(conn, invoice_id, BOUNCE_CHECK_STEP, after)
+
+
 async def _automatic(
     context: DeliverContext,
     delivery: _Delivery,
@@ -860,7 +875,9 @@ async def _automatic(
     error during the send propagates and leaves the batch ``sending``, so the retry treats it
     as a crashed send: the batch fails, BR-D03 reports it, and the mail is never resent (D89).
     A batch the send set ``sent`` also enqueues the ``folder_status`` job (R-7.11), in the
-    same transaction as that state change.
+    same transaction as that state change. When the mode returned the mail's Message-ID (an
+    smtp send), that transaction also stores it on the batch and enqueues the
+    ``bounce_check`` job after ``limits.bounce_check_after_s`` (D207).
     Before the send (filing, Excel upload) a transient error is simply retried.
     """
     # Kept before the send, so nothing but the commit lies between the mail going out and
@@ -871,7 +888,7 @@ async def _automatic(
         return
 
     try:
-        await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
+        message_id = await mode.deliver(delivery.invoice_id, delivery.mail, delivery.folder_path)
     except GraphError:
         await _send_failed(context, delivery, prepared, batch_id)
         return
@@ -885,6 +902,8 @@ async def _automatic(
     async with context.pool.connection() as conn, conn.transaction():
         await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
         await enqueue(conn, delivery.invoice_id, FOLDER_STATUS_STEP)
+        if isinstance(message_id, str):
+            await _watch_for_bounce(conn, context, delivery.invoice_id, batch_id, message_id)
         if not await _still_delivering(conn, delivery.invoice_id):
             return
         await set_state(conn, delivery.invoice_id, DONE, rule_id=mode.done_rule)
