@@ -252,7 +252,7 @@ retrieval:
   portal_timeout_s: 120                 # one portal fetch, browser helper included; OCR has its own timeout
   captcha:
     local_ocr_attempts: 2
-    ask_user_timeout_s: 300
+    ask_user_timeout_s: 150             # D209: under PEBSA's captcha life of 180-240 s (specs/spikes/portal-guide.md)
     ask_user_tries: 2                   # how many times the sender may retype a wrong captcha (D209)
     paid_solver: { enabled: false, provider: 2captcha }   # secret: TWOCAPTCHA_KEY
   paid_api: { enabled: false, provider: factiliza }       # never receives SOL credentials (R-9.10)

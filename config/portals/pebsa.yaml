@@ -1,0 +1,24 @@
+url: "https://sy.ecomprobantes.pe/pebsa/formularios/frmAutentificacionEstandar.aspx"
+adapter: generic_form
+captcha:
+  image: "img[src*='CaptchaImage.axd']"
+  input: "#ctl00_bodyContentPlace_txtCaptcha"
+  solver: [user]
+status: active
+# The site's own name for each SUNAT tipo, shown in its tipo dropdown.
+tipo_labels: { "01": "FACTURA ELECTRONICA", "03": "BOLETA ELECTRONICA" }
+fields:
+  # The emisor dropdown has one option.
+  "#ctl00_bodyContentPlace_cboEmisor": { select: "PEBSA COMBUSTIBLES" }
+  "#ctl00_bodyContentPlace_txtSerie": "{serie}"
+  "#ctl00_bodyContentPlace_txtCorrelativo": "{numero}"
+  "#ctl00_bodyContentPlace_cboTipoDoc": { select: "{tipo_label}" }
+  "#ctl00_bodyContentPlace_txtFecha": "{fecha:%Y-%m-%d}"
+  "#ctl00_bodyContentPlace_txtMonto": "{total:.2f}"
+submit: "#ctl00_bodyContentPlace_btnBuscar"
+# Not yet seen on a real result page: the live check (plan step 17) confirms or fixes them.
+downloads:
+  pdf: "a:has-text('PDF'), input[value*='PDF']"
+  xml: "a:has-text('XML'), input[value*='XML']"
+not_found: "td:has-text('No hay registros')"
+notes: "D209 and specs/spikes/portal-guide.md: the Convivencia form never answers, so the url is the standard form; txtFecha takes yyyy-mm-dd; the captcha (MSCaptcha) lives 180-240 s, so ask_user_timeout_s stays at 150. A wrong answer shows 'Texto no coincide con la imagen.' with a new captcha. Same software as lalucha-ddns."
