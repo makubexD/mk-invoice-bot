@@ -64,6 +64,10 @@ class PinnedAccount:
     mailbox: str
 
 
+def _without_reserved(scopes: Sequence[str]) -> list[str]:
+    return [scope for scope in scopes if scope not in _MSAL_RESERVED_SCOPES]
+
+
 class TokenProvider:
     """One account's encrypted MSAL cache and the tokens it yields (D85).
 
@@ -83,7 +87,7 @@ class TokenProvider:
         self._client_id = client_id
         self._account = account.name
         self._mailbox = normalize_email(account.mailbox)
-        self._scopes = [scope for scope in scopes if scope not in _MSAL_RESERVED_SCOPES]
+        self._scopes = _without_reserved(scopes)
         self._cache_path = Path(cache_path)
         self._identity = identity
         self._http_client = http_client
@@ -98,7 +102,18 @@ class TokenProvider:
             AuthRequired: no cache, an unreadable cache, an account that is not the
                 pinned mailbox, or the refresh failed.
         """
-        return await asyncio.to_thread(self._token)
+        return await self.token_for(self._scopes)
+
+    async def token_for(self, scopes: Sequence[str]) -> str:
+        """Return a current access token for ``scopes`` from the same cache (D205).
+
+        The SMTP token for flow B mail comes from the account's one MSAL cache,
+        through the same silent path as :meth:`token`.
+
+        Raises:
+            AuthRequired: as :meth:`token`, or the cache holds no token for ``scopes``.
+        """
+        return await asyncio.to_thread(self._token_for, _without_reserved(scopes))
 
     def login_device_code(self, show: Callable[[str], None]) -> None:
         """Sign the account in with the device-code flow and save the cache.
@@ -116,10 +131,28 @@ class TokenProvider:
                 nothing is saved, so an existing cache is left as it was.
         """
         # A fresh cache: a second sign-in must not leave two accounts behind, since
-        # `_token` accepts exactly one.
-        cache = msal.SerializableTokenCache()
+        # `_token_for` accepts exactly one.
+        self._device_flow(msal.SerializableTokenCache(), self._scopes, show)
+
+    def add_scopes_device_code(self, show: Callable[[str], None], scopes: Sequence[str]) -> None:
+        """Consent to more scopes with a device-code flow, keeping the cached account (D205).
+
+        Unlike :meth:`login_device_code` this starts from the existing cache, so the
+        SMTP scope joins the Graph tokens already there.
+
+        Raises:
+            AuthRequired: the cache is unreadable, or the flow could not start or failed.
+            WrongMailbox: the id token names another mailbox than the pinned one;
+                nothing is saved.
+        """
+        self._device_flow(self._load_cache(), _without_reserved(scopes), show)
+
+    def _device_flow(
+        self, cache: msal.SerializableTokenCache, scopes: Sequence[str], show: Callable[[str], None]
+    ) -> None:
+        """Run a device flow into ``cache``, check the mailbox, then save (D164, D205)."""
         app = self._application(cache)
-        flow = app.initiate_device_flow(scopes=self._scopes)
+        flow = app.initiate_device_flow(scopes=list(scopes))
         if "user_code" not in flow:
             raise AuthRequired(self._account)
         show(flow["message"])
@@ -138,7 +171,7 @@ class TokenProvider:
         if not isinstance(mailbox, str) or normalize_email(mailbox) != self._mailbox:
             raise WrongMailbox(self._account)
 
-    def _token(self) -> str:
+    def _token_for(self, scopes: Sequence[str]) -> str:
         cache = self._load_cache()
         app = self._application(cache)
         # The cache file is this account's alone; MSAL knows the account by its mailbox,
@@ -150,7 +183,7 @@ class TokenProvider:
         username = accounts[0].get("username")
         if not isinstance(username, str) or normalize_email(username) != self._mailbox:
             raise AuthRequired(self._account)
-        result = app.acquire_token_silent(self._scopes, account=accounts[0])
+        result = app.acquire_token_silent(list(scopes), account=accounts[0])
         self._save_if_changed(cache)
         if not result or "error" in result:
             raise AuthRequired(self._account)
