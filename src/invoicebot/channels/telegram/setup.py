@@ -88,6 +88,9 @@ async def sender_ids(client: TelegramClient) -> list[tuple[int, str | None]]:
 async def set_webhook(client: TelegramClient, url: str, secret: str) -> None:
     """Register the bot's webhook with the stored secret (D186).
 
+    Re-registering keeps Telegram's pending updates, so re-pointing the webhook
+    to a new tunnel URL loses nothing (D201).
+
     Raises ``ValueError`` for a URL that is not ``https://`` or does not end in
     ``/webhook/telegram``.
     """
@@ -99,7 +102,7 @@ async def set_webhook(client: TelegramClient, url: str, secret: str) -> None:
             "url": url,
             "secret_token": secret,
             "allowed_updates": ["message", "callback_query"],
-            "drop_pending_updates": True,
+            "drop_pending_updates": False,
         },
     )
 

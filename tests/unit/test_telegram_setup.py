@@ -108,8 +108,8 @@ async def test_sender_ids_raises_webhook_active_on_409() -> None:
             await sender_ids(client)
 
 
-async def test_set_webhook_posts_the_url_secret_and_allowed_updates() -> None:
-    """D186: setWebhook carries the URL, the secret and the two allowed update kinds."""
+async def test_set_webhook_posts_the_url_secret_and_keeps_pending_updates() -> None:
+    """D201: setWebhook keeps pending updates and carries the URL, secret and allowed kinds (D186)."""
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -124,7 +124,7 @@ async def test_set_webhook_posts_the_url_secret_and_allowed_updates() -> None:
         "url": "https://h.example.ts.net/webhook/telegram",
         "secret_token": SECRET,
         "allowed_updates": ["message", "callback_query"],
-        "drop_pending_updates": True,
+        "drop_pending_updates": False,
     }
 
 
