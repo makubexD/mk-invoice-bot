@@ -226,7 +226,12 @@ def make_fetch_handler(
         )
         schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
         decision = decide(
-            flow.fetchers, registry.keys(), inputs.attempts, schedule_for, no_retry=inputs.no_retry
+            flow.fetchers,
+            registry.keys(),
+            inputs.attempts,
+            schedule_for,
+            no_retry=inputs.no_retry,
+            captcha_tries=inputs.cfg.retrieval.captcha.ask_user_tries,
         )
         # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
         # remains; this job is the retry, since its run_after already held the delay (D65, D167).

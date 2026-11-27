@@ -55,6 +55,9 @@ class Exhausted:
 type Decision = Run | Wait | Done | Exhausted
 
 
+CAPTCHA_REASONS = frozenset({FetchReason.CAPTCHA_ASKED, FetchReason.CAPTCHA_WRONG})
+
+
 def decide(
     order: Sequence[str],
     registered: Collection[str],
@@ -62,6 +65,7 @@ def decide(
     schedule_for: Callable[[str], Sequence[timedelta]],
     *,
     no_retry: Collection[str],
+    captcha_tries: int,
 ) -> Decision:
     """Choose the next step of the chain (R-5.1, D65, D170).
 
@@ -71,12 +75,15 @@ def decide(
     latest attempt is technical waits once on its first schedule entry (D167),
     unless it is in ``no_retry`` (an open broken gap, D170); any other reason is
     final and the next fetcher gets its turn. ``no_retry`` is required so no
-    caller loses D170's brake by omission.
+    caller loses D170's brake by omission. A ``captcha_asked`` latest attempt
+    is the resume and runs the same fetcher; a ``captcha_wrong`` one runs it
+    again while its asks number fewer than ``captcha_tries`` (D209), else the
+    fetcher is over; ``captcha_timeout`` is final.
     """
     for fetcher in order:
         if fetcher not in registered:
             continue
-        decision = _decide_one(fetcher, attempts, schedule_for, no_retry)
+        decision = _decide_one(fetcher, attempts, schedule_for, no_retry, captcha_tries)
         if decision is not None:
             return decision
     return Exhausted()
@@ -87,6 +94,7 @@ def _decide_one(
     attempts: Sequence[Attempt],
     schedule_for: Callable[[str], Sequence[timedelta]],
     no_retry: Collection[str],
+    captcha_tries: int,
 ) -> Run | Wait | Done | None:
     """Decide for one fetcher; ``None`` means it is used up, try the next."""
     history = [attempt for attempt in attempts if attempt.fetcher == fetcher]
@@ -95,13 +103,33 @@ def _decide_one(
     latest = history[-1].reason
     if latest is FetchReason.OK:
         return Done(fetcher)
+    if latest in CAPTCHA_REASONS:
+        return _captcha_or_none(fetcher, history, captcha_tries)
     if latest in WAIT_REASONS:
         return _wait_or_none(fetcher, history, schedule_for)
     if latest in TECHNICAL_REASONS:
-        if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher), no_retry=no_retry) is None:
-            return None
-        return Wait(fetcher)
+        return _technical_or_none(fetcher, history, schedule_for, no_retry)
     return None
+
+
+def _captcha_or_none(fetcher: str, history: Sequence[Attempt], captcha_tries: int) -> Run | None:
+    """Run again after an ask (the resume) or a wrong answer with tries left; else ``None`` (D209)."""
+    if history[-1].reason is FetchReason.CAPTCHA_ASKED:
+        return Run(fetcher)
+    asks = sum(1 for attempt in history if attempt.reason is FetchReason.CAPTCHA_ASKED)
+    return Run(fetcher) if asks < captcha_tries else None
+
+
+def _technical_or_none(
+    fetcher: str,
+    history: Sequence[Attempt],
+    schedule_for: Callable[[str], Sequence[timedelta]],
+    no_retry: Collection[str],
+) -> Wait | None:
+    """Wait once after a technical failure, or ``None`` when no retry remains (D167, D170)."""
+    if technical_retry_delay(fetcher, history[:-1], schedule_for(fetcher), no_retry=no_retry) is None:
+        return None
+    return Wait(fetcher)
 
 
 def _wait_or_none(

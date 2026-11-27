@@ -1252,9 +1252,9 @@ async def test_reprocesar_after_used_up_fetchers_runs_the_chain_again(
     assert jobs == ["fetch"]
     assert attempts == []
     assert replies == [(REPROCESS_STARTED.format(id=invoice_id), None)]
-    assert decide(flow.fetchers, flow.fetchers, [], lambda _fetcher: (), no_retry=frozenset()) == Run(
-        flow.fetchers[0]
-    )
+    assert decide(
+        flow.fetchers, flow.fetchers, [], lambda _fetcher: (), no_retry=frozenset(), captcha_tries=2
+    ) == Run(flow.fetchers[0])
 
 
 async def test_reprocesar_on_a_failed_batch_redelivers(
