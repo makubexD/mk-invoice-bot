@@ -30,10 +30,11 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import invalid_question, summary_buttons
 from invoicebot.pipeline.steps import FETCH_STEP, SUNAT_RECHECK_STEP
 from invoicebot.pipeline.summary import flow_line, summary_text
+from invoicebot.pipeline.summary_post import moving_line
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING, SUMMARY_MOVING_QUIET
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
 from invoicebot.store.clock import owner_today
@@ -194,7 +195,7 @@ async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) 
     """Send the summary and move the invoice on, exactly as routing did before (D124)."""
     buttons = summary_buttons(inputs.invoice_id, inputs.reading)
     text = summary_text(
-        inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (_moving_line(buttons),)
+        inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (moving_line(buttons),)
     )
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
@@ -208,7 +209,7 @@ async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdi
         await _ask(conn, inputs, verdict)
         return
     buttons = summary_buttons(inputs.invoice_id, inputs.reading)
-    extra_lines = (*_extra_lines(verdict), _moving_line(buttons))
+    extra_lines = (*_extra_lines(verdict), moving_line(buttons))
     text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, extra_lines)
     await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
     await start_fetch_round(conn, inputs.invoice_id)
@@ -261,11 +262,6 @@ async def _now_plus(conn: AsyncConnection[Any], *, hours: int, minutes: int) -> 
     if row is None:
         raise RuntimeError("the database returned no time")
     return cast(datetime, row[0])
-
-
-def _moving_line(buttons: Sequence[Button]) -> str:
-    """Return the summary's last line: it invites a press only when it carries buttons (D189)."""
-    return SUMMARY_MOVING if buttons else SUMMARY_MOVING_QUIET
 
 
 async def _reply(
