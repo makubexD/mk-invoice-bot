@@ -1,0 +1,5 @@
+url: "https://sy.ecomprobantes.pe/pebsa/formularios/frmAutentificacionEstandarConvivencia.aspx"
+adapter: generic_form
+captcha: image
+status: todo # fields, submit and downloads are added with the captcha guide (9t4, D208)
+notes: "Asks: emisor (one option), serie, correlativo, tipo, fecha (yy-mm-dd), monto and an image captcha (CaptchaImage.axd). Same software as lalucha-ddns. Taught in chat; probe ended in captcha (specs/spikes/portal-probe.md)."
