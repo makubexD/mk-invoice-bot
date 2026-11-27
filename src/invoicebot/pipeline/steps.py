@@ -9,6 +9,8 @@ DOWNLOAD_STEP = "download_media"
 #: Job step that reads the downloaded photo or PDF (S3.11).
 EXTRACT_STEP = "extract"
 FETCH_STEP = "fetch"
+#: Job step that tells the sender the fetch is still running, after a short wait (D206).
+FETCH_PROGRESS_STEP = "fetch_progress"
 DELIVER_STEP = "deliver"
 #: Job step that asks SUNAT again after a BR-V01/BR-V04 answer (BR-V01, D125).
 SUNAT_RECHECK_STEP = "sunat_recheck"

@@ -35,6 +35,7 @@ from invoicebot.pipeline.park import park_stale_questions
 from invoicebot.pipeline.replies import resolve_reply
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import ATTACH_STEP
+from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.pipeline.uploads import make_attach_handler
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job
@@ -207,6 +208,9 @@ async def _run_route(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Confi
                 lease_until=datetime.now(UTC),
             )
         )
+    # D206: the fetch step's first attempt posts the summary; stand in for it here
+    async with pool.connection() as conn, conn.transaction():
+        await post_summary(conn, cfg, invoice_id)
 
 
 async def _photo_invoice(
