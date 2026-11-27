@@ -1,0 +1,7 @@
+[Unit]
+Description=Invoice bot Telegram webhook watch (D201)
+
+[Service]
+Type=oneshot
+Environment=INVOICEBOT_REPO=%h/WorkspaceMaku/Development/invoice-bot
+ExecStart=/usr/bin/env bash -c '"$INVOICEBOT_REPO"/deploy/webhook-watch.sh'
