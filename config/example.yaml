@@ -137,6 +137,7 @@ flows:
       retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [pdf]                # D142: xml is kept when it comes
     manual_uploads: [pdf, xml]          # what a sender may upload by hand, in preference order (R-1.5, D66)
+    chat_documents: [pdf]               # D206: kept files [📎 Ver documentos] posts in chat
     deliver_without_docs: false         # true => deliver now, attach docs later (R-5.9)
     sinks:
       - kind: google_drive
@@ -196,6 +197,7 @@ flows:
       retry_schedule: ["5m", "1h", "6h", "24h"]   # scheduled jobs; after the last one, next fetcher
     required_docs: [xml, pdf]
     manual_uploads: [pdf, xml]          # what a sender may upload by hand, in preference order (R-1.5, D66)
+    chat_documents: [pdf, xml, excel]   # D206: kept files [📎 Ver documentos] posts; excel needs excel_template
     deliver_without_docs: false
     reimbursement: { cap: 50.00 }       # BR-D06, R-7.13
     sinks:
@@ -279,7 +281,7 @@ ops:                            # R-9.11 to R-9.14
     max_mb: 200                 # refuse a backup larger than this (BR-O04, D119)
     age_recipient: "age1xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # public key only
     target: { kind: onedrive, path: "/Backups/mk-invoice-bot" }
-  retention_days: { messages_payload: 30, outbox: 90, events: 90, jobs: 90 }
+  retention_days: { messages_payload: 30, outbox: 90, events: 90, jobs: 90, chat_documents: 30 }   # chat_documents: D206
   self_alerts:
     outbox_backlog: { max_rows: 20, max_age_min: 15 }   # BR-O01
     disk_pct: 80                                        # BR-O02
@@ -297,4 +299,5 @@ limits:
   heavy_concurrency: 1
   browser_idle_close_s: 60
   per_domain_min_interval_s: 10
+  fetch_progress_after_s: 20      # D206 · one progress message when a fetch runs longer than this
   reprocess_min_interval_s: 600   # D171 · /reprocesar waits this long after the last fetch round
