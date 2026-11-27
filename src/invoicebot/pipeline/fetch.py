@@ -16,7 +16,7 @@ import logging
 import shutil
 import time
 import uuid
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -46,6 +46,7 @@ from invoicebot.fetchers.base import (
     FetchReason,
     FetchResult,
 )
+from invoicebot.fetchers.browser.protocol import CaptchaForm
 from invoicebot.fetchers.chain import (
     WAIT_REASONS,
     Attempt,
@@ -59,6 +60,7 @@ from invoicebot.fetchers.chain import (
 from invoicebot.fetchers.qr_url import QR_URL_FETCHER
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
+from invoicebot.pipeline.captcha import AskContext, AskedInvoice, CaptchaResumer, ask, drop_image
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUGS, RULE_AUTH_ADMIN
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
@@ -98,7 +100,8 @@ from invoicebot.rules.messages_es import (
     fields_desc,
 )
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
-from invoicebot.store import taught_links
+from invoicebot.store import captchas, taught_links
+from invoicebot.store.captchas import PendingCaptcha
 from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.fetch_attempts import list_attempts, record_attempt, technical_streak
@@ -144,6 +147,26 @@ class _Inputs:
     no_retry: frozenset[str]
     #: Each fetcher's retry schedule, keyed by fetcher name (D65, D98).
     schedules: Mapping[str, Schedule]
+    data_dir: Path
+
+
+@dataclass(frozen=True)
+class _Call:
+    """How one run reaches its fetcher: a fresh fetch, or the resume of an answered captcha (D209)."""
+
+    fetcher: str
+    start: Callable[[Path], Awaitable[FetchResult]]
+    #: The answered captcha this run resumes; its row and image go once the result is recorded.
+    answered: PendingCaptcha | None = None
+
+
+@dataclass(frozen=True)
+class _Ran:
+    """What one run produced: the result, the retry delay chosen for it and how long it took."""
+
+    result: FetchResult
+    delay: timedelta | None
+    duration_ms: int
 
 
 @dataclass(frozen=True)
@@ -186,6 +209,7 @@ def make_fetch_handler(
             reading = await load_reading(conn, job.invoice_id)
             flow_name = await load_flow(conn, job.invoice_id)
             rows = await list_attempts(conn, job.invoice_id)
+            pending = await captchas.get(conn, job.invoice_id)
             broken = reading is not None and await _portal_is_broken(conn, reading, directory)
         if reading is None:
             raise RuntimeError(f"invoice {job.invoice_id} has no reading")
@@ -223,27 +247,9 @@ def make_fetch_handler(
             directory=directory,
             no_retry=no_retry,
             schedules=retry_schedules,
+            data_dir=data_dir,
         )
-        schedule_for = _schedule_for(inputs.flow, inputs.invoice, retry_schedules)
-        decision = decide(
-            flow.fetchers,
-            registry.keys(),
-            inputs.attempts,
-            schedule_for,
-            no_retry=inputs.no_retry,
-            captcha_tries=inputs.cfg.retrieval.captcha.ask_user_tries,
-        )
-        # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
-        # remains; this job is the retry, since its run_after already held the delay (D65, D167).
-        if isinstance(decision, Run | Wait):
-            outcome = await _run(inputs, reading, decision.fetcher, registry, schedule_for, data_dir)
-        elif isinstance(decision, Exhausted):
-            outcome = await _exhausted(inputs, reading)
-        else:
-            # Done: the ok attempt, the DELIVERING commit and the deliver job happen together
-            # (R-5.1), so an invoice that still fetches has no ok attempt; the queue retries
-            # or parks this job.
-            raise RuntimeError(f"invoice {job.invoice_id} has an ok attempt but is still fetching")
+        outcome = await _step(inputs, reading, registry, pending)
         logger.info(
             "step done",
             extra={
@@ -275,37 +281,96 @@ async def _nothing_to_fetch(pool: Pool, cfg: Config, job: Job) -> None:
         await enqueue(conn, job.invoice_id, DELIVER_STEP)
 
 
+async def _step(
+    inputs: _Inputs, reading: Reading, registry: Mapping[str, Fetcher], pending: PendingCaptcha | None
+) -> _Outcome:
+    """Resume an answered captcha, else decide the chain's next move and make it (R-5.1, D209)."""
+    schedule_for = _schedule_for(inputs.flow, inputs.invoice, inputs.schedules)
+    if pending is not None and pending.answer is not None:
+        return await _run(
+            inputs, reading, _resume_call(inputs, registry, pending, pending.answer), schedule_for
+        )
+    decision = decide(
+        inputs.flow.fetchers,
+        registry.keys(),
+        inputs.attempts,
+        schedule_for,
+        no_retry=inputs.no_retry,
+        captcha_tries=inputs.cfg.retrieval.captcha.ask_user_tries,
+    )
+    # A Wait means the latest try ended with a wait reason or a first technical failure and a retry
+    # remains; this job is the retry, since its run_after already held the delay (D65, D167).
+    if isinstance(decision, Run | Wait):
+        return await _run(inputs, reading, _fresh_call(inputs, registry, decision.fetcher), schedule_for)
+    if isinstance(decision, Exhausted):
+        return await _exhausted(inputs, reading)
+    # Done: the ok attempt, the DELIVERING commit and the deliver job happen together
+    # (R-5.1), so an invoice that still fetches has no ok attempt; the queue retries
+    # or parks this job.
+    raise RuntimeError(f"invoice {inputs.job.invoice_id} has an ok attempt but is still fetching")
+
+
+def _fresh_call(inputs: _Inputs, registry: Mapping[str, Fetcher], fetcher: str) -> _Call:
+    """Return the call of a new fetch by ``fetcher`` (S7.1)."""
+
+    async def start(out_dir: Path) -> FetchResult:
+        return await registry[fetcher].fetch(inputs.invoice, out_dir)
+
+    return _Call(fetcher, start)
+
+
+def _resume_call(
+    inputs: _Inputs, registry: Mapping[str, Fetcher], pending: PendingCaptcha, answer: str
+) -> _Call:
+    """Return the call that resumes the portal fetcher with the sender's ``answer`` (D209)."""
+    portal = registry.get(PORTAL_FETCHER)
+    if not isinstance(portal, CaptchaResumer):
+        raise RuntimeError(f"invoice {inputs.job.invoice_id} has an answered captcha but no resumable portal")
+    form = CaptchaForm.model_validate(pending.form)
+
+    async def start(out_dir: Path) -> FetchResult:
+        return await portal.resume(inputs.invoice, form, answer, out_dir)
+
+    return _Call(PORTAL_FETCHER, start, pending)
+
+
 async def _run(
     inputs: _Inputs,
     reading: Reading,
-    fetcher: str,
-    registry: Mapping[str, Fetcher],
+    call: _Call,
     schedule_for: Callable[[str], Sequence[timedelta]],
-    data_dir: Path,
 ) -> _Outcome:
     """Run one fetcher and record its result in one transaction (S7.1, R-5.7)."""
     # One folder per run: a duplicate run's cleanup cannot remove the files another run stored.
-    out_dir = data_dir / TMP_DIRECTORY / str(inputs.job.invoice_id) / f"{inputs.job.id}-{uuid.uuid4().hex}"
+    out_dir = (
+        inputs.data_dir / TMP_DIRECTORY / str(inputs.job.invoice_id) / f"{inputs.job.id}-{uuid.uuid4().hex}"
+    )
     out_dir.mkdir(mode=DIRECTORY_MODE, parents=True, exist_ok=True)
     started = time.perf_counter()
     try:
-        result = await registry[fetcher].fetch(inputs.invoice, out_dir)
+        result = await call.start(out_dir)
     except BaseException:
         # R-9.2: a fetcher that raises leaves no partial files behind.
         shutil.rmtree(out_dir, ignore_errors=True)
         raise
     duration_ms = int((time.perf_counter() - started) * 1000)
     result = _with_required_docs(result, inputs.flow.required_docs)
-    if not result.ok:
+    # An asked captcha's PNG sits in out_dir until the ask moves it, so that folder goes after the commit.
+    if not result.ok and result.challenge is None:
         # R-9.2: a failed fetch, a helper killed on timeout included, leaves nothing.
         shutil.rmtree(out_dir, ignore_errors=True)
-    schedule = schedule_for(fetcher)
+    schedule = schedule_for(call.fetcher)
     delay = (
-        technical_retry_delay(fetcher, inputs.attempts, schedule, no_retry=inputs.no_retry)
+        technical_retry_delay(call.fetcher, inputs.attempts, schedule, no_retry=inputs.no_retry)
         if result.reason in TECHNICAL_REASONS
-        else retry_delay(fetcher, inputs.attempts, schedule)
+        else retry_delay(call.fetcher, inputs.attempts, schedule)
     )
-    outcome = _Outcome(fetcher=fetcher, portal_key=result.portal_key, reason=result.reason.value)
+    await _commit_run(inputs, reading, call, _Ran(result, delay, duration_ms), out_dir)
+    return _Outcome(fetcher=call.fetcher, portal_key=result.portal_key, reason=result.reason.value)
+
+
+async def _commit_run(inputs: _Inputs, reading: Reading, call: _Call, ran: _Ran, out_dir: Path) -> None:
+    """Record ``ran`` in one transaction, and clean up the folders and files the run leaves (R-9.2, D209)."""
     committed = False
     try:
         async with inputs.pool.connection() as conn, conn.transaction():
@@ -313,22 +378,38 @@ async def _run(
             if not await _is_current(conn, inputs.job):
                 # R-9.2: this run stored nothing, so its files must not stay.
                 shutil.rmtree(out_dir, ignore_errors=True)
-                return outcome
-            await record_attempt(
-                conn, inputs.job.invoice_id, fetcher, result.portal_key, result.reason.value, duration_ms
-            )
-            if await _raise_broken_gap(conn, inputs, reading, result) and fetcher == PORTAL_FETCHER:
-                # D170: the failure that raises the gap gets no retry; the next job's
-                # handle sees the open gap, so decide agrees with this at-once enqueue.
-                delay = None
-            await _record_result(conn, inputs, reading, fetcher, result, delay)
+                return
+            await _record_run(conn, inputs, reading, call, ran)
             committed = True
     except BaseException:
         # R-9.2: a run that did not commit leaves no files behind; a committed run keeps them.
         if not committed:
             shutil.rmtree(out_dir, ignore_errors=True)
         raise
-    return outcome
+    if ran.result.challenge is not None:
+        shutil.rmtree(out_dir, ignore_errors=True)
+    if call.answered is not None:
+        await drop_image(inputs.data_dir, call.answered.image_path)
+
+
+async def _record_run(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, call: _Call, ran: _Ran
+) -> None:
+    """Write the attempt and its consequences in the caller's transaction (S7.1, R-5.7, D209)."""
+    invoice_id = inputs.job.invoice_id
+    result = ran.result
+    await record_attempt(
+        conn, invoice_id, call.fetcher, result.portal_key, result.reason.value, ran.duration_ms
+    )
+    if call.answered is not None:
+        # Before a new ask's put, so a resume that asks again keeps the new row.
+        await captchas.delete(conn, invoice_id)
+    delay = ran.delay
+    if await _raise_broken_gap(conn, inputs, reading, result) and call.fetcher == PORTAL_FETCHER:
+        # D170: the failure that raises the gap gets no retry; the next job's
+        # handle sees the open gap, so decide agrees with this at-once enqueue.
+        delay = None
+    await _record_result(conn, inputs, reading, call.fetcher, result, delay)
 
 
 async def _is_current(conn: AsyncConnection[Any], job: Job) -> bool:
@@ -394,11 +475,14 @@ async def _record_result(
 ) -> None:
     """Store an ``ok`` result's files and enqueue deliver, or schedule the next try, in one transaction.
 
-    A technical failure gets one retry on its first schedule entry (D167); every other
-    failure, and a technical one with no retry left, moves the chain on at once. The
-    summary goes out first in every outcome that does not move straight on (D206).
+    A ``captcha_asked`` result goes to the sender and the invoice waits (D209). A technical
+    failure gets one retry on its first schedule entry (D167); every other failure, and a
+    technical one with no retry left, moves the chain on at once. The summary goes out first
+    in every outcome that does not move straight on (D206).
     """
-    if result.ok:
+    if result.reason is FetchReason.CAPTCHA_ASKED:
+        await _record_ask(conn, inputs, fetcher, result)
+    elif result.ok:
         await _record_found(conn, inputs, reading, fetcher, result)
     elif result.reason in WAIT_REASONS:
         await _record_wait(conn, inputs, reading, fetcher, result, delay)
@@ -408,6 +492,29 @@ async def _record_result(
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await run_after_delay(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
+
+
+async def _record_ask(conn: AsyncConnection[Any], inputs: _Inputs, fetcher: str, result: FetchResult) -> None:
+    """Send the portal's captcha to the sender and park the invoice; the summary goes first (D206, D209)."""
+    await post_summary(conn, inputs.cfg, inputs.job.invoice_id)
+    ctx = AskContext(
+        data_dir=inputs.data_dir,
+        directory=inputs.directory,
+        timeout_s=inputs.cfg.retrieval.captcha.ask_user_timeout_s,
+        to=Addressee(inputs.head.origin_channel, inputs.head.profile_id),
+    )
+    invoice = AskedInvoice(
+        invoice_id=inputs.job.invoice_id,
+        ruc_emisor=inputs.invoice.ruc_emisor,
+        after_wrong=_after_wrong(inputs.attempts, fetcher),
+    )
+    await ask(conn, ctx, invoice, result)
+
+
+def _after_wrong(attempts: Sequence[Attempt], fetcher: str) -> bool:
+    """Return True when ``fetcher``'s latest earlier attempt was a refused captcha answer (BR-F20)."""
+    history = [attempt.reason for attempt in attempts if attempt.fetcher == fetcher]
+    return bool(history) and history[-1] is FetchReason.CAPTCHA_WRONG
 
 
 async def _record_found(
