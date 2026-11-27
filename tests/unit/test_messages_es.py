@@ -5,7 +5,8 @@ from datetime import UTC, date, datetime
 
 import pytest
 
-from invoicebot.rules.messages_es import MESSAGES, when_desc
+from invoicebot.config.checks import BUTTON_TITLE_MAX
+from invoicebot.rules.messages_es import BUTTON_DOCS, DOCS_GONE, FETCH_PROGRESS, MESSAGES, when_desc
 
 
 @pytest.mark.parametrize(
@@ -26,3 +27,14 @@ def test_br_d10_formats_with_exactly_its_fields() -> None:
     """BR-D10, D195: the done text takes serie, numero, folder and to, and nothing else."""
     fields = {name for _, name, _, _ in string.Formatter().parse(MESSAGES["BR-D10"]) if name}
     assert fields == {"serie", "numero", "folder", "to"}
+
+
+def test_d206_progress_and_gone_notes_name_the_invoice() -> None:
+    """D206: BR-F17's note and BR-D25's text both carry the invoice number."""
+    assert "#47" in FETCH_PROGRESS.format(id=47)
+    assert "#47" in DOCS_GONE.format(id=47)
+
+
+def test_d206_docs_button_fits_the_title_limit() -> None:
+    """D206: the [📎 Ver documentos] button title fits BUTTON_TITLE_MAX."""
+    assert len(BUTTON_DOCS) <= BUTTON_TITLE_MAX

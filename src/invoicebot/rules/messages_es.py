@@ -21,6 +21,15 @@ from datetime import date, datetime, timedelta
 FOUND_LINE = "📄 Encontré {docs_desc}. Lo archivo…"
 #: BR-F16's second line, only when the XML cleared a field the summary's ⚠️ Revisa named (D202).
 CONFIRMED_LINE = "✅ El XML confirma: {fields_desc}"
+#: The hint that closes a summary carrying buttons (D206).
+SUMMARY_TAP_HINT = "Toca un botón solo si algo está mal."
+#: BR-F17: the one note when the fetch is slow; ``{id}`` is the invoice number (D206).
+FETCH_PROGRESS = (
+    "⏳ Sigo con tu comprobante #{id}: busco sus archivos en el portal del emisor. "
+    "Te escribo en cuanto los tenga."
+)
+#: BR-D25: the kept documents are gone; the folder link follows when there is one (D206).
+DOCS_GONE = "Los documentos de #{id} ya no están guardados en el bot. Ábrelos en la carpeta."
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
@@ -95,6 +104,7 @@ MESSAGES: dict[str, str] = {
         "ℹ️ El XML no tiene una firma válida del emisor; lo guardo, pero no reemplaza los datos leídos."
     ),
     "BR-F16": f"{FOUND_LINE}\n{CONFIRMED_LINE}",
+    "BR-F17": FETCH_PROGRESS,
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F13": (
         "⏳ Comprobante #{id}: no pude descargar {docs_desc}.\n"
@@ -194,6 +204,7 @@ MESSAGES: dict[str, str] = {
     "BR-D20": "⏸️ No envié el correo de {serie}-{numero}. Toca [Enviar] cuando quieras.",
     "BR-D21": "📤 Enviando el correo de {serie}-{numero}…",
     "BR-D22": "No hay un correo por revisar para #{id}.",
+    "BR-D25": DOCS_GONE,
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",
@@ -583,6 +594,8 @@ BUTTON_FIX = "✏️ Corregir"
 BUTTON_VOID = "✖️ Anular"
 #: The [Ver #{id}] button that answers like ``/estado {id}`` (D188).
 BUTTON_STATUS = "Ver #{id}"
+#: BR-D24's button on a final message: the kept documents, sent to the chat (D206).
+BUTTON_DOCS = "📎 Ver documentos"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).
