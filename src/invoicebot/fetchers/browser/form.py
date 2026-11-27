@@ -126,16 +126,47 @@ async def _fetch(
     max_bytes: MediaMaxBytes,
     saved: list[Path],
 ) -> FetchResult:
-    """Go to the portal, perform the actions, and save what it downloads."""
+    """Go to the portal, fill the form, submit it, and save what it downloads."""
     if portal.url is None:
         raise _Technical
     await page.goto(portal.url)
-    for action in actions:
-        await _perform(page, action)
+    await fill_form(page, actions)
     if portal.submit is None:
         raise _Technical
     await page.locator(portal.submit).click()
+    return await read_result(page, portal, out_dir, max_bytes, saved)
 
+
+async def fill_form(page: Page, actions: list[FieldAction]) -> None:
+    """Perform the rendered field actions (types, selects, picks, calendars) on the loaded page.
+
+    Args:
+        page: The page showing the portal's form.
+        actions: The rendered actions, in the portal file's order.
+    """
+    for action in actions:
+        await _perform(page, action)
+
+
+async def read_result(
+    page: Page,
+    portal: Portal,
+    out_dir: Path,
+    max_bytes: MediaMaxBytes,
+    saved: list[Path],
+) -> FetchResult:
+    """Wait for the not-found marker or the download controls on the loaded page and save the files.
+
+    Args:
+        page: The page that shows the result, already submitted.
+        portal: The portal whose result selectors are read.
+        out_dir: Where the files are saved.
+        max_bytes: The size limit for each kind of file.
+        saved: Receives each path saved, so the caller can remove them on failure.
+
+    Raises:
+        _Technical: the portal names no download, or a download is missing or too big.
+    """
     selectors = _download_selectors(portal)
     if not selectors:
         raise _Technical
