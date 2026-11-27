@@ -5,7 +5,7 @@ Date: 2026-11-27. Plan: `docs/archive/plan-mvp-portal-link.md`. Flow A (Drive), 
 
 Before any change: tag `live-2026-11-27-pre-pebsa` on the live commit (image `aa49e52d6441`); the live config was
 copied to a backup folder. PEBSA's store and portal files (`captcha: image`, `status: todo`) were installed in the live
-config before each deploy.
+config before each deploy. They stay in the live config only: CI refuses a pull request that adds a portal that is not `active`, so they enter the repo with 9t4, once the portal is active.
 
 | Row                                             | Result                                                                                                                                                                                                                            |
 | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
