@@ -180,7 +180,7 @@ MESSAGES: dict[str, str] = {
     "BR-D18": "✅ Registrado {serie}-{numero} de {razon_social}, S/ {total}.",
     "BR-D19": (
         "📧 Revisa el correo de {serie}-{numero} antes de enviarlo.\n"
-        "Para: {to}\n"
+        "{review_line}Para: {to}\n"
         "{cc_line}Asunto: {subject}\n"
         "{body}\n"
         "Adjuntos: {files}"
