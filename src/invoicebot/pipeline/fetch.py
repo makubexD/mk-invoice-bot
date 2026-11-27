@@ -11,6 +11,7 @@ A flow with no fetchers and no required documents goes straight to ``DELIVERING`
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import time
@@ -35,7 +36,9 @@ from invoicebot.config.models import (
     Flow,
     StoreDirectory,
 )
+from invoicebot.extract.confirm import confirmed_by_xml, confirmed_names
 from invoicebot.extract.fields import Reading
+from invoicebot.extract.ubl import parse_invoice_xml
 from invoicebot.fetchers.base import (
     TECHNICAL_REASONS,
     Fetcher,
@@ -53,6 +56,7 @@ from invoicebot.fetchers.chain import (
     retry_delay,
     technical_retry_delay,
 )
+from invoicebot.fetchers.qr_url import QR_URL_FETCHER
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.pipeline.deliver import AUTH_PROVIDER_SLUGS, RULE_AUTH_ADMIN
@@ -75,15 +79,20 @@ from invoicebot.pipeline.questions import (
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
+from invoicebot.pipeline.summary import review_fields
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BUTTON_VOID,
+    CONFIRMED_LINE,
     FETCH_WAITING,
+    FOUND_LINE,
     GAP_LINE_PORTAL,
     KIND_SUBJECT,
     MESSAGES,
     UNKNOWN_ISSUER,
+    docs_desc,
+    fields_desc,
 )
 from invoicebot.states import DELIVERING, FETCHING_DOCS, MANUAL_REQUIRED
 from invoicebot.store import taught_links
@@ -98,6 +107,7 @@ from invoicebot.store.invoices import (
     load_flow,
     load_invoice_head,
     load_reading,
+    save_reading,
     set_state,
 )
 
@@ -389,6 +399,7 @@ async def _record_result(
                     size=fetched.size,
                 ),
             )
+        await _found_notice(conn, inputs, reading, fetcher, result)
         await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
         await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
         # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
@@ -409,6 +420,41 @@ async def _record_result(
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await run_after_delay(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
+
+
+#: The fetchers whose XML confirms the reading: the issuer's portal and the printed QR link;
+#: a mailbox XML is unsigned until BR-F10 (D202).
+CONFIRMING_FETCHERS = frozenset({PORTAL_FETCHER, QR_URL_FETCHER})
+
+
+async def _found_notice(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, fetcher: str, result: FetchResult
+) -> None:
+    """Confirm the reading with the fetched XML and queue BR-F16 for every ``ok`` fetch (D202, BR-F16).
+
+    Only an XML from the issuer's portal or the printed QR link confirms the reading: a
+    mailbox XML is unsigned until BR-F10, so it is filed but changes nothing (D202). The
+    XML was matched to the invoice by R-5.6, so a parse failure here is a bug and raises.
+    The second line names the fields the summary's ⚠️ Revisa named that are no longer doubtful.
+    """
+    invoice_id = inputs.job.invoice_id
+    text = FOUND_LINE.format(docs_desc=docs_desc(sorted({fetched.kind for fetched in result.files})))
+    xml_file = next((fetched for fetched in result.files if fetched.kind == "xml"), None)
+    if xml_file is not None and fetcher in CONFIRMING_FETCHERS:
+        xml_reading = parse_invoice_xml(await asyncio.to_thread(xml_file.path.read_bytes))
+        confirmed = confirmed_by_xml(reading, xml_reading)
+        await save_reading(conn, invoice_id, confirmed)
+        today = await owner_today(conn, inputs.cfg.owner.timezone)
+        still = review_fields(confirmed, inputs.cfg.extraction, today)
+        named = set(confirmed_names(reading, confirmed))
+        cleared = [
+            name
+            for name in review_fields(reading, inputs.cfg.extraction, today)
+            if name in named and name not in still
+        ]
+        if cleared:
+            text += "\n" + CONFIRMED_LINE.format(fields_desc=fields_desc(cleared))
+    await _notify(conn, inputs.head, invoice_id, "BR-F16", text)
 
 
 def _is_first_attempt(attempts: Sequence[Attempt], fetcher: str, reasons: Collection[FetchReason]) -> bool:

@@ -293,8 +293,8 @@ def _two_brand_directory() -> StoreDirectory:
     return StoreDirectory(stores={STORE_RUC: store}, portals={})
 
 
-def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run") -> Config:
-    """Return example.yaml with a synthetic template, one mail mode and one profile."""
+def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run", send: str | None = None) -> Config:
+    """Return example.yaml with a synthetic template, one mail mode, one profile and ``send`` if given."""
     cfg = load_config(EXAMPLE)
     template = build_template()
     template_path = tmp_path / "template.xlsx"
@@ -309,7 +309,10 @@ def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run") -> Conf
                 }
             )
         elif isinstance(sink, MailerSink):
-            sink = sink.model_copy(update={"modes": [mail_mode]})
+            update: dict[str, Any] = {"modes": [mail_mode]}
+            if send is not None:
+                update["send"] = send
+            sink = sink.model_copy(update=update)
         sinks.append(sink)
     flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
     return cfg.model_copy(
@@ -1851,3 +1854,126 @@ async def test_resend_eml_on_a_prepared_batch_offers_ya_lo_envie(
             [{"id": button_id(invoice_id, "sent"), "title": "Ya lo envié"}],
         ),
     ]
+
+
+def _reading_with_serie(confidence: float) -> Reading:
+    """Return the complete reading with ``serie`` at the given confidence."""
+    reading = _reading()
+    fields = {**reading.fields, "serie": Field(value=SERIE, confidence=confidence, source="ocr")}
+    return Reading(fields=fields, document_url=None)
+
+
+async def _doubtful_invoice(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path, profile_id: str
+) -> int:
+    """Create a delivering invoice whose ``serie`` was read at 0.43, below the review threshold."""
+    invoice_id = await _delivering_invoice(pool, tmp_path, profile_id)
+    async with pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, _reading_with_serie(0.43))
+    return invoice_id
+
+
+async def test_if_doubtful_sends_a_confident_mail_at_once(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: send if_doubtful with every field confident sends through the first mode, no BR-D19."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="if_doubtful")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert len(mode.calls) == 1
+    assert [rule_id for _text, rule_id, _buttons in outbox] == ["BR-D10"]
+
+
+async def test_if_doubtful_holds_a_doubtful_mail_with_the_revisa_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: send if_doubtful with serie at 0.43 posts BR-D19 with the Revisa line and sends nothing."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="if_doubtful")
+    invoice_id = await _doubtful_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    text = outbox[-1][0]
+    assert mode.calls == []
+    assert invoice == ("BATCHED", "BR-D19")
+    assert text.split("\n")[:2] == [
+        f"📧 Revisa el correo de {SERIE}-{NUMERO} antes de enviarlo.",
+        "⚠️ Revisa: serie",
+    ]
+
+
+async def test_if_doubtful_sends_a_held_mail_after_enviar(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: after [Enviar] on the held mail, the next delivery sends it (D194 digest path)."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="if_doubtful")
+    invoice_id = await _doubtful_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+    handler = _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn, conn.transaction():
+        await merge_flow_data(conn, invoice_id, {"reviewed": True})
+        await set_state(conn, invoice_id, "DELIVERING")
+
+    await handler(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        invoice = await _invoice_state(conn, invoice_id)
+        flow_data = await load_flow_data(conn, invoice_id)
+    assert len(mode.calls) == 1
+    assert invoice == ("DONE", "BR-D10")
+    assert flow_data["reviewed"] is False
+
+
+async def test_if_doubtful_holds_a_mail_missing_a_required_field(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: send if_doubtful holds a mail whose reading lacks a required field, even with no doubtful one."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="if_doubtful")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    reading = _reading()
+    fields = {name: field for name, field in reading.fields.items() if name != "tipo"}
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_reading(conn, invoice_id, Reading(fields=fields, document_url=None))
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert mode.calls == []
+    assert outbox[-1][1] == "BR-D19"
+    assert outbox[-1][0].split("\n")[1].startswith("⚠️ Revisa: ")
+
+
+async def test_review_still_holds_a_confident_mail_without_a_revisa_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D203: send review holds even a confident mail, and BR-D19 carries no Revisa line."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _config(tmp_path, profile_id, mail_mode="graph", send="review")
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    mode = FakeGraphMode()
+
+    await _handler(db_pool, cfg, FakeDrive(), tmp_path, mode, mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    text = outbox[-1][0]
+    assert mode.calls == []
+    assert outbox[-1][1] == "BR-D19"
+    assert "⚠️" not in text
+    assert text.split("\n")[1].startswith("Para: ")

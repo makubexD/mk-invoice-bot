@@ -641,9 +641,11 @@ def test_mailer_sink_rejects_bad_modes_and_recipients(
         load_config(path)
 
 
-@pytest.mark.parametrize(("send", "expected"), [(None, "auto"), ("review", "review")])
+@pytest.mark.parametrize(
+    ("send", "expected"), [(None, "auto"), ("review", "review"), ("if_doubtful", "if_doubtful")]
+)
 def test_mailer_send_setting_loads(tmp_path: Path, send: str | None, expected: str) -> None:
-    """D194: a mailer without ``send`` sends at once, and ``review`` holds each mail for the owner."""
+    """D194, D203: a mailer without ``send`` sends at once; ``review`` and ``if_doubtful`` load as given."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
     mailer = document["flows"]["work_microsoft"]["sinks"][2]
     if send is None:
@@ -661,7 +663,7 @@ def test_mailer_send_setting_loads(tmp_path: Path, send: str | None, expected: s
 def test_mailer_send_unknown_value_fails(tmp_path: Path) -> None:
     """D194: ``send`` is a closed set, so a value outside it fails at load."""
     document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
-    document["flows"]["work_microsoft"]["sinks"][2]["send"] = "later"
+    document["flows"]["work_microsoft"]["sinks"][2]["send"] = "maybe"
     path = _write_yaml(tmp_path / "example.yaml", document)
 
     with pytest.raises(ValidationError, match="send"):

@@ -20,13 +20,13 @@ def test_intake_settings_carry_the_reprocess_interval() -> None:
 
 
 def test_review_flow_ids_name_the_flows_whose_mailer_waits_for_review() -> None:
-    """D194: a flow is a review flow only when its mailer sink is ``send: review``."""
+    """D194, D203: a flow is a review flow only when its mailer is ``send: review`` or ``if_doubtful``."""
     cfg = load_config(EXAMPLE)
     mailer_flows = {
         name for name, flow in cfg.flows.items() if any(isinstance(sink, MailerSink) for sink in flow.sinks)
     }
 
-    def with_send(send: Literal["review", "auto"]) -> Config:
+    def with_send(send: Literal["review", "auto", "if_doubtful"]) -> Config:
         flows = {
             name: flow.model_copy(
                 update={
@@ -42,4 +42,5 @@ def test_review_flow_ids_name_the_flows_whose_mailer_waits_for_review() -> None:
 
     assert mailer_flows
     assert review_flow_ids(with_send("review")) == mailer_flows
+    assert review_flow_ids(with_send("if_doubtful")) == mailer_flows
     assert review_flow_ids(with_send("auto")) == frozenset()

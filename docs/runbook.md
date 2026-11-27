@@ -258,17 +258,20 @@ roadmap's "T2 owner setup" (`docs/plan-telegram.md`) has the reasons for each st
 patterned cloth or other papers around it make OCR harder. In Telegram a photo sent as a file (📎 → File) keeps its
 full size, while a normal photo is resized to about 1080 px, which can leave the QR too small to read.
 
-## 12. Switch a flow's mail between review and auto (D194)
+## 12. Switch a flow's mail between review, if_doubtful and auto (D194, D203)
 
-A flow's mailer sink has `send: review` or `send: auto` (the default). With `review`, `deliver` files the folder and
+A flow's mailer sink has `send: review`, `send: if_doubtful` or `send: auto` (the default). With `if_doubtful` (the
+live flow B after 9z8), a mail is held for review exactly as with `review`, but only when a field still needs review
+(the summary's "⚠️ Revisa" set, or a missing required field); BR-D19 then names those fields. A fetched SUNAT XML that
+matches the invoice confirms the fields it agrees with first (D202), so most mail goes out at once. With `review`, `deliver` files the folder and
 the Excel as usual, then posts the attachments as documents and BR-D19 with the mail's To, Cc, subject and body.
 Nothing is sent until the owner taps **[Enviar]**; **[Cancelar]** only holds the mail, and the invoice stays filed. A
 held mail has no reminder and no timeout; `/estado` shows it. With `auto`, the mail goes out at once, as before.
 
-1. **Switch.** Set `send: review` or `send: auto` under the flow's `kind: mailer` sink in the live config, then
+1. **Switch.** Set `send: review`, `send: if_doubtful` or `send: auto` under the flow's `kind: mailer` sink in the live config, then
    **reload**. The change applies to the next delivery; a mail already waiting for review keeps waiting.
 2. **Review a batch prepared earlier.** A flow B invoice that is `BATCHED` with a `prepared` batch, no laptop job and
-   a flow now on `review` (for example a dry_run draft written before the switch) goes through review with
+   a flow now on `review` or `if_doubtful` (for example a dry_run draft written before the switch) goes through review with
    `/revisar <n>`, sent by an admin. The bot answers at once, then posts the review as in step 1. Anything else
    answers BR-D22. `/revisar` is in the admin's Telegram menu only after `invoicebot telegram commands` runs again
    (§11) once the new image is live.

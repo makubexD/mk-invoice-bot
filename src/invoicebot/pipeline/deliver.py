@@ -49,6 +49,7 @@ from invoicebot.config.models import (
     GRAPH_MODE,
     Config,
     ExcelTemplateSink,
+    Extraction,
     Flow,
     MailerSink,
     OneDriveFolderSink,
@@ -102,6 +103,7 @@ from invoicebot.pipeline.review import (
 )
 from invoicebot.pipeline.steps import DELIVER_STEP as DELIVER_STEP
 from invoicebot.pipeline.steps import FOLDER_STATUS_STEP, RESEND_EML_STEP, RESEND_LAPTOP_STEP
+from invoicebot.pipeline.summary import review_fields
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.outbox import has_pending_document
@@ -124,6 +126,7 @@ from invoicebot.sinks.mailer import Completion, MailMode, build_mail
 from invoicebot.sinks.onedrive import GraphError
 from invoicebot.sinks.onedrive_folder import file_folder
 from invoicebot.states import BATCHED, DELIVERING, DONE, MANUAL_REQUIRED, StateMoved
+from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     claim_seq,
@@ -225,6 +228,7 @@ class _Invoice:
     pdf: bytes
     xml: bytes | None
     xml_reading: Reading | None
+    today: date
 
 
 @dataclass(frozen=True)
@@ -360,7 +364,8 @@ async def _deliver(
 ) -> tuple[_Delivery, str]:
     """Prepare the delivery and hand it to the flow's first mail mode (R-7.7).
 
-    A mailer on ``send: review`` posts the mail for review instead, until the owner's
+    A mailer on ``send: review`` posts the mail for review instead, as does ``if_doubtful``
+    when the reading has a doubtful or missing field (D203), until the owner's
     [Enviar] has set ``reviewed`` in the flow data and the mail rebuilt now is the mail the
     owner saw, by its digest (D194). Once the mode's completion has committed, the send, the
     draft or the laptop job holds the attachments, so the review files are removed, unless a
@@ -369,9 +374,10 @@ async def _deliver(
     review (D194).
     """
     delivery = await _prepare(context, invoice, sinks, prepared)
-    reviewed = sinks.mailer.send == "review"
-    if reviewed and not _was_reviewed(invoice.flow_data, delivery.mail):
-        await _review(context, delivery, prepared)
+    held = _held(sinks.mailer, invoice.reading, context.cfg.extraction, invoice.today)
+    reviewed = held is not None
+    if held is not None and not _was_reviewed(invoice.flow_data, delivery.mail):
+        await _review(context, delivery, prepared, held)
         return delivery, REVIEW_BATCH_STATE
     mode_name, mode = _mode(context.modes, sinks.mailer)
     await _COMPLETIONS[mode.completion](context, delivery, prepared, mode)
@@ -383,6 +389,24 @@ async def _deliver(
         async with context.pool.connection() as conn, conn.transaction():
             await merge_flow_data(conn, delivery.invoice_id, {REVIEWED_KEY: False})
     return delivery, mode_name
+
+
+def _held(
+    mailer: MailerSink, reading: Reading, extraction: Extraction, today: date
+) -> tuple[str, ...] | None:
+    """Return the doubtful field names of a mail held for review, or None when it is not held (D203).
+
+    ``review`` always holds, with no names; ``auto`` never does. ``if_doubtful`` holds
+    when the summary's review set (D203) is not empty or a required field is missing,
+    and names those fields.
+    """
+    if mailer.send == "auto":
+        return None
+    if mailer.send == "review":
+        return ()
+    names = review_fields(reading, extraction, today)
+    names += tuple(name for name in reading.missing_required() if name not in names)
+    return names or None
 
 
 def _was_reviewed(flow_data: Mapping[str, Any], mail: OutgoingMail) -> bool:
@@ -527,6 +551,7 @@ async def _load(context: DeliverContext, job: Job, states: Collection[str]) -> _
         flow_data = await load_flow_data(conn, job.invoice_id)
         pdf_path = await get_file_path(conn, job.invoice_id, "pdf")
         xml_path = await get_file_path(conn, job.invoice_id, "xml")
+        today = await owner_today(conn, context.cfg.owner.timezone)
     if reading is None or flow_name is None:
         raise RuntimeError(f"invoice {job.invoice_id} lacks its reading or flow")
     flow = context.cfg.flows.get(flow_name)
@@ -547,6 +572,7 @@ async def _load(context: DeliverContext, job: Job, states: Collection[str]) -> _
         pdf=pdf,
         xml=xml,
         xml_reading=xml_reading,
+        today=today,
     )
 
 
@@ -767,8 +793,10 @@ async def _assisted(context: DeliverContext, delivery: _Delivery, prepared: _Val
         await _close_fixed_gap(conn, context, delivery.invoice_id)
 
 
-async def _review(context: DeliverContext, delivery: _Delivery, prepared: _Values) -> None:
-    """Post the built mail for the owner to check, sending nothing (D194, D88, D89).
+async def _review(
+    context: DeliverContext, delivery: _Delivery, prepared: _Values, doubtful: Sequence[str]
+) -> None:
+    """Post the built mail for the owner to check, sending nothing (D194, D203, D88, D89).
 
     The attachments are written first; a retry rewrites them, which is harmless. One
     transaction then opens the ``review`` batch (reusing an earlier ``prepared``,
@@ -796,7 +824,7 @@ async def _review(context: DeliverContext, delivery: _Delivery, prepared: _Value
         await set_state(conn, invoice_id, BATCHED, rule_id=RULE_REVIEW)
         addressee = Addressee(delivery.head.origin_channel, delivery.head.profile_id)
         await queue_review_documents(conn, addressee, invoice_id, documents)
-        text = review_text(prepared.values, delivery.mail)
+        text = review_text(prepared.values, delivery.mail, doubtful)
         await _notify(
             conn, delivery.head, invoice_id, _Reply(RULE_REVIEW, text, buttons, _folder_links(delivery))
         )

@@ -1,9 +1,10 @@
 """The pieces of flow B's review before send: the mail's files, its text and its documents (D194).
 
-With the mailer's ``send: review`` the delivery posts the built mail to the chat instead of
-sending it. This module writes the attachments under ``<data_dir>/mail/<invoice_id>/``,
-renders BR-D19 and queues the attachments as documents. The transaction that opens the
-``review`` batch stays in :mod:`invoicebot.pipeline.deliver`, next to the other completions.
+With the mailer's ``send: review`` (or ``if_doubtful`` and a doubtful field, D203) the
+delivery posts the built mail to the chat instead of sending it. This module writes the attachments under
+``<data_dir>/mail/<invoice_id>/``, renders BR-D19 and queues the attachments as documents.
+The transaction that opens the ``review`` batch stays in
+:mod:`invoicebot.pipeline.deliver`, next to the other completions.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from psycopg import AsyncConnection
 
 from invoicebot.channels.base import Document
 from invoicebot.pipeline.outgoing import Addressee, queue_document
-from invoicebot.rules.messages_es import MESSAGES, REVIEW_CC_LINE
+from invoicebot.rules.messages_es import MESSAGES, REVIEW_CC_LINE, SUMMARY_REVIEW, fields_desc
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.mailer import MAIL_DIRECTORY
 
@@ -107,13 +108,19 @@ def mail_digest(mail: OutgoingMail) -> str:
     return hashlib.sha256(text.encode("ascii")).hexdigest()
 
 
-def review_text(values: Mapping[str, object], mail: OutgoingMail) -> str:
-    """Render BR-D19 for the built mail: recipients, subject, body and file names (D194)."""
+def review_text(values: Mapping[str, object], mail: OutgoingMail, doubtful: Sequence[str]) -> str:
+    """Render BR-D19 for the built mail: recipients, subject, body and file names (D194).
+
+    ``doubtful`` names the fields that hold the mail under ``send: if_doubtful``; when it
+    is not empty the summary's Revisa line goes under the heading, else no line (D203).
+    """
+    review_line = SUMMARY_REVIEW.format(fields_desc=fields_desc(doubtful)) + "\n" if doubtful else ""
     cc_line = REVIEW_CC_LINE.format(cc=", ".join(mail.cc)) if mail.cc else ""
     return MESSAGES[RULE_REVIEW].format(
         serie=values["serie"],
         numero=values["numero"],
         to=", ".join(mail.to),
+        review_line=review_line,
         cc_line=cc_line,
         subject=mail.subject,
         body=mail.body,
