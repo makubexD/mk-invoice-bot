@@ -16,20 +16,23 @@ RUCs or images are recorded here.
   `No hay registros` in a table cell. Both pages show the captcha input again with a new image.
 - `hdfFecha` is filled by the server only; `txtFecha` takes `yyyy-mm-dd` (`dd/mm/yyyy` also gives `No hay registros`).
 
-| Row                                       | Result                                                                                          |
-| ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| (a) replay in a new browser after 12 s    | pass: `No hay registros` (captcha accepted)                                                     |
-| (c) wrong answer through replay           | pass: `Texto no coincide con la imagen.`                                                        |
-| (b) replay after 60, 120 and 180 s        | pass: all three `No hay registros` (captcha accepted)                                           |
-| (b) replay after 240 s and after 290 s    | fail: both `Texto no coincide`; the captcha lives between 180 s and 240 s                       |
-| (d) the live #52 ticket                   | `No hay registros` for correlativo plain and 8-digit padded; the portal has no record of it yet |
-| (d) result page, downloads, value formats | open: needs an invoice the portal knows                                                         |
-| Live #52 OCR                              | bug: serie and número were read off the date line (0.43); the ticket's number differs           |
+| Row                                       | Result                                                                                      |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------- |
+| (a) replay in a new browser after 12 s    | pass: `No hay registros` (captcha accepted)                                                 |
+| (c) wrong answer through replay           | pass: `Texto no coincide con la imagen.`                                                    |
+| (b) replay after 60, 120 and 180 s        | pass: all three `No hay registros` (captcha accepted)                                       |
+| (b) replay after 240 s and after 290 s    | fail: both `Texto no coincide`; the captcha lives between 180 s and 240 s                   |
+| (d) the live #52 ticket                   | `No hay registros`; the values match the printed ticket and its QR, so the portal lacks it  |
+| (d) result page, downloads, value formats | deferred to the live check: no invoice the portal knows, and replays need the owner (below) |
+| Live #52 QR                               | zxing reads the ticket's QR on the full photo, yet the reading came from OCR at 0.43: a bug |
 
-## Open before step 2
+## Left for the live check
 
-- The captcha lives between 180 s and 240 s. `ask_user_timeout_s` must sit under 180 s (with margin for the
-  replay itself), so the 300 s default of D209 does not hold for PEBSA; step 2 sets it lower.
+- The result page of an invoice the portal knows: its download buttons (PDF, XML), their selectors and whether a
+  download is a postback. Step 2 must treat a page with neither marker as unknown and say so, not guess.
+- The QR on the ticket is the SUNAT payload (no document link), so the portal stays the only route to the PDF.
+- The captcha lives between 180 s and 240 s. `ask_user_timeout_s` must sit under 180 s (with margin for the replay
+  itself), so the 300 s default of D209 does not hold for PEBSA; step 2 sets it lower.
 - Two of three forms opened in parallel showed the same captcha text; each answer is still checked against its own
   session.
-- A PEBSA invoice the portal knows, to learn the result page and its download buttons.
+- The auto-mode classifier refuses the replay POST from the assistant's shell; the owner ran the timed replays.
