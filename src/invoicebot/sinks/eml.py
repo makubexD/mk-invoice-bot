@@ -33,25 +33,35 @@ def _split_mime(mime: str) -> tuple[str, str]:
     return parts[0], parts[1]
 
 
-def build_eml(mail: OutgoingMail, *, sender: str | None = None, html: bool = False) -> bytes:
-    """Render ``mail`` as the bytes of an ``.eml`` message (R-7.6, D69, D205).
+def build_eml(
+    mail: OutgoingMail,
+    *,
+    sender: str | None = None,
+    html: bool = False,
+    message_id: str | None = None,
+) -> bytes:
+    """Render ``mail`` as the bytes of an ``.eml`` message (R-7.6, D69, D205, D207).
 
     Args:
         mail: the recipients, subject, body and attachments to render.
         sender: the ``From`` address; no ``From`` header when ``None``.
         html: add the D197 HTML body as an alternative to the plain text.
+        message_id: the ``Message-ID`` header the bounce watch looks for (D207);
+            no header when ``None``.
 
     Returns:
         The message as SMTP-policy bytes.
 
     Raises:
-        ValueError: the subject, sender, a recipient address or an attachment
-            name holds a CR or LF, or an attachment MIME type is not
-            ``type/subtype``.
+        ValueError: the subject, sender, message id, a recipient address or an
+            attachment name holds a CR or LF, or an attachment MIME type is
+            not ``type/subtype``.
     """
     _refuse_header_newlines(mail.subject, "subject")
     if sender is not None:
         _refuse_header_newlines(sender, "sender address")
+    if message_id is not None:
+        _refuse_header_newlines(message_id, "message id")
     for address in (*mail.to, *mail.cc):
         _refuse_header_newlines(address, "recipient address")
     for attachment in mail.attachments:
@@ -65,6 +75,8 @@ def build_eml(mail: OutgoingMail, *, sender: str | None = None, html: bool = Fal
         message["Cc"] = ", ".join(mail.cc)
     message["Subject"] = mail.subject
     message["Date"] = formatdate(usegmt=True)
+    if message_id is not None:
+        message["Message-ID"] = message_id
     message.set_content(mail.body)
     if html:
         message.add_alternative(html_body(mail.body), subtype="html")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import dataclasses
 import email
 import email.policy
 import logging
@@ -123,6 +124,30 @@ async def test_sent_bytes_have_sender_and_html_part() -> None:
     message = email.message_from_bytes(data, policy=email.policy.SMTP)
     assert SENDER in message["From"]
     assert any(part.get_content_type() == "text/html" for part in message.walk())
+
+
+async def test_send_returns_the_message_id_written_once_under_the_sender_domain() -> None:
+    """D207: the returned id is the one Message-ID header of the sent bytes, on the sender's domain."""
+    fake = _fake()
+    message_id = await _mailer(fake).send(MAIL)
+    data = dict(fake.last.calls)["sendmail"][2]
+    message = email.message_from_bytes(data, policy=email.policy.SMTP)
+    assert message.get_all("Message-ID") == [message_id]
+    assert message_id.endswith("@example.com>")
+
+
+async def test_two_sends_get_different_message_ids() -> None:
+    """D207: every send makes a fresh Message-ID."""
+    mailer = _mailer(_fake())
+    assert await mailer.send(MAIL) != await mailer.send(MAIL)
+
+
+async def test_subject_with_newline_is_still_refused_and_sends_nothing() -> None:
+    """D207: adding the Message-ID keeps the header-injection guard on the subject."""
+    no_connection = _fake(connect_error=OSError("must not connect"))
+    bad = dataclasses.replace(MAIL, subject="Support\r\nBcc: evil@example.com")
+    with pytest.raises(ValueError, match="subject"):
+        await _mailer(no_connection).send(bad)
 
 
 async def test_auth_535_raises_auth_required_and_sends_nothing() -> None:
