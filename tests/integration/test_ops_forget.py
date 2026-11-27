@@ -39,18 +39,37 @@ async def _seed(
     state: str = "DONE",
     folder: str | None = FOLDER,
     local_path: str | None = None,
+    batch_state: str | None = None,
 ) -> tuple[int, str, list[Path]]:
-    """Insert an invoice with a key, a file row and host files; return its id, key and files."""
+    """Insert an invoice with a key, a file row and host files; return its id, key and files.
+
+    ``batch_state`` also inserts a batch in that state and puts the invoice on it.
+    """
     key = f"20000000001-F014-{uuid4().hex}"
     async with pool.connection() as conn:
+        batch_id = None
+        if batch_state is not None:
+            cur = await conn.execute(
+                "INSERT INTO batches (flow_id, state) VALUES ('work_microsoft', %s) RETURNING id",
+                (batch_state,),
+            )
+            batch_row = await cur.fetchone()
+            assert batch_row is not None
+            batch_id = int(batch_row[0])
         cur = await conn.execute(
             """
             INSERT INTO invoices (profile_id, origin_channel, state, flow_id, serie, numero, natural_key,
-                                  flow_data_json)
-            VALUES (%s, 'whatsapp', %s, 'work_microsoft', 'F014', '15828', %s, %s)
+                                  flow_data_json, batch_id)
+            VALUES (%s, 'whatsapp', %s, 'work_microsoft', 'F014', '15828', %s, %s, %s)
             RETURNING id
             """,
-            (f"profile-{uuid4().hex}", state, key, Jsonb({"folder_path": folder} if folder else {})),
+            (
+                f"profile-{uuid4().hex}",
+                state,
+                key,
+                Jsonb({"folder_path": folder} if folder else {}),
+                batch_id,
+            ),
         )
         row = await cur.fetchone()
         assert row is not None
@@ -260,3 +279,71 @@ async def test_purge_of_a_paid_invoice_is_refused_but_release_works(
     assert all(p.exists() for p in files)
     await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
     assert await _row(db_pool, invoice_id) == (None, 1)
+
+
+async def _batch_count(pool: AsyncConnectionPool[AsyncConnection[Any]], invoice_id: int) -> int:
+    """Return how many batches the invoice's ``batch_id`` still points at (0 once it is gone)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT count(*) FROM batches WHERE id = (SELECT batch_id FROM invoices WHERE id = %s)",
+            (invoice_id,),
+        )
+        row = await cur.fetchone()
+        assert row is not None
+        return int(row[0])
+
+
+async def test_held_dry_run_reports_and_changes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a dry run on a held invoice says it will be cancelled and changes nothing."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    lines = await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, False))
+    assert "state: BATCHED, mail held for review; will be cancelled" in lines
+    assert lines[-1] == "dry run: nothing changed"
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("BATCHED",)
+
+
+async def test_held_apply_cancels_and_releases_key(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: --yes on a held invoice sets it CANCELLED with BR-D23 and releases its key."""
+    invoice_id, _, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    lines = await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    assert lines[-1] == "database: key released"
+    assert await _row(db_pool, invoice_id) == (None, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state, rule_id FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("CANCELLED", "BR-D23")
+
+
+async def test_held_purge_removes_rows_and_unused_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: --purge --yes on a held invoice deletes its rows and its now-unused batch."""
+    invoice_id, _, files = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT batch_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+        assert row is not None
+        batch_id = row[0]
+    await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, True, True))
+    assert await _row(db_pool, invoice_id) is None
+    assert not any(p.exists() for p in files)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT count(*) FROM batches WHERE id = %s", (batch_id,))
+        assert await cur.fetchone() == (0,)
+
+
+async def test_batched_on_prepared_batch_is_still_refused(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a BATCHED invoice on a prepared batch is refused, as before, and nothing changes."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="prepared")
+    with pytest.raises(ForgetRefused, match="/cancelar"):
+        await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    assert await _batch_count(db_pool, invoice_id) == 1

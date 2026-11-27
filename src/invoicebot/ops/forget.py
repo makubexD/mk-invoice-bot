@@ -1,4 +1,4 @@
-"""Forget a terminal invoice: its drive folder, host files and database rows (D196)."""
+"""Forget a terminal or held invoice: its drive folder, host files and database rows (D196)."""
 
 import asyncio
 import os
@@ -11,7 +11,10 @@ from invoicebot.sinks.base import Drive
 from invoicebot.sinks.mailer import MAIL_DIRECTORY
 from invoicebot.states import TERMINAL
 from invoicebot.store.db import Pool
-from invoicebot.store.forget import ForgetTarget, lock_target, purge, release_key
+from invoicebot.store.forget import ForgetTarget, cancel_held, lock_target, purge, release_key
+
+#: The dry-run line for an invoice whose mail waits for [Enviar] (D204).
+HELD_LINE = "state: BATCHED, mail held for review; will be cancelled"
 
 
 @dataclass(frozen=True)
@@ -67,11 +70,11 @@ async def _read_and_check(pool: Pool, request: ForgetRequest) -> ForgetTarget:
 
 
 def _require_forgettable(target: ForgetTarget | None, request: ForgetRequest) -> ForgetTarget:
-    """Return ``target`` when it exists, is terminal and may be purged if asked; else refuse."""
+    """Return ``target`` when it exists, is terminal or held and may be purged if asked; else refuse."""
     invoice_id = request.invoice_id
     if target is None:
         raise ForgetRefused(f"invoice {invoice_id} does not exist")
-    if target.state not in TERMINAL:
+    if target.state not in TERMINAL and not target.held:
         raise ForgetRefused(
             f"invoice {invoice_id} is {target.state}, not finished; cancel it first with /cancelar"
         )
@@ -174,6 +177,8 @@ def _head(target: ForgetTarget) -> str:
 def _plan_lines(target: ForgetTarget, files: _Files, scan: _Scan, request: ForgetRequest) -> list[str]:
     """Return the report of what an apply would do."""
     lines = [_head(target)]
+    if target.held:
+        lines.append(HELD_LINE)
     lines.append(f"drive: would delete {target.folder_path}" if request.drive else "drive: kept")
     lines.append(f"files: would remove {scan.count}" if request.purge else "files: kept")
     if request.purge:
@@ -199,7 +204,8 @@ async def _delete_drive(target: ForgetTarget, drive: Drive | None, request: Forg
 async def _finish(pool: Pool, data_dir: Path, request: ForgetRequest, drive_line: str) -> list[str]:
     """Re-lock the invoice, re-check it, then remove its files and purge it, or release its key.
 
-    The files go while the row is locked, after the re-check. A refusal here keeps
+    A held invoice is set ``CANCELLED`` first, in the same transaction (D204). The files
+    go while the row is locked, after the re-check. A refusal here keeps
     ``drive_line`` in the error when the drive folder was already deleted.
     """
     done = (drive_line,) if drive_line.startswith("drive: deleted") else ()
@@ -209,6 +215,8 @@ async def _finish(pool: Pool, data_dir: Path, request: ForgetRequest, drive_line
         except ForgetRefused as error:
             raise ForgetRefused(str(error), done=done) from error
         lines = [drive_line]
+        if target.held:
+            await cancel_held(conn, request.invoice_id)
         if not request.purge:
             await release_key(conn, request.invoice_id)
             return [*lines, "files: kept", "database: key released"]
@@ -227,7 +235,8 @@ async def _finish(pool: Pool, data_dir: Path, request: ForgetRequest, drive_line
 async def forget(pool: Pool, data_dir: Path, drive: Drive | None, request: ForgetRequest) -> list[str]:
     """Forget the invoice and return the report lines (D196).
 
-    Refuses an unknown invoice, one not in a terminal state, ``--purge`` on a paid
+    Refuses an unknown invoice, one neither terminal nor held (D204: a ``BATCHED``
+    invoice whose batch is in ``review``, which is set ``CANCELLED`` first), ``--purge`` on a paid
     invoice, and ``--drive`` without a drive or a folder. Without ``apply`` nothing
     changes. With it the drive folder goes first (a failure leaves everything as it
     was), then one transaction locks the invoice again, checks it, removes the host
