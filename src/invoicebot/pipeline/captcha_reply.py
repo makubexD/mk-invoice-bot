@@ -18,7 +18,7 @@ from invoicebot.queue.jobs import enqueue
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.states import FETCHING_DOCS, WAITING_CAPTCHA
 from invoicebot.store import captchas
-from invoicebot.store.invoices import load_invoice_head, set_state
+from invoicebot.store.invoices import load_invoice_head, lock_invoice, set_state
 
 #: BR-F19's text rule: the captcha already expired (D209).
 RULE_EXPIRED = "BR-F19"
@@ -41,6 +41,8 @@ async def answer(conn: AsyncConnection[Any], profile_id: str, msg: InboundMessag
     if question is None or question[0] not in _ASKED_RULES or not msg.text:
         return False
     invoice_id = question[1]
+    # The invoice lock first, as the timeout takes it, so the two never deadlock on the captcha row.
+    await lock_invoice(conn, invoice_id)
     head = await load_invoice_head(conn, invoice_id)
     if head is None or head.state != WAITING_CAPTCHA:
         return False

@@ -76,6 +76,7 @@ from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
 from invoicebot.pipeline.bounce_watch import BounceReader, make_bounce_check_handler
+from invoicebot.pipeline.captcha_timeout import make_captcha_timeout_handler
 from invoicebot.pipeline.chat_docs_post import make_send_documents_handler
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
@@ -111,6 +112,7 @@ from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import (
     ATTACH_STEP,
     BOUNCE_CHECK_STEP,
+    CAPTCHA_TIMEOUT_STEP,
     FETCH_PROGRESS_STEP,
     FOLDER_STATUS_STEP,
     PORTAL_CHECK_STEP,
@@ -389,6 +391,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             FETCH_PROGRESS_STEP: make_fetch_progress_handler(pool),
             BOUNCE_CHECK_STEP: make_bounce_check_handler(pool, cfg, _bounce_readers(settings, cfg, http)),
             SEND_DOCUMENTS_STEP: make_send_documents_handler(pool, settings.data_dir),
+            CAPTCHA_TIMEOUT_STEP: make_captcha_timeout_handler(pool, settings.data_dir),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
