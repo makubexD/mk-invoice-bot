@@ -41,7 +41,7 @@ from pypdfium2 import PdfDocument
 from invoicebot.config.models import Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
 from invoicebot.extract.image import ImageUnreadable, crop_receipt, load_gray
-from invoicebot.extract.merge import merge
+from invoicebot.extract.merge import fill_missing, merge
 from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
 from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
@@ -292,29 +292,43 @@ def _retries(
     first: tuple[OcrText | None, Reading | None, np.ndarray],
     qr_reading: Reading | None,
 ) -> tuple[OcrText | None, Reading | None, np.ndarray]:
-    """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198).
+    """Return the best of ``first`` and the retry reads, with the deskewed image it came from (D198, D200).
 
     While the best reading misses a required field, the candidates run in order, each only with
     at least ``MIN_RETRY_S`` of the retry budget left after ``started`` (the helper's start) and
     with only that time. The budget is ``ocr_cfg.timeout_s`` less ``STRIP_TIMEOUT_S``, kept for
     the strip re-read that follows. The best has the fewest missing required fields once merged
     with ``qr_reading``, a tie keeping the earlier reading; the reading kept is the OCR one,
-    unmerged. ``first`` carries the deskewed image it came from.
+    unmerged, with the fields it lacks filled from the other reads (``fill_missing``), and the
+    retries stop once those fills leave nothing missing. ``first`` carries the deskewed image it
+    came from; the image returned is the best read's.
     """
     best = first
+    reads = [] if first[1] is None else [first[1]]
     candidates = _candidates(gray, first[2])
     budget = ocr_cfg.timeout_s - STRIP_TIMEOUT_S
     # Time is checked before a candidate is built, so a skipped crop is never made, and again after,
     # so the time the build took is not handed to the read.
-    while _missing_count(best[1], qr_reading) > 0 and _left(budget, started) >= MIN_RETRY_S:
+    while _missing_count(_filled(best[1], reads), qr_reading) > 0 and _left(budget, started) >= MIN_RETRY_S:
         candidate = next(candidates, None)
         left = _left(budget, started)
         if candidate is None or left < MIN_RETRY_S:
             break
         read = _read_candidate(candidate[0], ocr_cfg, rules, left, candidate[2])
-        if read is not None and _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
+        if read is None:
+            continue
+        if read[1] is not None:
+            reads.append(read[1])
+        if _missing_count(read[1], qr_reading) < _missing_count(best[1], qr_reading):
             best = (*read, candidate[1])
-    return best
+    return best[0], _filled(best[1], reads), best[2]
+
+
+def _filled(best: Reading | None, reads: list[Reading]) -> Reading | None:
+    """Return ``best`` with its gaps filled from the other ``reads``, or ``None`` with no ``best`` (D200)."""
+    if best is None:
+        return None
+    return fill_missing(best, [read for read in reads if read is not best])
 
 
 def _with_url_strip(
