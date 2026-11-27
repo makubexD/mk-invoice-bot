@@ -711,6 +711,7 @@ def test_account_used_only_by_an_smtp_mailer_is_a_delivery_account(tmp_path: Pat
     flow = document["flows"]["work_microsoft"]
     flow["sinks"] = [sink for sink in flow["sinks"] if sink["kind"] == "mailer"]
     flow["sinks"][0]["modes"] = ["smtp"]
+    flow["chat_documents"] = []  # D206: excel needs the excel_template sink removed above
     flow["email_inbox"]["account"] = "bot"
     cfg = load_config(_write_yaml(tmp_path / "example.yaml", document))
 
@@ -1517,3 +1518,55 @@ def test_padron_url_over_plain_http_is_rejected() -> None:
     """S12.4: a padrón URL that is not https fails validation."""
     with pytest.raises(ValidationError, match=r"padron\.url must use https"):
         Padron(refresh_cron="0 4 * * 0", url="http://example.test/padron.zip")
+
+
+def test_example_config_has_chat_documents() -> None:
+    """D206: the example sends pdf, xml and excel for work_microsoft and nothing for personal_dni."""
+    cfg = load_config(EXAMPLE)
+
+    assert cfg.flows["work_microsoft"].chat_documents == ["pdf", "xml", "excel"]
+    assert cfg.flows["personal_google"].chat_documents == ["pdf"]
+    assert cfg.flows["personal_dni"].chat_documents == []
+
+
+def test_chat_document_defaults_apply_when_keys_are_absent(tmp_path: Path) -> None:
+    """D206: a config without the new keys loads with 20 s and 30 days."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    del document["limits"]["fetch_progress_after_s"]
+    del document["ops"]["retention_days"]["chat_documents"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    cfg = load_config(path)
+
+    assert cfg.limits.fetch_progress_after_s == 20
+    assert cfg.ops.retention_days.chat_documents == 30
+
+
+def test_duplicate_chat_documents_fail(tmp_path: Path) -> None:
+    """D206: a chat document listed twice is refused at load."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["chat_documents"] = ["pdf", "pdf"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="unique"):
+        load_config(path)
+
+
+def test_excel_chat_document_without_excel_sink_fails(tmp_path: Path) -> None:
+    """D206: excel is refused on a flow with no excel_template sink."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["flows"]["personal_google"]["chat_documents"] = ["excel"]
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="excel_template"):
+        load_config(path)
+
+
+def test_zero_fetch_progress_delay_fails(tmp_path: Path) -> None:
+    """D206: fetch_progress_after_s must be positive."""
+    document = yaml.safe_load(EXAMPLE.read_text(encoding="utf-8"))
+    document["limits"]["fetch_progress_after_s"] = 0
+    path = _write_yaml(tmp_path / "example.yaml", document)
+
+    with pytest.raises(ValidationError, match="fetch_progress_after_s"):
+        load_config(path)

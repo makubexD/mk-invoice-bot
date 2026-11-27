@@ -314,13 +314,21 @@ def _config(tmp_path: Path, profile_id: str, mail_mode: str = "dry_run", send: s
                 update["send"] = send
             sink = sink.model_copy(update=update)
         sinks.append(sink)
-    flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
+    flow = cfg.flows[FLOW].model_copy(
+        update={"sinks": sinks, "chat_documents": []}
+    )  # D206: off unless a test opts in
     return cfg.model_copy(
         update={
             "flows": {**cfg.flows, FLOW: flow},
             "profiles": {profile_id: cfg.profiles[PROFILE]},
         }
     )
+
+
+def _with_chat_documents(cfg: Config, kinds: list[Any]) -> Config:
+    """Return ``cfg`` with the work flow keeping ``kinds`` for [📎 Ver documentos] (D206)."""
+    flow = cfg.flows[FLOW].model_copy(update={"chat_documents": kinds})
+    return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
 def _config_with_admins(cfg: Config, profile_id: str, admin_ids: list[str]) -> Config:
@@ -339,7 +347,9 @@ def _config_with_bad_template(cfg: Config) -> Config:
         if isinstance(sink, ExcelTemplateSink):
             sink = sink.model_copy(update={"template_sha256": "0" * 64})
         sinks.append(sink)
-    flow = cfg.flows[FLOW].model_copy(update={"sinks": sinks})
+    flow = cfg.flows[FLOW].model_copy(
+        update={"sinks": sinks, "chat_documents": []}
+    )  # D206: off unless a test opts in
     return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
@@ -781,6 +791,72 @@ async def test_the_graph_done_message_carries_the_folder_link(
         links = await _outbox_links(conn, profile_id)
     assert flow_data["folder_url"] == FAKE_FOLDER_URL
     assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+
+
+async def test_a_done_delivery_keeps_the_flow_documents_and_offers_the_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: BR-D10 keeps the listed pdf, xml and excel and the message adds [📎 Ver documentos]."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(tmp_path, profile_id, mail_mode="graph"), ["pdf", "xml", "excel"])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    data_dir = tmp_path / "data"
+
+    await _handler(db_pool, cfg, FakeDrive(), data_dir, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        links = await _outbox_links(conn, profile_id)
+    kept = sorted(path.suffix for path in (data_dir / "docs" / str(invoice_id)).iterdir())
+    assert kept == [".pdf", ".xlsx", ".xml"]
+    assert outbox[0][2] == [{"id": button_id(invoice_id, "docs"), "title": "📎 Ver documentos"}]
+    assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
+
+
+class _DocsCheckingMode(FakeGraphMode):
+    """An automatic mode that records whether the chat documents were kept before the send (D206)."""
+
+    def __init__(self, folder: Path) -> None:
+        super().__init__()
+        self.folder = folder
+        self.kept_before_send: bool | None = None
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, folder_path: str) -> None:
+        """Note whether the folder exists, then record the send."""
+        self.kept_before_send = self.folder.is_dir()
+        await super().deliver(invoice_id, mail, folder_path)
+
+
+async def test_the_documents_are_kept_before_the_mail_is_sent(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, D89: the files are kept before the send, so only the commit follows the mail going out."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(tmp_path, profile_id, mail_mode="graph"), ["pdf"])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    data_dir = tmp_path / "data"
+    mode = _DocsCheckingMode(data_dir / "docs" / str(invoice_id))
+
+    await _handler(db_pool, cfg, FakeDrive(), data_dir, mode, mode_name="graph")(_job(invoice_id))
+
+    assert mode.kept_before_send is True
+
+
+async def test_a_flow_without_chat_documents_keeps_nothing_and_adds_no_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: with ``chat_documents: []`` BR-D10 is today's message: no folder and no button."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(tmp_path, profile_id, mail_mode="graph"), [])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    data_dir = tmp_path / "data"
+
+    await _handler(db_pool, cfg, FakeDrive(), data_dir, FakeGraphMode(), mode_name="graph")(_job(invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert not (data_dir / "docs").exists()
+    assert not outbox[0][2]
 
 
 async def test_a_retried_delivery_reuses_the_saved_folder_link(

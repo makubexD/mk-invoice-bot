@@ -74,6 +74,7 @@ from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
+from invoicebot.pipeline.chat_docs_post import make_send_documents_handler
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
     DeliverContext,
@@ -85,6 +86,7 @@ from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google
 from invoicebot.pipeline.extract import ROUTE_STEP, ExtractInputs, make_extract_handler, run_extract_helper
 from invoicebot.pipeline.failed import notify_dead
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
+from invoicebot.pipeline.fetch_progress import make_fetch_progress_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
@@ -106,9 +108,11 @@ from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import (
     ATTACH_STEP,
+    FETCH_PROGRESS_STEP,
     FOLDER_STATUS_STEP,
     PORTAL_CHECK_STEP,
     PORTAL_PROBE_STEP,
+    SEND_DOCUMENTS_STEP,
     SUNAT_RECHECK_STEP,
 )
 from invoicebot.pipeline.sunat_recheck import make_sunat_recheck_handler, skip_recheck
@@ -377,10 +381,12 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
             ),
+            FETCH_PROGRESS_STEP: make_fetch_progress_handler(pool),
+            SEND_DOCUMENTS_STEP: make_send_documents_handler(pool, settings.data_dir),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
-        handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
+        handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens, settings.data_dir))
         worker = Worker(pool, handlers, on_dead=partial(notify_dead, profiles=cfg.profiles))
         github_app = _github_app(cfg, store, http)
         transports: dict[str, Transport] = {
@@ -399,7 +405,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             DailyRuns(
                 backup=partial(_run_backup, settings, cfg, pool, drive),
                 retention=partial(_run_retention, pool, cfg),
-                housekeeping=partial(housekeep, pool, settings.data_dir),
+                housekeeping=partial(
+                    housekeep, pool, settings.data_dir, cfg.ops.retention_days.chat_documents
+                ),
                 padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
                 digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
                 github_health=_github_health_run(github_app, pool, cfg),
@@ -666,6 +674,7 @@ def _deliver_registry(
     http: httpx.AsyncClient,
     pool: Pool,
     tokens: Mapping[str, GoogleTokens],
+    data_dir: Path,
 ) -> dict[str, Handler]:
     """Return the delivery steps each flow's sink kind selects (D132).
 
@@ -673,7 +682,7 @@ def _deliver_registry(
     status and resends stay registered as before, only when a OneDrive sink exists.
     """
     by_kind: dict[str, Handler] = {}
-    google = _google_deliver_handler(cfg, http, pool, tokens)
+    google = _google_deliver_handler(cfg, http, pool, tokens, data_dir)
     if google is not None:
         by_kind[GOOGLE_DRIVE_KIND] = google
         by_kind[GOOGLE_SHEETS_KIND] = google
@@ -795,6 +804,7 @@ def _google_deliver_handler(
     http: httpx.AsyncClient,
     pool: Pool,
     tokens: Mapping[str, GoogleTokens],
+    data_dir: Path,
 ) -> Handler | None:
     """Build the Google flows' deliver handler, or None when no flow has a Google sink (R-6.1, D129, D144).
 
@@ -821,7 +831,9 @@ def _google_deliver_handler(
         )
         for account in tokens
     }
-    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles))
+    return make_google_deliver_handler(
+        GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles, data_dir)
+    )
 
 
 def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str, Handler]:

@@ -1,12 +1,13 @@
-"""Job handler that validates a routed invoice with SUNAT and sends its summary (R-4.1, D124).
+"""Job handler that validates a routed invoice with SUNAT and saves its summary inputs (R-4.1, D124, D206).
 
 :func:`make_validate_handler` builds the handler of the ``validate`` job step. In
 ``VALIDATING`` it reads the routed invoice and its padrón row, asks the SUNAT validez
 API when the adapter's secrets are present and, in one transaction, stores the answer,
 applies BR-V01..BR-V06's verdict and either moves the invoice to ``FETCHING_DOCS`` with
-its summary (now carrying the SUNAT line) and its ``fetch`` job, or to ``CONFIRM_INVALID``
-with BR-V02/BR-V06's question. Without secrets (validation off, D124) it only sends the
-summary and moves on, exactly as routing did before. The token fetch and the validez call
+its ``fetch`` and ``fetch_progress`` jobs and the summary's inputs saved (the SUNAT lines
+included; the fetch step posts the summary, D206), or to ``CONFIRM_INVALID`` with
+BR-V02/BR-V06's question. Without secrets (validation off, D124) it saves the inputs with
+no SUNAT line and moves on. The token fetch and the validez call
 run with no connection held, except the short, separate ``kv`` reads, writes and deletes
 the token makes on connections of its own.
 """
@@ -17,7 +18,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import datetime
 from typing import Any, cast
 
 import httpx
@@ -27,16 +28,15 @@ from invoicebot.channels.base import Button
 from invoicebot.config.models import Config
 from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.questions import invalid_question, summary_buttons
-from invoicebot.pipeline.steps import FETCH_STEP, SUNAT_RECHECK_STEP
-from invoicebot.pipeline.summary import flow_line, summary_text
+from invoicebot.pipeline.questions import invalid_question
+from invoicebot.pipeline.steps import FETCH_PROGRESS_STEP, FETCH_STEP, SUNAT_RECHECK_STEP
+from invoicebot.pipeline.summary_post import discard_summary_inputs, save_summary_inputs
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import MESSAGES, SUMMARY_MOVING, SUMMARY_MOVING_QUIET
+from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.secrets import Secrets
 from invoicebot.states import CONFIRM_INVALID, FETCHING_DOCS, VALIDATING, StateMoved
-from invoicebot.store.clock import owner_today
 from invoicebot.store.db import Pool
 from invoicebot.store.invoices import (
     CpStatus,
@@ -73,8 +73,6 @@ class _Inputs:
     invoice_id: int
     reading: Reading
     rule_id: str
-    flow_line: str
-    today: date
     padron: PadronRow | None
 
 
@@ -83,11 +81,11 @@ def make_validate_handler(
 ) -> Handler:
     """Build the handler that validates an invoice in ``VALIDATING`` (R-4.1, D124, D125).
 
-    ``secrets is None`` means validation is off: the handler only sends the routed
-    summary and moves the invoice on, exactly as routing did before this step. With
+    ``secrets is None`` means validation is off: the handler only saves the summary's
+    inputs and moves the invoice on (the fetch step posts the summary, D206). With
     secrets it stores the SUNAT answer and acts on :func:`invoicebot.sunat.verdict.decide`:
     a question moves the invoice to ``CONFIRM_INVALID``, a recheck schedules a
-    ``sunat_recheck`` job, and the summary gains the verdict's line and BR-V03's. A
+    ``sunat_recheck`` job, and the saved inputs gain the verdict's line and BR-V03's. A
     missing reading, flow or rule is a programming error, so the queue retries. An
     invoice a cancel or edit moved out of ``VALIDATING`` while SUNAT was being asked ends
     the job quietly: the final transaction rolls back, so the answer is not stored (D95).
@@ -131,7 +129,7 @@ def make_validate_handler(
 
 
 async def _read(conn: AsyncConnection[Any], invoice_id: int, cfg: Config) -> _Inputs | None:
-    """Load the routed invoice, its padrón row and the summary inputs (D125).
+    """Load the routed invoice and its padrón row (D125).
 
     Returns None when the invoice does not exist or is not in ``VALIDATING``, so the
     job ends quietly. A missing reading, flow or rule raises for the queue to retry.
@@ -147,16 +145,13 @@ async def _read(conn: AsyncConnection[Any], invoice_id: int, cfg: Config) -> _In
         raise RuntimeError(f"invoice {invoice_id} has no reading")
     if flow_id is None or rule_id is None:
         raise RuntimeError(f"invoice {invoice_id} has no routed flow or rule")
-    flow = cfg.flows.get(flow_id)
-    if flow is None:
+    if flow_id not in cfg.flows:
         raise RuntimeError(f"invoice {invoice_id} has an unknown flow")
     return _Inputs(
         invoice=invoice,
         invoice_id=invoice_id,
         reading=reading,
         rule_id=rule_id,
-        flow_line=flow_line(flow, rule_id),
-        today=await owner_today(conn, cfg.owner.timezone),
         padron=await lookup(conn, reading.value("ruc_emisor") or ""),
     )
 
@@ -191,32 +186,32 @@ async def ask_sunat(
 
 
 async def _routed_off(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) -> None:
-    """Send the summary and move the invoice on, exactly as routing did before (D124)."""
-    buttons = summary_buttons(inputs.invoice_id, inputs.reading)
-    text = summary_text(
-        inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, (_moving_line(buttons),)
-    )
-    await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
-    await start_fetch_round(conn, inputs.invoice_id)
-    await enqueue(conn, inputs.invoice_id, FETCH_STEP)
-    await _reply(conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, buttons)
+    """Save the summary's inputs and move the invoice on, with no SUNAT line (D124, D206)."""
+    await save_summary_inputs(conn, inputs.invoice_id, rule_id=inputs.rule_id, extra_lines=())
+    await _start_fetching(conn, inputs, cfg)
 
 
 async def _apply(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config, verdict: Verdict) -> None:
-    """Apply the verdict in the caller's transaction (D125)."""
+    """Apply the verdict in the caller's transaction (D125, D206)."""
     if verdict.ask:
         await _ask(conn, inputs, verdict)
         return
-    buttons = summary_buttons(inputs.invoice_id, inputs.reading)
-    extra_lines = (*_extra_lines(verdict), _moving_line(buttons))
-    text = summary_text(inputs.reading, inputs.flow_line, inputs.today, cfg.extraction, extra_lines)
-    await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
-    await start_fetch_round(conn, inputs.invoice_id)
-    await enqueue(conn, inputs.invoice_id, FETCH_STEP)
+    await save_summary_inputs(
+        conn, inputs.invoice_id, rule_id=inputs.rule_id, extra_lines=_extra_lines(verdict)
+    )
+    await _start_fetching(conn, inputs, cfg)
     run_after = await recheck_run_after(conn, verdict, 1)
     if run_after is not None:
         await enqueue(conn, inputs.invoice_id, SUNAT_RECHECK_STEP, run_after)
-    await _reply(conn, inputs.invoice, inputs.invoice_id, inputs.rule_id, text, buttons)
+
+
+async def _start_fetching(conn: AsyncConnection[Any], inputs: _Inputs, cfg: Config) -> None:
+    """Move to ``FETCHING_DOCS``, start a fetch round and queue the fetch and its progress note (D206)."""
+    await set_state(conn, inputs.invoice_id, FETCHING_DOCS, rule_id=inputs.rule_id, expected=VALIDATING)
+    await start_fetch_round(conn, inputs.invoice_id)
+    await enqueue(conn, inputs.invoice_id, FETCH_STEP)
+    progress_at = await _now_plus(conn, seconds=cfg.limits.fetch_progress_after_s)
+    await enqueue(conn, inputs.invoice_id, FETCH_PROGRESS_STEP, progress_at)
 
 
 async def _ask(conn: AsyncConnection[Any], inputs: _Inputs, verdict: Verdict) -> None:
@@ -226,6 +221,7 @@ async def _ask(conn: AsyncConnection[Any], inputs: _Inputs, verdict: Verdict) ->
         raise RuntimeError("an ask verdict has no rule")
     text, buttons = invalid_question(inputs.invoice_id, rule_id)
     await set_state(conn, inputs.invoice_id, CONFIRM_INVALID, rule_id=rule_id, expected=VALIDATING)
+    await discard_summary_inputs(conn, inputs.invoice_id)
     await _reply(conn, inputs.invoice, inputs.invoice_id, rule_id, text, buttons)
 
 
@@ -250,22 +246,21 @@ async def recheck_run_after(conn: AsyncConnection[Any], verdict: Verdict, attemp
     if not verdict.recheck:
         return None
     if verdict.rule_id == RULE_MISSING:
-        return await _now_plus(conn, hours=MISSING_RECHECK_HOURS, minutes=0)
-    return await _now_plus(conn, hours=0, minutes=backoff_minutes(attempt))
+        return await _now_plus(conn, hours=MISSING_RECHECK_HOURS)
+    return await _now_plus(conn, minutes=backoff_minutes(attempt))
 
 
-async def _now_plus(conn: AsyncConnection[Any], *, hours: int, minutes: int) -> datetime:
-    """Return ``now() + hours/minutes`` from the database clock."""
-    cur = await conn.execute("SELECT now() + make_interval(hours => %s, mins => %s)", (hours, minutes))
+async def _now_plus(
+    conn: AsyncConnection[Any], *, hours: int = 0, minutes: int = 0, seconds: int = 0
+) -> datetime:
+    """Return ``now() + hours/minutes/seconds`` from the database clock."""
+    cur = await conn.execute(
+        "SELECT now() + make_interval(hours => %s, mins => %s, secs => %s)", (hours, minutes, seconds)
+    )
     row = await cur.fetchone()
     if row is None:
         raise RuntimeError("the database returned no time")
     return cast(datetime, row[0])
-
-
-def _moving_line(buttons: Sequence[Button]) -> str:
-    """Return the summary's last line: it invites a press only when it carries buttons (D189)."""
-    return SUMMARY_MOVING if buttons else SUMMARY_MOVING_QUIET
 
 
 async def _reply(

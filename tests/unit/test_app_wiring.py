@@ -412,7 +412,7 @@ def test_config_without_google_builds_no_google_clients(tmp_path: Path) -> None:
     store = _RecordingStore({})
 
     tokens = _google_tokens(Settings(data_dir=tmp_path), cfg, cast(Any, None), store)
-    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), tokens)
+    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), tokens, tmp_path)
 
     assert tokens == {}
     assert handler is None
@@ -423,7 +423,7 @@ def test_sheets_only_google_flow_gets_a_deliverer(tmp_path: Path) -> None:
     """D144: a flow with only a google_sheets sink gets the Google deliver dispatcher."""
     cfg = _sheets_only(tmp_path)
 
-    handlers = _deliver_registry(cfg, None, cast(Any, None), cast(Any, None), {})
+    handlers = _deliver_registry(cfg, None, cast(Any, None), cast(Any, None), {}, tmp_path)
 
     assert DELIVER_STEP in handlers
 
@@ -432,7 +432,7 @@ def test_config_without_google_sinks_builds_no_google_handler(tmp_path: Path) ->
     """D144: with no Google sink of either kind no Google deliver handler is built."""
     cfg = _without_google_sinks(tmp_path)
 
-    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), {})
+    handler = _google_deliver_handler(cfg, cast(Any, None), cast(Any, None), {}, tmp_path)
 
     assert handler is None
 

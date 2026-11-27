@@ -5,7 +5,8 @@ Usage: ``memprofile.py [--invoices N] [--timeout-s S]``. The script builds the r
 in-process: the WhatsApp webhook route over a real Postgres database, the real extract, route
 and validate handlers, and the real job worker. Two edge adapters are faked, because they need
 a live channel: a :class:`FakeChannel` serves the synthetic photo files in place of the WhatsApp
-media download, and a no-op fetch handler ends the chain once the summary is queued.
+media download, and a fetch stand-in posts the summary, as the fetch step's first attempt does
+(D206), and ends the chain.
 
 Every photo is generated in-process with a SUNAT QR code for a synthetic RUC from
 ``tests/synthetic_rucs.txt``; no sample, real RUC, phone number or secret is used. The
@@ -59,6 +60,8 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import DOWNLOAD_STEP, RULE_ACK
 from invoicebot.pipeline.intake_config import intake_settings
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import FETCH_PROGRESS_STEP
+from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler, Worker
@@ -375,7 +378,8 @@ def _handlers(pool: Pool, setup: _Setup, media: FakeChannel, http: httpx.AsyncCl
         ),
         ROUTE_STEP: make_route_handler(pool, cfg, _EMPTY_DIRECTORY, compile_rules(cfg.routing)),
         VALIDATE_STEP: make_validate_handler(pool, http, None, cfg),
-        FETCH_STEP: _skip_fetch,
+        FETCH_STEP: _post_summary_only(pool, cfg),
+        FETCH_PROGRESS_STEP: _skip_progress,
     }
 
 
@@ -424,8 +428,18 @@ async def _first_attachment(pool: Pool, invoice_id: int) -> Attachment:
     return message.attachments[0]
 
 
-async def _skip_fetch(_job: Job) -> None:
-    """Complete the fetch job without fetching: this run measures up to the summary (D160)."""
+def _post_summary_only(pool: Pool, cfg: Config) -> Handler:
+    """Build the fetch stand-in: it posts the summary without fetching (D160, D206)."""
+
+    async def handle(job: Job) -> None:
+        async with pool.connection() as conn, conn.transaction():
+            await post_summary(conn, cfg, job.invoice_id)
+
+    return handle
+
+
+async def _skip_progress(_job: Job) -> None:
+    """Complete the progress-note job: this run measures up to the summary (D160, D206)."""
 
 
 async def _wait_for_summaries(

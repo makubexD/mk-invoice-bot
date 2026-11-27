@@ -31,6 +31,7 @@ from invoicebot.pipeline.gaps import GapContext
 from invoicebot.pipeline.handlers import EXTRACT_STEP, MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.outbox import OutboxSender
@@ -290,6 +291,9 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
             validate = make_validate_handler(db_pool, http, None, cfg)
             for job_id in validate_jobs:
                 await validate(_job(job_id, invoice_id, VALIDATE_STEP))
+        # D206: the fetch step's first attempt posts the summary; stand in for it here
+        async with db_pool.connection() as conn, conn.transaction():
+            await post_summary(conn, cfg, invoice_id)
 
         fake = FakeChannel()
         await OutboxSender(db_pool, {"whatsapp": fake.transport()}).send_pending()

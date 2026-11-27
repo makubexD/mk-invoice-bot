@@ -661,6 +661,9 @@ class FlowInbox(BaseModel):
 #: The fetcher name that requires ``Flow.email_inbox`` settings (D98, R-5.2).
 EMAIL_INBOX_FETCHER = "email_inbox"
 
+#: D206: a document kind a flow keeps for [📎 Ver documentos].
+type ChatDocument = Literal["photo", "pdf", "xml", "excel"]
+
 
 class Flow(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -672,6 +675,8 @@ class Flow(BaseModel):
     #: R-1.5, D66: the file kinds a sender may upload by hand, in preference order.
     manual_uploads: list[Literal["pdf", "xml"]] = Field(default_factory=list)
     deliver_without_docs: bool
+    #: D206: the kinds kept at completion and posted on [📎 Ver documentos].
+    chat_documents: list[ChatDocument] = Field(default_factory=list)
     reimbursement: Reimbursement | None = None
     email_inbox: FlowInbox | None = None
     sinks: list[Sink]
@@ -681,6 +686,15 @@ class Flow(BaseModel):
         """D98, R-5.2: a flow that lists the email_inbox fetcher configures that inbox."""
         if EMAIL_INBOX_FETCHER in self.fetchers and self.email_inbox is None:
             raise ValueError(f"flow fetchers lists '{EMAIL_INBOX_FETCHER}' without flow.email_inbox settings")
+        return self
+
+    @model_validator(mode="after")
+    def _chat_documents_are_valid(self) -> Self:
+        """D206: each chat document appears once, and excel needs an excel_template sink."""
+        if len(set(self.chat_documents)) != len(self.chat_documents):
+            raise ValueError("chat_documents must be unique")
+        if "excel" in self.chat_documents and not any(sink.kind == "excel_template" for sink in self.sinks):
+            raise ValueError("chat_documents lists 'excel' without an 'excel_template' sink")
         return self
 
     @model_validator(mode="after")
@@ -799,6 +813,8 @@ class RetentionDays(BaseModel):
     outbox: int
     events: int
     jobs: int
+    #: D206: how long a document kept for the chat is stored; the default keeps existing configs valid.
+    chat_documents: int = Field(default=30, gt=0)
 
 
 class OutboxBacklog(BaseModel):
@@ -856,6 +872,8 @@ class Limits(BaseModel):
     #: D171: a /reprocesar waits this long after the invoice's last fetch round; the
     #: default keeps existing private configs valid.
     reprocess_min_interval_s: int = Field(default=600, ge=0)
+    #: D206: one progress message goes out when a fetch runs longer than this.
+    fetch_progress_after_s: int = Field(default=20, gt=0)
 
 
 #: D93: a profile id is the natural key, so it cannot carry the ``|`` the key encodes.

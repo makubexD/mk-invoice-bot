@@ -69,6 +69,7 @@ from invoicebot.pipeline.actions import (
     SENT_ACTION,
     send_not_confirmed,
 )
+from invoicebot.pipeline.chat_docs import keep_documents
 from invoicebot.pipeline.done import MAIL_INVOICE_KEY, MAIL_TO_KEY, RULE_DONE, done_text
 from invoicebot.pipeline.gaps import GapContext, GapSighting, close_if_fixed, raise_gap
 from invoicebot.pipeline.outgoing import (
@@ -90,7 +91,7 @@ from invoicebot.pipeline.pending_auth import (
 from invoicebot.pipeline.pending_auth import (
     RULE_AUTH_ADMIN as RULE_AUTH_ADMIN,
 )
-from invoicebot.pipeline.questions import retry_button
+from invoicebot.pipeline.questions import DOCS_ACTION, retry_button
 from invoicebot.pipeline.review import (
     DIGEST_KEY,
     REVIEW_BATCH_STATE,
@@ -110,6 +111,7 @@ from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.outbox import has_pending_document
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
+    BUTTON_DOCS,
     BUTTON_HOLD,
     BUTTON_NOT_ARRIVED,
     BUTTON_SEND,
@@ -147,6 +149,7 @@ from invoicebot.store.invoices import (
     load_invoice_head,
     load_reading,
     lock_invoice,
+    photo_paths,
     set_state,
 )
 from invoicebot.store.mail_jobs import add_mail_job, waiting_job_age_hours
@@ -266,6 +269,7 @@ class _Delivery:
     folder_url: str
     seq: int
     mail: OutgoingMail
+    files: Mapping[str, Attachment]
 
 
 def make_deliver_handler(context: DeliverContext) -> Handler:
@@ -682,11 +686,8 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         )
     excel = await asyncio.to_thread(build_excel, sinks.excel, prepared.values, prepared.overrides)
     await context.drive.upload(f"{folder.path}/{sinks.excel.output}", excel)
-    mail = build_mail(
-        sinks.mailer,
-        prepared.values,
-        _attachments(sinks.excel.output, excel, sinks.folder, prepared.values, invoice.pdf, invoice.xml),
-    )
+    files = _attachments(sinks.excel.output, excel, sinks.folder, prepared.values, invoice.pdf, invoice.xml)
+    mail = build_mail(sinks.mailer, prepared.values, files)
     async with context.pool.connection() as conn, conn.transaction():
         await merge_flow_data(
             conn,
@@ -705,6 +706,7 @@ async def _prepare(context: DeliverContext, invoice: _Invoice, sinks: _Sinks, pr
         folder_url=folder_url,
         seq=folder.seq,
         mail=mail,
+        files=files,
     )
 
 
@@ -861,6 +863,9 @@ async def _automatic(
     same transaction as that state change.
     Before the send (filing, Excel upload) a transient error is simply retried.
     """
+    # Kept before the send, so nothing but the commit lies between the mail going out and
+    # the ``sent`` mark (D89); a retry rewrites the same files (D206).
+    kept = await _keep_chat_documents(context, delivery)
     batch_id = await _begin_send(context, delivery, prepared)
     if batch_id is None:
         return
@@ -890,7 +895,7 @@ async def _automatic(
             _Reply(
                 mode.done_rule,
                 await _done_reply_text(conn, delivery, mode.done_rule),
-                _done_buttons(delivery.invoice_id, mode.done_rule),
+                _done_buttons(delivery.invoice_id, mode.done_rule, kept),
                 _folder_links(delivery),
             ),
         )
@@ -976,11 +981,55 @@ async def _close_fixed_gap(conn: AsyncConnection[Any], context: DeliverContext, 
     await close_if_fixed(conn, invoice_id, TEMPLATE_INVALID, context.cfg.gaps.github.repo)
 
 
-def _done_buttons(invoice_id: int, done_rule: str) -> list[Button]:
-    """Return BR-D13's [No llegó] button, or none for any other done rule (R-7.8)."""
-    if done_rule != RULE_INBOX:
-        return []
-    return [Button(id=button_id(invoice_id, NOT_ARRIVED_ACTION), title=BUTTON_NOT_ARRIVED)]
+def _done_buttons(invoice_id: int, done_rule: str, kept: bool) -> list[Button]:
+    """Return BR-D13's [No llegó] button (R-7.8) and, when files were kept, [📎 Ver documentos] (D206)."""
+    buttons: list[Button] = []
+    if done_rule == RULE_INBOX:
+        buttons.append(Button(id=button_id(invoice_id, NOT_ARRIVED_ACTION), title=BUTTON_NOT_ARRIVED))
+    if kept:
+        buttons.append(Button(id=button_id(invoice_id, DOCS_ACTION), title=BUTTON_DOCS))
+    return buttons
+
+
+async def _keep_chat_documents(context: DeliverContext, delivery: _Delivery) -> bool:
+    """Keep the kinds the flow lists in ``chat_documents`` and return whether any was kept (D206, BR-D24).
+
+    The PDF, XML and Excel bytes come from the delivery's files, named as the mail attachments
+    are; a photo is read from its stored path. A failure is logged and never fails the delivery.
+    """
+    kinds = context.cfg.flows[delivery.flow_name].chat_documents
+    if not kinds:
+        return False
+    try:
+        files = [
+            (name, data)
+            for kind in kinds
+            if kind != "photo"
+            for name, data in _attachment_file(delivery, kind)
+        ]
+        if "photo" in kinds:
+            files.extend(await _photo_files(context, delivery.invoice_id))
+        return await asyncio.to_thread(keep_documents, context.data_dir, delivery.invoice_id, files) > 0
+    except (OSError, ValueError) as exc:  # the error's text may hold a file name with a legal name
+        logger.warning(
+            "could not keep the chat documents of invoice %s (D206)",
+            delivery.invoice_id,
+            extra={"error": type(exc).__name__},
+        )
+        return False
+
+
+def _attachment_file(delivery: _Delivery, kind: str) -> list[tuple[str, bytes]]:
+    """Return the ``(name, bytes)`` of one attachment kind, or none when the invoice has no such file."""
+    attachment = delivery.files.get("excel_template" if kind == "excel" else kind)
+    return [] if attachment is None else [(attachment.name, attachment.data)]
+
+
+async def _photo_files(context: DeliverContext, invoice_id: int) -> list[tuple[str, bytes]]:
+    """Read the invoice's photo files, which are still on disk until the DONE transaction ends."""
+    async with context.pool.connection() as conn:
+        paths = await photo_paths(conn, invoice_id)
+    return [(path.name, await _read_bytes(path)) for path in paths]
 
 
 type _CompletionHandler = Callable[[DeliverContext, _Delivery, _Values, MailMode], Awaitable[None]]

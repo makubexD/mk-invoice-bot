@@ -24,6 +24,8 @@ from invoicebot.pipeline.extract import ROUTE_STEP
 from invoicebot.pipeline.handlers import MEGABYTE
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
+from invoicebot.pipeline.steps import FETCH_PROGRESS_STEP
+from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.routing.router import CompiledRule
@@ -203,6 +205,9 @@ async def _run_validate(
 ) -> None:
     """Run the validate step with validation off, as the app wires it (D124)."""
     await make_validate_handler(pool, cast(Any, None), None, cfg)(_job(1, invoice_id, VALIDATE_STEP))
+    # D206: the fetch step's first attempt posts the summary; stand in for it here
+    async with pool.connection() as conn, conn.transaction():
+        await post_summary(conn, cfg, invoice_id)
 
 
 def _store(ruc: str, *comercios: str) -> Store:
@@ -361,7 +366,7 @@ async def test_validate_off_sends_the_routed_summary(
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(outbox) == 1
     text, rule_id, buttons = outbox[0]
     assert rule_id == "BR-R02"
@@ -633,7 +638,7 @@ async def test_total_at_cap_routes_without_a_question(
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == []  # D189: every required field came from the QR
@@ -657,7 +662,7 @@ async def test_flow_without_reimbursement_is_not_asked(
         outbox = await _outbox(conn, profile_id)
         jobs = await _jobs(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R01", OWNER_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(outbox) == 1
     assert "¿Continúo?" not in outbox[0][0]
     assert outbox[0][2] == []  # D189: every required field came from the QR
@@ -734,7 +739,7 @@ async def test_answered_flow_is_routed_to_summary(
         jobs = await _jobs(conn, invoice_id)
         flow_data = await load_flow_data(conn, invoice_id)
     assert row == ("FETCHING_DOCS", "BR-R03", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(texts) == 1
     assert "➡️ Trabajo (Microsoft)" in texts[0]
     assert "choices" not in flow_data
@@ -808,7 +813,7 @@ async def test_buyer_ok_true_continues_to_summary(
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(texts) == 1
     assert "¿Correcto?" not in texts[0]
 
@@ -913,7 +918,7 @@ async def test_answered_comercio_skips_the_brand_question(
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(texts) == 1
     assert "¿De qué local" not in texts[0]
 
@@ -935,7 +940,7 @@ async def test_one_brand_store_is_not_asked(
         jobs = await _jobs(conn, invoice_id)
         texts = await _texts(conn, profile_id)
     assert row == ("FETCHING_DOCS", "BR-R02", WORK_FLOW)
-    assert jobs == [VALIDATE_STEP, "fetch"]
+    assert jobs == [VALIDATE_STEP, "fetch", FETCH_PROGRESS_STEP]
     assert len(texts) == 1
     assert "¿De qué local" not in texts[0]
 

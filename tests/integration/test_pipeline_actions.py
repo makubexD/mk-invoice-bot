@@ -1741,3 +1741,70 @@ async def test_hold_on_a_prepared_batch_is_stale(
     assert batch_state == "prepared"
     assert jobs == []
     assert [rule_id for rule_id, _ in texts] == ["BR-S02"]
+
+
+async def test_docs_press_on_a_done_invoice_enqueues_the_send_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D206: [Ver documentos] on a DONE invoice enqueues one send_documents job and queues no message."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, DONE, RULE_DONE)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "docs", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert jobs == ["send_documents"]
+    assert texts == []
+
+
+async def test_docs_press_on_a_running_invoice_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D206, BR-S02: [Ver documentos] on a non-terminal invoice gets BR-S02 and no job."""
+    profile_id = _profile()
+    invoice_id = await _invoice_in(db_pool, profile_id, FETCHING_DOCS)
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "docs", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        jobs = await _jobs(conn, invoice_id)
+        texts = await _texts(conn, profile_id)
+
+    assert jobs == []
+    assert [rule for rule, _ in texts] == ["BR-S02"]
+
+
+async def test_docs_press_keeps_a_pending_edit(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D206, D90: [Ver documentos] is read-only, so the invoice stays the sender's edit target."""
+    profile_id = _profile()
+    invoice_id = await _extract_failed_invoice(db_pool, profile_id, _partial_reading())
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, DONE, rule_id=RULE_DONE)
+        await merge_flow_data(conn, invoice_id, {"editing": True})
+
+    async with db_pool.connection() as conn:
+        await handle_inbound(
+            conn,
+            _press(invoice_id, "docs", profile_id),
+            max_queued_per_sender=MAX_QUEUED,
+            media_max_bytes=MEDIA_MAX_BYTES,
+            timezone=TIMEZONE,
+        )
+        flow_data = await load_flow_data(conn, invoice_id)
+
+    assert flow_data["editing"] is True

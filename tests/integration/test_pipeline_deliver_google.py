@@ -8,6 +8,7 @@ real.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import json
@@ -28,7 +29,9 @@ from invoicebot.auth.msal_cache import AuthRequired
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, GoogleSheetsSink
 from invoicebot.extract.fields import Field, Reading
+from invoicebot.pipeline.chat_docs import kept_documents
 from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google_deliver_handler
+from invoicebot.pipeline.questions import DOCS_ACTION
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
@@ -273,13 +276,22 @@ def _reading() -> Reading:
 def _config(profile_id: str) -> Config:
     """Return example.yaml with ``profile_id`` as the only profile."""
     cfg = load_config(EXAMPLE)
-    return cfg.model_copy(update={"profiles": {profile_id: cfg.profiles[PROFILE]}})
+    flow = cfg.flows[FLOW].model_copy(update={"chat_documents": []})
+    return cfg.model_copy(
+        update={"flows": {**cfg.flows, FLOW: flow}, "profiles": {profile_id: cfg.profiles[PROFILE]}}
+    )
+
+
+def _with_chat_documents(cfg: Config, kinds: list[Any]) -> Config:
+    """Return cfg whose flow A keeps ``kinds`` for [📎 Ver documentos] (D206)."""
+    flow = cfg.flows[FLOW].model_copy(update={"chat_documents": kinds})
+    return cfg.model_copy(update={"flows": {**cfg.flows, FLOW: flow}})
 
 
 def _two_account_flows(profile_id: str) -> Config:
     """Return two flow A flows whose Drive and Sheets sinks file on different accounts (D128)."""
     cfg = load_config(EXAMPLE)
-    first = cfg.flows[FLOW]
+    first = cfg.flows[FLOW].model_copy(update={"chat_documents": []})
     second = first.model_copy(
         update={
             "label": "Facturas (Google) — segunda cuenta",
@@ -297,7 +309,7 @@ def _two_account_flows(profile_id: str) -> Config:
 def _sheets_only_config(profile_id: str) -> Config:
     """Return example.yaml's flow A as a Sheets-only flow with no Drive link columns (D144)."""
     cfg = load_config(EXAMPLE)
-    flow = cfg.flows[FLOW]
+    flow = cfg.flows[FLOW].model_copy(update={"chat_documents": []})
     sheets = next(sink for sink in flow.sinks if isinstance(sink, GoogleSheetsSink))
     drive_links = (LINK_PHOTO, LINK_PDF, LINK_XML)
     columns = {
@@ -374,14 +386,14 @@ async def _delivering_invoice(
 
 @contextlib.asynccontextmanager
 async def _handler(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, fake: FakeGoogle
+    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, fake: FakeGoogle, data_dir: Path
 ) -> AsyncIterator[Handler]:
     """Build the flow A deliver handler on one real Drive and Sheets client over the fake."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handler)) as http:
         drive = GoogleDrive(http, _Tokens(), TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
         yield make_google_deliver_handler(
-            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles, data_dir)
         )
 
 
@@ -431,7 +443,7 @@ async def test_delivering_invoice_files_drive_and_appends_its_row(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
     fake = FakeGoogle()
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     key = f"{profile_id}|{STORE_RUC}|{TIPO}|{SERIE}|{NUMERO}"
@@ -493,7 +505,7 @@ async def test_each_flow_files_through_its_own_account(
             ),
         }
         handler = make_google_deliver_handler(
-            GoogleDeliverContext(db_pool, cfg, drives, sheets, cfg.profiles)
+            GoogleDeliverContext(db_pool, cfg, drives, sheets, cfg.profiles, tmp_path / "data")
         )
         await handler(_job(seeded.invoice_id))
 
@@ -522,7 +534,7 @@ async def test_a_retry_reuses_drive_files_and_updates_the_row(
         503,
     )
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         with pytest.raises(GoogleTransient, match="status 503"):
             await handler(_job(seeded.invoice_id))
         await handler(_job(seeded.invoice_id))
@@ -549,7 +561,7 @@ async def test_no_pdf_reports_br_d17(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id, pdf=False)
     fake = FakeGoogle()
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     folder_link = f"https://drive.google.com/drive/folders/{fake.last_folder_id}"
@@ -585,7 +597,7 @@ async def test_a_sheets_only_flow_appends_one_row_and_reports_br_d18(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
     fake = FakeGoogle()
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     key = f"{profile_id}|{STORE_RUC}|{TIPO}|{SERIE}|{NUMERO}"
@@ -626,7 +638,7 @@ async def test_a_sheets_only_retry_updates_the_same_row(
         503,
     )
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         with pytest.raises(GoogleTransient, match="status 503"):
             await handler(_job(seeded.invoice_id))
         await handler(_job(seeded.invoice_id))
@@ -649,7 +661,7 @@ async def test_auth_required_parks_the_invoice_and_alerts_every_admin(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
     fake = FakeGoogle(fail=401)
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     async with db_pool.connection() as conn:
@@ -696,7 +708,9 @@ async def test_a_cancel_during_the_google_call_is_not_overwritten_by_the_park(
         drive = GoogleDrive(http, _Tokens(), TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
         handler = make_google_deliver_handler(
-            GoogleDeliverContext(db_pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+            GoogleDeliverContext(
+                db_pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles, tmp_path / "data"
+            )
         )
         with pytest.raises(StateMoved):
             await handler(_job(seeded.invoice_id))
@@ -718,7 +732,7 @@ async def test_a_503_raises_and_leaves_the_invoice_delivering(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
     fake = FakeGoogle(fail=503)
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         with pytest.raises(GoogleTransient, match="status 503"):
             await handler(_job(seeded.invoice_id))
 
@@ -739,7 +753,7 @@ async def test_done_deletes_the_local_photo_pdf_and_xml(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
     fake = FakeGoogle()
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     assert seeded.photo is not None
@@ -759,7 +773,7 @@ async def test_invoice_outside_delivering_is_untouched(
     seeded = await _delivering_invoice(db_pool, tmp_path, profile_id, state="DONE")
     fake = FakeGoogle()
 
-    async with _handler(db_pool, cfg, fake) as handler:
+    async with _handler(db_pool, cfg, fake, tmp_path / "data") as handler:
         await handler(_job(seeded.invoice_id))
 
     async with db_pool.connection() as conn:
@@ -770,3 +784,45 @@ async def test_invoice_outside_delivering_is_untouched(
     assert outbox == []
     assert fake.uploaded == []
     assert fake.appended == []
+
+
+async def test_chat_documents_keep_the_pdf_and_add_the_button(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, BR-D16, BR-D24: a flow listing pdf keeps the fetched PDF and BR-D16 carries [Ver documentos]."""
+    profile_id = f"google-docs-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(profile_id), ["pdf"])
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    data_dir = tmp_path / "data"
+
+    async with _handler(db_pool, cfg, FakeGoogle(), data_dir) as handler:
+        await handler(_job(seeded.invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+
+    kept = kept_documents(data_dir, seeded.invoice_id)
+    assert [document.filename for document in kept] == [f"{FILE_NAME}.pdf"]
+    assert await asyncio.to_thread(Path(kept[0].path).read_bytes) == PDF_BYTES
+    assert [(rule, [button["id"] for button in buttons]) for _, rule, buttons in outbox] == [
+        ("BR-D16", [f"{seeded.invoice_id}:{DOCS_ACTION}"])
+    ]
+
+
+async def test_chat_documents_keep_nothing_without_a_pdf(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, BR-D17: with no PDF, a flow listing pdf keeps nothing and BR-D17 has no button."""
+    profile_id = f"google-docs-none-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(profile_id), ["pdf"])
+    seeded = await _delivering_invoice(db_pool, tmp_path, profile_id, pdf=False)
+    data_dir = tmp_path / "data"
+
+    async with _handler(db_pool, cfg, FakeGoogle(), data_dir) as handler:
+        await handler(_job(seeded.invoice_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+
+    assert kept_documents(data_dir, seeded.invoice_id) == []
+    assert [(rule, buttons) for _, rule, buttons in outbox] == [("BR-D17", [])]

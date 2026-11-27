@@ -15,11 +15,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from invoicebot.auth.msal_cache import AuthRequired
+from invoicebot.channels.base import Button
+from invoicebot.channels.buttons import button_id
 from invoicebot.config.models import (
     Config,
     Flow,
@@ -29,18 +31,21 @@ from invoicebot.config.models import (
 )
 from invoicebot.extract.fields import Reading
 from invoicebot.extract.ubl import parse_invoice_xml
+from invoicebot.pipeline.chat_docs import keep_documents
 from invoicebot.pipeline.deliver import TEMPLATE_INVALID
 from invoicebot.pipeline.gaps import close_if_fixed
 from invoicebot.pipeline.outgoing import Addressee, outbound, queue_outbound, safe_links
 from invoicebot.pipeline.pending_auth import GOOGLE, park_for_auth
+from invoicebot.pipeline.questions import DOCS_ACTION
 from invoicebot.pipeline.route import natural_key
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.values import invoice_values
 from invoicebot.queue.jobs import Job
 from invoicebot.queue.worker import Handler
-from invoicebot.rules.messages_es import LINK_TITLE_FOLDER, LINK_TITLE_ROW, MESSAGES
+from invoicebot.rules.messages_es import BUTTON_DOCS, LINK_TITLE_FOLDER, LINK_TITLE_ROW, MESSAGES
 from invoicebot.sinks.base import FolderDrive, RowSheet
-from invoicebot.sinks.drive_files import LINK_FOLDER, DriveInput, file_to_drive
+from invoicebot.sinks.drive_files import LINK_FOLDER, DriveInput, file_to_drive, photo_file_name
+from invoicebot.sinks.expr import render
 from invoicebot.sinks.sheet_rows import LINK_ROW, upsert_row
 from invoicebot.states import DELIVERING, DONE
 from invoicebot.store.db import Pool
@@ -77,6 +82,7 @@ class GoogleDeliverContext:
     drives: Mapping[str, FolderDrive]
     sheets: Mapping[str, RowSheet]
     admins: Mapping[str, Profile]
+    data_dir: Path
 
 
 @dataclass(frozen=True)
@@ -250,12 +256,15 @@ async def _complete(
         razon_social=values["razon_social"],
         total=values["total"],
     )
+    kept = await _keep_chat_documents(context, invoice, values, sinks)
+    buttons = [Button(id=button_id(invoice.job.invoice_id, DOCS_ACTION), title=BUTTON_DOCS)] if kept else []
     pairs = [(LINK_TITLE_ROW, values[LINK_ROW]), (LINK_TITLE_FOLDER, values.get(LINK_FOLDER, ""))]
     message = outbound(
         Addressee(invoice.head.origin_channel, invoice.head.profile_id),
         text,
         rule_id=rule,
         links=safe_links([(title, str(url)) for title, url in pairs if url]),
+        buttons=buttons,
     )
     async with context.pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice.job.invoice_id, DONE, rule_id=rule, expected=DELIVERING)
@@ -268,3 +277,48 @@ async def _complete(
     documents = [path for path in (invoice.pdf_path, invoice.xml_path) if path is not None]
     for path in [*photos, *documents]:
         await asyncio.to_thread(path.unlink, missing_ok=True)
+
+
+async def _keep_chat_documents(
+    context: GoogleDeliverContext, invoice: _Invoice, values: dict[str, object], sinks: _Sinks
+) -> bool:
+    """Keep the kinds the flow lists in ``chat_documents`` and return whether any was kept (D206, BR-D24).
+
+    The files are still on disk here: they are unlinked only after the DONE transaction. A
+    failure is logged and never fails the delivery.
+    """
+    kinds = invoice.flow.chat_documents
+    if not kinds:
+        return False
+    try:
+        files = await asyncio.to_thread(_chat_files, invoice, values, sinks, kinds)
+        return await asyncio.to_thread(keep_documents, context.data_dir, invoice.job.invoice_id, files) > 0
+    except (OSError, ValueError) as exc:  # the error's text may hold a file name with a legal name
+        logger.warning(
+            "could not keep the chat documents of invoice %s (D206)",
+            invoice.job.invoice_id,
+            extra={"error": type(exc).__name__},
+        )
+        return False
+
+
+def _chat_files(
+    invoice: _Invoice, values: dict[str, object], sinks: _Sinks, kinds: Sequence[str]
+) -> list[tuple[str, bytes]]:
+    """Return the ``(name, bytes)`` of each listed kind the invoice has, named as on Drive (D206).
+
+    A flow with no Drive sink has no Drive name, so the local file names are used.
+    """
+    base = None if sinks.drive is None else render(sinks.drive.filename, values)
+    files: list[tuple[str, bytes]] = []
+    if "photo" in kinds:
+        for index, photo in enumerate(invoice.files.photos):
+            name = photo.name if base is None else photo_file_name(base, index)
+            files.append((name, photo.read_bytes()))
+    for kind, path, data in (
+        ("pdf", invoice.pdf_path, invoice.files.pdf),
+        ("xml", invoice.xml_path, invoice.files.xml),
+    ):
+        if kind in kinds and path is not None and data is not None:
+            files.append((path.name if base is None else f"{base}.{kind}", data))
+    return files
