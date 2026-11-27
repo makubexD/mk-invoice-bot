@@ -17,6 +17,7 @@ from invoicebot.channels.base import InboundMessage
 from invoicebot.channels.buttons import COMMAND_BUTTON_PREFIX, is_button_command
 from invoicebot.config.models import MediaMaxBytes
 from invoicebot.pipeline.actions import PressResult, handle_press
+from invoicebot.pipeline.captcha_reply import answer as answer_captcha
 from invoicebot.pipeline.commands import (
     CommandContext,
     PaymentFlow,
@@ -319,6 +320,8 @@ async def _store_with_overrides(
     edits = parse_edits(msg.text)
     overrides = parse_overrides(msg.text)
     is_edit = bool(edits.fields or overrides) or any(error.field is not None for error in edits.errors)
+    if await answer_captcha(conn, msg.profile_id, msg):
+        return IntakeResult(status="stored", invoice_id=None)
     if roles.teach is not None and not is_edit and await answer(conn, roles.teach, msg):
         return IntakeResult(status="stored", invoice_id=None)
     invoice_id = None
