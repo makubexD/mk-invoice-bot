@@ -236,6 +236,14 @@ async def test_batch_accepts_review_and_rejects_paused(
             await conn.execute(INSERT_BATCH, ("file-b", "paused"))
 
 
+async def test_batch_accepts_bounced(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D207: a batch accepts bounced."""
+    async with db_pool.connection() as conn:
+        await conn.execute(INSERT_BATCH, ("file-b", "bounced"))
+
+
 async def test_file_accepts_eml_and_manifest_and_rejects_unknown_kinds(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:
