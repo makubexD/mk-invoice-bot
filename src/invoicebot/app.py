@@ -85,6 +85,7 @@ from invoicebot.pipeline.deliver_google import GoogleDeliverContext, make_google
 from invoicebot.pipeline.extract import ROUTE_STEP, ExtractInputs, make_extract_handler, run_extract_helper
 from invoicebot.pipeline.failed import notify_dead
 from invoicebot.pipeline.fetch import FETCH_STEP, PORTAL_FETCHER, Schedule, make_fetch_handler
+from invoicebot.pipeline.fetch_progress import make_fetch_progress_handler
 from invoicebot.pipeline.folder_status import make_folder_status_handler
 from invoicebot.pipeline.gaps import GapContext, daily_digest, issue_opened, writes_today
 from invoicebot.pipeline.handlers import EXTRACT_STEP, make_download_handler
@@ -106,6 +107,7 @@ from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import (
     ATTACH_STEP,
+    FETCH_PROGRESS_STEP,
     FOLDER_STATUS_STEP,
     PORTAL_CHECK_STEP,
     PORTAL_PROBE_STEP,
@@ -377,6 +379,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 settings.data_dir,
                 schedules=_fetch_schedules(directory),
             ),
+            FETCH_PROGRESS_STEP: make_fetch_progress_handler(pool),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
