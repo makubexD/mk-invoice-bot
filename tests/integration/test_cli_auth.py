@@ -12,7 +12,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.auth.msal_cache import AuthRequired
-from invoicebot.auth.providers import scopes_for
+from invoicebot.auth.providers import SMTP_SEND_SCOPE, scopes_for
 from invoicebot.cli import main
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
@@ -35,11 +35,19 @@ class _StubProvider:
         self.error = error
         self.account = ""
         self.scopes: tuple[str, ...] = ()
+        self.added: list[tuple[str, ...]] = []
+        self.add_error: AuthRequired | None = None
 
     def login_device_code(self, show: Callable[[str], None]) -> None:
         """Record the request and raise the configured failure, if any."""
         if self.error is not None:
             raise self.error
+
+    def add_scopes_device_code(self, show: Callable[[str], None], scopes: Sequence[str]) -> None:
+        """Record the extra scopes and raise the second flow's failure, if any (D205)."""
+        self.added.append(tuple(scopes))
+        if self.add_error is not None:
+            raise self.add_error
 
 
 def _factory(provider: _StubProvider) -> Callable[..., _StubProvider]:
@@ -110,6 +118,30 @@ async def _count_pending(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> int
         row = await cur.fetchone()
     assert row is not None
     return int(row[0])
+
+
+def _config_with_smtp(tmp_path: Path) -> Path:
+    """Return a copy of the example config whose mailer also lists ``smtp`` (D205)."""
+    cfg = load_config(EXAMPLE_CONFIG)
+    flows = {
+        name: flow.model_copy(
+            update={
+                "sinks": [
+                    sink.model_copy(update={"modes": [*sink.modes, "smtp"]})
+                    if isinstance(sink, MailerSink)
+                    else sink
+                    for sink in flow.sinks
+                ]
+            }
+        )
+        for name, flow in cfg.flows.items()
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        yaml.safe_dump(cfg.model_copy(update={"flows": flows}).model_dump(mode="json")),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _config_without_graph(tmp_path: Path) -> Path:
@@ -263,3 +295,51 @@ async def test_auth_microsoft_bot_signs_in_without_resuming(
     assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
     assert await _job_steps(db_pool, invoice_id) == []
     assert "resumed 0 invoice(s)" in capsys.readouterr().out
+
+
+async def test_auth_microsoft_smtp_account_runs_a_second_flow_then_resumes(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D205: an account with an smtp mailer runs a second device flow for SMTP.Send, then resumes."""
+    invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
+    provider = _StubProvider()
+
+    code = await _run_cli(_settings(db_pool, tmp_path / "data", _config_with_smtp(tmp_path)), provider)
+
+    assert code == 0
+    assert provider.added == [(SMTP_SEND_SCOPE,)]
+    assert await _state(db_pool, invoice_id) == "DELIVERING"
+    assert "a second code adds sending through SMTP" in capsys.readouterr().out
+
+
+async def test_auth_microsoft_failed_second_flow_resumes_nothing(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D205: a failed SMTP consent exits 1 and leaves the invoice PENDING_AUTH."""
+    invoice_id = await _seed_invoice(db_pool, "PENDING_AUTH")
+    provider = _StubProvider()
+    provider.add_error = AuthRequired(ACCOUNT)
+
+    code = await _run_cli(_settings(db_pool, tmp_path / "data", _config_with_smtp(tmp_path)), provider)
+
+    assert code == 1
+    assert await _state(db_pool, invoice_id) == "PENDING_AUTH"
+    assert await _job_steps(db_pool, invoice_id) == []
+    assert f"Microsoft sign-in needed for {ACCOUNT}" in capsys.readouterr().err
+
+
+async def test_auth_microsoft_without_smtp_runs_one_flow(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+) -> None:
+    """D205: an account with no smtp mailer runs one device flow, as before."""
+    provider = _StubProvider()
+
+    code = await _run_cli(_settings(db_pool, tmp_path / "data", EXAMPLE_CONFIG), provider)
+
+    assert code == 0
+    assert provider.added == []
