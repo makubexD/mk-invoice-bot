@@ -863,6 +863,9 @@ async def _automatic(
     same transaction as that state change.
     Before the send (filing, Excel upload) a transient error is simply retried.
     """
+    # Kept before the send, so nothing but the commit lies between the mail going out and
+    # the ``sent`` mark (D89); a retry rewrites the same files (D206).
+    kept = await _keep_chat_documents(context, delivery)
     batch_id = await _begin_send(context, delivery, prepared)
     if batch_id is None:
         return
@@ -879,7 +882,6 @@ async def _automatic(
             await set_batch_state(conn, batch_id, FAILED_BATCH_STATE)
         raise
 
-    kept = await _keep_chat_documents(context, delivery)
     async with context.pool.connection() as conn, conn.transaction():
         await set_batch_state(conn, batch_id, SENT_BATCH_STATE)
         await enqueue(conn, delivery.invoice_id, FOLDER_STATUS_STEP)

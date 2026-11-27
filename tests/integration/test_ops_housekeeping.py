@@ -350,3 +350,24 @@ async def test_housekeep_removes_a_docs_folder_with_no_invoice(
     await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
     assert not folder.exists()
+
+
+async def test_housekeep_keeps_a_docs_folder_while_its_documents_wait_to_send(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, BR-D24: an old terminal invoice's docs folder stays while a BR-D24 document row is pending."""
+    invoice_id, folder = await _docs_folder_of(db_pool, tmp_path, DONE, 31)
+    async with db_pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            """
+            INSERT INTO outbox (channel, "to", invoice_id, payload_json, state)
+            VALUES ('console', 'x', %s, %s::jsonb, 'pending')
+            """,
+            (invoice_id, json.dumps({"document": "factura.pdf", "rule_id": "BR-D24"})),
+        )
+    try:
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
+
+        assert folder.exists()
+    finally:
+        await _cleanup_mail(db_pool, invoice_id)

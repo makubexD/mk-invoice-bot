@@ -20,9 +20,10 @@ from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import summary_buttons
 from invoicebot.pipeline.summary import flow_line, summary_text
 from invoicebot.rules.messages_es import SUMMARY_MOVING, SUMMARY_MOVING_QUIET, SUMMARY_TAP_HINT
+from invoicebot.states import EDITABLE
 from invoicebot.store.clock import owner_today
 from invoicebot.store.flow_b import load_flow_data, merge_flow_data
-from invoicebot.store.invoices import load_flow, load_invoice_head, load_reading
+from invoicebot.store.invoices import load_flow, load_invoice_head, load_reading, lock_invoice
 
 #: The flow-data key that holds the saved inputs and the ``posted`` mark (D206).
 SUMMARY_KEY = "summary"
@@ -42,15 +43,24 @@ async def save_summary_inputs(
     )
 
 
+async def discard_summary_inputs(conn: AsyncConnection[Any], invoice_id: int) -> None:
+    """Drop saved inputs a new validation made stale, so no summary carries them; does not commit (D206)."""
+    await merge_flow_data(conn, invoice_id, {SUMMARY_KEY: None})
+
+
 async def post_summary(
     conn: AsyncConnection[Any], cfg: Config, invoice_id: int, *, found_lines: Sequence[str] = ()
 ) -> bool:
     """Queue the summary in the caller's transaction and return True, or return False (D206).
 
     Nothing is queued when no inputs were saved or the summary was already ``posted``.
-    With no ``found_lines`` the text ends with the moving line (D189); with them it ends
-    with those lines and, when the summary has buttons, the tap hint.
+    The invoice row is locked first, so two transactions never both post it. The buttons
+    follow D189 only while an edit is still accepted: a summary that goes out with the move
+    to ``DELIVERING`` carries none, since [Corregir] and [Anular] are valid only until
+    delivery starts (R-3.4). With no ``found_lines`` the text ends with the moving line
+    (D189); with them it ends with those lines and, when it has buttons, the tap hint.
     """
+    await lock_invoice(conn, invoice_id)
     saved = (await load_flow_data(conn, invoice_id)).get(SUMMARY_KEY)
     if not isinstance(saved, dict) or saved.get("posted"):
         return False
@@ -61,7 +71,7 @@ async def post_summary(
     if invoice is None or reading is None or flow is None:
         raise RuntimeError(f"invoice {invoice_id} has no reading or routed flow")
     rule_id = str(saved["rule_id"])
-    buttons = summary_buttons(invoice_id, reading)
+    buttons = summary_buttons(invoice_id, reading) if invoice.state in EDITABLE else []
     tail = _tail(found_lines, buttons)
     text = summary_text(
         reading,

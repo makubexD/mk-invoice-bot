@@ -420,8 +420,8 @@ async def _record_found(
                 size=fetched.size,
             ),
         )
-    await _found_notice(conn, inputs, reading, fetcher, result)
     await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
+    await _found_notice(conn, inputs, reading, fetcher, result)
     await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
     # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
     repo = inputs.cfg.gaps.github.repo

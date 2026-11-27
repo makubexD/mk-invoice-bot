@@ -1988,3 +1988,21 @@ async def test_invoice_without_saved_inputs_gets_today_s_messages(
     async with db_pool.connection() as conn:
         outbox = await _outbox(conn, profile_id)
     assert outbox == [(FOUND_PDF_XML, "BR-F16")]
+
+
+@pytest.mark.usefixtures("_clean_fetch_attempts")
+async def test_first_technical_retry_posts_the_summary_and_schedules_the_retry(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, D167: a first technical failure posts the summary with the moving line, then one retry."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.TECHNICAL), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        jobs = await _fetch_jobs(conn, invoice_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE]
+    assert outbox[0][0].endswith(SUMMARY_MOVING_QUIET)
+    assert len(jobs) == 1

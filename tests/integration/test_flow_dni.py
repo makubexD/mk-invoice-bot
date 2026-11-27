@@ -38,7 +38,6 @@ from invoicebot.pipeline.handlers import EXTRACT_STEP
 from invoicebot.pipeline.intake import handle_inbound
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import DELIVER_STEP
-from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
@@ -240,9 +239,6 @@ async def _validate(pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config
     async with httpx.AsyncClient() as http:
         handler = make_validate_handler(pool, http, None, cfg)
         await handler(await _newest_job(pool, invoice_id, VALIDATE_STEP))
-    # D206: the fetch step's first attempt posts the summary; stand in for it here
-    async with pool.connection() as conn, conn.transaction():
-        await post_summary(conn, cfg, invoice_id)
 
 
 async def _fetch(

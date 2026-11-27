@@ -21,6 +21,7 @@ from typing import Any
 from psycopg import AsyncConnection
 
 from invoicebot.pipeline.chat_docs import DOCS_DIRECTORY
+from invoicebot.pipeline.chat_docs_post import RULE_SENT
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.pipeline.review import RULE_REVIEW
 from invoicebot.queue.outbox import has_pending_document
@@ -38,7 +39,8 @@ async def housekeep(pool: Pool, data_dir: Path, docs_retention_days: int) -> Non
     The jobs are deleted in one transaction. A folder is removed only when its
     name is an invoice id in a terminal state or one no invoice has; any other
     name is left alone, and a mail folder stays while a review document row is
-    pending. A docs folder of a terminal invoice also waits until the invoice's last
+    pending. A docs folder stays while a BR-D24 document row is pending, and one of a
+    terminal invoice also waits until the invoice's last
     state change is ``docs_retention_days`` old by the database clock (D206). Logs one
     INFO line with the counts.
     """
@@ -46,7 +48,9 @@ async def housekeep(pool: Pool, data_dir: Path, docs_retention_days: int) -> Non
         jobs = await delete_stale_jobs(conn)
     tmp_dirs = await _remove_stale(pool, data_dir / TMP_DIRECTORY, "tmp")
     mail_dirs = await _remove_stale(pool, data_dir / MAIL_DIRECTORY, "mail", RULE_REVIEW)
-    docs_dirs = await _remove_stale(pool, data_dir / DOCS_DIRECTORY, "docs", min_age_days=docs_retention_days)
+    docs_dirs = await _remove_stale(
+        pool, data_dir / DOCS_DIRECTORY, "docs", RULE_SENT, min_age_days=docs_retention_days
+    )
     logger.info(
         "housekeeping done",
         extra={"jobs": jobs, "tmp_dirs": tmp_dirs, "mail_dirs": mail_dirs, "docs_dirs": docs_dirs},

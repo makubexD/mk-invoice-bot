@@ -18,7 +18,7 @@ from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, ValidezApi
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.pipeline.questions import INVALID_OK_ACTION
-from invoicebot.pipeline.summary_post import SUMMARY_KEY
+from invoicebot.pipeline.summary_post import SUMMARY_KEY, save_summary_inputs
 from invoicebot.pipeline.validate import VALIDATE_STEP, make_validate_handler
 from invoicebot.queue.jobs import Job
 from invoicebot.rules.messages_es import MESSAGES
@@ -567,3 +567,19 @@ async def test_br_v02_ask_is_queued_at_once(
         outbox = await _outbox(conn, profile_id)
     assert jobs == []
     assert [rule for _, rule, _ in outbox] == ["BR-V02"]
+
+
+async def test_br_v02_ask_discards_inputs_an_earlier_validation_saved(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D206: a re-validation that asks drops the earlier saved inputs, so no stale SUNAT line is posted."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    invoice_id = await _validating_invoice(db_pool, profile_id, _reading(await _today(db_pool)))
+    async with db_pool.connection() as conn, conn.transaction():
+        await save_summary_inputs(conn, invoice_id, rule_id="BR-R02", extra_lines=["stale"])
+
+    await _run(db_pool, cfg, invoice_id, secrets=_secrets(), transport=_sunat_handler(2))
+
+    async with db_pool.connection() as conn:
+        assert (await load_flow_data(conn, invoice_id))[SUMMARY_KEY] is None

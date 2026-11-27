@@ -167,3 +167,22 @@ async def test_xml_confirmed_reading_has_no_review_line_or_buttons(
     assert "⚠️ Revisa" not in text
     assert buttons == []
     assert text.endswith(FOUND)
+
+
+async def test_a_summary_posted_as_delivery_starts_has_no_buttons_or_tap_hint(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """R-3.4, D206: in DELIVERING the buttons would be stale at once, so a printed-text reading gets none."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id)
+    reading = _reading(await _today(db_pool), total_source="ocr")
+    invoice_id = await _invoice(db_pool, profile_id, reading, saved=True)
+    async with db_pool.connection() as conn, conn.transaction():
+        await set_state(conn, invoice_id, "DELIVERING")
+
+    assert await _post(db_pool, cfg, invoice_id, found_lines=[FOUND]) is True
+
+    ((text, buttons),) = await _outbox(db_pool, profile_id)
+    assert text.endswith(FOUND)
+    assert SUMMARY_TAP_HINT not in text
+    assert buttons == []

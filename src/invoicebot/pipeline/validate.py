@@ -30,7 +30,7 @@ from invoicebot.extract.fields import Reading
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.questions import invalid_question
 from invoicebot.pipeline.steps import FETCH_PROGRESS_STEP, FETCH_STEP, SUNAT_RECHECK_STEP
-from invoicebot.pipeline.summary_post import save_summary_inputs
+from invoicebot.pipeline.summary_post import discard_summary_inputs, save_summary_inputs
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.retry import backoff_minutes
 from invoicebot.queue.worker import Handler
@@ -221,6 +221,7 @@ async def _ask(conn: AsyncConnection[Any], inputs: _Inputs, verdict: Verdict) ->
         raise RuntimeError("an ask verdict has no rule")
     text, buttons = invalid_question(inputs.invoice_id, rule_id)
     await set_state(conn, inputs.invoice_id, CONFIRM_INVALID, rule_id=rule_id, expected=VALIDATING)
+    await discard_summary_inputs(conn, inputs.invoice_id)
     await _reply(conn, inputs.invoice, inputs.invoice_id, rule_id, text, buttons)
 
 

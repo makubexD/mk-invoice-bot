@@ -813,6 +813,35 @@ async def test_a_done_delivery_keeps_the_flow_documents_and_offers_the_button(
     assert links == [[{"title": "📂 Abrir carpeta", "url": FAKE_FOLDER_URL}]]
 
 
+class _DocsCheckingMode(FakeGraphMode):
+    """An automatic mode that records whether the chat documents were kept before the send (D206)."""
+
+    def __init__(self, folder: Path) -> None:
+        super().__init__()
+        self.folder = folder
+        self.kept_before_send: bool | None = None
+
+    async def deliver(self, invoice_id: int, mail: OutgoingMail, folder_path: str) -> None:
+        """Note whether the folder exists, then record the send."""
+        self.kept_before_send = self.folder.is_dir()
+        await super().deliver(invoice_id, mail, folder_path)
+
+
+async def test_the_documents_are_kept_before_the_mail_is_sent(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, D89: the files are kept before the send, so only the commit follows the mail going out."""
+    profile_id = f"deliver-{uuid4().hex}"
+    cfg = _with_chat_documents(_config(tmp_path, profile_id, mail_mode="graph"), ["pdf"])
+    invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
+    data_dir = tmp_path / "data"
+    mode = _DocsCheckingMode(data_dir / "docs" / str(invoice_id))
+
+    await _handler(db_pool, cfg, FakeDrive(), data_dir, mode, mode_name="graph")(_job(invoice_id))
+
+    assert mode.kept_before_send is True
+
+
 async def test_a_flow_without_chat_documents_keeps_nothing_and_adds_no_button(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
