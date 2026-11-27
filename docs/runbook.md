@@ -282,7 +282,8 @@ held mail has no reminder and no timeout; `/estado` shows it. With `auto`, the m
 For an emergency, or to send the same invoice again from a clean slate. It runs on the host, never from the chat.
 Only a `DONE`, `CANCELLED` or `FAILED` invoice can be forgotten; cancel a running one with `/cancelar` first. A held
 mail (`BATCHED`, waiting for [Enviar], D194) can be forgotten too: with `--yes` it is set `CANCELLED` first (BR-D23),
-so a later [Enviar] sends nothing (D204). The dry run says it is held.
+so a later [Enviar] sends nothing (D204). The dry run says it is held. Don't tap [Enviar] or `/revisar` while it
+runs: with `--drive` the folder would already be gone when the re-check refuses.
 
 ```sh
 podman exec "$APP" invoicebot invoice forget <id>                       # dry run: prints the plan, changes nothing

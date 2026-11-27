@@ -39,6 +39,8 @@ _DELETE_BATCH = """
 """
 #: The rule that records a held mail's invoice cancelled by ``forget`` (D204).
 RULE_HELD_FORGOTTEN = "BR-D23"
+# The batch state is read without locking the batch: a race can only turn a held invoice into a
+# false "not held", which refuses (D204).
 _LOCK_INVOICE = """
     SELECT invoices.state, invoices.flow_id, invoices.serie, invoices.numero,
            invoices.flow_data_json ->> 'folder_path', invoices.payment_id IS NOT NULL,
@@ -97,9 +99,9 @@ async def release_key(conn: AsyncConnection[Any], invoice_id: int) -> None:
 
 
 async def cancel_held(conn: AsyncConnection[Any], invoice_id: int) -> None:
-    """Set a held ``BATCHED`` invoice ``CANCELLED`` so a later [Enviar] finds no review (D204, BR-D23).
+    """Set a held ``BATCHED`` invoice ``CANCELLED`` so a later [Enviar] answers BR-S02 (D204, BR-D23).
 
-    Does not commit.
+    BR-S02 is the stale-button answer: [Enviar] applies to ``BATCHED`` only. Does not commit.
     """
     await set_state(conn, invoice_id, CANCELLED, rule_id=RULE_HELD_FORGOTTEN, expected=BATCHED)
 

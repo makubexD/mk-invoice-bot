@@ -9,7 +9,7 @@ from pathlib import Path
 from invoicebot.pipeline.handlers import TMP_DIRECTORY
 from invoicebot.sinks.base import Drive
 from invoicebot.sinks.mailer import MAIL_DIRECTORY
-from invoicebot.states import TERMINAL
+from invoicebot.states import BATCHED, TERMINAL
 from invoicebot.store.db import Pool
 from invoicebot.store.forget import ForgetTarget, cancel_held, lock_target, purge, release_key
 
@@ -74,6 +74,10 @@ def _require_forgettable(target: ForgetTarget | None, request: ForgetRequest) ->
     invoice_id = request.invoice_id
     if target is None:
         raise ForgetRefused(f"invoice {invoice_id} does not exist")
+    if target.state == BATCHED and not target.held:
+        raise ForgetRefused(
+            f"invoice {invoice_id} is BATCHED and its mail is not held for review; it cannot be forgotten"
+        )
     if target.state not in TERMINAL and not target.held:
         raise ForgetRefused(
             f"invoice {invoice_id} is {target.state}, not finished; cancel it first with /cancelar"

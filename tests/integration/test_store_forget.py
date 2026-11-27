@@ -253,46 +253,28 @@ async def test_every_foreign_key_to_invoices_is_covered(
     assert referencing == set(PURGED_TABLES) | set(NULLED_TABLES)
 
 
-async def test_lock_target_batched_on_review_batch_is_held(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+@pytest.mark.parametrize(
+    ("state", "batch_state", "held"),
+    [
+        ("BATCHED", "review", True),
+        ("BATCHED", "prepared", False),
+        ("BATCHED", "sending", False),
+        ("BATCHED", None, False),
+        ("DONE", "review", False),
+        ("DONE", None, False),
+    ],
+)
+async def test_lock_target_held_only_for_batched_on_review_batch(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], state: str, batch_state: str | None, held: bool
 ) -> None:
-    """D204: a BATCHED invoice on a batch in state review locks as held."""
+    """D204: an invoice is held only when it is BATCHED and its batch is in state review."""
     async with db_pool.connection() as conn:
         try:
-            batch_id = await _insert_batch(conn, "review")
-            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state="BATCHED")
+            batch_id = await _insert_batch(conn, batch_state) if batch_state else None
+            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state=state)
             target = await lock_target(conn, invoice_id)
             assert target is not None
-            assert target.held is True
-        finally:
-            await conn.rollback()
-
-
-async def test_lock_target_batched_on_prepared_batch_is_not_held(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
-) -> None:
-    """D204: a BATCHED invoice on a batch in state prepared is not held."""
-    async with db_pool.connection() as conn:
-        try:
-            batch_id = await _insert_batch(conn, "prepared")
-            invoice_id = await _insert_invoice(conn, batch_id=batch_id, state="BATCHED")
-            target = await lock_target(conn, invoice_id)
-            assert target is not None
-            assert target.held is False
-        finally:
-            await conn.rollback()
-
-
-async def test_lock_target_done_invoice_is_not_held(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
-) -> None:
-    """D204: a DONE invoice is never held."""
-    async with db_pool.connection() as conn:
-        try:
-            invoice_id = await _insert_invoice(conn)
-            target = await lock_target(conn, invoice_id)
-            assert target is not None
-            assert target.held is False
+            assert target.held is held
         finally:
             await conn.rollback()
 

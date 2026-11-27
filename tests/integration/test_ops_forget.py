@@ -1,5 +1,6 @@
 """Integration tests for the forget operation (D196)."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -9,7 +10,10 @@ from psycopg import AsyncConnection
 from psycopg.types.json import Jsonb
 from psycopg_pool import AsyncConnectionPool
 
-from invoicebot.ops.forget import ForgetRefused, ForgetRequest, forget
+from invoicebot.channels.base import InboundMessage
+from invoicebot.channels.buttons import button_id
+from invoicebot.ops.forget import HELD_LINE, ForgetRefused, ForgetRequest, forget
+from invoicebot.pipeline.actions import SEND_ACTION, handle_press
 from invoicebot.sinks.onedrive import GraphError
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -163,8 +167,8 @@ async def test_apply_drive_purge_removes_everything(
 async def test_non_terminal_invoice_is_refused(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """D196: a BATCHED invoice is refused, naming /cancelar, and nothing changes."""
-    invoice_id, key, files = await _seed(db_pool, tmp_path, state="BATCHED")
+    """D196: an unfinished invoice is refused, naming /cancelar, and nothing changes."""
+    invoice_id, key, files = await _seed(db_pool, tmp_path, state="CONFIRMING")
     drive = FakeDrive()
     with pytest.raises(ForgetRefused, match="/cancelar"):
         await forget(db_pool, tmp_path, drive, ForgetRequest(invoice_id, True, True, True))
@@ -299,7 +303,7 @@ async def test_held_dry_run_reports_and_changes_nothing(
     """D204: a dry run on a held invoice says it will be cancelled and changes nothing."""
     invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
     lines = await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, False))
-    assert "state: BATCHED, mail held for review; will be cancelled" in lines
+    assert HELD_LINE in lines
     assert lines[-1] == "dry run: nothing changed"
     assert await _row(db_pool, invoice_id) == (key, 1)
     async with db_pool.connection() as conn:
@@ -343,7 +347,63 @@ async def test_batched_on_prepared_batch_is_still_refused(
 ) -> None:
     """D204: a BATCHED invoice on a prepared batch is refused, as before, and nothing changes."""
     invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="prepared")
-    with pytest.raises(ForgetRefused, match="/cancelar"):
+    with pytest.raises(ForgetRefused, match="not held for review"):
         await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
     assert await _row(db_pool, invoice_id) == (key, 1)
     assert await _batch_count(db_pool, invoice_id) == 1
+
+
+async def test_held_race_to_delivering_is_refused_and_not_cancelled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204: a held invoice that [Enviar] moves to DELIVERING mid-delete is refused, not cancelled."""
+    invoice_id, key, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+
+    class RacingDrive(FakeDrive):
+        async def delete(self, path: str) -> None:
+            """Delete, then let [Enviar] win the race."""
+            await super().delete(path)
+            async with db_pool.connection() as conn:
+                await conn.execute("UPDATE invoices SET state = 'DELIVERING' WHERE id = %s", (invoice_id,))
+
+    with pytest.raises(ForgetRefused, match="not finished") as refused:
+        await forget(db_pool, tmp_path, RacingDrive(), ForgetRequest(invoice_id, True, False, True))
+    assert refused.value.done == (f"drive: deleted {FOLDER}",)
+    assert await _row(db_pool, invoice_id) == (key, 1)
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("DELIVERING",)
+
+
+async def test_enviar_after_forgetting_a_held_invoice_is_stale(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D204, BR-S02: [Enviar] on a forgotten held invoice answers BR-S02 and queues no delivery."""
+    invoice_id, _, _ = await _seed(db_pool, tmp_path, state="BATCHED", batch_state="review")
+    await forget(db_pool, tmp_path, None, ForgetRequest(invoice_id, False, False, True))
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT profile_id FROM invoices WHERE id = %s", (invoice_id,))
+        row = await cur.fetchone()
+    assert row is not None
+    press = InboundMessage(
+        channel="whatsapp",
+        external_id=f"ext-{uuid4().hex}",
+        profile_id=row[0],
+        sender_role="owner",
+        button_id=button_id(invoice_id, SEND_ACTION),
+        received_at=datetime.now(UTC),
+    )
+    async with db_pool.connection() as conn, conn.transaction():
+        result = await handle_press(conn, press, frozenset())
+    assert result.invoice_id is None
+    async with db_pool.connection() as conn:
+        cur = await conn.execute("SELECT state FROM invoices WHERE id = %s", (invoice_id,))
+        assert await cur.fetchone() == ("CANCELLED",)
+        cur = await conn.execute(
+            "SELECT count(*) FROM jobs WHERE invoice_id = %s AND step = 'deliver'", (invoice_id,)
+        )
+        assert await cur.fetchone() == (0,)
+        cur = await conn.execute(
+            "SELECT payload_json->>'rule_id' FROM outbox WHERE invoice_id = %s", (invoice_id,)
+        )
+        assert await cur.fetchall() == [("BR-S02",)]
