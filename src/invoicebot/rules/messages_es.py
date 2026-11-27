@@ -532,6 +532,8 @@ FETCH_WAITING = "⏳ Comprobante #{id}: esperando al portal. Lo vuelvo a buscar 
 FETCH_NOT_FOUND_LINE = "• {fetcher}: no encontré el comprobante"
 #: BR-F07 bullet: the store has no known portal to fetch from (S7.4).
 FETCH_NO_PORTAL_LINE = "• Portal del comercio: no lo conozco"
+#: BR-F07 and BR-F13 bullet: the issuer has an approved taught link no fetcher reads yet (D208).
+FETCH_TAUGHT_PORTAL_LINE = "• Portal del comercio: me lo enseñaste, pero todavía no sé consultarlo"
 #: BR-F07 bullet: the store's portal is configured but not implemented yet (S7.4).
 FETCH_PORTAL_TODO_LINE = "• Portal {portal}: todavía no sé consultarlo"
 #: BR-F07 bullet: the fetcher failed for a technical reason or a timeout (S7.4).

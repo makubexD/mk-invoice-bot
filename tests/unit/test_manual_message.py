@@ -12,12 +12,13 @@ from invoicebot.config.models import Brand, Flow, FlowInbox, Portal, Store, Stor
 from invoicebot.extract.fields import Field, Reading
 from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.chain import Attempt
-from invoicebot.pipeline.manual_message import LookTimes, docs_needed_text, manual_message
+from invoicebot.pipeline.manual_message import LookTimes, StoreFacts, docs_needed_text, manual_message
 from invoicebot.rules.messages_es import (
     FETCH_AUTH_LINE,
     FETCH_NO_PORTAL_LINE,
     FETCH_NOT_FOUND_LINE,
     FETCH_PORTAL_TODO_LINE,
+    FETCH_TAUGHT_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     MESSAGES,
     fetcher_desc,
@@ -90,13 +91,14 @@ def _bullets(
     *,
     flow: Flow | None = None,
     directory: StoreDirectory | None = None,
+    taught_portal: bool = False,
 ) -> list[str]:
     """Return the bullets of the message for one fetcher's final ``reason``."""
     text = manual_message(
         _reading(),
         flow or _flow(),
         [Attempt(PORTAL_FETCHER, reason)],
-        directory or _with_store(),
+        StoreFacts(directory or _with_store(), taught_portal),
     )
     return [line for line in text.splitlines() if line.startswith("•")]
 
@@ -153,7 +155,7 @@ def test_two_attempts_of_one_fetcher_give_one_bullet_from_the_last_reason() -> N
         Attempt(PORTAL_FETCHER, FetchReason.XML_INVALID),
     ]
 
-    text = manual_message(_reading(), _flow(), attempts, _with_store())
+    text = manual_message(_reading(), _flow(), attempts, StoreFacts(_with_store(), taught_portal=False))
 
     bullets = [line for line in text.splitlines() if line.startswith("•")]
     assert bullets == [MESSAGES["BR-F09"].format(fetcher=fetcher_desc(PORTAL_FETCHER))]
@@ -167,7 +169,7 @@ def test_bullet_order_follows_each_fetcher_first_attempt() -> None:
         Attempt("email_inbox", FetchReason.AUTH_REQUIRED),
     ]
 
-    text = manual_message(_reading(), _flow(), attempts, _with_store())
+    text = manual_message(_reading(), _flow(), attempts, StoreFacts(_with_store(), taught_portal=False))
 
     bullets = [line for line in text.splitlines() if line.startswith("•")]
     assert bullets == [FETCH_AUTH_LINE, FETCH_NO_PORTAL_LINE]
@@ -202,7 +204,7 @@ def test_docs_needed_text_names_the_docs_the_fetcher_bullets_and_the_mailbox() -
         _reading(),
         _flow(inbox=_inbox()),
         attempts,
-        _with_store(),
+        StoreFacts(_with_store(), taught_portal=False),
         LookTimes(datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)),
     )
 
@@ -223,7 +225,7 @@ def test_docs_needed_text_drops_the_search_line_without_a_bullet() -> None:
         _reading(),
         _flow(inbox=_inbox()),
         [Attempt("qr_url", FetchReason.NO_URL)],
-        _with_store(),
+        StoreFacts(_with_store(), taught_portal=False),
         LookTimes(datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)),
     )
 
@@ -254,7 +256,7 @@ def test_docs_needed_text_words_the_last_look_against_the_owner_date(
         _reading(),
         _flow(inbox=_inbox()),
         [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
-        _with_store(),
+        StoreFacts(_with_store(), taught_portal=False),
         LookTimes(last_at, today),
     )
 
@@ -271,7 +273,7 @@ def test_docs_needed_text_names_outlook_for_a_graph_inbox() -> None:
         _reading(),
         _flow(inbox=_inbox("graph")),
         [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
-        _with_store(),
+        StoreFacts(_with_store(), taught_portal=False),
         LookTimes(
             datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
             date(2026, 11, 24),
@@ -289,7 +291,7 @@ def test_docs_needed_text_needs_a_flow_with_an_inbox() -> None:
             _reading(),
             _flow(),
             [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
-            _with_store(),
+            StoreFacts(_with_store(), taught_portal=False),
             LookTimes(
                 datetime(2026, 11, 25, 12, 20, tzinfo=UTC),
                 date(2026, 11, 24),
@@ -302,3 +304,28 @@ def test_br_f11_uses_a_generic_comercio_without_a_store() -> None:
     assert _bullets(FetchReason.NO_WEBSITE, directory=_directory(None, None)) == [
         MESSAGES["BR-F11"].format(comercio="el comercio")
     ]
+
+
+def test_a_taught_portal_changes_the_no_portal_bullet_in_br_f07() -> None:
+    """D208, BR-F07: NO_PORTAL with an approved taught link says the portal was taught."""
+    assert _bullets(FetchReason.NO_PORTAL, taught_portal=True) == [FETCH_TAUGHT_PORTAL_LINE]
+
+
+def test_a_taught_portal_changes_the_no_portal_bullet_in_br_f13() -> None:
+    """D208, BR-F13: NO_PORTAL with an approved taught link says the portal was taught."""
+    text = docs_needed_text(
+        7,
+        _reading(),
+        _flow(inbox=_inbox()),
+        [Attempt(PORTAL_FETCHER, FetchReason.NO_PORTAL)],
+        StoreFacts(_with_store(), taught_portal=True),
+        LookTimes(datetime(2026, 1, 2, 14, 5, tzinfo=UTC), date(2026, 1, 1)),
+    )
+
+    assert FETCH_TAUGHT_PORTAL_LINE in text.splitlines()
+    assert FETCH_NO_PORTAL_LINE not in text
+
+
+def test_no_taught_portal_keeps_the_fixed_no_portal_bullet() -> None:
+    """D208, BR-F07: NO_PORTAL without a taught link still says the portal is unknown."""
+    assert _bullets(FetchReason.NO_PORTAL, taught_portal=False) == [FETCH_NO_PORTAL_LINE]

@@ -66,6 +66,7 @@ from invoicebot.pipeline.manual_message import PORTAL_FETCHER as PORTAL_FETCHER
 from invoicebot.pipeline.manual_message import (
     RULE_EXHAUSTED,
     LookTimes,
+    StoreFacts,
     docs_needed_text,
     manual_message,
     portal_for,
@@ -525,7 +526,7 @@ async def _wait_notice(
         reading,
         inputs.flow,
         inputs.attempts,
-        inputs.directory,
+        StoreFacts(inputs.directory, await _has_approved_link(conn, reading)),
         looks,
     )
     offer_portal = await _offer_portal(conn, inputs, reading)
@@ -537,6 +538,15 @@ async def _wait_notice(
         text,
         docs_needed_buttons(invoice_id, offer_portal),
     )
+
+
+async def _has_approved_link(conn: AsyncConnection[Any], reading: Reading) -> bool:
+    """Return True when the issuer has an approved taught link (D208)."""
+    ruc_emisor = reading.value("ruc_emisor")
+    if ruc_emisor is None:
+        return False
+    link = await taught_links.get(conn, int(ruc_emisor))
+    return link is not None and link.state == "approved"
 
 
 async def _offer_portal(conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading) -> bool:
@@ -572,9 +582,12 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
             reading,
             inputs.flow,
             inputs.attempts,
-            inputs.directory,
+            StoreFacts(
+                inputs.directory,
+                await _has_approved_link(conn, reading),
+                await _portal_is_broken(conn, reading, inputs.directory),
+            ),
             gap_line=_gap_line(gap),
-            portal_broken=await _portal_is_broken(conn, reading, inputs.directory),
         )
         await set_state(
             conn, inputs.job.invoice_id, MANUAL_REQUIRED, rule_id=RULE_EXHAUSTED, expected=FETCHING_DOCS

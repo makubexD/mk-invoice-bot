@@ -23,6 +23,7 @@ from invoicebot.rules.messages_es import (
     FETCH_NO_PORTAL_LINE,
     FETCH_NOT_FOUND_LINE,
     FETCH_PORTAL_TODO_LINE,
+    FETCH_TAUGHT_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     MAILBOX_DESC,
     MESSAGES,
@@ -49,22 +50,33 @@ _REASON_RULES: dict[FetchReason, str] = {
 }
 
 
+@dataclass(frozen=True)
+class StoreFacts:
+    """What the bullets know about the issuer's store (BR-F07, BR-F13, D208)."""
+
+    directory: StoreDirectory
+    #: The issuer has an approved taught link (D208).
+    taught_portal: bool
+    #: The portal is broken: its technical failure bullet is BR-F03's line (BR-F03).
+    portal_broken: bool = False
+
+
 def manual_message(
     reading: Reading,
     flow: Flow,
     attempts: Sequence[Attempt],
-    directory: StoreDirectory,
+    facts: StoreFacts,
     gap_line: str = "",
-    portal_broken: bool = False,
 ) -> str:
     """Return BR-F07's message for an invoice no fetcher could complete (BR-F07).
 
-    With ``portal_broken``, the portal fetcher's technical failure bullet is
-    BR-F03's line instead of the plain technical one (BR-F03).
+    With ``facts.portal_broken``, the portal fetcher's technical failure bullet is
+    BR-F03's line instead of the plain technical one (BR-F03). With
+    ``facts.taught_portal``, a missing portal reads as taught but unsupported (D208).
     """
-    store = _store_for(reading, directory)
-    portal = portal_for(reading.value("ruc_emisor") or "", directory)
-    lines = fetcher_lines(attempts, store, portal, portal_broken)
+    store = _store_for(reading, facts.directory)
+    portal = portal_for(reading.value("ruc_emisor") or "", facts.directory)
+    lines = fetcher_lines(attempts, store, portal, facts)
     if SUNAT_SOL not in flow.fetchers:
         lines = "\n".join(line for line in (lines, MESSAGES["BR-F01"]) if line)
     return (
@@ -93,12 +105,13 @@ def docs_needed_text(
     reading: Reading,
     flow: Flow,
     attempts: Sequence[Attempt],
-    directory: StoreDirectory,
+    facts: StoreFacts,
     looks: LookTimes,
 ) -> str:
     """Return BR-F13's text asking for the documents no fetcher could get (BR-F13, D190).
 
     ``looks`` gives the last inbox look, which ``when_desc`` words against the owner's date.
+    ``facts`` gives the store directory and whether the issuer has a taught portal (D208).
 
     Raises:
         ValueError: when the flow has no ``email_inbox``, since only the mailbox fetcher
@@ -107,9 +120,9 @@ def docs_needed_text(
     inbox = flow.email_inbox
     if inbox is None:
         raise ValueError("BR-F13 needs a flow with an email_inbox")
-    store = _store_for(reading, directory)
-    portal = portal_for(reading.value("ruc_emisor") or "", directory)
-    bullets = fetcher_lines(attempts, store, portal, portal_broken=False)
+    store = _store_for(reading, facts.directory)
+    portal = portal_for(reading.value("ruc_emisor") or "", facts.directory)
+    bullets = fetcher_lines(attempts, store, portal, facts)
     searched_lines = "\n".join((SEARCHED_HEADER, bullets)) if bullets else ""
     text = MESSAGES["BR-F13"].format(
         id=invoice_id,
@@ -130,11 +143,11 @@ def fetcher_lines(
     attempts: Sequence[Attempt],
     store: Store | None,
     portal: Portal | None,
-    portal_broken: bool,
+    facts: StoreFacts,
 ) -> str:
     """Return one bullet per fetcher in first-attempt order, from its last reason (BR-F07, BR-F13)."""
     last: dict[str, FetchReason] = {attempt.fetcher: attempt.reason for attempt in attempts}
-    lines = (_reason_line(fetcher, reason, store, portal, portal_broken) for fetcher, reason in last.items())
+    lines = (_reason_line(fetcher, reason, store, portal, facts) for fetcher, reason in last.items())
     return "\n".join(line for line in lines if line)
 
 
@@ -150,12 +163,14 @@ def _reason_line(
     reason: FetchReason,
     store: Store | None,
     portal: Portal | None,
-    portal_broken: bool,
+    facts: StoreFacts,
 ) -> str:
-    """Return the BR-F07 bullet for one fetcher's final reason (BR-F07, BR-F03)."""
+    """Return the BR-F07 bullet for one fetcher's final reason (BR-F07, BR-F03, D208)."""
     if reason is FetchReason.NO_URL:
         return ""
-    if portal_broken and fetcher == PORTAL_FETCHER and reason in TECHNICAL_REASONS:
+    if reason is FetchReason.NO_PORTAL and facts.taught_portal:
+        return FETCH_TAUGHT_PORTAL_LINE
+    if facts.portal_broken and fetcher == PORTAL_FETCHER and reason in TECHNICAL_REASONS:
         return MESSAGES["BR-F03"].format(portal=_portal_desc(store, portal))
     if reason in (FetchReason.PORTAL_INACTIVE, FetchReason.CAPTCHA_UNSOLVABLE):
         return _portal_line(reason, store, portal)
