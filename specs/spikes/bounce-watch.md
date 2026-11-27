@@ -1,7 +1,7 @@
 # Spike: what a bounce looks like and a draft from Sent
 
 Date: 2026-11-27. Account: the owner's personal Outlook.com mailbox (config account `personal`). Plan:
-`docs/plan-mvp-bounce-watch.md`, step 1.
+`docs/archive/plan-mvp-bounce-watch.md`, step 1.
 
 ## Probe
 
