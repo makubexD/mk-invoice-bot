@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Protocol
 
+import httpx
 from psycopg import AsyncConnection
 
 from invoicebot.auth.msal_cache import AuthRequired
@@ -24,7 +25,7 @@ from invoicebot.pipeline.actions import SENT_ACTION, SENT_BATCH_STATE
 from invoicebot.pipeline.done import MAIL_INVOICE_KEY
 from invoicebot.pipeline.outgoing import Addressee, outbound, queue_outbound, safe_links
 from invoicebot.pipeline.steps import BOUNCE_CHECK_STEP, FOLDER_STATUS_STEP
-from invoicebot.queue.jobs import Job, db_now_plus, enqueue
+from invoicebot.queue.jobs import Job, db_now_plus, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BOUNCE_STATUS_UNKNOWN,
@@ -34,7 +35,7 @@ from invoicebot.rules.messages_es import (
     BUTTON_SENT,
 )
 from invoicebot.sinks.mail_bounce import Bounce, DraftUnavailable
-from invoicebot.sinks.onedrive import GraphError
+from invoicebot.sinks.onedrive import GraphError, GraphTransient
 from invoicebot.store.db import Pool
 from invoicebot.store.flow_b import (
     BOUNCED_BATCH_STATE,
@@ -59,6 +60,9 @@ _NO_STATUS = "?"
 _NO_READER = "no_reader"
 #: The ``status`` a blocked watch logs when the account needs a sign-in.
 _AUTH_REQUIRED = "auth_required"
+#: How far before ``sent_at`` the inbox is read. The Microsoft and host clocks may differ;
+#: the id match keeps an older report from counting.
+_SINCE_MARGIN_S = 60
 
 
 class BounceReader(Protocol):
@@ -73,11 +77,14 @@ class BounceReader(Protocol):
         """Return the delivery report of ``message_id`` received since ``since``, or None."""
         ...
 
-    async def draft_from_sent(self, *, sent_id: str) -> str:
+    async def draft_from_sent(self, *, sent_id: str, message_id: str) -> str:
         """Draft the Sent copy of ``sent_id`` again and return the draft's web link.
 
+        The copy must carry the bot's ``message_id`` as its original id.
+
         Raises:
-            DraftUnavailable: the copy is missing or too big, or the link is not Outlook's.
+            DraftUnavailable: the copy is missing, too big or another mail, or the link
+                is not Outlook's.
         """
         ...
 
@@ -97,33 +104,36 @@ class _Watch:
 def make_bounce_check_handler(pool: Pool, cfg: Config, readers: Mapping[str, BounceReader]) -> Handler:
     """Build the handler of the ``bounce_check`` step (D207, BR-D26, BR-D27).
 
-    A short transaction reads the batch and stops unless it is ``sent`` with a Message-ID.
+    A short transaction reads the batch and stops when a newer ``bounce_check`` exists
+    (a forked chain) or unless the batch is ``sent`` with a Message-ID.
     The inbox read and the draft run with no transaction held. A final Graph error or a
     missing sign-in logs ``bounce watch blocked`` and ends the watch without touching the
     batch or the invoice; a transient error propagates to the worker's retry. With no
     report, the job schedules itself ``limits.bounce_check_every_s`` later until
-    ``limits.bounce_watch_s`` after the send. With one, a failed draft only means BR-D27
-    instead of BR-D26. The last transaction locks the invoice and reads the batch again,
-    so a batch that is no longer ``sent``, or that already carries a recorded bounce, is
-    left alone; otherwise it sets the batch ``bounced``, records the bounce in flow data,
-    queues ``folder_status`` and the message. The recorded bounce also keeps a batch set
-    ``sent`` again by [Ya lo envié] (BR-D08) from being watched again. The draft's link is
-    never logged.
+    ``limits.bounce_watch_s`` after the send. With one, a failed draft, transient errors
+    included, or a link the outbound check drops only means BR-D27 instead of BR-D26. The
+    last transaction locks the invoice and reads the batch again, so a batch that is no
+    longer ``sent``, or that already carries a recorded bounce, is left alone; otherwise
+    it sets the batch ``bounced``, records the bounce in flow data, queues
+    ``folder_status`` and the message. The recorded bounce also keeps a batch set ``sent``
+    again by [Ya lo envié] (BR-D08) from being watched again. The draft's link is never
+    logged.
 
     A crash after the draft and before that commit makes a second draft on the retry. That
     is accepted: the owner sends one and deletes the other, and the mail is never sent twice.
     """
 
     async def handle(job: Job) -> None:
-        watch = await _start(pool, cfg, job.invoice_id)
+        watch = await _start(pool, cfg, job)
         if watch is None:
             return
         reader = readers.get(watch.account)
         if reader is None:
             _blocked(job.invoice_id, _NO_READER)
             return
+        since = watch.sent_at - timedelta(seconds=_SINCE_MARGIN_S)
         try:
-            bounce = await reader.find_bounce(message_id=watch.email_ref, since=watch.sent_at)
+            bounce = await reader.find_bounce(message_id=watch.email_ref, since=since)
         except GraphError as err:
             _blocked(job.invoice_id, str(err.status))
             return
@@ -133,19 +143,23 @@ def make_bounce_check_handler(pool: Pool, cfg: Config, readers: Mapping[str, Bou
         if bounce is None:
             await _watch_on(pool, cfg, job.invoice_id, watch)
             return
-        link = await _draft(reader, job.invoice_id, bounce)
+        link = await _draft(reader, job.invoice_id, bounce, watch.email_ref)
         await _report(pool, job.invoice_id, watch, bounce, link)
 
     return handle
 
 
-async def _start(pool: Pool, cfg: Config, invoice_id: int) -> _Watch | None:
+async def _start(pool: Pool, cfg: Config, job: Job) -> _Watch | None:
     """Return what this run watches, or None unless the batch is ``sent`` with a Message-ID.
 
-    A batch set ``sent`` again after its bounce (BR-D08) carries the recorded bounce, so it
-    is not watched again.
+    A newer ``bounce_check`` for the invoice means this run is a stale fork of the chain
+    (R-5.1), so it does nothing. A batch set ``sent`` again after its bounce (BR-D08)
+    carries the recorded bounce, so it is not watched again.
     """
+    invoice_id = job.invoice_id
     async with pool.connection() as conn, conn.transaction():
+        if await is_superseded(conn, job):
+            return None
         batch = await load_sent_batch(conn, invoice_id)
         if batch is None or batch.state != SENT_BATCH_STATE:
             return None
@@ -194,11 +208,15 @@ async def _watch_on(pool: Pool, cfg: Config, invoice_id: int, watch: _Watch) -> 
         await enqueue(conn, invoice_id, BOUNCE_CHECK_STEP, after)
 
 
-async def _draft(reader: BounceReader, invoice_id: int, bounce: Bounce) -> str | None:
-    """Return the draft's web link, or None when no draft could be made (D207, BR-D27)."""
+async def _draft(reader: BounceReader, invoice_id: int, bounce: Bounce, message_id: str) -> str | None:
+    """Return the draft's web link, or None when no draft could be made (D207, BR-D27).
+
+    A transient or network error is "no draft" too: the bounce is already found, so the
+    sender hears of it now instead of the job retrying, or parking, with it unreported.
+    """
     try:
-        return await reader.draft_from_sent(sent_id=bounce.sent_id)
-    except (DraftUnavailable, GraphError, AuthRequired) as err:
+        return await reader.draft_from_sent(sent_id=bounce.sent_id, message_id=message_id)
+    except (DraftUnavailable, GraphError, GraphTransient, httpx.HTTPError, AuthRequired) as err:
         logger.warning(
             "bounce draft unavailable",
             extra={"invoice_id": invoice_id, "status": bounce.status, "error": type(err).__name__},
@@ -220,19 +238,17 @@ async def _report(pool: Pool, invoice_id: int, watch: _Watch, bounce: Bounce, li
         if head is None:
             return
         serie, numero = await _serie_numero(conn, invoice_id, flow_data)
+        links = [] if link is None else safe_links([(BUTTON_OPEN_DRAFT, link)])
         await set_batch_state(conn, batch.id, BOUNCED_BATCH_STATE)
-        await merge_flow_data(
-            conn, invoice_id, {BOUNCE_KEY: {"status": bounce.status, "draft": link is not None}}
-        )
+        await merge_flow_data(conn, invoice_id, {BOUNCE_KEY: {"status": bounce.status, "draft": bool(links)}})
         await enqueue(conn, invoice_id, FOLDER_STATUS_STEP)
         status = BOUNCE_STATUS_UNKNOWN if bounce.status == _NO_STATUS else bounce.status
         values = {"id": invoice_id, "serie": serie, "numero": numero, "to": watch.to, "status": status}
         sent = Button(id=button_id(invoice_id, SENT_ACTION), title=BUTTON_SENT)
-        if link is None:
-            rule_id, text, links = RULE_BOUNCED_NO_DRAFT, BOUNCED_NO_DRAFT.format(**values), []
-        else:
+        if links:
             rule_id, text = RULE_BOUNCED_DRAFT, BOUNCED_DRAFT.format(**values)
-            links = safe_links([(BUTTON_OPEN_DRAFT, link)])
+        else:
+            rule_id, text = RULE_BOUNCED_NO_DRAFT, BOUNCED_NO_DRAFT.format(**values)
         message = outbound(
             Addressee(head.origin_channel, head.profile_id),
             text,

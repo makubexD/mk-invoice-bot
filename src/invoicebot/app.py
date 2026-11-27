@@ -645,10 +645,15 @@ class _GraphBounceReader:
             timeout_s=self.timeout_s,
         )
 
-    async def draft_from_sent(self, *, sent_id: str) -> str:
-        """Draft the Sent copy of ``sent_id`` again and return its web link (D207)."""
+    async def draft_from_sent(self, *, sent_id: str, message_id: str) -> str:
+        """Draft the Sent copy of ``sent_id``, the bot's ``message_id``, and return its web link (D207)."""
         return await mail_bounce.draft_from_sent(
-            self.http, self.tokens, sent_id=sent_id, account=self.account, timeout_s=self.timeout_s
+            self.http,
+            self.tokens,
+            sent_id=sent_id,
+            message_id=message_id,
+            account=self.account,
+            timeout_s=self.timeout_s,
         )
 
 

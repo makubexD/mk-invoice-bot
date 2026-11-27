@@ -9,11 +9,13 @@ carry the HTTP status only, never a URL, an address or a body (R-9.16).
 from __future__ import annotations
 
 import base64
+import email.errors
 import email.parser
 import email.policy
 import logging
 import re
 import urllib.parse
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from email.message import Message
@@ -38,8 +40,12 @@ MESSAGE_ID = re.compile(r"^<[^<>'\s]{1,250}>$")
 #: A delivery report bigger than this is skipped.
 MAX_REPORT_BYTES = 2 * 1024 * 1024
 
-#: A Sent copy bigger than this is not turned into a draft.
-MAX_DRAFT_BYTES = 3 * 1024 * 1024
+#: A Sent copy bigger than this is not turned into a draft. Base64 grows it by 4/3, and
+#: Graph refuses a request body over 4 MB.
+MAX_DRAFT_BYTES = 2_900_000
+
+#: How much of an inbox message is read for its top-level headers.
+MAX_HEADER_BYTES = 64 * 1024
 
 #: How many inbox messages one watch looks at.
 _INBOX_TOP = 50
@@ -47,6 +53,23 @@ _INBOX_TOP = 50
 _STATUS_CODE = re.compile(r"^[245]\.\d{1,3}\.\d{1,3}$")
 _ORIGINAL_ID_HEADER = "X-Microsoft-Original-Message-ID"
 _WEB_LINK_HOSTS = frozenset({"outlook.live.com", "outlook.office.com"})
+_REPORT_TYPE = "multipart/report"
+_DELIVERY_STATUS = "delivery-status"
+_HEADER_END = re.compile(rb"\r?\n\r?\n")
+#: A backslash, a space, a control character or DEL anywhere in a draft's link.
+_UNSAFE_LINK_CHAR = re.compile(r"[\x00-\x20\x7f\\]")
+
+#: What a crafted MIME can make the parser or a header raise. Every mail here is untrusted,
+#: and one bad item must not stop the watch, so each counts as "not a report".
+_POISON_ERRORS = (
+    RecursionError,
+    email.errors.MessageError,
+    ValueError,
+    IndexError,
+    LookupError,
+    TypeError,
+    AttributeError,
+)
 
 
 class DraftUnavailable(Exception):
@@ -92,9 +115,46 @@ def _original_part(report: Message, message_id: str) -> Message | None:
     return None
 
 
+def _is_delivery_report(message: Message) -> bool:
+    """Return True when the top-level type is ``multipart/report; report-type=delivery-status``."""
+    report_type = message.get_param("report-type", "")
+    return (
+        message.get_content_type() == _REPORT_TYPE
+        and isinstance(report_type, str)
+        and report_type.lower() == _DELIVERY_STATUS
+    )
+
+
+def _headers_of(raw: bytes) -> Message:
+    """Return the top-level headers of ``raw``, the body left unparsed."""
+    return email.parser.BytesHeaderParser(policy=email.policy.default).parsebytes(raw)
+
+
+def _headers_say_report(head: bytes) -> bool:
+    """Return True when the header block ``head`` is a delivery report's; a poison header is not."""
+    try:
+        return _is_delivery_report(_headers_of(head))
+    except _POISON_ERRORS:
+        return False
+
+
 def parse_bounce(raw: bytes, message_id: str) -> Bounce | None:
-    """Return the bounce when ``raw`` is the report of ``message_id``, else None (D207)."""
+    """Return the bounce when ``raw`` is the report of ``message_id``, else None (D207).
+
+    Only a top-level delivery report counts, so a forwarded or quoted one does not. It
+    never raises: a mail the parser cannot handle is not a report.
+    """
+    try:
+        return _parse_report(raw, message_id)
+    except _POISON_ERRORS:
+        return None
+
+
+def _parse_report(raw: bytes, message_id: str) -> Bounce | None:
+    """Return the bounce of ``message_id`` in ``raw``; may raise on a crafted MIME."""
     report = email.parser.BytesParser(policy=email.policy.default).parsebytes(raw)
+    if not _is_delivery_report(report):
+        return None
     original = _original_part(report, message_id)
     if original is None:
         return None
@@ -158,8 +218,6 @@ async def _read_raw(
     timeout_s: float,
 ) -> bytes | None:
     """Return a message's MIME, or None when it is over ``max_bytes``."""
-    chunks: list[bytes] = []
-    total = 0
     async with http.stream(
         "GET",
         f"{GRAPH_BASE_URL}/me/messages/{encoded_id}/$value",
@@ -167,12 +225,51 @@ async def _read_raw(
         timeout=timeout_s,
     ) as response:
         raise_graph_error(response, account)
-        async for chunk in response.aiter_bytes():
-            total += len(chunk)
-            if total > max_bytes:
-                return None
-            chunks.append(chunk)
-    return b"".join(chunks)
+        return await _read_rest(response.aiter_bytes(), b"", max_bytes)
+
+
+async def _read_report(
+    http: httpx.AsyncClient,
+    tokens: TokenSource,
+    encoded_id: str,
+    *,
+    account: str,
+    timeout_s: float,
+) -> bytes | None:
+    """Return an inbox message's MIME; ``b""`` when it is not a delivery report, None when oversize.
+
+    The top-level headers are read first, at most ``MAX_HEADER_BYTES`` of them; a message
+    whose headers say it is not a report is left without reading the rest.
+    """
+    async with http.stream(
+        "GET",
+        f"{GRAPH_BASE_URL}/me/messages/{encoded_id}/$value",
+        headers=auth_headers(await tokens.token()),
+        timeout=timeout_s,
+    ) as response:
+        raise_graph_error(response, account)
+        chunks = response.aiter_bytes()
+        head = bytearray()
+        async for chunk in chunks:
+            head += chunk
+            if _HEADER_END.search(head, 0, MAX_HEADER_BYTES) or len(head) >= MAX_HEADER_BYTES:
+                break
+        end = _HEADER_END.search(head, 0, MAX_HEADER_BYTES)
+        if end is None or not _headers_say_report(bytes(head[: end.end()])):
+            return b""
+        return await _read_rest(chunks, bytes(head), MAX_REPORT_BYTES)
+
+
+async def _read_rest(chunks: AsyncIterator[bytes], start: bytes, max_bytes: int) -> bytes | None:
+    """Return ``start`` and the rest of ``chunks``, or None once that is over ``max_bytes``."""
+    buffer = bytearray(start)
+    if len(buffer) > max_bytes:
+        return None
+    async for chunk in chunks:
+        buffer += chunk
+        if len(buffer) > max_bytes:
+            return None
+    return bytes(buffer)
 
 
 async def find_bounce(
@@ -199,23 +296,27 @@ async def find_bounce(
         f"{GRAPH_BASE_URL}/me/mailFolders/inbox/messages",
         {
             "$filter": f"receivedDateTime ge {_odata_utc(since)}",
-            "$select": "id,subject",
+            # The report comes seconds after the send, so the oldest first keeps it on page one.
+            "$orderby": "receivedDateTime asc",
+            "$select": "id",
             "$top": str(_INBOX_TOP),
         },
         account=account,
         timeout_s=timeout_s,
     )
+    found: Bounce | None = None
+    oversize = 0
     for item in items:
-        raw = await _read_raw(
-            http, tokens, _item_id(item), MAX_REPORT_BYTES, account=account, timeout_s=timeout_s
-        )
+        raw = await _read_report(http, tokens, _item_id(item), account=account, timeout_s=timeout_s)
         if raw is None:
-            logger.warning("bounce watch skipped an oversize inbox message")
+            oversize += 1
             continue
-        bounce = parse_bounce(raw, message_id)
-        if bounce is not None:
-            return bounce
-    return None
+        found = parse_bounce(raw, message_id) if raw else None
+        if found is not None:
+            break
+    if oversize:
+        logger.warning("bounce watch skipped oversize inbox messages", extra={"count": oversize})
+    return found
 
 
 def _odata_utc(moment: datetime) -> str:
@@ -237,14 +338,27 @@ def _checked_web_link(value: object) -> str:
     """
     if not isinstance(value, str):
         raise DraftUnavailable("no link")
+    if _UNSAFE_LINK_CHAR.search(value):
+        raise DraftUnavailable("bad link")
     try:
         parts = urllib.parse.urlsplit(value)
         host = parts.hostname
+        port = parts.port
     except ValueError as err:
         raise DraftUnavailable("bad link") from err
     if parts.scheme != "https" or host not in _WEB_LINK_HOSTS:
         raise DraftUnavailable("bad link")
+    if parts.username is not None or parts.password is not None or port is not None:
+        raise DraftUnavailable("bad link")
     return value
+
+
+def _original_id(raw: bytes) -> str:
+    """Return the stripped ``X-Microsoft-Original-Message-ID`` of ``raw``, or ``""``."""
+    try:
+        return str(_headers_of(raw).get(_ORIGINAL_ID_HEADER, "")).strip()
+    except _POISON_ERRORS:
+        return ""
 
 
 async def draft_from_sent(
@@ -252,16 +366,20 @@ async def draft_from_sent(
     tokens: TokenSource,
     *,
     sent_id: str,
+    message_id: str,
     account: str,
     timeout_s: float,
 ) -> str:
     """Make a draft from the Sent copy of ``sent_id`` and return its web link (D207).
 
-    ``account`` names the sign-in an ``AuthRequired`` asks for.
+    The copy must carry ``message_id``, the bot's own id, as its original id, so a
+    forged ``In-Reply-To`` can never draft another mail. ``account`` names the sign-in
+    an ``AuthRequired`` asks for.
 
     Raises:
         ValueError: ``sent_id`` is not a message id.
-        DraftUnavailable: the copy is missing or too big, or the link is not Outlook's.
+        DraftUnavailable: the copy is missing, too big or not the bot's mail, or the
+            link is not Outlook's.
         GraphError: Graph answers with a final error or a malformed body.
         GraphTransient: Graph answers with a retryable error.
         AuthRequired: the account needs a sign-in.
@@ -283,6 +401,8 @@ async def draft_from_sent(
     )
     if raw is None:
         raise DraftUnavailable("Sent copy too big")
+    if _original_id(raw) != message_id:
+        raise DraftUnavailable("Sent copy is another mail")
     response = await http.post(
         f"{GRAPH_BASE_URL}/me/messages",
         content=base64.b64encode(raw),
