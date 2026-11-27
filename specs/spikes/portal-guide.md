@@ -20,13 +20,16 @@ RUCs or images are recorded here.
 | ----------------------------------------- | ----------------------------------------------------------------------------------------------- |
 | (a) replay in a new browser after 12 s    | pass: `No hay registros` (captcha accepted)                                                     |
 | (c) wrong answer through replay           | pass: `Texto no coincide con la imagen.`                                                        |
-| (b) replay after 240 s and after 290 s    | fail: both `Texto no coincide`; the captcha expires before 240 s                                |
+| (b) replay after 60, 120 and 180 s        | pass: all three `No hay registros` (captcha accepted)                                           |
+| (b) replay after 240 s and after 290 s    | fail: both `Texto no coincide`; the captcha lives between 180 s and 240 s                       |
 | (d) the live #52 ticket                   | `No hay registros` for correlativo plain and 8-digit padded; the portal has no record of it yet |
 | (d) result page, downloads, value formats | open: needs an invoice the portal knows                                                         |
 | Live #52 OCR                              | bug: serie and número were read off the date line (0.43); the ticket's number differs           |
 
 ## Open before step 2
 
-- The captcha lifetime between 12 s and 240 s (MSCaptcha's default is about 120 s): replay at 60, 120 and 180 s.
-  `ask_user_timeout_s` must sit under it, so the 300 s default of D209 does not hold for PEBSA.
+- The captcha lives between 180 s and 240 s. `ask_user_timeout_s` must sit under 180 s (with margin for the
+  replay itself), so the 300 s default of D209 does not hold for PEBSA; step 2 sets it lower.
+- Two of three forms opened in parallel showed the same captcha text; each answer is still checked against its own
+  session.
 - A PEBSA invoice the portal knows, to learn the result page and its download buttons.
