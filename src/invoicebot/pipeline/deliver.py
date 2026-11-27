@@ -47,6 +47,7 @@ from invoicebot.config.digest import config_digest
 from invoicebot.config.models import (
     GMAIL_PROVIDER,
     GRAPH_MODE,
+    SMTP_MODE,
     Config,
     ExcelTemplateSink,
     Extraction,
@@ -177,7 +178,11 @@ TEMPLATE_INVALID = "TEMPLATE_INVALID"
 #: The provider's slug in BR-D01's admin text, which names ``scripts/auth_<slug>.py``.
 AUTH_PROVIDER_SLUG = MICROSOFT
 #: Each inbox provider's slug in BR-D01's admin text, naming ``scripts/auth_<slug>.py``.
-AUTH_PROVIDER_SLUGS: dict[str, str] = {GRAPH_MODE: MICROSOFT, GMAIL_PROVIDER: GOOGLE}
+AUTH_PROVIDER_SLUGS: dict[str, str] = {
+    GRAPH_MODE: MICROSOFT,
+    SMTP_MODE: MICROSOFT,
+    GMAIL_PROVIDER: GOOGLE,
+}
 #: The assisted mode's name, used in BR-D07's ``{modes_desc}`` (R-7.7).
 DRY_RUN_MODE = "dry_run"
 #: The laptop mode's name, the one a flow lists as ``laptop_outlook`` (R-7.14).

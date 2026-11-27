@@ -17,7 +17,7 @@ from invoicebot.config.loader import load_config
 from invoicebot.config.models import Config, MailerSink
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.laptop_job import LaptopJob, job_hmac
-from invoicebot.sinks.mailer import DryRun, GraphSend, InboxRule, LaptopOutlook, build_mail, mail_modes
+from invoicebot.sinks.mailer import DryRun, InboxRule, LaptopOutlook, MailerSend, build_mail, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "config" / "example.yaml"
@@ -142,9 +142,9 @@ async def test_dry_run_second_call_replaces_the_eml(tmp_path: Path) -> None:
 def test_mail_modes_close_sending_when_disabled(tmp_path: Path) -> None:
     """R-7.7, D89: with send_enabled false the graph entry is replaced by the dry run."""
     dry_run = DryRun(tmp_path)
-    graph = GraphSend(FakeMailer())
+    graph = MailerSend(FakeMailer())
 
-    modes = mail_modes(_config(send_enabled=False), dry_run, graph, FakeMailer(), None)
+    modes = mail_modes(_config(send_enabled=False), dry_run, graph, FakeMailer(), None, None)
 
     assert modes["dry_run"] is dry_run
     assert modes["graph"] is dry_run
@@ -155,9 +155,9 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
     """R-7.7, D89: in production the graph entry sends the mail exactly once."""
     mailer = FakeMailer()
     dry_run = DryRun(tmp_path)
-    graph = GraphSend(mailer)
+    graph = MailerSend(mailer)
 
-    modes = mail_modes(_config(send_enabled=True), dry_run, graph, FakeMailer(), None)
+    modes = mail_modes(_config(send_enabled=True), dry_run, graph, FakeMailer(), None, None)
     result = await modes["graph"].deliver(7, MAIL, FOLDER)
 
     assert modes["graph"] is graph
@@ -169,7 +169,7 @@ async def test_mail_modes_send_once_through_graph_when_enabled(tmp_path: Path) -
 def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
     """R-7.8, D108: each built mode says how it completes and which rule reports it."""
     modes = mail_modes(
-        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), FakeMailer(), None, None
     )
 
     assert (modes["dry_run"].completion, modes["dry_run"].done_rule) == ("tap", "BR-D08")
@@ -178,7 +178,9 @@ def test_built_modes_report_their_completion_and_rule(tmp_path: Path) -> None:
 
 def test_mail_modes_without_a_bot_mailer_offer_no_inbox_rule(tmp_path: Path) -> None:
     """R-7.7, D108, D164: a config that never signs the bot mailbox in gets no inbox_rule mode."""
-    modes = mail_modes(_config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), None, None)
+    modes = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), None, None, None
+    )
 
     assert "inbox_rule" not in modes
     assert set(modes) == {"dry_run", "graph"}
@@ -207,7 +209,7 @@ async def test_inbox_rule_sends_only_to_the_owner_address() -> None:
 def test_inbox_rule_reports_accepted_and_br_d13(tmp_path: Path) -> None:
     """R-7.7, D108: the inbox_rule mode completes when Graph accepts it, under BR-D13."""
     modes = mail_modes(
-        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), FakeMailer(), None, None
     )
 
     assert (modes["inbox_rule"].completion, modes["inbox_rule"].done_rule) == ("accepted", "BR-D13")
@@ -217,7 +219,9 @@ def test_inbox_rule_closes_to_the_dry_run_when_sending_is_disabled(tmp_path: Pat
     """R-7.7, D89: with send_enabled false the inbox_rule entry is the dry run."""
     dry_run = DryRun(tmp_path)
 
-    modes = mail_modes(_config(send_enabled=False), dry_run, GraphSend(FakeMailer()), FakeMailer(), None)
+    modes = mail_modes(
+        _config(send_enabled=False), dry_run, MailerSend(FakeMailer()), FakeMailer(), None, None
+    )
 
     assert modes["inbox_rule"] is dry_run
 
@@ -227,7 +231,7 @@ def test_inbox_rule_is_absent_without_the_owner_address(tmp_path: Path) -> None:
     cfg = _config(send_enabled=True)
     cfg = cfg.model_copy(update={"mail": cfg.mail.model_copy(update={"owner_work_address": None})})
 
-    modes = mail_modes(cfg, DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None)
+    modes = mail_modes(cfg, DryRun(tmp_path), MailerSend(FakeMailer()), FakeMailer(), None, None)
 
     assert "inbox_rule" not in modes
 
@@ -300,14 +304,15 @@ async def test_laptop_outlook_writes_one_signed_job() -> None:
 def test_mail_modes_add_laptop_outlook_only_when_given(tmp_path: Path) -> None:
     """R-7.14: laptop_outlook exists only when app.py built the mode."""
     without = mail_modes(
-        _config(send_enabled=True), DryRun(tmp_path), GraphSend(FakeMailer()), FakeMailer(), None
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), FakeMailer(), None, None
     )
     with_laptop = mail_modes(
         _config(send_enabled=True),
         DryRun(tmp_path),
-        GraphSend(FakeMailer()),
+        MailerSend(FakeMailer()),
         FakeMailer(),
         LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock),
+        None,
     )
 
     assert "laptop_outlook" not in without
@@ -322,9 +327,41 @@ def test_mail_modes_map_laptop_outlook_to_the_dry_run_when_disabled(tmp_path: Pa
     modes = mail_modes(
         _config(send_enabled=False),
         dry_run,
-        GraphSend(FakeMailer()),
+        MailerSend(FakeMailer()),
         FakeMailer(),
         LaptopOutlook(FakeDrive(), LAPTOP_ROOT, LAPTOP_KEY, _fixed_clock),
+        None,
     )
 
     assert modes["laptop_outlook"] is dry_run
+
+
+def test_mail_modes_map_smtp_to_its_mailer_when_sending_is_on(tmp_path: Path) -> None:
+    """D205: with sending on, the smtp entry is the given smtp mailer."""
+    smtp = MailerSend(FakeMailer())
+
+    modes = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), None, None, smtp
+    )
+
+    assert modes["smtp"] is smtp
+
+
+def test_mail_modes_map_smtp_to_the_dry_run_when_sending_is_off(tmp_path: Path) -> None:
+    """D205: with sending off, the smtp entry is the dry run."""
+    dry_run = DryRun(tmp_path)
+
+    modes = mail_modes(
+        _config(send_enabled=False), dry_run, MailerSend(FakeMailer()), None, None, MailerSend(FakeMailer())
+    )
+
+    assert modes["smtp"] is dry_run
+
+
+def test_mail_modes_have_no_smtp_without_an_smtp_mailer(tmp_path: Path) -> None:
+    """D205: without an smtp mailer, there is no smtp mode."""
+    modes = mail_modes(
+        _config(send_enabled=True), DryRun(tmp_path), MailerSend(FakeMailer()), None, None, None
+    )
+
+    assert "smtp" not in modes

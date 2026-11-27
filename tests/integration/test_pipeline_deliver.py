@@ -1433,23 +1433,26 @@ async def test_graph_transient_propagates_and_leaves_the_batch_sending(
     assert outbox == []
 
 
+@pytest.mark.parametrize("mode_name", ["graph", "smtp"])
 async def test_auth_required_on_send_parks_the_invoice_and_frees_the_batch(
-    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+    mode_name: str, db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
 ) -> None:
-    """BR-D01, D89: an expired token at send time parks the invoice; the batch is failed, not sending."""
+    """BR-D01, D89, D205: an expired token at send time parks the invoice, naming Microsoft; batch failed."""
     profile_id = f"deliver-{uuid4().hex}"
-    cfg = _config(tmp_path, profile_id, mail_mode="graph")
+    cfg = _config(tmp_path, profile_id, mail_mode=mode_name)
     invoice_id = await _delivering_invoice(db_pool, tmp_path, profile_id)
 
     await _handler(
-        db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(AuthRequired("personal")), mode_name="graph"
+        db_pool, cfg, FakeDrive(), tmp_path, RaisingMode(AuthRequired("personal")), mode_name=mode_name
     )(_job(invoice_id))
 
     async with db_pool.connection() as conn:
         invoice = await _invoice_state(conn, invoice_id)
         batch_state = await get_batch_state(conn, invoice_id)
+        user = await _outbox(conn, profile_id)
     assert invoice == ("PENDING_AUTH", "BR-D01")
     assert batch_state == "failed"
+    assert (MESSAGES["BR-D01"].format(provider="Microsoft"), "BR-D01", []) in user
 
 
 async def test_a_failed_batch_is_marked_sending_before_the_send(
