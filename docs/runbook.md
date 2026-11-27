@@ -24,7 +24,10 @@ The bot asks for this with BR-D01: a revoked or expired token parks the invoice 
 
 1. `podman exec -it "$APP" invoicebot auth-microsoft --account personal`
 2. Open the URL it prints, enter the code and sign in with the owner's account.
-3. The command moves every `PENDING_AUTH` invoice back to `DELIVERING` and prints how many.
+3. An account an `smtp` mailer uses (D205, the live flow B) then prints "a second code adds sending through SMTP"
+   and a second URL and code: sign in again with the same account. Both codes are needed once; a failed second one
+   exits 1 and resumes nothing.
+4. The command moves every `PENDING_AUTH` invoice back to `DELIVERING` and prints how many.
 
 **Google** (loopback sign-in, which the container cannot receive; recipe from `specs/spikes/host.md`):
 

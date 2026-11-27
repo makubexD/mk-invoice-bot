@@ -116,6 +116,9 @@ microsoft:
   timeout_s: 30
   # D164: each account name is pinned to the mailbox auth-microsoft signs in.
   accounts: { personal: personal@example.com, bot: bot@example.com }
+  # D205: the server the `smtp` mail mode sends through, with OAuth (SMTP.Send); these are the defaults.
+  # smtp_host: smtp-mail.outlook.com
+  # smtp_port: 587
 # Desktop-app OAuth client; the secret is the age-store secret google_client_secret (D128).
 # D138: each account name is pinned to the mailbox `invoicebot auth-google` signs in.
 google:
@@ -223,6 +226,9 @@ flows:
         # Modes in order; the first automatic one sends, the others only when the sender asks (BR-D11).
         # How each completes (D108):
         #   graph          - Graph accepts the mail from `account`            -> sent, BR-D10
+        #   smtp           - the SMTP server accepts the mail from `account`  -> sent, BR-D10 (D205);
+        #                    the live flow B mode: Graph mail from a personal account bounces
+        #                    5.7.501 at the work tenant since 2026-11-16, SMTP from it is delivered
         #   inbox_rule     - Graph accepts the bot mailbox's mail to the owner's
         #                    work address; the Outlook rule forwards it (D67)  -> sent, BR-D13
         #   laptop_outlook - the laptop agent's receipt for the job file      -> sent, BR-D10
