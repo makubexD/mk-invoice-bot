@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Flag, Reading
-from invoicebot.extract.merge import merge
+from invoicebot.extract.merge import fill_missing, merge
 
 OCR_CONFIDENCE = 0.7
 DOCUMENT_URL = "https://example.test/invoice"
@@ -139,3 +139,89 @@ def test_merge_confirms_an_inferred_qr_tipo() -> None:
     )
 
     assert merged.fields["tipo"] == Field(value="01", source="ocr", confidence=FULL_CONFIDENCE, flag=None)
+
+
+BUYER_RUC = "20000000010"
+OTHER_RUC = "20000000001"
+
+
+def test_fill_missing_takes_absent_required_field() -> None:
+    """D200: `kept` lacks `fecha_emision`, `others[0]` has it at 0.7: filled, rest unchanged."""
+    kept = _reading({"total": _ocr_field("12.50", 0.9)})
+    other = _reading({"fecha_emision": _ocr_field("2026-11-01", 0.7)})
+
+    result = fill_missing(kept, [other])
+
+    assert result.fields["fecha_emision"] == _ocr_field("2026-11-01", 0.7)
+    assert result.fields["total"] == kept.fields["total"]
+    assert list(result.fields) == ["total", "fecha_emision"]
+
+
+def test_fill_missing_keeps_present_field_and_returns_kept() -> None:
+    """D200: `kept` has `total` 49.90 and `others[0]` has 12.50: `kept` is returned itself."""
+    kept = _reading({"total": _ocr_field("49.90")})
+
+    result = fill_missing(kept, [_reading({"total": _ocr_field("12.50")})])
+
+    assert result is kept
+    assert result.fields["total"].value == "49.90"
+
+
+def test_fill_missing_takes_first_other_that_has_it() -> None:
+    """D200: two others give different `fecha_emision` values: the first one's is taken."""
+    first = _reading({"fecha_emision": _ocr_field("2026-11-01")})
+    second = _reading({"fecha_emision": _ocr_field("2026-11-02")})
+
+    result = fill_missing(_reading({}), [first, second])
+
+    assert result.fields["fecha_emision"].value == "2026-11-01"
+
+
+def test_fill_missing_serie_and_numero_come_from_one_reading() -> None:
+    """D200: `kept` lacks both; `others[0]` has only `serie`, `others[1]` has both: both from it."""
+    only_serie = _reading({"serie": _ocr_field("F001")})
+    both = _reading({"serie": _ocr_field("F002"), "numero": _ocr_field("15")})
+
+    result = fill_missing(_reading({}), [only_serie, both])
+
+    assert result.fields["serie"].value == "F002"
+    assert result.fields["numero"].value == "15"
+
+
+def test_fill_missing_leaves_numero_when_kept_has_serie() -> None:
+    """D200: `kept` has `serie` but no `numero`, `others[0]` has both: `numero` stays missing."""
+    kept = _reading({"serie": _ocr_field("F001")})
+    other = _reading({"serie": _ocr_field("F002"), "numero": _ocr_field("15")})
+
+    result = fill_missing(kept, [other])
+
+    assert result is kept
+    assert "numero" not in result.fields
+
+
+def test_fill_missing_skips_buyer_ruc_as_issuer() -> None:
+    """D200: a `ruc_emisor` candidate equal to the buyer `num_doc_adq` is skipped for the next read."""
+    kept = _reading({"num_doc_adq": _ocr_field(BUYER_RUC)})
+    buyer_read = _reading({"ruc_emisor": _ocr_field(BUYER_RUC)})
+    issuer_read = _reading({"ruc_emisor": _ocr_field(OTHER_RUC)})
+
+    result = fill_missing(kept, [buyer_read, issuer_read])
+
+    assert result.fields["ruc_emisor"].value == OTHER_RUC
+
+
+def test_fill_missing_ignores_optional_fields() -> None:
+    """D200: `kept` lacks `igv` (not required) and `others[0]` has it: `igv` stays missing."""
+    kept = _reading({"total": _ocr_field("12.50")})
+
+    result = fill_missing(kept, [_reading({"igv": _ocr_field("1.90")})])
+
+    assert result is kept
+    assert "igv" not in result.fields
+
+
+def test_fill_missing_with_no_others_returns_kept() -> None:
+    """D200: with no other reads, `kept` is returned itself."""
+    kept = _reading({}, document_url=DOCUMENT_URL)
+
+    assert fill_missing(kept, []) is kept

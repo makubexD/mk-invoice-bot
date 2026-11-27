@@ -1,16 +1,19 @@
-"""Merge the OCR and QR readings into the one reading the pipeline carries (D81).
+"""Combine readings of one document into the reading the pipeline carries.
 
-OCR is the primary reading; the QR confirms it. A field both readers give with the same value
-reaches full confidence, a field they disagree on keeps the OCR value and is flagged
-``conflict``, and a field only one reader gives keeps that reader's confidence and flag (R-2.6).
+Two jobs. ``merge`` joins the OCR and QR readings (D81): OCR is the primary reading and the QR
+confirms it. A field both readers give with the same value reaches full confidence, a field they
+disagree on keeps the OCR value and is flagged ``conflict``, and a field only one reader gives
+keeps that reader's confidence and flag (R-2.6). ``fill_missing`` fills a reading's missing
+required fields from other OCR reads of the same document (D200).
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date
 
-from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, Field, Reading, finite_decimal
+from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, REQUIRED, Field, Reading, finite_decimal
 
 
 def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
@@ -78,3 +81,42 @@ def _iso_date(text: str) -> date | None:
         return date.fromisoformat(text)
     except ValueError:
         return None
+
+
+#: The invoice number's two parts, filled together or not at all (D200).
+_SERIE_NUMERO = ("serie", "numero")
+
+
+def fill_missing(kept: Reading, others: Sequence[Reading]) -> Reading:
+    """Return ``kept`` with its missing required fields taken from ``others`` (D200).
+
+    Each missing required field comes from the first reading in ``others`` that has it, except
+    ``serie`` and ``numero``, which move together: both are taken from the first reading with both
+    when ``kept`` has neither, and neither when ``kept`` has one. A ``ruc_emisor`` equal to the
+    buyer's ``num_doc_adq`` is skipped. Filled fields come after the existing ones and the URLs stay
+    ``kept``'s; with nothing to fill, ``kept`` itself is returned.
+    """
+    filled: dict[str, Field] = {}
+    for name in REQUIRED:
+        if name in _SERIE_NUMERO or kept.value(name) is not None:
+            continue
+        for other in others:
+            if (field := _fillable(name, kept, other)) is not None:
+                filled[name] = field
+                break
+    if kept.value("serie") is None and kept.value("numero") is None:
+        for other in others:
+            if other.value("serie") is not None and other.value("numero") is not None:
+                filled.update(serie=other.fields["serie"], numero=other.fields["numero"])
+                break
+    if not filled:
+        return kept
+    return replace(kept, fields={**kept.fields, **filled})
+
+
+def _fillable(name: str, kept: Reading, other: Reading) -> Field | None:
+    """Return ``other``'s field ``name`` when it may fill ``kept``'s gap, else ``None`` (D200)."""
+    value = other.value(name)
+    if value is None or (name == "ruc_emisor" and value == kept.value("num_doc_adq")):
+        return None
+    return other.fields[name]
