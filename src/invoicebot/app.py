@@ -27,6 +27,7 @@ from invoicebot.api.intake_route import IntakeDeps
 from invoicebot.auth.google_oauth import GOOGLE_CLIENT_SECRET, GoogleTokens, google_secrets
 from invoicebot.auth.msal_cache import TokenProvider
 from invoicebot.auth.providers import (
+    MAIL_READWRITE_SCOPE,
     build_token_provider,
     google_accounts,
     google_token_path,
@@ -74,6 +75,7 @@ from invoicebot.ops.daily import DailyTask, daily_forever
 from invoicebot.ops.housekeeping import housekeep
 from invoicebot.ops.padron_refresh import PadronRefreshError, refresh_padron
 from invoicebot.ops.selfcheck import disk_used_pct, selfcheck_forever
+from invoicebot.pipeline.bounce_watch import BounceReader, make_bounce_check_handler
 from invoicebot.pipeline.chat_docs_post import make_send_documents_handler
 from invoicebot.pipeline.deliver import (
     DELIVER_STEP,
@@ -108,6 +110,7 @@ from invoicebot.pipeline.reevaluate import reevaluate
 from invoicebot.pipeline.route import make_route_handler
 from invoicebot.pipeline.steps import (
     ATTACH_STEP,
+    BOUNCE_CHECK_STEP,
     FETCH_PROGRESS_STEP,
     FOLDER_STATUS_STEP,
     PORTAL_CHECK_STEP,
@@ -133,9 +136,11 @@ from invoicebot.sandbox import (
 )
 from invoicebot.secrets import Secrets, SecretStore, assert_no_plain_secrets, load_identity
 from invoicebot.settings import Settings
+from invoicebot.sinks import mail_bounce
 from invoicebot.sinks.base import Drive
 from invoicebot.sinks.google_drive import GoogleDrive
 from invoicebot.sinks.google_sheets import GoogleSheets
+from invoicebot.sinks.mail_bounce import Bounce
 from invoicebot.sinks.mailer import DryRun, LaptopOutlook, MailerSend, mail_modes
 from invoicebot.sinks.mailer_graph import GraphMailer
 from invoicebot.sinks.mailer_smtp import SmtpEndpoint, SmtpMailer
@@ -382,6 +387,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                 schedules=_fetch_schedules(directory),
             ),
             FETCH_PROGRESS_STEP: make_fetch_progress_handler(pool),
+            BOUNCE_CHECK_STEP: make_bounce_check_handler(pool, cfg, _bounce_readers(settings, cfg, http)),
             SEND_DOCUMENTS_STEP: make_send_documents_handler(pool, settings.data_dir),
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
@@ -617,6 +623,50 @@ def _smtp_send(cfg: Config, provider: TokenProvider) -> MailerSend | None:
         provider, endpoint, sender=microsoft.accounts[MICROSOFT_ACCOUNT], account=MICROSOFT_ACCOUNT
     )
     return MailerSend(smtp)
+
+
+@dataclass(frozen=True)
+class _GraphBounceReader:
+    """One ``smtp`` account's bounce reader over Graph: its token source, client and timeout (D207)."""
+
+    http: httpx.AsyncClient
+    tokens: TokenProvider
+    account: str
+    timeout_s: float
+
+    async def find_bounce(self, *, message_id: str, since: datetime) -> Bounce | None:
+        """Return the delivery report of ``message_id`` received since ``since``, or None (D207)."""
+        return await mail_bounce.find_bounce(
+            self.http,
+            self.tokens,
+            message_id=message_id,
+            since=since,
+            account=self.account,
+            timeout_s=self.timeout_s,
+        )
+
+    async def draft_from_sent(self, *, sent_id: str) -> str:
+        """Draft the Sent copy of ``sent_id`` again and return its web link (D207)."""
+        return await mail_bounce.draft_from_sent(
+            self.http, self.tokens, sent_id=sent_id, account=self.account, timeout_s=self.timeout_s
+        )
+
+
+def _bounce_readers(settings: Settings, cfg: Config, http: httpx.AsyncClient) -> dict[str, BounceReader]:
+    """Return a bounce reader for each account an ``smtp`` mailer sends from (D207).
+
+    Each reads with ``Mail.ReadWrite`` from the account's one MSAL cache; nothing signs
+    in until the first ``bounce_check`` runs, where a missing scope ends that watch.
+    """
+    return {
+        account: _GraphBounceReader(
+            http,
+            build_token_provider(settings, cfg, account, (MAIL_READWRITE_SCOPE,)),
+            account,
+            cfg.microsoft.timeout_s,
+        )
+        for account in smtp_send_accounts(cfg)
+    }
 
 
 def _deliver_handlers(

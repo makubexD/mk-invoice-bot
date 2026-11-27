@@ -92,6 +92,8 @@ RULES: dict[str, Rule] = {
     "BR-D23": Rule("BR-D23", "CANCELLED", None),
     "BR-D24": Rule("BR-D24", None, None),
     "BR-D25": Rule("BR-D25", None, "BR-D25"),
+    "BR-D26": Rule("BR-D26", None, "BR-D26"),
+    "BR-D27": Rule("BR-D27", None, "BR-D27"),
     "BR-P01": Rule("BR-P01", None, "BR-P01"),
     "BR-P02": Rule("BR-P02", None, "BR-P02"),
     "BR-P03": Rule("BR-P03", None, "BR-P03"),

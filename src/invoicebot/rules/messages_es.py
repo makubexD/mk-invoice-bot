@@ -30,6 +30,19 @@ FETCH_PROGRESS = (
 )
 #: BR-D25: the kept documents are gone; the folder link follows when there is one (D206).
 DOCS_GONE = "Los documentos de #{id} ya no están guardados en el bot. Ábrelos en la carpeta."
+#: The first sentence BR-D26 and BR-D27 share: the mail of an invoice bounced (D207).
+BOUNCED_LINE = "⚠️ El correo de #{id} {serie}-{numero} a {to} rebotó ({status})."
+#: BR-D26: the bounce left a draft in Outlook to send by hand (D207).
+BOUNCED_DRAFT = (
+    f"{BOUNCED_LINE} Te dejé un borrador igual en Outlook: ábrelo, toca ✏️ y envíalo. "
+    "Cuando lo envíes, toca [Ya lo envié]."
+)
+#: BR-D27: the bounce could not leave a draft (D207).
+BOUNCED_NO_DRAFT = (
+    f"{BOUNCED_LINE} No pude dejarte el borrador: reenvíalo desde Enviados en Outlook y toca [Ya lo envié]."
+)
+#: BR-D26's and BR-D27's ``{status}`` when the report has no enhanced status code (D207).
+BOUNCE_STATUS_UNKNOWN = "sin código"
 
 MESSAGES: dict[str, str] = {
     "BR-R01": "➡️ {flow.label}",
@@ -205,6 +218,8 @@ MESSAGES: dict[str, str] = {
     "BR-D21": "📤 Enviando el correo de {serie}-{numero}…",
     "BR-D22": "No hay un correo por revisar para #{id}.",
     "BR-D25": DOCS_GONE,
+    "BR-D26": BOUNCED_DRAFT,
+    "BR-D27": BOUNCED_NO_DRAFT,
     "BR-P04": "✅ Pago registrado: {n} carpetas marcadas como pagadas.",
     "BR-P01": "Pago de S/ {monto} del {fecha}: {n} facturas ({lista}). ¿Lo registro?",
     "BR-P02": "Hay varias combinaciones que suman S/ {monto}. ¿Cuál es?\n{set_lines}",
@@ -596,6 +611,8 @@ BUTTON_VOID = "✖️ Anular"
 BUTTON_STATUS = "Ver #{id}"
 #: BR-D24's button on a final message: the kept documents, sent to the chat (D206).
 BUTTON_DOCS = "📎 Ver documentos"
+#: BR-D26's link button: the bounced mail's draft in Outlook (D207).
+BUTTON_OPEN_DRAFT = "✉️ Abrir borrador"
 #: BR-R04's [Sí] and [Cambiar] buttons (S4.4).
 BUTTON_YES = "Sí"
 #: The [No] button that closes a BR-P01 or BR-P02 payment proposal (R-7.12).

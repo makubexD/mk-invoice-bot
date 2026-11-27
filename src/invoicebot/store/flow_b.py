@@ -15,6 +15,8 @@ from psycopg.types.json import Jsonb
 
 #: The states a newly opened batch may start in (R-7.5, R-7.8, D194).
 BatchState = Literal["prepared", "sending", "review"]
+#: The batch state of a sent mail whose delivery report came back (D207).
+BOUNCED_BATCH_STATE = "bounced"
 
 
 async def load_flow_data(conn: AsyncConnection[Any], invoice_id: int) -> dict[str, Any]:
