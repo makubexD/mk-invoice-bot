@@ -278,19 +278,31 @@ def test_webhook_check_with_nothing_pending_prints_ok(
     assert capsys.readouterr().out == "webhook: ok\n"
 
 
-def test_webhook_check_with_updates_still_pending_exits_one(
+def test_webhook_check_with_updates_still_pending_exits_three(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """D201: webhook --check exits 1 and reports the second pending count on stderr."""
+    """D201: webhook --check exits 3 and reports the second pending count on stderr."""
     monkeypatch.setattr("invoicebot.cli.STUCK_WAIT_S", 0)
 
-    assert _run(_settings(tmp_path), PendingApi([2, 3]), "webhook", "--check") == 1
+    assert _run(_settings(tmp_path), PendingApi([2, 3]), "webhook", "--check") == 3
 
     captured = capsys.readouterr()
     assert captured.out == ""
     assert captured.err == "webhook: stuck (pending 3)\n"
+
+
+def test_webhook_check_with_an_api_error_exits_one_with_nothing_on_stdout(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """D201: a Bot API failure during --check exits 1, apart from the stuck exit 3."""
+    api = BotApi("getWebhookInfo", status=ERROR_STATUS)
+
+    assert _run(_settings(tmp_path), api, "webhook", "--check") == 1
+
+    assert capsys.readouterr().out == ""
 
 
 def test_check_and_info_together_exit_two(tmp_path: Path) -> None:

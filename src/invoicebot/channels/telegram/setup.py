@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from invoicebot.channels.telegram.client import (
     OK_STATUS,
@@ -92,11 +93,18 @@ async def set_webhook(client: TelegramClient, url: str, secret: str) -> None:
     Re-registering keeps Telegram's pending updates, so re-pointing the webhook
     to a new tunnel URL loses nothing (D201).
 
-    Raises ``ValueError`` for a URL that is not ``https://`` or does not end in
-    ``/webhook/telegram``.
+    Raises ``ValueError`` for a URL that is not ``https://`` with a host, the path
+    ``/webhook/telegram`` and no query or fragment.
     """
-    if not url.startswith("https://") or not url.endswith(WEBHOOK_PATH):
-        raise ValueError(f"the webhook URL must be https:// and end in {WEBHOOK_PATH}")
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or not parts.netloc
+        or parts.path != WEBHOOK_PATH
+        or parts.query
+        or parts.fragment
+    ):
+        raise ValueError(f"the webhook URL must be https://<host>{WEBHOOK_PATH}")
     await client.call(
         "setWebhook",
         {
@@ -128,14 +136,18 @@ async def webhook_stuck(
     wait_s: float,
     sleep: Callable[[float], Awaitable[None]],
 ) -> int:
-    """Return the number of updates Telegram still holds after the wait, 0 when the route delivers (D201).
+    """Return the pending count when Telegram is stuck on updates it cannot deliver, else 0 (D201).
 
     No pending updates returns 0 at once; otherwise it waits ``wait_s`` and reads the count again.
+    The route is stuck only when the second count is above 0 and not below the first: a queue that
+    drains, even slowly, is delivering.
     """
-    if (await webhook_info(client)).pending == 0:
+    first = (await webhook_info(client)).pending
+    if first == 0:
         return 0
     await sleep(wait_s)
-    return (await webhook_info(client)).pending
+    second = (await webhook_info(client)).pending
+    return second if second > 0 and second >= first else 0
 
 
 async def delete_webhook(client: TelegramClient) -> None:

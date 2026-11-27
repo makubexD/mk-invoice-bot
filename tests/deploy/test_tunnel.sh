@@ -15,7 +15,9 @@ LOG="$TMP_ROOT/log"
 QUEUE="$TMP_ROOT/curl-queue"
 export XDG_STATE_HOME="$TMP_ROOT/state"
 STATE_FILE="$XDG_STATE_HOME/invoicebot/tunnel"
-export LOG QUEUE
+CF_ACTIVE_RC="$TMP_ROOT/cf-active-rc"
+FUNNEL_NO_TELEGRAM="$TMP_ROOT/funnel-no-telegram"
+export LOG QUEUE CF_ACTIVE_RC FUNNEL_NO_TELEGRAM
 mkdir -p "$STUB_DIR"
 
 FAILURES=0
@@ -35,6 +37,12 @@ cat >"$STUB_DIR/tailscale" <<'STUB'
 echo "tailscale $*" >>"$LOG"
 if [[ "$1 ${2:-}" == "status --json" ]]; then
     echo '{"Self":{"DNSName":"host.tailnet.ts.net."}}'
+elif [[ "$1 ${2:-} ${3:-}" == "funnel status --json" ]]; then
+    if [[ -s "$FUNNEL_NO_TELEGRAM" ]]; then
+        echo '{"Web":{"host.tailnet.ts.net:443":{"Handlers":{"/health":{}}}}}'
+    else
+        echo '{"Web":{"host.tailnet.ts.net:443":{"Handlers":{"/health":{},"/webhook/telegram":{}}}}}'
+    fi
 elif [[ "$1 ${2:-}" == "funnel reset" && -n "${TS_FAIL_RESET:-}" ]]; then
     exit 1
 fi
@@ -42,6 +50,12 @@ STUB
 cat >"$STUB_DIR/systemctl" <<'STUB'
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$LOG"
+if [[ "$2" == is-active ]]; then
+    exit "$(cat "$CF_ACTIVE_RC" 2>/dev/null || echo 0)"
+fi
+if [[ "$2" == stop && -n "${SC_FAIL_STOP:-}" ]]; then
+    exit 1
+fi
 STUB
 cat >"$STUB_DIR/sleep" <<'STUB'
 #!/usr/bin/env bash
@@ -63,6 +77,7 @@ reset_case() {
     rm -rf "$XDG_STATE_HOME"
     : >"$LOG"
     : >"$QUEUE"
+    rm -f "$CF_ACTIVE_RC" "$FUNNEL_NO_TELEGRAM"
 }
 
 run_tunnel() {
@@ -79,7 +94,8 @@ tailscale funnel reset
 tailscale funnel --bg --set-path /health http://127.0.0.1:8080/health
 tailscale funnel --bg --set-path /webhook/telegram http://127.0.0.1:8080/webhook/telegram
 tailscale funnel --bg --set-path /webhook/whatsapp http://127.0.0.1:8080/webhook/whatsapp
-tailscale status --json"
+tailscale status --json
+tailscale funnel status --json"
 if ((rc == 0)) && [[ "$(cat "$LOG")" == "$expected" ]]; then
     pass "case 1: stop, reset, three paths in order"
 else
@@ -110,6 +126,12 @@ fi
 if [[ "$(grep -c '' <(grep -E '^(tailscale funnel reset|systemctl --user restart invoicebot-cftunnel)$' "$LOG"))" == 2 ]] &&
     [[ "$(grep -c '^sleep' "$LOG")" == 1 ]]; then
     pass "case 2: funnel reset, cftunnel restarted, one sleep"
+    if (($(grep -n '^tailscale funnel reset$' "$LOG" | head -1 | cut -d: -f1) <
+        $(grep -n '^systemctl --user restart' "$LOG" | head -1 | cut -d: -f1))); then
+        pass "case 2: reset comes before the restart"
+    else
+        fail "case 2: reset after the restart"
+    fi
 else
     fail "case 2: calls were: $(cat "$LOG")"
 fi
@@ -195,6 +217,71 @@ if ((rc == 2)); then
     pass "case 7: exited 2"
 else
     fail "case 7: exited $rc, expected 2"
+fi
+
+# --- case 8: cloudflare url with a foreign hostname ---------------------------
+echo "case 8: cloudflare url with evil.example"
+reset_case
+mkdir -p "$(dirname "$STATE_FILE")"
+echo cloudflare >"$STATE_FILE"
+echo '{"hostname":"evil.example"}' >"$QUEUE"
+rc=0
+run_tunnel url >/dev/null 2>&1 || rc=$?
+if ((rc == 1)); then
+    pass "case 8: exited 1"
+else
+    fail "case 8: exited $rc, expected 1"
+fi
+
+# --- case 9: cloudflare url with the unit inactive ---------------------------
+echo "case 9: cloudflare url with the unit inactive"
+reset_case
+mkdir -p "$(dirname "$STATE_FILE")"
+echo cloudflare >"$STATE_FILE"
+echo '{"hostname":"x.trycloudflare.com"}' >"$QUEUE"
+echo 3 >"$CF_ACTIVE_RC"
+rc=0
+run_tunnel url >/dev/null 2>&1 || rc=$?
+if ((rc == 1)) && ! grep -q '^curl' "$LOG"; then
+    pass "case 9: exited 1, curl not called"
+else
+    fail "case 9: rc=$rc, calls were: $(cat "$LOG")"
+fi
+
+# --- case 10: funnel url without the telegram handler ------------------------
+echo "case 10: funnel url without the telegram handler"
+reset_case
+echo x >"$FUNNEL_NO_TELEGRAM"
+rc=0
+run_tunnel url >/dev/null 2>&1 || rc=$?
+if ((rc == 1)); then
+    pass "case 10: exited 1"
+else
+    fail "case 10: exited $rc, expected 1"
+fi
+
+# --- case 11: up cloudflare with a failing funnel reset ----------------------
+echo "case 11: up cloudflare with a failing funnel reset"
+reset_case
+printf '{"hostname":"x.trycloudflare.com"}\n' >"$QUEUE"
+rc=0
+out="$(TS_FAIL_RESET=1 run_tunnel up cloudflare 2>/dev/null)" || rc=$?
+if ((rc == 0)) && [[ "$out" == "https://x.trycloudflare.com" ]] &&
+    grep -q '^systemctl --user restart invoicebot-cftunnel$' "$LOG"; then
+    pass "case 11: cftunnel restarted, exit 0"
+else
+    fail "case 11: rc=$rc, printed '$out', calls were: $(cat "$LOG")"
+fi
+
+# --- case 12: up funnel with a failing systemctl stop ------------------------
+echo "case 12: up funnel with a failing systemctl stop"
+reset_case
+rc=0
+out="$(SC_FAIL_STOP=1 run_tunnel up funnel 2>/dev/null)" || rc=$?
+if ((rc == 0)) && [[ "$out" == "https://host.tailnet.ts.net" ]]; then
+    pass "case 12: exit 0"
+else
+    fail "case 12: rc=$rc, printed '$out'"
 fi
 
 # --- result ------------------------------------------------------------------

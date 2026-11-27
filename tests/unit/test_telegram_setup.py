@@ -131,7 +131,14 @@ async def test_set_webhook_posts_the_url_secret_and_keeps_pending_updates() -> N
 
 @pytest.mark.parametrize(
     "url",
-    ["http://h.example.ts.net/webhook/telegram", "https://h.example.ts.net/webhook/whatsapp"],
+    [
+        "http://h.example.ts.net/webhook/telegram",
+        "https://h.example.ts.net/webhook/whatsapp",
+        "https://evil.example/x?/webhook/telegram",
+        "https://h.example/webhook/telegram#x",
+        "https:///webhook/telegram",
+        "https://h.example/a/webhook/telegram",
+    ],
 )
 async def test_set_webhook_refuses_a_bad_url_without_a_request(url: str) -> None:
     """D186: a URL that is not https or not the Telegram path is refused before any call."""
@@ -384,3 +391,17 @@ async def test_webhook_stuck_that_grows_returns_the_second_count() -> None:
 
     async with _make_client(_pending_handler([2, 3], [])) as client:
         assert await webhook_stuck(client, 60, sleep) == 3
+
+    assert sleep.waits == [60]
+
+
+async def test_webhook_stuck_that_drains_slowly_returns_zero() -> None:
+    """D201: pending 5 then 2 is draining, not stuck."""
+    async with _make_client(_pending_handler([5, 2], [])) as client:
+        assert await webhook_stuck(client, 60, _FakeSleep()) == 0
+
+
+async def test_webhook_stuck_that_does_not_move_returns_the_count() -> None:
+    """D201: pending 2 then 2 is stuck; the count is returned."""
+    async with _make_client(_pending_handler([2, 2], [])) as client:
+        assert await webhook_stuck(client, 60, _FakeSleep()) == 2

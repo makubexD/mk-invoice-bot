@@ -20,6 +20,11 @@ usage() {
     exit 2
 }
 
+# A wedged tailscaled must not hang the script (D201).
+ts() {
+    timeout 20 tailscale "$@"
+}
+
 write_state() {
     mkdir -p "$(dirname "$STATE_FILE")"
     printf '%s\n' "$1" >"$STATE_FILE"
@@ -27,17 +32,24 @@ write_state() {
 
 funnel_url() {
     local dns
-    dns="$(tailscale status --json | jq -r .Self.DNSName)" || return 1
+    dns="$(ts status --json | jq -r .Self.DNSName)" || return 1
     if [[ -z "$dns" || "$dns" == null ]]; then
         return 1
     fi
+    # The Funnel must actually serve the webhook, not just exist.
+    ts funnel status --json |
+        jq -e '[.Web[]?.Handlers // {} | keys[]] | any(. == "/webhook/telegram")' \
+            >/dev/null || return 1
     printf 'https://%s\n' "${dns%.}"
 }
 
 cloudflare_url() {
     local host
+    systemctl --user is-active --quiet "$CF_UNIT" || return 1
     host="$(curl -fsS -m 3 "$QUICKTUNNEL_URL" | jq -r .hostname)" || return 1
-    if [[ -z "$host" || "$host" == null ]]; then
+    # Only a quick-tunnel hostname: whatever answers on the local port must not
+    # be able to point the webhook elsewhere.
+    if [[ ! "$host" =~ ^[a-z0-9-]+\.trycloudflare\.com$ ]]; then
         return 1
     fi
     printf 'https://%s\n' "$host"
@@ -62,9 +74,9 @@ cmd_url() {
 up_funnel() {
     local path
     systemctl --user stop "$CF_UNIT" || true
-    tailscale funnel reset
+    ts funnel reset
     for path in "${FUNNEL_PATHS[@]}"; do
-        tailscale funnel --bg --set-path "$path" "$LOCAL_URL$path"
+        ts funnel --bg --set-path "$path" "$LOCAL_URL$path"
     done
     write_state funnel
     funnel_url
@@ -72,7 +84,7 @@ up_funnel() {
 
 up_cloudflare() {
     local i url
-    tailscale funnel reset || true # a broken Tailscale is why we switch (D201)
+    ts funnel reset || true # a broken Tailscale is why we switch (D201)
     systemctl --user restart "$CF_UNIT"
     for ((i = 1; i <= CF_TRIES; i++)); do
         if url="$(cloudflare_url 2>/dev/null)"; then

@@ -7,8 +7,8 @@
 # the other one, and notifies the owner when both fail. Logs go to stdout (the
 # journal).
 #
-# Exit: 0 ok or recovered, 1 stuck after every repair, other = a command failed
-# (for example 125 when the app container is missing).
+# Exit: 0 ok or recovered, 1 stuck after every repair or Telegram unreachable,
+# other = a command failed (for example 125 when the app container is missing).
 #
 # PODMAN, TUNNEL and NOTIFY name the commands to run, so tests can stub them.
 set -euo pipefail
@@ -18,6 +18,7 @@ TUNNEL="${TUNNEL:-$(dirname "${BASH_SOURCE[0]}")/tunnel.sh}"
 NOTIFY="${NOTIFY:-notify-send}"
 APP_CONTAINER="invoicebot-live-app-1"
 WEBHOOK_PATH="/webhook/telegram"
+STUCK=3 # exit code of --check when updates are stuck
 
 log() {
     printf 'webhook-watch: %s\n' "$*"
@@ -40,22 +41,45 @@ point() {
     cli --url "$1$WEBHOOK_PATH"
 }
 
-# Return the exit code of --check: 0 ok, 1 stuck, anything else an error.
-check() {
-    local rc=0
+# Bring a tunnel up, re-point the webhook at it and check again.
+# Return 0 recovered, STUCK when the tunnel did not come up or the check says
+# stuck, any other code from --url or --check as is.
+restart() {
+    local name="$1" base rc=0
+    if ! base="$("$TUNNEL" up "$name")"; then
+        log "tunnel $name did not come up"
+        return "$STUCK"
+    fi
+    point "$base" || return $?
     cli --check || rc=$?
     return "$rc"
 }
 
-# Bring a tunnel up, re-point the webhook at it and check again.
-restart() {
+# Put the previous tunnel back after both failed; failures here are ignored.
+restore() {
     local name="$1" base
-    if ! base="$("$TUNNEL" up "$name")"; then
-        log "tunnel $name did not come up"
-        return 1
+    base="$("$TUNNEL" up "$name")" || return 0
+    point "$base" || true
+}
+
+# Try the other tunnel; 0 recovered, STUCK both failed, else a failing code.
+switch_to() {
+    local name="$1" other="$2" rc=0
+    log "switching to $other"
+    restart "$other" || rc=$?
+    if ((rc == 0)); then
+        log "webhook recovered on $other"
+    elif ((rc == STUCK)); then
+        restore "$name"
     fi
-    point "$base" || return 1
-    check
+    return "$rc"
+}
+
+notify_owner() {
+    log "webhook still stuck on $1 and $2, notifying"
+    "$NOTIFY" "invoicebot: Telegram webhook stuck" \
+        "Check: tailscale status; journalctl --user -u invoicebot-cftunnel" ||
+        log "notify failed"
 }
 
 main() {
@@ -69,35 +93,41 @@ main() {
 
     registered="$(cli --info | sed -n 's/^url: //p')"
     if [[ "$registered" != "$base$WEBHOOK_PATH" ]]; then
+        log "re-pointing webhook to $name"
         point "$base"
-        log "webhook re-pointed to $name"
     fi
 
-    check || rc=$?
+    cli --check || rc=$?
     if ((rc == 0)); then
         log "webhook ok"
         return 0
-    elif ((rc != 1)); then
-        log "check failed with exit $rc (app down?), nothing touched"
+    elif ((rc != STUCK)); then
+        log "check failed with exit $rc, nothing touched"
         return "$rc"
     fi
 
     log "webhook stuck, restarting $name"
-    if restart "$name"; then
+    rc=0
+    restart "$name" || rc=$?
+    if ((rc == 0)); then
         log "webhook recovered"
         return 0
+    elif ((rc != STUCK)); then
+        log "check failed with exit $rc, nothing touched"
+        return "$rc"
     fi
 
     other="$(other_tunnel "$name")"
-    log "switching to $other"
-    if restart "$other"; then
-        log "webhook recovered on $other"
+    rc=0
+    switch_to "$name" "$other" || rc=$?
+    if ((rc == 0)); then
         return 0
+    elif ((rc != STUCK)); then
+        log "check failed with exit $rc, nothing touched"
+        return "$rc"
     fi
 
-    "$NOTIFY" "invoicebot: Telegram webhook stuck" \
-        "Check: tailscale status; journalctl --user -u invoicebot-cftunnel"
-    log "webhook still stuck on $name and $other, owner notified"
+    notify_owner "$name" "$other"
     return 1
 }
 

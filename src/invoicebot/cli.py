@@ -12,7 +12,7 @@ takes a flow name: it creates the flow's Drive folder (only when the flow has a 
 sink) and either creates its spreadsheet with the header or checks an existing one, then
 prints the ids for the private config (R-6.2, D129, D145). ``telegram`` lists the private
 senders who pressed Start and registers, inspects or deletes the bot's webhook, reading its
-token and secret from the age store (D186, R-9.9); ``telegram webhook --check`` exits 1
+token and secret from the age store (D186, R-9.9); ``telegram webhook --check`` exits 3
 when Telegram holds updates it cannot deliver (D201).
 """
 
@@ -112,6 +112,7 @@ from invoicebot.text import normalize_email
 _SAMPLE = TypeAdapter(FetchInvoice)
 #: How long the Google sign-in waits for the browser's redirect (D128).
 SIGN_IN_TIMEOUT_S = 300
+STUCK_EXIT = 3  # D201: `telegram webhook --check` stuck; 1 stays the TelegramError exit
 #: The request-line cap of the one-request loopback listener (R-6.5).
 _REQUEST_LINE_LIMIT = 8192
 #: The page the browser shows once the redirect arrives (R-6.5).
@@ -235,7 +236,7 @@ def _parser() -> argparse.ArgumentParser:
     webhook_action.add_argument(
         "--check",
         action="store_true",
-        help="exit 1 when Telegram holds updates it cannot deliver",
+        help="exit 3 when Telegram holds updates it cannot deliver",
     )
     rehearse = subparsers.add_parser(
         "rehearse",
@@ -585,7 +586,7 @@ async def _telegram_webhook(
         pending = await webhook_stuck(client, STUCK_WAIT_S, asyncio.sleep)
         if pending:
             sys.stderr.write(f"webhook: stuck (pending {pending})\n")
-            return 1
+            return STUCK_EXIT
         show("webhook: ok")
     else:
         await delete_webhook(client)

@@ -1256,7 +1256,8 @@ async def _supervise(name: str, factory: TaskFactory) -> None:
 
 def create_app(db_ping: DbPing, *, lifespan: Lifespan | None = None) -> FastAPI:
     """Build the application with the given database ping callable."""
-    app = FastAPI(lifespan=lifespan)
+    # The Cloudflare tunnel forwards every path, so only the routes the bot needs are served (D201).
+    app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.db_ping = db_ping
 
     @app.get("/health")
