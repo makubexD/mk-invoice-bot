@@ -6,6 +6,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from invoicebot.config.checks import BUTTON_TITLE_MAX
+from invoicebot.rules.catalog import RULES
 from invoicebot.rules.messages_es import BUTTON_DOCS, DOCS_GONE, FETCH_PROGRESS, MESSAGES, when_desc
 
 
@@ -38,3 +39,21 @@ def test_d206_progress_and_gone_notes_name_the_invoice() -> None:
 def test_d206_docs_button_fits_the_title_limit() -> None:
     """D206: the [📎 Ver documentos] button title fits BUTTON_TITLE_MAX."""
     assert len(BUTTON_DOCS) <= BUTTON_TITLE_MAX
+
+
+@pytest.mark.parametrize("rule_id", ["BR-F18", "BR-F19", "BR-F20"])
+def test_d209_captcha_rules_are_in_the_catalog(rule_id: str) -> None:
+    """D209: the captcha messages BR-F18, BR-F19 and BR-F20 are registered rules."""
+    assert rule_id in RULES
+
+
+@pytest.mark.parametrize("message_id", ["BR-F18", "BR-F19", "BR-F20", "BR-F20_shape"])
+def test_d209_captcha_messages_format_with_their_placeholders(message_id: str) -> None:
+    """D209: each captcha message formats with only its placeholders (BR-F18: portal, minutes)."""
+    text = MESSAGES[message_id].format(portal="PEBSA", minutes=3)
+    assert text
+    if message_id == "BR-F18":
+        assert "PEBSA" in text
+        assert "3 min" in text
+    else:
+        assert text == MESSAGES[message_id]

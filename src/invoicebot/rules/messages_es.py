@@ -118,6 +118,12 @@ MESSAGES: dict[str, str] = {
     ),
     "BR-F16": f"{FOUND_LINE}\n{CONFIRMED_LINE}",
     "BR-F17": FETCH_PROGRESS,
+    "BR-F18": (
+        "🔐 El portal de {portal} pide un captcha. Escríbeme las letras de la imagen (tienes {minutes} min)."
+    ),
+    "BR-F19": "⌛ Ese captcha ya venció; seguí con otras opciones.",
+    "BR-F20": "🔁 No pude con ese captcha. Escríbeme las letras de esta nueva imagen.",
+    "BR-F20_shape": "✏️ Escríbeme solo las letras y números de la imagen.",
     "BR-F12": "🔄 Ya puedo continuar con tu comprobante #{id}; lo estoy procesando de nuevo.",
     "BR-F13": (
         "⏳ Comprobante #{id}: no pude descargar {docs_desc}.\n"
