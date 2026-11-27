@@ -296,13 +296,13 @@ class _Google:
 
 @asynccontextmanager
 async def _dispatch(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, google: _Google
+    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, google: _Google, data_dir: Path
 ) -> AsyncIterator[Handler]:
     """Build the app's ``deliver`` dispatcher with the Sheets-only DNI flow over the fake."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(google.handler)) as http:
         sheets = GoogleSheets(http, _Tokens(), TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
         deliver = make_google_deliver_handler(
-            GoogleDeliverContext(pool, cfg, {}, {ACCOUNT: sheets}, cfg.profiles)
+            GoogleDeliverContext(pool, cfg, {}, {ACCOUNT: sheets}, cfg.profiles, data_dir)
         )
         yield make_deliver_dispatch(pool, {FLOW: deliver})
 
@@ -330,7 +330,7 @@ async def test_a_dni_boleta_routes_to_its_sheet_and_ends_done_with_br_d18(
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     google = _Google()
-    async with _dispatch(db_pool, cfg, google) as dispatch:
+    async with _dispatch(db_pool, cfg, google, tmp_path) as dispatch:
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
 
     assert await _state(db_pool, invoice_id) == ("DONE", "BR-D18")

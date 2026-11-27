@@ -245,14 +245,18 @@ class _Google:
 
 @asynccontextmanager
 async def _dispatch(
-    pool: AsyncConnectionPool[AsyncConnection[Any]], cfg: Config, google: _Google, tokens: _Tokens
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    cfg: Config,
+    google: _Google,
+    tokens: _Tokens,
+    data_dir: Path,
 ) -> AsyncIterator[Handler]:
     """Build the app's ``deliver`` dispatcher with flow A's Google deliverer over the fake."""
     async with httpx.AsyncClient(transport=httpx.MockTransport(google.handler)) as http:
         drive = GoogleDrive(http, tokens, TIMEOUT_S, account=ACCOUNT)
         sheets = GoogleSheets(http, tokens, TIMEOUT_S, account=ACCOUNT, max_rows=MAX_ROWS)
         deliver = make_google_deliver_handler(
-            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles)
+            GoogleDeliverContext(pool, cfg, {ACCOUNT: drive}, {ACCOUNT: sheets}, cfg.profiles, data_dir)
         )
         yield make_deliver_dispatch(pool, {FLOW: deliver})
 
@@ -330,7 +334,7 @@ async def test_a_photo_is_fetched_and_filed_in_drive_and_sheets(
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     google = _Google()
-    async with _dispatch(db_pool, cfg, google, _Tokens()) as dispatch:
+    async with _dispatch(db_pool, cfg, google, _Tokens(), tmp_path) as dispatch:
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
 
     assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")
@@ -359,7 +363,7 @@ async def test_a_revoked_google_token_parks_and_resume_finishes_the_delivery(
 
     tokens = _Tokens(revoked=True)
     google = _Google()
-    async with _dispatch(db_pool, cfg, google, tokens) as dispatch:
+    async with _dispatch(db_pool, cfg, google, tokens, tmp_path) as dispatch:
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
         assert await _state(db_pool, invoice_id) == ("PENDING_AUTH", "BR-D01")
 
@@ -389,7 +393,7 @@ async def test_a_fetch_with_only_the_pdf_delivers_without_an_xml_link(
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     google = _Google()
-    async with _dispatch(db_pool, cfg, google, _Tokens()) as dispatch:
+    async with _dispatch(db_pool, cfg, google, _Tokens(), tmp_path) as dispatch:
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
 
     assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")
@@ -456,7 +460,7 @@ async def test_a_manual_pdf_upload_in_manual_required_delivers(
     assert await _state(db_pool, invoice_id) == ("DELIVERING", None)
 
     google = _Google()
-    async with _dispatch(db_pool, cfg, google, _Tokens()) as dispatch:
+    async with _dispatch(db_pool, cfg, google, _Tokens(), tmp_path) as dispatch:
         await dispatch(await _newest_job(db_pool, invoice_id, DELIVER_STEP))
 
     assert await _state(db_pool, invoice_id) == ("DONE", "BR-D16")

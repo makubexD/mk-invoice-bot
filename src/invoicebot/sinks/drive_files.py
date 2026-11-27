@@ -92,13 +92,17 @@ async def _ensure_folders(sink: GoogleDriveSink, drive: FolderDrive, values: Map
     return folder_id
 
 
+def photo_file_name(name: str, index: int) -> str:
+    """Return photo number ``index``'s file name: ``<name>.jpg``, ``<name>_2.jpg``, … (R-6.1)."""
+    return f"{name}{'' if index == 0 else f'_{index + 1}'}.jpg"
+
+
 async def _upload_photos(drive: FolderDrive, folder_id: str, name: str, photos: list[Path]) -> str:
-    """Upload the photos as ``<name>.jpg``, ``<name>_2.jpg``, … and return the first link (R-6.1)."""
+    """Upload the photos named by :func:`photo_file_name` and return the first link (R-6.1)."""
     first_link = ""
     for index, photo in enumerate(photos):
-        suffix = "" if index == 0 else f"_{index + 1}"
         uploaded: DriveFile = await drive.put_file(
-            folder_id, f"{name}{suffix}.jpg", await asyncio.to_thread(photo.read_bytes), PHOTO_MIME
+            folder_id, photo_file_name(name, index), await asyncio.to_thread(photo.read_bytes), PHOTO_MIME
         )
         if index == 0:
             first_link = uploaded.link

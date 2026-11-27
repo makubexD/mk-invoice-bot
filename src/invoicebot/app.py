@@ -383,7 +383,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
         }
         handlers.update(_validation_handlers(cfg, pool, http, sunat_secrets))
         deliver = _deliver_handlers(settings, cfg, directory, http, pool, store)
-        handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens))
+        handlers.update(_deliver_registry(cfg, deliver, http, pool, google_tokens, settings.data_dir))
         worker = Worker(pool, handlers, on_dead=partial(notify_dead, profiles=cfg.profiles))
         github_app = _github_app(cfg, store, http)
         transports: dict[str, Transport] = {
@@ -669,6 +669,7 @@ def _deliver_registry(
     http: httpx.AsyncClient,
     pool: Pool,
     tokens: Mapping[str, GoogleTokens],
+    data_dir: Path,
 ) -> dict[str, Handler]:
     """Return the delivery steps each flow's sink kind selects (D132).
 
@@ -676,7 +677,7 @@ def _deliver_registry(
     status and resends stay registered as before, only when a OneDrive sink exists.
     """
     by_kind: dict[str, Handler] = {}
-    google = _google_deliver_handler(cfg, http, pool, tokens)
+    google = _google_deliver_handler(cfg, http, pool, tokens, data_dir)
     if google is not None:
         by_kind[GOOGLE_DRIVE_KIND] = google
         by_kind[GOOGLE_SHEETS_KIND] = google
@@ -798,6 +799,7 @@ def _google_deliver_handler(
     http: httpx.AsyncClient,
     pool: Pool,
     tokens: Mapping[str, GoogleTokens],
+    data_dir: Path,
 ) -> Handler | None:
     """Build the Google flows' deliver handler, or None when no flow has a Google sink (R-6.1, D129, D144).
 
@@ -824,7 +826,9 @@ def _google_deliver_handler(
         )
         for account in tokens
     }
-    return make_google_deliver_handler(GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles))
+    return make_google_deliver_handler(
+        GoogleDeliverContext(pool, cfg, drives, sheets, cfg.profiles, data_dir)
+    )
 
 
 def _deliverers_by_flow(cfg: Config, by_kind: Mapping[str, Handler]) -> dict[str, Handler]:
