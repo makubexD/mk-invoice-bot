@@ -45,6 +45,8 @@ BRAND_ACTION = "brand"
 CONTINUE_ACTION = "continue"
 CANCEL_ACTION = "cancel"
 EDIT_ACTION = "edit"
+#: D206: the [📎 Ver documentos] button's action: it posts the documents the flow kept.
+DOCS_ACTION = "docs"
 #: The [Ver #{id}] button's action: it answers like ``/estado {id}`` (D188).
 STATUS_ACTION = "status"
 #: The [Sí] that accepts a BR-V02/BR-V06 comprobante (D125).
