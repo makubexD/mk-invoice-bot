@@ -11,6 +11,7 @@ import pytest
 
 from invoicebot.sinks.base import Attachment, OutgoingMail
 from invoicebot.sinks.eml import build_eml
+from invoicebot.sinks.mailer_graph import html_body
 
 PDF_BYTES = b"%PDF-1.4 synthetic"
 XLSX_BYTES = b"PK\x03\x04 synthetic"
@@ -121,3 +122,45 @@ def test_mime_without_exactly_one_slash_raises(mime: str) -> None:
 
     with pytest.raises(ValueError, match="MIME"):
         build_eml(replace(MAIL, attachments=(attachment,)))
+
+
+def test_sender_becomes_from_header() -> None:
+    """D205: with a sender the message carries that From address."""
+    message = _parse(build_eml(MAIL, sender="bot@example.com"))
+
+    assert message["From"] == "bot@example.com"
+
+
+def test_newline_in_sender_raises() -> None:
+    """D205: a CR or LF in the sender is refused like any other header."""
+    with pytest.raises(ValueError, match="sender"):
+        build_eml(MAIL, sender="bot@example.com\r\nBcc: evil@example.com")
+
+
+def test_html_adds_alternative_and_keeps_attachments() -> None:
+    """D205: html=True gives mixed(alternative(plain, html), attachments)."""
+    message = _parse(build_eml(MAIL, html=True))
+    body = message.get_body(preferencelist=("html",))
+
+    assert message.get_content_type() == "multipart/mixed"
+    alternative = next(message.iter_parts())
+    assert alternative.get_content_type() == "multipart/alternative"
+    assert [part.get_content_type() for part in alternative.iter_parts()] == [
+        "text/plain",
+        "text/html",
+    ]
+    assert body is not None
+    assert body.get_content().strip() == html_body(MAIL.body)
+    assert [part.get_filename() for part in message.iter_attachments()] == [
+        "invoice.pdf",
+        "invoice.xlsx",
+        "invoice.xml",
+    ]
+
+
+def test_defaults_have_no_from_and_no_html_part() -> None:
+    """D205: without the new arguments the dry-run shape is unchanged."""
+    message = _parse(build_eml(MAIL))
+
+    assert message["From"] is None
+    assert message.get_body(preferencelist=("html",)) is None
