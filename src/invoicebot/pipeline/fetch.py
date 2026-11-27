@@ -80,6 +80,7 @@ from invoicebot.pipeline.questions import (
 from invoicebot.pipeline.steps import DELIVER_STEP
 from invoicebot.pipeline.steps import FETCH_STEP as FETCH_STEP
 from invoicebot.pipeline.summary import review_fields
+from invoicebot.pipeline.summary_post import post_summary
 from invoicebot.queue.jobs import Job, enqueue, is_superseded
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
@@ -193,7 +194,7 @@ def make_fetch_handler(
             raise RuntimeError(f"invoice {job.invoice_id} has unknown flow {flow_name!r}")
         registry = registries.get(flow_name, {})
         if _needs_no_fetch(flow):
-            await _nothing_to_fetch(pool, job)
+            await _nothing_to_fetch(pool, cfg, job)
             logger.info(
                 "step done",
                 extra={
@@ -256,10 +257,14 @@ def _needs_no_fetch(flow: Flow) -> bool:
     return not flow.fetchers and not flow.required_docs
 
 
-async def _nothing_to_fetch(pool: Pool, job: Job) -> None:
-    """Move an invoice whose flow has nothing to fetch to ``DELIVERING`` with its deliver job (D144)."""
+async def _nothing_to_fetch(pool: Pool, cfg: Config, job: Job) -> None:
+    """Move an invoice whose flow has nothing to fetch to ``DELIVERING`` with its deliver job (D144).
+
+    The summary goes out in the same transaction (D206).
+    """
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
+        await post_summary(conn, cfg, job.invoice_id)
         await enqueue(conn, job.invoice_id, DELIVER_STEP)
 
 
@@ -383,43 +388,66 @@ async def _record_result(
     """Store an ``ok`` result's files and enqueue deliver, or schedule the next try, in one transaction.
 
     A technical failure gets one retry on its first schedule entry (D167); every other
-    failure, and a technical one with no retry left, moves the chain on at once.
+    failure, and a technical one with no retry left, moves the chain on at once. The
+    summary goes out first in every outcome that does not move straight on (D206).
     """
     if result.ok:
-        # shortcut: a fetched file's local_path stays under tmp/ until deliver moves it.
-        for fetched in result.files:
-            await add_file(
-                conn,
-                inputs.job.invoice_id,
-                FileRecord(
-                    kind=fetched.kind,
-                    local_path=str(fetched.path),
-                    remote_ref=None,
-                    sha256=fetched.sha256,
-                    size=fetched.size,
-                ),
-            )
-        await _found_notice(conn, inputs, reading, fetcher, result)
-        await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
-        await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
-        # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
-        repo = inputs.cfg.gaps.github.repo
-        await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_MISSING, repo)
-        await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_BROKEN, repo)
+        await _record_found(conn, inputs, reading, fetcher, result)
     elif result.reason in WAIT_REASONS:
-        run_after = None if delay is None else await run_after_delay(conn, delay)
-        await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
-        if run_after is not None and _is_first_attempt(inputs.attempts, fetcher, WAIT_REASONS):
-            await _wait_notice(conn, inputs, reading, fetcher, run_after)
-        if result.reason is FetchReason.AUTH_REQUIRED and _is_first_attempt(
-            inputs.attempts, fetcher, {FetchReason.AUTH_REQUIRED}
-        ):
-            await _alert_sign_in(conn, inputs)
+        await _record_wait(conn, inputs, reading, fetcher, result, delay)
     elif result.reason in TECHNICAL_REASONS and delay is not None:
         # D167: a technical retry sends no notice and no admin alert.
+        await post_summary(conn, inputs.cfg, inputs.job.invoice_id)
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, await run_after_delay(conn, delay))
     else:
         await enqueue(conn, inputs.job.invoice_id, FETCH_STEP)
+
+
+async def _record_found(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, fetcher: str, result: FetchResult
+) -> None:
+    """Store an ``ok`` result's files, say so, and move the invoice on to deliver (R-5.1)."""
+    # shortcut: a fetched file's local_path stays under tmp/ until deliver moves it.
+    for fetched in result.files:
+        await add_file(
+            conn,
+            inputs.job.invoice_id,
+            FileRecord(
+                kind=fetched.kind,
+                local_path=str(fetched.path),
+                remote_ref=None,
+                sha256=fetched.sha256,
+                size=fetched.size,
+            ),
+        )
+    await _found_notice(conn, inputs, reading, fetcher, result)
+    await set_state(conn, inputs.job.invoice_id, DELIVERING, expected=FETCHING_DOCS)
+    await enqueue(conn, inputs.job.invoice_id, DELIVER_STEP)
+    # The invoice got past the fetch step, so its fixed portal gaps close (R-11.9).
+    repo = inputs.cfg.gaps.github.repo
+    await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_MISSING, repo)
+    await close_if_fixed(conn, inputs.job.invoice_id, PORTAL_BROKEN, repo)
+
+
+async def _record_wait(
+    conn: AsyncConnection[Any],
+    inputs: _Inputs,
+    reading: Reading,
+    fetcher: str,
+    result: FetchResult,
+    delay: timedelta | None,
+) -> None:
+    """Schedule the retry of a wait and send its first notice; a wait with no delay moves on (D100, D206)."""
+    run_after = None if delay is None else await run_after_delay(conn, delay)
+    await enqueue(conn, inputs.job.invoice_id, FETCH_STEP, run_after)
+    if run_after is not None:
+        await post_summary(conn, inputs.cfg, inputs.job.invoice_id)
+        if _is_first_attempt(inputs.attempts, fetcher, WAIT_REASONS):
+            await _wait_notice(conn, inputs, reading, fetcher, run_after)
+    if result.reason is FetchReason.AUTH_REQUIRED and _is_first_attempt(
+        inputs.attempts, fetcher, {FetchReason.AUTH_REQUIRED}
+    ):
+        await _alert_sign_in(conn, inputs)
 
 
 #: The fetchers whose XML confirms the reading: the issuer's portal and the printed QR link;
@@ -430,7 +458,20 @@ CONFIRMING_FETCHERS = frozenset({PORTAL_FETCHER, QR_URL_FETCHER})
 async def _found_notice(
     conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, fetcher: str, result: FetchResult
 ) -> None:
-    """Confirm the reading with the fetched XML and queue BR-F16 for every ``ok`` fetch (D202, BR-F16).
+    """Post the summary with BR-F16's lines, or queue BR-F16 when the summary is already out (D206, BR-F16).
+
+    The lines come from :func:`_found_lines`; the summary carries them when it goes out
+    with this ``ok`` fetch, otherwise BR-F16 is a message of its own.
+    """
+    text = await _found_lines(conn, inputs, reading, fetcher, result)
+    if not await post_summary(conn, inputs.cfg, inputs.job.invoice_id, found_lines=text.split("\n")):
+        await _notify(conn, inputs.head, inputs.job.invoice_id, "BR-F16", text)
+
+
+async def _found_lines(
+    conn: AsyncConnection[Any], inputs: _Inputs, reading: Reading, fetcher: str, result: FetchResult
+) -> str:
+    """Confirm the reading with the fetched XML and return BR-F16's text for an ``ok`` fetch (D202, BR-F16).
 
     Only an XML from the issuer's portal or the printed QR link confirms the reading: a
     mailbox XML is unsigned until BR-F10, so it is filed but changes nothing (D202). The
@@ -454,7 +495,7 @@ async def _found_notice(
         ]
         if cleared:
             text += "\n" + CONFIRMED_LINE.format(fields_desc=fields_desc(cleared))
-    await _notify(conn, inputs.head, invoice_id, "BR-F16", text)
+    return text
 
 
 def _is_first_attempt(attempts: Sequence[Attempt], fetcher: str, reasons: Collection[FetchReason]) -> bool:
@@ -525,6 +566,7 @@ async def _exhausted(inputs: _Inputs, reading: Reading) -> _Outcome:
     async with inputs.pool.connection() as conn, conn.transaction():
         if not await _is_current(conn, inputs.job):
             return _Outcome(fetcher=None, portal_key=None, reason=RULE_EXHAUSTED)
+        await post_summary(conn, inputs.cfg, inputs.job.invoice_id)
         gap = await _raise_portal_gap(conn, inputs, reading)
         text = manual_message(
             reading,

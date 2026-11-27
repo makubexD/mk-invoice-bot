@@ -38,16 +38,20 @@ from invoicebot.pipeline.questions import (
     TEACH_PORTAL_ACTION,
 )
 from invoicebot.pipeline.steps import DELIVER_STEP
+from invoicebot.pipeline.summary_post import save_summary_inputs
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import Handler
 from invoicebot.rules.messages_es import (
     BUTTON_DONT_KNOW,
     BUTTON_WRITE_PORTAL,
+    CONFIRMED_LINE,
     FETCH_NO_PORTAL_LINE,
     FETCH_TECHNICAL_LINE,
     FETCH_WAITING,
+    FOUND_LINE,
     GAP_LINE_PORTAL,
     MESSAGES,
+    SUMMARY_MOVING_QUIET,
     fetcher_desc,
     fields_desc,
     when_desc,
@@ -1831,3 +1835,156 @@ async def test_mailbox_xml_does_not_confirm_the_reading(
     assert stored == reading
     first = MESSAGES["BR-F16"].split("\n")[0]
     assert outbox == [(first.format(docs_desc="el PDF y el XML"), "BR-F16")]
+
+
+SUMMARY_RULE = "BR-R02"
+FOUND_PDF_XML = FOUND_LINE.format(docs_desc="el PDF y el XML")
+
+
+async def _with_saved_summary(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], profile_id: str, reading: Reading | None = None
+) -> int:
+    """Create a fetching invoice whose validate step saved the summary's inputs (D206)."""
+    invoice_id = await _fetching_invoice(pool, profile_id, reading=reading)
+    async with pool.connection() as conn, conn.transaction():
+        await save_summary_inputs(conn, invoice_id, rule_id=SUMMARY_RULE, extra_lines=[])
+    return invoice_id
+
+
+def _with_ocr_serie_and_numero() -> Reading:
+    """Return the synthetic reading with its serie and numero read from a photo at 0.43."""
+    fields = dict(_reading().fields)
+    fields["serie"] = Field(value=SERIE, source="ocr", confidence=0.43)
+    fields["numero"] = Field(value=NUMERO, source="ocr", confidence=0.43)
+    return Reading(fields=fields, document_url=None)
+
+
+async def test_first_ok_posts_one_summary_that_holds_br_f16(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: a first ok posts one summary with BR-F16's lines, no review, no buttons, and no BR-F16 row."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id, _with_ocr_serie_and_numero())
+
+    await _run(db_pool, FakeFetcher(FetchReason.OK), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        buttons = await _outbox_button_dicts(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE]
+    text = outbox[0][0]
+    assert FOUND_PDF_XML in text
+    assert CONFIRMED_LINE.format(fields_desc=fields_desc(["serie", "numero"])) in text
+    assert "⚠️ Revisa" not in text
+    assert buttons == [[]]
+
+
+async def test_not_found_moving_on_then_ok_posts_the_summary_with_the_ok(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: a not_found that moves to the next fetcher posts nothing; the summary goes out with the ok."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+    first = FakeFetcher(FetchReason.NOT_FOUND)
+    second = FakeFetcher(FetchReason.OK)
+    handler = make_fetch_handler(
+        db_pool,
+        _config(("portal_registry", EMAIL_INBOX_FETCHER)),
+        _directory(),
+        {FLOW: {"portal_registry": first, EMAIL_INBOX_FETCHER: second}},
+        tmp_path,
+    )
+
+    await handler(_job(invoice_id))
+    async with db_pool.connection() as conn:
+        assert await _outbox(conn, profile_id) == []
+        next_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, next_job_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE]
+    assert FOUND_PDF_XML in outbox[0][0]
+
+
+async def test_first_wait_posts_the_summary_then_the_wait_notice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: a first wait posts the summary with the moving line, then the wait notice."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND_YET), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE, None]
+    assert outbox[0][0].endswith(SUMMARY_MOVING_QUIET)
+    assert outbox[1][0] == FETCH_WAITING.format(id=invoice_id)
+
+
+async def test_ok_after_a_wait_posts_br_f16_and_no_second_summary(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: an ok after the summary went out sends BR-F16 as its own message."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+    fetcher = FakeFetcher(FetchReason.NOT_FOUND_YET)
+    handler = _handler(db_pool, fetcher, tmp_path)
+
+    await handler(_job(invoice_id))
+    fetcher.reason = FetchReason.OK
+    async with db_pool.connection() as conn:
+        retry_job_id = await _latest_fetch_job_id(conn, invoice_id)
+    await handler(_job(invoice_id, retry_job_id))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE, None, "BR-F16"]
+    assert outbox[2][0] == FOUND_PDF_XML
+
+
+async def test_exhausted_chain_posts_the_summary_then_br_f07(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: the final failure posts the summary first, then BR-F07."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+    await _seed_attempts(db_pool, invoice_id, "not_found_yet", 3)
+
+    await _run(db_pool, FakeFetcher(FetchReason.NOT_FOUND_YET), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE, "BR-F07"]
+    assert outbox[0][0].endswith(SUMMARY_MOVING_QUIET)
+
+
+async def test_flow_with_nothing_to_fetch_posts_the_summary_and_the_deliver_job(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206, D144: a flow with nothing to fetch posts the summary in the transaction that queues deliver."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _with_saved_summary(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.OK), invoice_id, tmp_path, cfg=_config((), required_docs=()))
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+        deliver_jobs = await _deliver_jobs(conn, invoice_id)
+    assert [rule_id for _text, rule_id in outbox] == [SUMMARY_RULE]
+    assert len(deliver_jobs) == 1
+
+
+async def test_invoice_without_saved_inputs_gets_today_s_messages(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: an invoice validated before the deploy has no saved inputs, so no summary is posted."""
+    profile_id = f"fetch-{uuid4().hex}"
+    invoice_id = await _fetching_invoice(db_pool, profile_id)
+
+    await _run(db_pool, FakeFetcher(FetchReason.OK), invoice_id, tmp_path)
+
+    async with db_pool.connection() as conn:
+        outbox = await _outbox(conn, profile_id)
+    assert outbox == [(FOUND_PDF_XML, "BR-F16")]
