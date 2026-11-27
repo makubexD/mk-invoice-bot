@@ -18,16 +18,24 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import ValidationError
 
 from invoicebot.config.checks import MANUAL_PORTAL
-from invoicebot.config.models import MediaMaxBytes, Portal, StoreDirectory
+from invoicebot.config.models import MediaMaxBytes, Portal, PortalCaptcha, StoreDirectory
 from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Reading
 from invoicebot.extract.ubl import XmlRejected, matches_invoice, parse_invoice_xml
 from invoicebot.fetchers.base import FetchedFile, FetchInvoice, FetchReason, FetchResult
 from invoicebot.fetchers.browser.probe_protocol import ProbeReport
-from invoicebot.fetchers.browser.protocol import HelperFile, HelperOutput, HelperRequest
+from invoicebot.fetchers.browser.protocol import (
+    CaptchaChallenge,
+    CaptchaForm,
+    CaptchaResume,
+    HelperFile,
+    HelperOutput,
+    HelperRequest,
+)
 from invoicebot.helper import run_helper
 from invoicebot.sandbox import check_no_parent_dir
 
@@ -61,12 +69,26 @@ class PortalFetcher:
 
     async def fetch(self, invoice: FetchInvoice, out_dir: Path) -> FetchResult:
         """Fetch ``invoice`` from its store's portal and report why (R-5.6, S10.2)."""
+        return await self._fetch(invoice, out_dir, None)
+
+    async def resume(
+        self, invoice: FetchInvoice, form: CaptchaForm, answer: str, out_dir: Path
+    ) -> FetchResult:
+        """Send the sender's captcha ``answer`` for ``form`` and report why the fetch ended (D209)."""
+        return await self._fetch(invoice, out_dir, CaptchaResume(form=form, answer=answer))
+
+    async def _fetch(self, invoice: FetchInvoice, out_dir: Path, resume: CaptchaResume | None) -> FetchResult:
+        """Run the helper for ``invoice``, check its output; ``resume`` continues a stopped fetch (D209)."""
         portal = self._portal_for(invoice.ruc_emisor)
         if isinstance(portal, FetchResult):
             return portal
-        output = await self._run(portal, invoice, out_dir)
+        if resume is not None and not _https_on_host_of(resume.form.action_url, portal):
+            return FetchResult(FetchReason.TECHNICAL, (), portal.key)
+        output = await self._run(portal, invoice, out_dir, resume)
         if isinstance(output, FetchResult):
             return output
+        if output.captcha is not None:
+            return _asked_result(output.captcha, out_dir, self._max_bytes, portal)
         return result_from(output, out_dir, invoice, self._max_bytes, portal.key)
 
     def _portal_for(self, ruc: str) -> Portal | FetchResult:
@@ -79,14 +101,20 @@ class PortalFetcher:
         portal = self._directory.portals.get(store.portal)
         if portal is None:
             return FetchResult(FetchReason.NO_PORTAL, (), None)
-        if portal.captcha != "none":
-            # shortcut: image captchas wait for S10.3/S10.4 (D99); reported unsolvable until then.
+        if portal.captcha != "none" and not isinstance(portal.captcha, PortalCaptcha):
+            # shortcut: only a captcha the sender types is handled (D209); others stay unsolvable (D99).
             return FetchResult(FetchReason.CAPTCHA_UNSOLVABLE, (), portal.key)
         if portal.status != "active":
             return FetchResult(FetchReason.PORTAL_INACTIVE, (), portal.key)
         return portal
 
-    async def _run(self, portal: Portal, invoice: FetchInvoice, out_dir: Path) -> HelperOutput | FetchResult:
+    async def _run(
+        self,
+        portal: Portal,
+        invoice: FetchInvoice,
+        out_dir: Path,
+        resume: CaptchaResume | None,
+    ) -> HelperOutput | FetchResult:
         """Run the browser helper in its own temp folder and validate its one JSON line (S10.2, R-9.2)."""
         request = HelperRequest(
             portal=portal,
@@ -94,6 +122,7 @@ class PortalFetcher:
             out_dir=out_dir,
             max_bytes=self._max_bytes,
             page_timeout_ms=PAGE_TIMEOUT_MS,
+            resume=resume,
         )
         job = BrowserJob(
             command=self._helper_command,
@@ -104,6 +133,40 @@ class PortalFetcher:
             model=HelperOutput,
         )
         return await run_browser_job(job)
+
+
+def _https_on_host_of(url: str, portal: Portal) -> bool:
+    """Return whether ``url`` is https on the host of the portal's own URL (D209)."""
+    if portal.url is None:
+        return False
+    parts = urlsplit(url)
+    return (
+        parts.scheme == "https"
+        and parts.hostname is not None
+        and parts.hostname == urlsplit(portal.url).hostname
+    )
+
+
+def _asked_result(
+    challenge: CaptchaChallenge, out_dir: Path, max_bytes: MediaMaxBytes, portal: Portal
+) -> FetchResult:
+    """Return ``CAPTCHA_ASKED`` with the challenge when the bot confirms it, else ``TECHNICAL`` (D209).
+
+    The PNG is checked as any downloaded file is (inside ``out_dir``, own size and SHA-256),
+    and both form URLs must be https on the portal's host. A failed check removes the PNG.
+    """
+    # shortcut: the PNG is checked as a "pdf" file, the one kind whose limit is an upper bound here.
+    root = out_dir.resolve()
+    image = HelperFile(kind="pdf", path=challenge.path, size=challenge.size, sha256=challenge.sha256)
+    valid = check_files((image,), root, max_bytes, {}) is FetchReason.OK
+    valid = valid and challenge.path.stat().st_size == challenge.size
+    valid = valid and all(
+        _https_on_host_of(url, portal) for url in (challenge.form.action_url, challenge.form.page_url)
+    )
+    if not valid:
+        delete_inside((image,), root)
+        return FetchResult(FetchReason.TECHNICAL, (), portal.key)
+    return FetchResult(FetchReason.CAPTCHA_ASKED, (), portal.key, challenge)
 
 
 @dataclass(frozen=True)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import sys
 import tempfile
@@ -12,8 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from invoicebot.config.models import Brand, MediaMaxBytes, Portal, Store, StoreDirectory
+from invoicebot.config.models import Brand, MediaMaxBytes, Portal, PortalCaptcha, Store, StoreDirectory
 from invoicebot.fetchers.base import FetchInvoice, FetchReason
+from invoicebot.fetchers.browser.protocol import CaptchaForm
 from invoicebot.fetchers.portal import PortalFetcher
 
 # From tests/synthetic_rucs.txt; the other two have a deliberately wrong check digit.
@@ -22,6 +24,7 @@ MANUAL_RUC = "20000000002"
 TODO_RUC = "20000000003"
 RECAPTCHA_RUC = "20000000004"
 IMAGE_CAPTCHA_RUC = "20000000005"
+ASK_RUC = "20000000006"
 UNKNOWN_RUC = "51900000000"
 SERIE = "F001"
 NUMERO = "123"
@@ -166,6 +169,28 @@ elif MODE == "outside":
         "size": len(path.read_bytes()),
         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
     }])
+elif MODE in ("asked", "asked_host", "asked_outside"):
+    data = b"PNG synthetic captcha"
+    target = out_dir.parent if MODE == "asked_outside" else out_dir
+    png = target / "captcha.png"
+    png.write_bytes(data)
+    action = "https://other.example/go" if MODE == "asked_host" else "https://ask.example/go"
+    print(json.dumps({"reason": "captcha_asked", "files": [], "captcha": {
+        "path": str(png),
+        "size": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+        "form": {
+            "page_url": "https://ask.example/page",
+            "action_url": action,
+            "fields": [["a", "1"]],
+            "captcha_name": "captcha",
+            "submit_name": "go",
+            "submit_value": "Go",
+        },
+    }}))
+elif MODE == "echo_resume":
+    Path(sys.argv[2]).write_text(json.dumps(request["resume"]))
+    report("technical", [])
 else:
     report("technical", [])
 '''
@@ -191,6 +216,7 @@ def _directory() -> StoreDirectory:
             TODO_RUC: _store(TODO_RUC, "todo"),
             RECAPTCHA_RUC: _store(RECAPTCHA_RUC, "recaptcha"),
             IMAGE_CAPTCHA_RUC: _store(IMAGE_CAPTCHA_RUC, "image_captcha"),
+            ASK_RUC: _store(ASK_RUC, "ask"),
         },
         portals={
             "synthetic": Portal(
@@ -210,6 +236,13 @@ def _directory() -> StoreDirectory:
                 url="https://image-captcha.example/",
                 status="active",
                 captcha="image",
+            ),
+            "ask": Portal(
+                key="ask",
+                adapter="generic_form",
+                url="https://ask.example/",
+                status="active",
+                captcha=PortalCaptcha(image="img", input="input", solver=("user",)),
             ),
         },
     )
@@ -546,3 +579,81 @@ async def test_fetch_file_outside_out_dir_is_technical(tmp_path: Path) -> None:
 
     assert result.reason is FetchReason.TECHNICAL
     assert (tmp_path / "outside.xml").is_file()
+
+
+def _form() -> CaptchaForm:
+    """Return a captcha form on the ``ask`` portal's host."""
+    return CaptchaForm(
+        page_url="https://ask.example/page",
+        action_url="https://ask.example/go",
+        fields=(("a", "1"),),
+        captcha_name="captcha",
+        submit_name="go",
+        submit_value="Go",
+    )
+
+
+async def test_fetch_valid_captcha_challenge_comes_back_on_the_result(tmp_path: Path) -> None:
+    """D209: a captcha_asked output the bot confirms returns the challenge and keeps the PNG."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "asked").fetch(_invoice(ASK_RUC), out_dir)
+
+    assert result.reason is FetchReason.CAPTCHA_ASKED
+    assert result.challenge is not None
+    assert result.challenge.path == out_dir / "captcha.png"
+    assert result.challenge.form == _form()
+    assert (out_dir / "captcha.png").exists()
+
+
+async def test_fetch_captcha_action_on_another_host_is_technical(tmp_path: Path) -> None:
+    """D209: a form action on another host is technical and the PNG is removed."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "asked_host").fetch(_invoice(ASK_RUC), out_dir)
+
+    assert result.reason is FetchReason.TECHNICAL
+    assert result.challenge is None
+    assert list(out_dir.iterdir()) == []
+
+
+async def test_fetch_captcha_png_outside_out_dir_is_technical(tmp_path: Path) -> None:
+    """D209: a captcha PNG outside out_dir is technical and is not removed."""
+    out_dir = tmp_path / OUT_DIR_NAME
+
+    result = await _fetcher(tmp_path, "asked_outside").fetch(_invoice(ASK_RUC), out_dir)
+
+    assert result.reason is FetchReason.TECHNICAL
+    assert result.challenge is None
+    assert (tmp_path / "captcha.png").exists()
+
+
+async def test_fetch_image_captcha_portal_is_still_unsolvable(tmp_path: Path) -> None:
+    """D209: a ``captcha: image`` portal still gives captcha_unsolvable."""
+    result = await _fetcher(tmp_path, "asked").fetch(_invoice(IMAGE_CAPTCHA_RUC), tmp_path / OUT_DIR_NAME)
+
+    assert result.reason is FetchReason.CAPTCHA_UNSOLVABLE
+
+
+async def test_resume_sends_the_answer_and_form_to_the_helper(tmp_path: Path) -> None:
+    """D209: resume puts the form and the sender's answer in the helper's request."""
+    seen = tmp_path / "resume.json"
+    fetcher = _fetcher(tmp_path, "echo_resume", extra_args=(str(seen),))
+
+    await fetcher.resume(_invoice(ASK_RUC), _form(), "AB12", tmp_path / OUT_DIR_NAME)
+
+    sent = json.loads(seen.read_text(encoding="utf-8"))
+    assert sent["answer"] == "AB12"
+    assert CaptchaForm.model_validate(sent["form"]) == _form()
+
+
+async def test_resume_with_an_action_on_another_host_is_technical(tmp_path: Path) -> None:
+    """D209: resume refuses a form whose action is not https on the portal's host."""
+    form = _form().model_copy(update={"action_url": "https://other.example/go"})
+
+    result = await _fetcher(tmp_path, "echo_resume", extra_args=(str(tmp_path / "x"),)).resume(
+        _invoice(ASK_RUC), form, "AB12", tmp_path / OUT_DIR_NAME
+    )
+
+    assert result.reason is FetchReason.TECHNICAL
+    assert not (tmp_path / "x").exists()

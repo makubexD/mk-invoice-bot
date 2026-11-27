@@ -13,7 +13,10 @@ from datetime import date
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
+
+if TYPE_CHECKING:
+    from invoicebot.fetchers.browser.protocol import CaptchaChallenge
 
 #: A UTF-8 BOM may precede the first byte of a document.
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -84,6 +87,8 @@ class FetchResult:
     reason: FetchReason
     files: tuple[FetchedFile, ...]
     portal_key: str | None
+    #: The captcha the sender must answer; set only with ``CAPTCHA_ASKED`` (D209).
+    challenge: CaptchaChallenge | None = None
 
     @property
     def ok(self) -> bool:
