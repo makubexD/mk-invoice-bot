@@ -30,6 +30,7 @@ def _form(**overrides: object) -> dict[str, object]:
         "page_url": "https://portal.example/consulta",
         "action_url": "https://portal.example/consulta",
         "fields": [["serie", "F001"], ["token", "x"]],
+        "captcha_name": "codigo",
         "submit_name": "btn",
         "submit_value": "Buscar",
     }

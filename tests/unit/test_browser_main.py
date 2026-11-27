@@ -9,6 +9,7 @@ from typing import Any
 
 import pytest
 
+from invoicebot.config.models import PortalCaptcha
 from invoicebot.fetchers.browser import __main__ as browser_main
 from invoicebot.fetchers.browser.protocol import BadRequest
 
@@ -61,3 +62,22 @@ def test_main_prints_no_error_class_for_a_bad_request(
         "error_class": None,
         "captcha": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_fetch_with_a_resume_runs_the_captcha_resume(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D209: a captcha portal's request with a resume goes to resume_captcha, not the ask."""
+    sentinel = object()
+
+    async def fake_resume(*args: object) -> object:
+        return sentinel
+
+    monkeypatch.setattr(browser_main, "resume_captcha", fake_resume)
+    portal = SimpleNamespace(captcha=PortalCaptcha(image="#i", input="#c", solver=("user",)))
+    request: Any = SimpleNamespace(
+        portal=portal, resume=object(), invoice=object(), out_dir=object(), max_bytes=object()
+    )
+
+    page: Any = object()
+
+    assert await browser_main._fetch(page, request) is sentinel

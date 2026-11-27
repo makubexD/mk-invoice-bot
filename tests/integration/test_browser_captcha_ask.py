@@ -114,6 +114,7 @@ async def test_ask_saves_the_captcha_and_the_form_without_its_input(page: Page, 
     assert asked.path.read_bytes().startswith(b"\x89PNG")
     assert asked.size == asked.path.stat().st_size
     assert asked.form.fields == (("token", "abc"), ("viewstate", "xyz"), ("total", "118.50"))
+    assert asked.form.captcha_name == "captcha"
     assert asked.form.submit_name == "accion"
     assert asked.form.submit_value == "Buscar"
     assert asked.form.page_url == "https://portal.test/form"

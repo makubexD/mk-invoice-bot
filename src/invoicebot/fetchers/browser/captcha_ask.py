@@ -22,7 +22,7 @@ from invoicebot.fetchers.browser.protocol import MAX_CAPTCHA_IMAGE_BYTES, Captch
 CAPTCHA_FILE_NAME = "captcha.png"
 
 #: Run on the captcha input: the form's resolved action, the page URL and its text fields,
-#: without files and without the input's own value (the sender's answer replaces it).
+#: without files, with the input's name and without the input's own value (the sender's answer replaces it).
 _READ_FORM_SCRIPT = """(input) => {
   const form = input.form;
   if (form === null) return null;
@@ -30,7 +30,7 @@ _READ_FORM_SCRIPT = """(input) => {
   for (const [name, value] of new FormData(form)) {
     if (typeof value === "string" && name !== input.name) fields.push([name, value]);
   }
-  return { action: form.action, page: location.href, fields };
+  return { action: form.action, page: location.href, captcha: input.name, fields };
 }"""
 
 
@@ -95,6 +95,7 @@ async def _read_form(page: Page, submit: str, captcha_input: str) -> CaptchaForm
             page_url=read["page"],
             action_url=read["action"],
             fields=tuple((field[0], field[1]) for field in read["fields"]),
+            captcha_name=read["captcha"],
             submit_name=name,
             submit_value=value or "",
         )

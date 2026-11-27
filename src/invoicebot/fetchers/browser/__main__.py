@@ -23,6 +23,7 @@ from playwright.async_api import Page
 from invoicebot.config.models import PortalCaptcha
 from invoicebot.fetchers.base import FetchReason, FetchResult
 from invoicebot.fetchers.browser.captcha_ask import ask_captcha
+from invoicebot.fetchers.browser.captcha_resume import resume_captcha
 from invoicebot.fetchers.browser.form import fill_and_download
 from invoicebot.fetchers.browser.protocol import (
     BadRequest,
@@ -83,13 +84,12 @@ async def _run_browser(request: HelperRequest, chromium_sandbox: bool) -> None:
 
 
 async def _fetch(page: Page, request: HelperRequest) -> FetchResult | CaptchaChallenge:
-    """Ask the sender's captcha, or fill and download for a portal without one (D209)."""
+    """Ask the captcha, resume with its answer, or fill and download without one (D209)."""
     portal = request.portal
     if not isinstance(portal.captcha, PortalCaptcha):
         return await fill_and_download(page, portal, request.invoice, request.out_dir, request.max_bytes)
     if request.resume is not None:
-        # shortcut: step 8 replaces this with the resume of the stopped form.
-        return FetchResult(reason=FetchReason.TECHNICAL, files=(), portal_key=portal.key)
+        return await resume_captcha(page, portal, request.resume, request.out_dir, request.max_bytes)
     return await ask_captcha(page, portal, request.invoice, request.out_dir)
 
 

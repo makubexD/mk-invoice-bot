@@ -183,7 +183,7 @@ async def read_result(
     Raises:
         TechnicalFailure: the portal names no download, or a download is missing or too big.
     """
-    selectors = _download_selectors(portal)
+    selectors = download_selectors(portal)
     if not selectors:
         raise TechnicalFailure
     if await _wait_for_result(page, portal, selectors[0][1]):
@@ -198,7 +198,7 @@ async def read_result(
     return FetchResult(reason=FetchReason.OK, files=tuple(files), portal_key=portal.key)
 
 
-def _download_selectors(portal: Portal) -> list[tuple[DownloadKind, str]]:
+def download_selectors(portal: Portal) -> list[tuple[DownloadKind, str]]:
     """The download controls the portal file names, in pdf-then-xml order."""
     if portal.downloads is None:
         return []

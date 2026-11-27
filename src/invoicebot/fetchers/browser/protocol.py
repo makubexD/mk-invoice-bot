@@ -56,6 +56,7 @@ class CaptchaForm(BaseModel):
     page_url: str
     action_url: str
     fields: tuple[tuple[str, str], ...] = Field(max_length=MAX_CAPTCHA_FIELDS)
+    captcha_name: str = Field(min_length=1, max_length=MAX_CAPTCHA_NAME_CHARS)
     submit_name: str = Field(max_length=MAX_CAPTCHA_NAME_CHARS)
     submit_value: str = Field(max_length=MAX_CAPTCHA_SUBMIT_VALUE_CHARS)
 
