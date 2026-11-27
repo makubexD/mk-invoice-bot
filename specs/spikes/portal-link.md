@@ -1,6 +1,6 @@
 # Spike: portal-link live check (9t4a, D208)
 
-Date: 2026-11-27. Plan: `docs/plan-mvp-portal-link.md`. Flow A (Drive), the PEBSA ticket from live #50, resent after
+Date: 2026-11-27. Plan: `docs/archive/plan-mvp-portal-link.md`. Flow A (Drive), the PEBSA ticket from live #50, resent after
 `/cancelar` and `invoice forget --purge`.
 
 Before any change: tag `live-2026-11-27-pre-pebsa` on the live commit (image `aa49e52d6441`); the live config was
