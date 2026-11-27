@@ -11,12 +11,16 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 from invoicebot.channels.base import InboundMessage
+from invoicebot.fetchers.base import FetchReason
 from invoicebot.fetchers.browser.protocol import CaptchaForm
 from invoicebot.pipeline.captcha_reply import answer
+from invoicebot.pipeline.captcha_timeout import RULE_ID as RULE_TIMED_OUT
+from invoicebot.pipeline.manual_message import PORTAL_FETCHER
 from invoicebot.pipeline.outgoing import Addressee, queue_message
 from invoicebot.pipeline.steps import FETCH_STEP
 from invoicebot.rules.messages_es import MESSAGES
 from invoicebot.store import captchas
+from invoicebot.store.fetch_attempts import list_attempts, record_attempt
 from invoicebot.store.invoices import create_invoice, set_state
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -153,3 +157,46 @@ async def test_answer_without_text_is_not_handled(db_pool: AsyncConnectionPool[A
     photo = _text("")
     assert not await _answer(db_pool, photo)
     assert (await _facts(db_pool, invoice_id))[:3] == ("WAITING_CAPTCHA", None, 0)
+
+
+async def _timed_out(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], *, reason: FetchReason = FetchReason.CAPTCHA_TIMEOUT
+) -> int:
+    """Create an invoice back on the fetch chain after BR-F05, its portal attempt recorded as ``reason``."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await create_invoice(conn, f"reply-{uuid4().hex}", "whatsapp")
+        await set_state(conn, invoice_id, "FETCHING_DOCS")
+        await record_attempt(conn, invoice_id, PORTAL_FETCHER, PORTAL_KEY, reason, 0)
+        await queue_message(
+            conn, Addressee("whatsapp", SENDER), "timeout", invoice_id=invoice_id, rule_id=RULE_TIMED_OUT
+        )
+    return invoice_id
+
+
+async def test_late_answer_after_the_timeout_sends_br_f19(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D209: a captcha-looking text after the timeout's BR-F05 gets BR-F19; state and attempts stay."""
+    invoice_id = await _timed_out(db_pool)
+    assert await _answer(db_pool, _text("AB12"))
+    assert await _facts(db_pool, invoice_id) == ("FETCHING_DOCS", None, 0, [RULE_TIMED_OUT, "BR-F19"])
+    async with db_pool.connection() as conn:
+        assert await list_attempts(conn, invoice_id) == [(PORTAL_FETCHER, FetchReason.CAPTCHA_TIMEOUT)]
+
+
+async def test_late_text_of_the_wrong_shape_is_not_handled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D209: any other text after BR-F05 is not handled and nothing is written."""
+    invoice_id = await _timed_out(db_pool)
+    assert not await _answer(db_pool, _text("ab 12 x"))
+    assert await _facts(db_pool, invoice_id) == ("FETCHING_DOCS", None, 0, [RULE_TIMED_OUT])
+
+
+async def test_late_answer_without_a_timeout_attempt_is_not_handled(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D209: BR-F05 alone is not enough; the portal fetcher's newest attempt must be captcha_timeout."""
+    invoice_id = await _timed_out(db_pool, reason=FetchReason.NOT_FOUND)
+    assert not await _answer(db_pool, _text("AB12"))
+    assert await _facts(db_pool, invoice_id) == ("FETCHING_DOCS", None, 0, [RULE_TIMED_OUT])
