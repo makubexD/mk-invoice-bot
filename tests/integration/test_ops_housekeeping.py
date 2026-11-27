@@ -21,6 +21,8 @@ UNKNOWN_ID = 1_999_999_999
 #: A lease that ended an hour ago, and one that ends in an hour.
 EXPIRED_LEASE_S = -3600
 LIVE_LEASE_S = 3600
+#: The chat-documents retention the tests pass in (D206).
+RETENTION_DAYS = 30
 
 
 async def _insert_invoice(conn: AsyncConnection[Any], state: str) -> int:
@@ -81,13 +83,13 @@ async def test_housekeep_holds_an_invoice_that_leaves_failed(
             await blocker.execute("UPDATE invoices SET state = %s WHERE id = %s", (FETCHING_DOCS, invoice_id))
             with pytest.raises(TimeoutError):
                 async with asyncio.timeout(1):
-                    await housekeep(db_pool, tmp_path)
+                    await housekeep(db_pool, tmp_path, RETENTION_DAYS)
             assert folder.is_dir()
     finally:
         await blocker.rollback()
         await db_pool.putconn(blocker)
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         assert not folder.exists()
     finally:
@@ -112,7 +114,7 @@ async def test_housekeep_removes_tmp_folders_of_terminal_and_unknown_invoices(
     for folder in (done_dir, active_dir, unknown_dir, other_dir):
         folder.mkdir(parents=True)
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         assert not done_dir.exists()
         assert active_dir.is_dir()
@@ -139,7 +141,7 @@ async def test_housekeep_does_not_wait_for_a_running_invoice(
         async with blocker.transaction(force_rollback=True):
             await blocker.execute("SELECT 1 FROM invoices WHERE id = %s FOR UPDATE", (active_id,))
             async with asyncio.timeout(5):
-                await housekeep(db_pool, tmp_path)
+                await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
             assert not done_dir.exists()
             assert active_dir.is_dir()
@@ -159,7 +161,7 @@ async def test_housekeep_skips_a_name_that_is_not_an_invoice_id(
     for folder in (odd, unknown_dir):
         folder.mkdir(parents=True)
 
-    await housekeep(db_pool, tmp_path)
+    await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
     assert odd.is_dir()
     assert not unknown_dir.exists()
@@ -178,7 +180,7 @@ async def test_housekeep_skips_a_folder_it_cannot_remove(
     other = tmp / str(UNKNOWN_ID + 1)
     other.mkdir()
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         assert stuck.is_dir()
         assert not other.exists()
@@ -198,7 +200,7 @@ async def test_housekeep_skips_a_symlink_named_like_an_invoice(
     link = tmp / str(UNKNOWN_ID)
     link.symlink_to(target, target_is_directory=True)
 
-    await housekeep(db_pool, tmp_path)
+    await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
     assert link.is_symlink()
     assert (target / "keep.txt").is_file()
@@ -215,7 +217,7 @@ async def test_housekeep_deletes_expired_jobs_of_terminal_invoices_only(
         live_job = await _insert_job(conn, cancelled_id, LIVE_LEASE_S)
         active_job = await _insert_job(conn, active_id, EXPIRED_LEASE_S)
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         async with db_pool.connection() as conn:
             assert not await _job_exists(conn, expired_job)
@@ -265,7 +267,7 @@ async def test_housekeep_mail_dir_follows_state_and_pending_review(
     folder = tmp_path / "mail" / str(invoice_id)
     folder.mkdir(parents=True)
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         assert folder.exists() is kept
     finally:
@@ -281,7 +283,7 @@ async def test_housekeep_leaves_a_mail_eml_draft_file(
     draft.parent.mkdir(parents=True)
     draft.write_text("draft")
     try:
-        await housekeep(db_pool, tmp_path)
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
         assert draft.is_file()
     finally:
@@ -295,6 +297,56 @@ async def test_housekeep_removes_the_mail_dir_of_an_unknown_invoice(
     folder = tmp_path / "mail" / str(UNKNOWN_ID)
     folder.mkdir(parents=True)
 
-    await housekeep(db_pool, tmp_path)
+    await housekeep(db_pool, tmp_path, RETENTION_DAYS)
+
+    assert not folder.exists()
+
+
+async def _docs_folder_of(
+    pool: AsyncConnectionPool[AsyncConnection[Any]], root: Path, state: str, age_days: int
+) -> tuple[int, Path]:
+    """Insert an invoice in ``state`` last changed ``age_days`` ago and make its docs folder."""
+    async with pool.connection() as conn, conn.transaction():
+        invoice_id = await _insert_invoice(conn, state)
+        await conn.execute(
+            "UPDATE invoices SET updated_at = now() - make_interval(days => %s) WHERE id = %s",
+            (age_days, invoice_id),
+        )
+    folder = root / "docs" / str(invoice_id)
+    folder.mkdir(parents=True)
+    (folder / "factura.pdf").write_bytes(b"%PDF")
+    return invoice_id, folder
+
+
+@pytest.mark.parametrize(
+    ("state", "age_days", "removed"),
+    [(DONE, 31, True), (DONE, 1, False), (FETCHING_DOCS, 31, False)],
+    ids=["old-terminal", "recent-terminal", "non-terminal"],
+)
+async def test_housekeep_docs_folder_follows_the_retention(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    state: str,
+    age_days: int,
+    removed: bool,
+) -> None:
+    """D206: a terminal invoice's docs folder goes once past retention; others stay."""
+    invoice_id, folder = await _docs_folder_of(db_pool, tmp_path, state, age_days)
+    try:
+        await housekeep(db_pool, tmp_path, RETENTION_DAYS)
+
+        assert folder.exists() is not removed
+    finally:
+        await _delete_invoices(db_pool, [invoice_id])
+
+
+async def test_housekeep_removes_a_docs_folder_with_no_invoice(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_path: Path
+) -> None:
+    """D206: a docs folder whose invoice no longer exists is removed whatever its age."""
+    folder = tmp_path / "docs" / str(UNKNOWN_ID)
+    folder.mkdir(parents=True)
+
+    await housekeep(db_pool, tmp_path, RETENTION_DAYS)
 
     assert not folder.exists()

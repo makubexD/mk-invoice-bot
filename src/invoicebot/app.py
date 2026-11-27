@@ -405,7 +405,9 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
             DailyRuns(
                 backup=partial(_run_backup, settings, cfg, pool, drive),
                 retention=partial(_run_retention, pool, cfg),
-                housekeeping=partial(housekeep, pool, settings.data_dir),
+                housekeeping=partial(
+                    housekeep, pool, settings.data_dir, cfg.ops.retention_days.chat_documents
+                ),
                 padron=partial(_run_padron_refresh, pool, guarded_http, cfg, settings.data_dir),
                 digest=partial(daily_digest, pool, cfg.profiles, cfg.gaps),
                 github_health=_github_health_run(github_app, pool, cfg),
