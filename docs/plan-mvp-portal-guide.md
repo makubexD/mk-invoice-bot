@@ -286,7 +286,19 @@ Files: `src/invoicebot/pipeline/captcha_timeout.py` (new), `src/invoicebot/app.p
 
 Test: `uv run pytest -q tests/integration/test_pipeline_captcha_timeout.py`.
 
-## Step 15: PEBSA's store and portal files `[inline: values from the step 1 spike]`
+## Step 15: a late answer gets BR-F19 `[worker]`
+
+Files: `src/invoicebot/pipeline/captcha_reply.py`, `tests/integration/test_pipeline_captcha_reply.py`.
+
+- Owner decision (2026-11-27): D209's "a late answer gets BR-F19" also holds after the timeout. In `answer`, when the
+  newest question is BR-F05, the portal fetcher's newest attempt is `captcha_timeout` and the stripped text matches
+  `CAPTCHA_ANSWER_PATTERN`: queue BR-F19 for that invoice and return True. Any other text after BR-F05 is not handled.
+- Tests (`D209`): (a) after the timeout's BR-F05, `AB12` → BR-F19, state and attempts unchanged; (b) after BR-F05,
+  `ab 12 x` → not handled; (c) BR-F05 newest but the portal's newest attempt is not `captcha_timeout` → not handled.
+
+Test: `uv run pytest -q tests/integration/test_pipeline_captcha_reply.py`.
+
+## Step 16: PEBSA's store and portal files `[inline: values from the step 1 spike]`
 
 Files: `config/portals/pebsa.yaml` (new), `config/stores/<PEBSA's RUC>.yaml` (new, D47), `config/example.yaml`,
 `config/config.yaml`.
@@ -300,7 +312,7 @@ input: "#ctl00_bodyContentPlace_txtCaptcha", solver: [user]}`, `submit`, `downlo
   `tipo_labels`, and `status: active`. Its notes cite D209 and the spike.
   Test: `uv run pytest -q tests/unit/test_config_checks.py tests/unit/test_config_models.py`.
 
-## Step 16: live check `[inline: live run, needs the owner's Telegram]`
+## Step 17: live check `[inline: live run, needs the owner's Telegram]`
 
 Files: `specs/spikes/portal-guide.md`.
 
@@ -314,7 +326,7 @@ the rows, with image ids and no invoice values.
 
 Test: `npx prettier --check specs/spikes/portal-guide.md`.
 
-## Step 17: runbook `[inline: user-facing docs]`
+## Step 18: runbook `[inline: user-facing docs]`
 
 Files: `docs/runbook.md`.
 
