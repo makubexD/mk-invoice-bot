@@ -544,7 +544,9 @@ def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:
             flow=flow,
             accepted_desc=tipos_desc(flow.accepted_tipos),
         )
-    buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
+    buyer = buyer_desc(
+        reading.value("tipo") or "", reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or ""
+    )
     return MESSAGES[RULE_UNMATCHED].format(buyer_desc=buyer)
 
 

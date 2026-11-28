@@ -7,7 +7,14 @@ import pytest
 
 from invoicebot.config.checks import BUTTON_TITLE_MAX
 from invoicebot.rules.catalog import RULES
-from invoicebot.rules.messages_es import BUTTON_DOCS, DOCS_GONE, FETCH_PROGRESS, MESSAGES, when_desc
+from invoicebot.rules.messages_es import (
+    BUTTON_DOCS,
+    DOCS_GONE,
+    FETCH_PROGRESS,
+    MESSAGES,
+    buyer_desc,
+    when_desc,
+)
 
 
 @pytest.mark.parametrize(
@@ -57,3 +64,18 @@ def test_d209_captcha_messages_format_with_their_placeholders(message_id: str) -
         assert "3 min" in text
     else:
         assert text == MESSAGES[message_id]
+
+
+@pytest.mark.parametrize(
+    ("tipo", "tipo_doc", "num_doc", "expected"),
+    [
+        ("01", "", "", "de un cliente que no pude leer"),
+        ("03", "", "", "de ningún cliente (boleta sin datos)"),
+        ("01", "6", "20000000001", "del RUC 20000000001"),
+    ],
+)
+def test_buyer_desc_names_an_unread_factura_buyer(
+    tipo: str, tipo_doc: str, num_doc: str, expected: str
+) -> None:
+    """D213: a factura with no buyer says the buyer was not read; a boleta keeps "sin datos"."""
+    assert buyer_desc(tipo, tipo_doc, num_doc) == expected

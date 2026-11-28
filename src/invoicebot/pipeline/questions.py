@@ -104,7 +104,9 @@ def flow_question(
 
     Menu number ``menu`` tells a press on this question apart from one on an older ask (R-3.5).
     """
-    buyer = buyer_desc(reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or "")
+    buyer = buyer_desc(
+        reading.value("tipo") or "", reading.value("tipo_doc_adq") or "", reading.value("num_doc_adq") or ""
+    )
     buttons = [
         Button(id=button_id(invoice_id, PICK_ACTION, choice, menu), title=flow.label)
         for choice, (_flow_id, flow) in enumerate(candidates)
