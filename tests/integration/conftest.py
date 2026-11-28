@@ -268,6 +268,7 @@ def read_conversation(db_pool: AsyncConnectionPool[AsyncConnection[Any]], tmp_pa
                 cfg.limits.media,
                 PARSING_RULES_PATH,
                 frozenset({cfg.owner.ruc, cfg.work.ruc}),
+                cfg.routing,
             ),
             GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             helper_prefix=(),

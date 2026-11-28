@@ -221,6 +221,7 @@ async def _read_photo(
             cfg.limits.media,
             PARSING_RULES_PATH,
             frozenset({cfg.owner.ruc, cfg.work.ruc}),
+            cfg.routing,
         ),
         GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
         helper_prefix=(),

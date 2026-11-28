@@ -26,8 +26,9 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind, Button
 from invoicebot.channels.media_limits import max_bytes_for
-from invoicebot.config.models import Extraction, MediaLimits
-from invoicebot.extract.fields import REQUIRED, Reading, reading_from_json
+from invoicebot.config.models import Extraction, MediaLimits, Routing
+from invoicebot.extract.buyer_match import match_buyer
+from invoicebot.extract.fields import REQUIRED, RUC_LENGTH, UNCHECKED_BUYER_RUC, Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.padron import with_padron
 from invoicebot.extract.parties import with_own_buyer
@@ -96,13 +97,16 @@ class ExtractInputs:
     """What the extract handler reads an invoice with (S3.11, D199).
 
     ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
-    ``own_rucs`` are the RUCs the bot files invoices for (``owner.ruc``, ``work.ruc``).
+    ``own_rucs`` are the RUCs the bot files invoices for (``owner.ruc``, ``work.ruc``), and
+    ``routing`` holds the rules whose ``num_doc_adq`` RUCs a misread buyer is matched to
+    (D213; config load has already resolved their ``{owner.ruc}`` placeholders).
     """
 
     extraction: Extraction
     media: MediaLimits
     rules_path: Path
     own_rucs: frozenset[str]
+    routing: Routing
 
 
 class _HelperResult(BaseModel):
@@ -210,6 +214,7 @@ def make_extract_handler(
 
         async with pool.connection() as conn, conn.transaction():
             reading = await _with_padron(conn, reading)
+            reading = await _with_buyer_match(conn, reading, inputs.routing)
             await save_reading(conn, job.invoice_id, reading)
             await set_state(conn, job.invoice_id, ROUTING, expected=EXTRACTING)
             await enqueue(conn, job.invoice_id, ROUTE_STEP)
@@ -405,6 +410,32 @@ async def _with_padron(conn: AsyncConnection[Any], reading: Reading) -> Reading:
         return reading
     row = await lookup(conn, ruc)
     return with_padron(reading, None if row is None else row.razon_social)
+
+
+def _routing_rucs(routing: Routing) -> frozenset[str]:
+    """Return the RUC-shaped buyer values the routing rules name."""
+    return frozenset(
+        value
+        for rule in routing.rules
+        for value in rule.when.get("num_doc_adq", [])
+        if len(value) == RUC_LENGTH and value.isdigit()
+    )
+
+
+async def _with_buyer_match(conn: AsyncConnection[Any], reading: Reading, routing: Routing) -> Reading:
+    """Return ``reading`` with its buyer matched to a routing RUC by a near RUC and name (D213).
+
+    Only a reading with the unchecked buyer RUC hint looks anything up, on the caller's
+    connection, so a normal read costs no query. A routing RUC with no padrón row is skipped.
+    """
+    if UNCHECKED_BUYER_RUC not in reading.fields:
+        return reading
+    names: dict[str, str] = {}
+    for ruc in sorted(_routing_rucs(routing)):
+        row = await lookup(conn, ruc)
+        if row is not None:
+            names[ruc] = row.razon_social
+    return match_buyer(reading, names)
 
 
 async def _finish(

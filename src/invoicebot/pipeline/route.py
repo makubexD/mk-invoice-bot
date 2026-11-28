@@ -549,6 +549,12 @@ def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:
 
 
 def _doubtful_buyer(reading: Reading, threshold: float) -> bool:
-    """Return whether the buyer was read by OCR below the review threshold (BR-R04)."""
+    """Return whether the buyer was read by OCR below the review threshold or inferred (BR-R04).
+
+    An inferred buyer (D212, D213) is matched from a misread RUC and a name, so it is asked
+    about whatever its confidence.
+    """
     buyer = reading.fields.get("num_doc_adq")
-    return buyer is not None and buyer.source == "ocr" and buyer.confidence < threshold
+    if buyer is None or buyer.source != "ocr":
+        return False
+    return buyer.flag == "inferred" or buyer.confidence < threshold

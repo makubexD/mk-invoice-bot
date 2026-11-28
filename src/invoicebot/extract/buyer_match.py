@@ -7,8 +7,14 @@ from collections.abc import Mapping
 from dataclasses import replace
 from difflib import SequenceMatcher
 
-from invoicebot.extract.fields import BUYER_NAME, UNCHECKED_BUYER_RUC, Field, Reading
-from invoicebot.extract.ocr_parse import RUC_DOCUMENT_TYPE, RUC_LENGTH
+from invoicebot.extract.fields import (
+    BUYER_NAME,
+    RUC_DOCUMENT_TYPE,
+    RUC_LENGTH,
+    UNCHECKED_BUYER_RUC,
+    Field,
+    Reading,
+)
 
 MAX_BUYER_RUC_DIGIT_DIFFS = 3
 MIN_BUYER_NAME_RATIO = 0.7

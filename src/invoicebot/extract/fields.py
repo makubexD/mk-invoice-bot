@@ -19,6 +19,10 @@ from invoicebot.text import replace_unsafe_chars
 Source = Literal["qr", "xml", "ocr", "pdf", "padron", "llm", "user"]
 Flag = Literal["inferred", "conflict"]
 
+#: A RUC has eleven digits; its SUNAT document type is "6".
+RUC_LENGTH = 11
+RUC_DOCUMENT_TYPE = "6"
+
 #: The buyer hints OCR gives when it reads no valid buyer RUC: a RUC failing its check digit and the
 #: name after the buyer label (D213).
 UNCHECKED_BUYER_RUC = "num_doc_adq_unchecked"

@@ -792,6 +792,48 @@ async def test_doubtful_ocr_buyer_asks_confirmation(
     ]
 
 
+async def test_inferred_ocr_buyer_asks_confirmation_at_high_confidence(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D213: an inferred OCR buyer at confidence 0.95 asks BR-R04 with the owner flow pre-selected."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading(await _today(db_pool), buyer=OWNER_RUC)
+    fields = dict(reading.fields)
+    fields["num_doc_adq"] = _field(OWNER_RUC, source="ocr", confidence=0.95, flag="inferred")
+    invoice_id = await _routing_invoice(db_pool, profile_id, Reading(fields=fields, document_url=None))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert row == ("CONFIRMING", "BR-R04", OWNER_FLOW)
+    assert [rule_id for _, rule_id, _ in outbox] == ["BR-R04"]
+
+
+async def test_uninferred_ocr_buyer_at_high_confidence_routes_silently(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D213: an OCR buyer with no inferred flag at confidence 0.95 still routes silently (BR-R01)."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    reading = _reading(await _today(db_pool), buyer=OWNER_RUC)
+    fields = dict(reading.fields)
+    fields["num_doc_adq"] = _field(OWNER_RUC, source="ocr", confidence=0.95)
+    invoice_id = await _routing_invoice(db_pool, profile_id, Reading(fields=fields, document_url=None))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        outbox = await _outbox(conn, profile_id)
+    assert row[0] != "CONFIRMING"
+    assert row[1] == "BR-R01"
+    assert row[2] == OWNER_FLOW
+    assert all(rule_id != "BR-R04" for _, rule_id, _ in outbox)
+
+
 async def test_buyer_ok_true_continues_to_summary(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
 ) -> None:

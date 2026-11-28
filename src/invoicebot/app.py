@@ -368,6 +368,7 @@ async def _runtime(app: FastAPI, settings: Settings, pool: Pool | None) -> Async
                     cfg.limits.media,
                     settings.parsing_rules_path,
                     frozenset({cfg.owner.ruc, cfg.work.ruc}),
+                    cfg.routing,
                 ),
                 GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
                 helper_prefix=prefixes.image,

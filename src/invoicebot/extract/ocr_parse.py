@@ -17,6 +17,8 @@ from invoicebot.extract.fields import (
     BUYER_NAME,
     MAX_PRINTED_URL_CHARS,
     PRINTED_URL_PATH_CHARS,
+    RUC_DOCUMENT_TYPE,
+    RUC_LENGTH,
     UNCHECKED_BUYER_RUC,
     Field,
     Flag,
@@ -36,8 +38,6 @@ from invoicebot.sunat_origins import is_sunat_host
 
 WORD_SEPARATOR = " "
 LINE_SEPARATOR = "\n"
-RUC_DOCUMENT_TYPE = "6"
-RUC_LENGTH = 11
 #: Longest buyer name kept, so a long OCR line cannot fill a field (D213).
 MAX_BUYER_NAME_CHARS = 100
 #: Fewest letters a buyer name needs, so a lone dash or digit string is no name (D213).
