@@ -337,7 +337,32 @@ Files: `src/invoicebot/extract/merge.py`, `tests/unit/test_extract_merge.py`, `s
 
 Test: `uv run pytest -q tests/unit/test_extract_merge.py tests/unit/test_rules_parity.py`.
 
-## Step 18: live check `[inline: live run, needs the owner's Telegram]`
+## Step 18: a date is not a serie, and an uncontradicted QR wins (D211) `[inline: fix from the live check, cause found by probing the live photo]`
+
+Files: `src/invoicebot/extract/ocr_parse.py`, `src/invoicebot/extract/merge.py`, `tests/unit/test_extract_ocr_parse.py`,
+`tests/unit/test_extract_merge.py`, `specs/05-open-questions.md`, `specs/02-requirements.md`.
+
+- Live #56 (owner, 2026-11-27): the first OCR pass read the emission date with one hyphen lost (`2026-0222`), the
+  parser took it as the four-digit serie `2026` and número `222`, and read none of RUC, total or fecha. The QR held all
+  of them, but D210 found no shared anchor to agree on, so the OCR's serie and número stayed as a conflict and the
+  portal search failed. Owner GO for both fixes.
+- `ocr_parse.py` `_read_serie_numero`: a four-digit serie in `1900`–`2099` whose raw número is four digits forming a
+  valid month and day with it (`yyyy-mmdd`) is a date, not a serie: skip it.
+- `merge.py`: the QR is _contradicted_ when the readers share at least one anchor (the QR's not `inferred`) and agree
+  on none. A field the two disagree on takes the QR's unless the QR is contradicted; then D81 holds (the OCR's value
+  flagged `conflict`). This keeps D210's agreeing case and adds the case where the OCR read no anchor.
+- `specs/05-open-questions.md`: a D211 row after D210 (amends D210), D210's title gets "(amended by D211)".
+  `specs/02-requirements.md` R-2.3 and R-2.6: `conflict` is for an OCR value a contradicted QR disagrees with
+  (D81, D211).
+- Tests (`D211`): (a) `2026-0222` is not read as serie and número; (b) `0001-0222` still is (not year-shaped);
+  (c) `2026-1399` still is (not a valid date); (d) the OCR reads no anchor → the QR's serie and número win; (e) one
+  anchor agrees and another disagrees → the QR wins (D210); (f) the only shared anchor is `inferred` on the QR → no
+  evidence either way, the QR wins (replaces D210's `conflict` test); (g) the only shared anchor disagrees → `conflict`
+  (unchanged).
+
+Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py tests/unit/test_extract_merge.py tests/integration/test_pipeline_extract.py`.
+
+## Step 19: live check `[inline: live run, needs the owner's Telegram]`
 
 Files: `specs/spikes/portal-guide.md`.
 
@@ -351,7 +376,7 @@ the rows, with image ids and no invoice values.
 
 Test: `npx prettier --check specs/spikes/portal-guide.md`.
 
-## Step 19: runbook `[inline: user-facing docs]`
+## Step 20: runbook `[inline: user-facing docs]`
 
 Files: `docs/runbook.md`.
 
