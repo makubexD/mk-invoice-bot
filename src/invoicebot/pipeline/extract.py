@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -189,7 +189,9 @@ def make_extract_handler(
             _log_outcome(job.invoice_id, result, RULE_MEDIA_REJECTED, started)
             return
 
-        rule_id, reading = _classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
+        rule_id, reading = await _drop_unknown_repair(
+            pool, *_classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
+        )
         if rule_id is not None:
             await _finish(
                 pool, job.invoice_id, invoice, _Failure(rule_id, reading), gaps, expected=EXTRACTING
@@ -362,6 +364,27 @@ def _classify(
     if (tipo_rule := check_tipo(tipo, supported)) is not None:
         return tipo_rule, reading
     return None, reading
+
+
+async def _drop_unknown_repair(
+    pool: Pool,
+    rule_id: RuleId | None,
+    reading: Reading | None,
+) -> tuple[RuleId | None, Reading | None]:
+    """Drop an inferred issuer RUC the padrón does not hold, so BR-E01 lists it missing (R-2.4, D212).
+
+    A repaired RUC can pass the check digit by chance; only a padrón row confirms it. A
+    wrong repair then becomes a missing field, never a wrong issuer. Any other reading,
+    and any RUC the reader found as printed, is returned unchanged.
+    """
+    field = None if reading is None else reading.fields.get("ruc_emisor")
+    if reading is None or field is None or field.flag != "inferred":
+        return rule_id, reading
+    async with pool.connection() as conn:
+        if await lookup(conn, field.value) is not None:
+            return rule_id, reading
+    kept = {name: kept_field for name, kept_field in reading.fields.items() if name != "ruc_emisor"}
+    return RULE_UNREADABLE, replace(reading, fields=kept)
 
 
 async def _with_padron(conn: AsyncConnection[Any], reading: Reading) -> Reading:

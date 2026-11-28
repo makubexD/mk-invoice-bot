@@ -36,7 +36,7 @@ from invoicebot.channels.base import AttachmentKind
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading, reading_to_json
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Flag, Reading, reading_to_json
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
 from invoicebot.gaps.kinds import fingerprint
@@ -705,6 +705,80 @@ async def test_extraction_logs_carry_no_razon_social(
         if value in _record_text(record)
     ]
     assert leaks == []
+
+
+def _with_issuer_flag(reading: Reading, flag: Flag | None, ruc: str = SYNTHETIC_RUC) -> Reading:
+    """Return ``reading`` whose issuer RUC is ``ruc`` carrying ``flag`` (D212)."""
+    issuer = Field(ruc, "ocr", FULL_CONFIDENCE, flag)
+    return replace(reading, fields={**reading.fields, "ruc_emisor": issuer})
+
+
+async def test_inferred_issuer_in_the_padron_routes_on_with_its_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, R-2.4: a repaired issuer RUC the padrón holds keeps its flag and gets the padrón name."""
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"known{PNG}"))
+
+    await _run_handler_with_reading(
+        db_pool, invoice_id, _with_issuer_flag(_ocr_reading(), "inferred"), monkeypatch
+    )
+
+    async with db_pool.connection() as conn:
+        state, _ = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+
+    assert state == "ROUTING"
+    assert reading is not None
+    assert reading.fields["ruc_emisor"].flag == "inferred"
+    assert reading.fields["razon_social"].value == PADRON_RAZON_SOCIAL
+
+
+async def test_inferred_issuer_missing_from_the_padron_is_dropped_to_br_e01(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: a repaired issuer RUC the padrón lacks leaves the reading and is listed missing."""
+    invoice_id, profile_id = await _invoice_with_photo(
+        db_pool, _write_blank_photo(tmp_path / f"unknown{PNG}")
+    )
+
+    await _run_handler_with_reading(
+        db_pool, invoice_id, _with_issuer_flag(_ocr_reading(), "inferred"), monkeypatch
+    )
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        stored = await load_reading(conn, invoice_id)
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+
+    assert (state, rule_id) == ("EXTRACT_FAILED", "BR-E01")
+    assert stored is not None
+    assert "ruc_emisor" not in stored.fields
+    assert stored.missing_required() == ("ruc_emisor",)
+    assert messages == [unreadable_text(invoice_id, stored)]
+    read_part, missing_part = messages[0].split("❓ Falta: ")
+    assert missing_part.startswith("RUC del emisor")
+    assert "RUC del emisor" not in read_part
+
+
+async def test_unflagged_issuer_missing_from_the_padron_still_routes_on(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212: an issuer RUC read as printed is kept whether or not the padrón holds it."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"printed{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        state, _ = await _invoice_row(conn, invoice_id)
+
+    assert state == "ROUTING"
 
 
 async def test_qr_and_printed_text_confirm_each_other(
