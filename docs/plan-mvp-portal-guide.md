@@ -312,7 +312,32 @@ input: "#ctl00_bodyContentPlace_txtCaptcha", solver: [user]}`, `submit`, `downlo
   `tipo_labels`, and `status: active`. Its notes cite D209 and the spike.
   Test: `uv run pytest -q tests/unit/test_config_checks.py tests/unit/test_config_models.py`.
 
-## Step 17: live check `[inline: live run, needs the owner's Telegram]`
+## Step 17: a QR that matches the invoice wins a conflict (D210) `[worker]`
+
+Files: `src/invoicebot/extract/merge.py`, `tests/unit/test_extract_merge.py`, `specs/05-open-questions.md`,
+`specs/02-requirements.md`.
+
+- Owner decision (2026-11-27, live #54: the OCR read the date as serie `2026` and número `222`, the QR held the real
+  ones, and D81 kept the OCR's): reconcile instead of always trusting the OCR. The QR **corroborates** the reading when
+  at least one anchor (`ruc_emisor`, `total`, `fecha_emision`) is given by both readers with the same value
+  (`same_value`) and the QR's anchor is not `inferred`. When it corroborates, a field the two disagree on takes the
+  QR's field as it is (source `qr`, its confidence, no flag). When it does not, D81 holds: the OCR's value, flagged
+  `conflict`, which the summary names so the user is asked only about that field. Fields only one reader gives and
+  agreeing fields are unchanged.
+- `merge.py`: an `ANCHOR_FIELDS` constant and a `_corroborates(ocr, qr) -> bool` helper; `merge` passes the result to
+  `_merged_field`. Update the module docstring.
+- `specs/05-open-questions.md`: a D210 row after D209 stating the rule above and that it amends D81; D81's row gets
+  "(amended by D210)" after its title. `specs/02-requirements.md` R-2.6: `conflict` is "for an OCR value an
+  uncorroborated QR contradicts (D81, D210)".
+- Tests (`D210`): (a) RUC and total agree, serie and número disagree → serie and número are the QR's, unflagged;
+  (b) no anchor agrees → the OCR's values flagged `conflict` (today's behavior); (c) the only agreeing anchor is
+  `inferred` on the QR → not corroborated, `conflict`; (d) the QR has no fields (URL only) → the OCR reading unchanged.
+  Existing D81 tests that expect the OCR to win must still pass or be updated only where an anchor now agrees; say
+  which.
+
+Test: `uv run pytest -q tests/unit/test_extract_merge.py tests/unit/test_rules_parity.py`.
+
+## Step 18: live check `[inline: live run, needs the owner's Telegram]`
 
 Files: `specs/spikes/portal-guide.md`.
 
@@ -326,7 +351,7 @@ the rows, with image ids and no invoice values.
 
 Test: `npx prettier --check specs/spikes/portal-guide.md`.
 
-## Step 18: runbook `[inline: user-facing docs]`
+## Step 19: runbook `[inline: user-facing docs]`
 
 Files: `docs/runbook.md`.
 
