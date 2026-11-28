@@ -34,8 +34,24 @@ Decision this plan proposes (step 2):
   the fields read.
 
 Out of scope: QR glare recovery, a "retake without glare" tip (needs a detector that finds an undecodable QR), La
-Choza's store and portal files (its printed consulta URL is a later portal-link case), the buyer RUC misread (a digit
-swap no character map can fix; routing asks per BR-R04), PEBSA (9t4), the SUNAT API (9t5).
+Choza's store and portal files (its printed consulta URL is a later portal-link case), PEBSA (9t4), the SUNAT API (9t5).
+The buyer RUC misread was out of scope until live #59 (step 9) showed it ends in BR-R03, not BR-R04: steps 10 to 16.
+
+Live #59 (2026-11-27, the same ticket resent): every pass reads the buyer RUC 2 or 3 digits off, so it fails the check
+digit and is dropped; with no buyer the route asks BR-R03 with "boleta sin datos" on a factura. Three passes read the
+buyer name close to the padrón's razón social for `owner.ruc`; two of them carry the `CLIENTE:` label after other OCR
+text on the line, which the anchored `buyer_label` misses. The owner's rule (2026-11-27): a partial RUC alone is not
+enough; a partial RUC **and** the expected name together are, for every flow.
+
+Decision this plan adds (step 10):
+
+- **D213 A misread buyer is matched to a routing RUC by a near RUC and its name** (amends D212). When OCR finds no buyer
+  RUC that passes the check digit, but a buyer line holds an 11-digit candidate within 3 digits of a RUC a routing rule
+  names (`num_doc_adq`), and the buyer name read on the buyer label's line is similar (≥ 0.7) to that RUC's padrón
+  razón social, the buyer is taken as that RUC, flagged `inferred`. Exactly one routing RUC must match, else nothing
+  is inferred. An `inferred` buyer is always doubtful: BR-R04 asks with the flow pre-selected, never silent routing.
+  `CLIENTE` and `ADQUIRIENTE` labels may follow other text on their line. BR-R03's `{buyer_desc}` for a factura with
+  no buyer says the buyer could not be read, not "boleta sin datos".
 
 ## Step 1: baseline on a private golden set `[inline: private photos, expected values read by eye]`
 
@@ -164,5 +180,113 @@ Choza Náutica Minka ticket (flow A). Rows: (a) the issuer RUC is repaired, foun
 razón social; (b) número and fecha are right; (c) any field still below the threshold is shown as doubtful, not read;
 (d) the invoice routes to RK Export (Drive) or asks BR-R04 for the buyer; (e) what the fetch step does with the
 printed consulta URL (recorded, not fixed here); (f) flow B untouched. Record the rows with no invoice values.
+
+Test: `npx prettier --check specs/spikes/ocr-harden.md`.
+
+## Step 10: D213 and spec rows `[inline: spec text and owner decisions]`
+
+Files: `specs/05-open-questions.md`, `specs/02-requirements.md`, `specs/06-business-rules.md`.
+
+- `specs/05-open-questions.md`: a D213 row after D212 with the decision above; D212's row gets "(amended by D213)".
+- `specs/02-requirements.md`: R-2.4 gains the near-RUC-and-name buyer match (D213); R-3.3 also asks for an `inferred`
+  buyer.
+- `specs/06-business-rules.md`: BR-R04's trigger becomes "the buyer was read by OCR below `review_threshold`, or was
+  inferred (D212, D213)"; the `{buyer_desc}` line gains the factura case: `de un cliente que no pude leer` when `tipo`
+  is `01` and there is no buyer.
+
+Test: `npx prettier --check specs/05-open-questions.md specs/02-requirements.md specs/06-business-rules.md`.
+
+## Step 11: OCR keeps the buyer name and an unchecked buyer RUC `[worker]`
+
+Files: `config/parsing_rules.yaml`, `src/invoicebot/extract/ocr_parse.py`, `tests/unit/test_extract_ocr_parse.py`.
+
+- `config/parsing_rules.yaml` `buyer_label`: `SEÑOR(ES)` and `SR(ES)` still start the line; `CLIENTE` and
+  `ADQUIRIENTE` may follow other text:
+  `'^\W*(?:SE[ÑN]OR(?:\(?ES\)?)?|SR(?:\(?ES\)?)?\.?)\s*[:;.,!|]|\b(?:CLIENTE|ADQUIRIENTE)\s*[:;.,!|]'`.
+- `ocr_parse.py`: when no buyer RUC is found (no valid buyer-line match and no second valid RUC), add two fields, both
+  `source="ocr"`, `flag="inferred"`:
+  - `num_doc_adq_unchecked`: the first RUC-pattern match on a buyer line whose repaired value (`_repair_ruc`) is 11
+    digits but fails `is_valid_ruc`; confidence as for a RUC.
+  - `nombre_adq`: on the first buyer-label line, the text after the label's punctuation, stripped, capped at
+    `MAX_BUYER_NAME_CHARS = 100`; only when it holds at least 3 letters; confidence is the mean of its words.
+  - A valid buyer RUC adds neither field. Docstrings cite D213.
+- Tests (`D213`): (a) `XX AN CLIENTE: RK EXPORT PERU SAC` matches `buyer_label`; (b) `MI CLIENTE` with no punctuation
+  does not; (c) `XX SR.: EMPRESA` does not (SR stays line-start); (d) the existing label forms still match; (e)
+  `CLIENTE: RC EXPORT PLRU SAC` then `RUC: 20000000001` where that RUC fails the check digit gives
+  `num_doc_adq_unchecked` `20000000001` and `nombre_adq` `RC EXPORT PLRU SAC`, both `inferred`, and no `num_doc_adq`;
+  (f) a buyer RUC that passes the check digit gives `num_doc_adq` and neither new field; (g) `CLIENTE: -` gives no
+  `nombre_adq`; (h) a 150-letter name is cut to 100 characters. Use synthetic RUCs only (compute the check digit in
+  the test helper for valid ones).
+
+Test: `uv run pytest -q tests/unit/test_extract_ocr_parse.py`.
+
+## Step 12: the buyer hints take their best pass `[worker]`
+
+Files: `src/invoicebot/extract/merge.py`, `tests/unit/test_extract_merge.py`.
+
+- `best_of_reads`: after the `REQUIRED` groups, when the result has no `num_doc_adq`, take `num_doc_adq_unchecked`
+  and `nombre_adq` each from its highest-confidence pass among `kept` and `others` (a tie keeps the earlier pass). A
+  result that has `num_doc_adq` carries neither hint (drop them). Docstring cites D213.
+- Tests (`D213`): (a) hints read only by another pass are taken; (b) of two passes, the higher-confidence `nombre_adq`
+  wins; (c) a tie keeps `kept`'s; (d) when the merged result has `num_doc_adq`, no hint is returned; (e) the existing
+  merge tests still pass.
+
+Test: `uv run pytest -q tests/unit/test_extract_merge.py`.
+
+## Step 13: match a misread buyer to a routing RUC `[worker]`
+
+Files: `src/invoicebot/extract/buyer_match.py` (new), `tests/unit/test_extract_buyer_match.py` (new).
+
+- Module of pure functions (no store, no config import), docstring cites D213:
+  `match_buyer(reading: Reading, names_by_ruc: Mapping[str, str]) -> Reading`. With `num_doc_adq` present, or either
+  hint missing, return `reading` unchanged. Else a RUC in `names_by_ruc` matches when it has 11 digits, differs from
+  `num_doc_adq_unchecked` in at most `MAX_BUYER_RUC_DIGIT_DIFFS = 3` positions, and
+  `difflib.SequenceMatcher(None, read, expected).ratio() >= MIN_BUYER_NAME_RATIO = 0.7`, where both names are
+  upper-cased with everything but `A-Z0-9` removed and `read` is cut to `expected`'s length. Exactly one match: return
+  the reading with `num_doc_adq` = that RUC and `tipo_doc_adq` = `6`, both `source="ocr"`, `flag="inferred"`,
+  confidence the lower of the two hints', and the two hints removed. Zero or several: unchanged.
+- Tests (`D213`), synthetic RUCs and names: (a) a RUC 2 digits off with name `RC EXPORT PLRU-S:ADOS` against
+  `RK EXPORT PERU S.A.C.` matches; (b) 3 digits off matches, 4 does not; (c) a near RUC with name
+  `CORPORACION BARLOVENTO S.A.C.` does not; (d) the exact name with a RUC 5 digits off does not; (e) two routing RUCs
+  that both match give no match; (f) a reading with `num_doc_adq` is returned unchanged; (g) a missing hint returns it
+  unchanged; (h) the inferred buyer's confidence is the lower hint's, and the hints are gone.
+
+Test: `uv run pytest -q tests/unit/test_extract_buyer_match.py`.
+
+## Step 14: the extract step matches the buyer; an inferred buyer asks BR-R04 `[worker]`
+
+Files: `src/invoicebot/pipeline/extract.py`, `src/invoicebot/pipeline/route.py`, `tests/integration/test_pipeline_extract.py`, `tests/integration/test_pipeline_route.py`.
+
+- `extract.py`: after `_with_padron`, `_with_buyer_match(conn, reading, cfg)`: collect the 11-digit values in the
+  routing rules' `num_doc_adq` lists (resolved as the router resolves `{owner.ruc}` and `{work.ruc}`; reuse that
+  function, do not copy it), look each up with `store.padron.lookup`, skip those without a row, and call
+  `match_buyer`. Only when the reading has `num_doc_adq_unchecked`, so a normal read does no lookup.
+- `route.py` `_doubtful_buyer`: also true for an `ocr` buyer flagged `inferred` (D213). Docstring cites D212, D213.
+- Tests (`D213`, real Postgres, synthetic padrón rows): (a) an extract with a near `num_doc_adq_unchecked` and a close
+  `nombre_adq` for `owner.ruc` stores `ruc_adq` = `owner.ruc`; (b) the same with a far name stores no `ruc_adq`; (c)
+  an inferred buyer at confidence 0.95 routes to BR-R04 with the owner flow pre-selected, not silently; (d) a
+  non-inferred buyer at 0.95 still routes silently (BR-R01).
+
+Test: `uv run pytest -q tests/integration/test_pipeline_extract.py tests/integration/test_pipeline_route.py`.
+
+## Step 15: BR-R03 names an unread factura buyer `[inline: user-facing copy]`
+
+Files: `src/invoicebot/rules/messages_es.py`, `src/invoicebot/pipeline/route.py`, `src/invoicebot/pipeline/questions.py`, `tests/unit/test_messages_es.py`.
+
+- `buyer_desc` takes `tipo`: no buyer on a `01` gives `de un cliente que no pude leer`; other tipos keep
+  `de ningún cliente (boleta sin datos)`. Both callers pass `reading.value("tipo")`.
+- Tests (`D213`): (a) tipo `01`, no buyer → the unread text; (b) tipo `03`, no buyer → boleta sin datos; (c) a RUC
+  buyer is unchanged.
+
+Test: `uv run pytest -q tests/unit/test_messages_es.py`.
+
+## Step 16: live check of D213 `[inline: live run, needs the owner's Telegram]`
+
+Files: `specs/spikes/ocr-harden.md`.
+
+Deploy this branch's image (tag and back up the config first, as in step 9). **Ask the owner** to resend the La Choza
+Náutica Minka ticket. Rows: (a) BR-R04 asks with RK Export (Drive) pre-selected; (b) the issuer still reads as in step
+9; (c) a ticket whose buyer RUC reads cleanly still routes silently (any earlier flow A photo); (d) flow B untouched.
+Also re-run step 8's golden set and record that no per-field rate dropped. No invoice values in the file.
 
 Test: `npx prettier --check specs/spikes/ocr-harden.md`.
