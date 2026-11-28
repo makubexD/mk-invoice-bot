@@ -19,6 +19,11 @@ from invoicebot.text import replace_unsafe_chars
 Source = Literal["qr", "xml", "ocr", "pdf", "padron", "llm", "user"]
 Flag = Literal["inferred", "conflict"]
 
+#: The buyer hints OCR gives when it reads no valid buyer RUC: a RUC failing its check digit and the
+#: name after the buyer label (D213).
+UNCHECKED_BUYER_RUC = "num_doc_adq_unchecked"
+BUYER_NAME = "nombre_adq"
+
 REQUIRED = ("ruc_emisor", "tipo", "serie", "numero", "fecha_emision", "total")
 
 #: The field names whose values compare as amounts.

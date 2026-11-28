@@ -14,7 +14,16 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date
 
-from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, REQUIRED, Field, Reading, finite_decimal
+from invoicebot.extract.fields import (
+    AMOUNT_FIELDS,
+    BUYER_NAME,
+    FULL_CONFIDENCE,
+    REQUIRED,
+    UNCHECKED_BUYER_RUC,
+    Field,
+    Reading,
+    finite_decimal,
+)
 
 
 def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
@@ -108,9 +117,7 @@ def _iso_date(text: str) -> date | None:
 #: The invoice number's two parts, taken together from one read or not at all (D200, D212).
 _SERIE_NUMERO = ("serie", "numero")
 
-#: The buyer hints OCR gives when it cannot read the buyer's RUC (D213): carried only without one.
-UNCHECKED_BUYER_RUC = "num_doc_adq_unchecked"
-BUYER_NAME = "nombre_adq"
+#: The buyer hints, carried only without a buyer RUC (D213).
 _BUYER_HINTS = (UNCHECKED_BUYER_RUC, BUYER_NAME)
 
 #: The score of a read that lacks a field (or half a pair): lower than any confidence.

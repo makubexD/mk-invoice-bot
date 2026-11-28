@@ -14,8 +14,10 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from invoicebot.extract.fields import (
+    BUYER_NAME,
     MAX_PRINTED_URL_CHARS,
     PRINTED_URL_PATH_CHARS,
+    UNCHECKED_BUYER_RUC,
     Field,
     Flag,
     Reading,
@@ -36,6 +38,10 @@ WORD_SEPARATOR = " "
 LINE_SEPARATOR = "\n"
 RUC_DOCUMENT_TYPE = "6"
 RUC_LENGTH = 11
+#: Longest buyer name kept, so a long OCR line cannot fill a field (D213).
+MAX_BUYER_NAME_CHARS = 100
+#: Fewest letters a buyer name needs, so a lone dash or digit string is no name (D213).
+MIN_BUYER_NAME_LETTERS = 3
 #: Lines after a buyer label whose RUC still belongs to the buyer (D198).
 BUYER_LINES = 2
 SERIE_FIX_LENGTH = 3
@@ -196,6 +202,71 @@ def _add_rucs(
     if buyer is not None:
         fields["num_doc_adq"] = buyer.to_field()
         fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer.confidence, flag="inferred")
+    else:
+        fields.update(_buyer_hints(searched, spans, rules))
+
+
+def _buyer_hints(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> dict[str, Field]:
+    """Return the buyer hints OCR can give when no valid buyer RUC was read (D213).
+
+    ``num_doc_adq_unchecked`` is the buyer-line RUC that fails its check digit and ``nombre_adq``
+    the text after the first buyer label. Both are flagged ``inferred``.
+    """
+    hints: dict[str, Field] = {}
+    unchecked = _read_unchecked_buyer_ruc(searched, spans, rules)
+    if unchecked is not None:
+        hints[UNCHECKED_BUYER_RUC] = unchecked
+    name = _read_buyer_name(searched, spans, rules)
+    if name is not None:
+        hints[BUYER_NAME] = name
+    return hints
+
+
+def _read_unchecked_buyer_ruc(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> Field | None:
+    """Return the first buyer-line RUC of 11 digits that fails :func:`is_valid_ruc`, or None (D213)."""
+    buyer_lines = _buyer_line_numbers(searched, rules)
+    for pattern in rules.ruc:
+        for match in _matches(pattern, searched):
+            repair = _repair_ruc(match.group("value"))
+            line = searched.count(LINE_SEPARATOR, 0, match.start("value"))
+            if repair is None or line not in buyer_lines or is_valid_ruc(repair[0]):
+                continue
+            confidence = _confidence(spans, *match.span("value"))
+            return _ocr_field(repair[0], confidence, flag="inferred")
+    return None
+
+
+def _read_buyer_name(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> Field | None:
+    """Return the text after the first buyer label as a field, or None when it is no name (D213).
+
+    The name is capped at :data:`MAX_BUYER_NAME_CHARS` and needs
+    :data:`MIN_BUYER_NAME_LETTERS` letters.
+    """
+    line_start = 0
+    for line in searched.split(LINE_SEPARATOR):
+        label = rules.buyer_label.search(line)
+        if label is not None:
+            rest = line[label.end() :]
+            name = rest.strip()[:MAX_BUYER_NAME_CHARS].strip()
+            if sum(char.isalpha() for char in name) < MIN_BUYER_NAME_LETTERS:
+                return None
+            start = line_start + label.end() + len(rest) - len(rest.lstrip())
+            confidence = _confidence(spans, start, start + len(name))
+            return _ocr_field(name, confidence, flag="inferred")
+        line_start += len(line) + len(LINE_SEPARATOR)
+    return None
 
 
 def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
