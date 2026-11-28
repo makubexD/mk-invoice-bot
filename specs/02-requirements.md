@@ -63,8 +63,11 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   - a field both give with the same value gets confidence 1.0;
   - when they disagree, the QR's value wins unless the QR is contradicted (D210, D211: the readers share an anchor and agree on none), and then the OCR value stays and the field is flagged `conflict`;
   - a field only one of them gives comes from that one.
+  - the parser repairs a keyword-anchored RUC whose 11 characters are digits or the confusable letters `O U D Q I L | /` (`O U D Q→0`, `I L |→1`, `/→7`), and keeps it only when the repaired value passes the check digit (D212);
+  - a date may have spaces around its separators (D212);
+  - when OCR is retried on the same photo (D200), each required field takes the value of the pass with the highest confidence, a tie keeping the earlier pass; `serie` and `numero` move as a pair scored by the lower of their two confidences, and fields the QR gives are not taken from a pass (D212).
 - **R-2.4 (M)** THE SYSTEM SHALL validate:
-  - the RUC check digit (mod 11);
+  - the RUC check digit (mod 11); a RUC repaired from confusable characters (R-2.3) is flagged `inferred`, and the pipeline drops an `inferred` `ruc_emisor` the padrón does not hold, so a wrong repair becomes a missing field (BR-E01), never a wrong issuer (D212);
   - the serie pattern (`[FBE][A-Z0-9]{3}` or 4 digits);
   - the date (not in the future, not older than the configured limit);
   - `total ≈ base + IGV + other charges − discounts` (tolerance S/ 0.05) when base and IGV are present. Other charges are the restaurant service charge (_recargo al consumo_) and ICBPER: 26 of the owner's 35 work invoices in 2026 carry a service charge, so a check without it would flag them wrongly;
