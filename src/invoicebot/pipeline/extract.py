@@ -27,7 +27,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from invoicebot.channels.base import AttachmentKind, Button
 from invoicebot.channels.media_limits import max_bytes_for
 from invoicebot.config.models import Extraction, MediaLimits
-from invoicebot.extract.fields import Reading, reading_from_json
+from invoicebot.extract.fields import REQUIRED, Reading, reading_from_json
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.padron import with_padron
 from invoicebot.extract.parties import with_own_buyer
@@ -43,7 +43,7 @@ from invoicebot.pipeline.handlers import (
     reject_media,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.questions import unreadable_buttons
+from invoicebot.pipeline.questions import PRINTED_SOURCES, unreadable_buttons
 from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
@@ -87,6 +87,8 @@ class _Failure:
 
     rule_id: RuleId
     reading: Reading | None
+    #: The printed fields read below the review threshold, which BR-E01 names as doubtful (D212).
+    doubtful: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -194,7 +196,12 @@ def make_extract_handler(
         )
         if rule_id is not None:
             await _finish(
-                pool, job.invoice_id, invoice, _Failure(rule_id, reading), gaps, expected=EXTRACTING
+                pool,
+                job.invoice_id,
+                invoice,
+                _Failure(rule_id, reading, _doubtful(reading, inputs.extraction.review_threshold)),
+                gaps,
+                expected=EXTRACTING,
             )
             _log_outcome(job.invoice_id, result, rule_id, started)
             return
@@ -419,7 +426,7 @@ async def _finish(
     there.
     """
     rule_id = failure.rule_id
-    text, buttons = _failure_reply(rule_id, invoice_id, failure.reading)
+    text, buttons = _failure_reply(invoice_id, failure)
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
         if failure.reading is not None:
@@ -468,16 +475,29 @@ def _parser_miss_sighting(invoice_id: int, reading: Reading | None) -> GapSighti
     )
 
 
-def _failure_reply(rule_id: RuleId, invoice_id: int, reading: Reading | None) -> tuple[str, list[Button]]:
+def _failure_reply(invoice_id: int, failure: _Failure) -> tuple[str, list[Button]]:
     """Return the failure rule's text and buttons (spec 06).
 
-    BR-E01 names the required fields the reading kept and the ones still missing, and
-    carries [Editar] / [Cancelar] (BR-E01, D188); the other rules keep their text and no
-    buttons.
+    BR-E01 names the required fields the reading kept, the doubtful ones apart (D212), and
+    the ones still missing, and carries [Editar] / [Cancelar] (BR-E01, D188); the other
+    rules keep their text and no buttons.
     """
-    if rule_id == RULE_UNREADABLE:
-        return unreadable_text(invoice_id, reading), unreadable_buttons(invoice_id)
-    return _message(rule_id, reading), []
+    if failure.rule_id == RULE_UNREADABLE:
+        return unreadable_text(invoice_id, failure.reading, failure.doubtful), unreadable_buttons(invoice_id)
+    return _message(failure.rule_id, failure.reading), []
+
+
+def _doubtful(reading: Reading | None, threshold: float) -> tuple[str, ...]:
+    """Return the required fields read from the printed text below ``threshold`` (D212)."""
+    if reading is None:
+        return ()
+    return tuple(
+        name
+        for name in REQUIRED
+        if (field := reading.fields.get(name)) is not None
+        and field.source in PRINTED_SOURCES
+        and field.confidence < threshold
+    )
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:

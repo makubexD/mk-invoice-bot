@@ -284,14 +284,18 @@ MESSAGES: dict[str, str] = {
 }
 
 #: BR-E01's text when the reading kept some required fields: the fields read, with
-#: their values, and the lines to type for the ones still missing (D188).
+#: their values, any read below the review threshold (D212), and the lines to type for
+#: the ones still missing (D188).
 UNREADABLE_PARTIAL = (
     "Leí parte del comprobante #{id}.\n"
     "✅ Leído: {read_desc}\n"
+    "{doubtful_line}"
     "❓ Falta: {missing_desc}\n"
     "Envíame otra foto más cerca y con buena luz, o escríbeme solo lo que falta, un dato por línea:\n"
     "{missing_lines}"
 )
+#: BR-E01's ``{doubtful_line}``: the printed fields read below the review threshold (D212).
+UNREADABLE_DOUBTFUL_LINE = "⚠️ Dudoso (revísalo): {doubtful_desc}\n"
 
 #: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
 GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."

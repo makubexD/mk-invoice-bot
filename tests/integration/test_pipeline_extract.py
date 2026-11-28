@@ -36,7 +36,7 @@ from invoicebot.channels.base import AttachmentKind
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
 from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Flag, Reading, reading_to_json
+from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Flag, Reading, Source, reading_to_json
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
 from invoicebot.gaps.kinds import fingerprint
@@ -883,6 +883,70 @@ async def test_partial_reading_sends_br_e01_naming_the_fields(
             {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
         ]
     ]
+
+
+def _partial_with_numero(source: Source, confidence: float) -> Reading:
+    """Return :func:`_partial_ocr_reading` with ``numero`` read from ``source`` at ``confidence`` (D212)."""
+    reading = _partial_ocr_reading()
+    numero = replace(reading.fields["numero"], source=source, confidence=confidence)
+    return replace(reading, fields={**reading.fields, "numero": numero})
+
+
+async def _br_e01_text(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reading: Reading,
+) -> str:
+    """Run the handler on ``reading`` and return the one BR-E01 text it queued (D212)."""
+    invoice_id, profile_id = await _invoice_with_photo(pool, _write_blank_photo(tmp_path / f"doubt{PNG}"))
+    await _run_handler_with_reading(pool, invoice_id, reading, monkeypatch)
+    async with pool.connection() as conn:
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+    assert len(messages) == 1
+    return messages[0]
+
+
+async def test_partial_reading_names_a_low_confidence_printed_field_as_doubtful(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: a número read by OCR at 0.18 is on the doubtful line, not on the read line."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("ocr", 0.18))
+
+    read_line = next(line for line in text.splitlines() if line.startswith("✅ Leído: "))
+    assert "⚠️ Dudoso (revísalo): número " in text
+    assert "número" not in read_line
+    assert "serie" in read_line
+
+
+async def test_partial_reading_with_every_field_above_the_threshold_has_no_doubtful_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: fields read at or above the threshold keep today's text, read line then missing line."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("ocr", 0.8))
+
+    lines = text.splitlines()
+    read_at = next(index for index, line in enumerate(lines) if line.startswith("✅ Leído: "))
+    assert "Dudoso" not in text
+    assert "número" in lines[read_at]
+    assert lines[read_at + 1] == "❓ Falta: fecha, total"
+
+
+@pytest.mark.parametrize("confidence", [1.0, 0.5])
+async def test_partial_reading_never_doubts_a_qr_field(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    confidence: float,
+) -> None:
+    """D212, BR-E01: a field from the QR is never doubtful, at 1.0 or below the threshold."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("qr", confidence))
+
+    assert "Dudoso" not in text
 
 
 async def test_partial_reading_is_stored_for_the_answers(
