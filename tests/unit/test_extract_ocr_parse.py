@@ -588,3 +588,46 @@ def test_parse_ocr_labelled_buyer_wins_over_a_second_unlabelled_ruc(rules: Parsi
 
     assert fields["ruc_emisor"] == SYNTHETIC_RUC
     assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_ruc_with_letter_o_is_repaired_and_inferred(rules: ParsingRules) -> None:
+    """D212: letters O read in place of zeros are repaired and the RUC is flagged inferred."""
+    field = parse_ocr(_ocr("RUC: 2OOOOOOOOO1"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == SYNTHETIC_RUC
+    assert field.flag == "inferred"
+
+
+def test_parse_ocr_ruc_with_slash_reads_as_seven(rules: ParsingRules) -> None:
+    """D212: a slash read in place of a 7 is repaired and the RUC is flagged inferred."""
+    field = parse_ocr(_ocr("RUC: 200000000/9"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == "20000000079"
+    assert field.flag == "inferred"
+
+
+def test_parse_ocr_repaired_ruc_failing_check_digit_is_not_read(rules: ParsingRules) -> None:
+    """D212: a repaired RUC that fails the check digit is dropped."""
+    assert "ruc_emisor" not in _fields(_ocr("RUC: 2OOOOOOOOO2"), rules)
+
+
+def test_parse_ocr_clean_ruc_is_not_flagged(rules: ParsingRules) -> None:
+    """D212: a RUC read as 11 digits is unchanged and carries no flag."""
+    field = parse_ocr(_ocr(f"RUC: {SYNTHETIC_RUC}"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == SYNTHETIC_RUC
+    assert field.flag is None
+
+
+def test_parse_ocr_bare_ruc_with_letters_is_not_repaired(rules: ParsingRules) -> None:
+    """D212: without the RUC keyword a letter-bearing string is never repaired."""
+    assert "ruc_emisor" not in _fields(_ocr("2OOOOOOOOO1"), rules)
+
+
+def test_parse_ocr_repaired_ruc_under_buyer_label_is_the_buyer(rules: ParsingRules) -> None:
+    """D212: a repaired RUC under CLIENTE goes to num_doc_adq, flagged inferred."""
+    fields = parse_ocr(_ocr("CLIENTE: EMPRESA SAC", "RUC: 2OOOOOOOOO1"), rules).reading.fields
+
+    assert "ruc_emisor" not in fields
+    assert fields["num_doc_adq"].value == SYNTHETIC_RUC
+    assert fields["num_doc_adq"].flag == "inferred"

@@ -35,10 +35,13 @@ from invoicebot.sunat_origins import is_sunat_host
 WORD_SEPARATOR = " "
 LINE_SEPARATOR = "\n"
 RUC_DOCUMENT_TYPE = "6"
+RUC_LENGTH = 11
 #: Lines after a buyer label whose RUC still belongs to the buyer (D198).
 BUYER_LINES = 2
 SERIE_FIX_LENGTH = 3
 SERIE_DIGIT_FIXES = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1"}
+#: OCR letters and marks read in place of a RUC digit, applied after upper-casing (D212).
+RUC_DIGIT_FIXES = {"O": "0", "U": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "|": "1", "/": "7"}
 #: Years a date misread as a four-digit serie can start with (D211).
 DATE_YEARS = range(1900, 2100)
 #: Digits of the month and day a date misread as a número carries, ``mmdd`` (D211).
@@ -160,22 +163,39 @@ def _confidence(spans: tuple[_WordSpan, ...], start: int, end: int) -> float:
     return sum(overlapping) / len(overlapping) if overlapping else NO_CONFIDENCE
 
 
+@dataclass(frozen=True)
+class _RucMatch:
+    """One valid RUC read from the text; ``repaired`` means OCR letters became digits (D212)."""
+
+    value: str
+    confidence: float
+    is_buyer: bool
+    repaired: bool
+
+    def to_field(self) -> Field:
+        """Return the RUC as an OCR field, flagged ``inferred`` when it was repaired (D212)."""
+        return _ocr_field(self.value, self.confidence, flag="inferred" if self.repaired else None)
+
+
 def _add_rucs(
     fields: dict[str, Field],
     searched: str,
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> None:
-    """Add the issuer and buyer RUCs; a RUC under a buyer label is never the issuer's (R-2.4, D198)."""
+    """Add the issuer and buyer RUCs; a RUC under a buyer label is never the issuer's (R-2.4, D198).
+
+    A RUC repaired from OCR letters is flagged ``inferred`` (D212).
+    """
     found = _ruc_matches(searched, spans, rules)
-    buyers = [(value, confidence) for value, confidence, is_buyer in found if is_buyer]
-    others = [(value, confidence) for value, confidence, is_buyer in found if not is_buyer]
+    buyers = [match for match in found if match.is_buyer]
+    others = [match for match in found if not match.is_buyer]
     if others:
-        fields["ruc_emisor"] = _ocr_field(*others[0])
+        fields["ruc_emisor"] = others[0].to_field()
     buyer = buyers[0] if buyers else (others[1] if len(others) > 1 else None)
     if buyer is not None:
-        fields["num_doc_adq"] = _ocr_field(*buyer)
-        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer[1], flag="inferred")
+        fields["num_doc_adq"] = buyer.to_field()
+        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer.confidence, flag="inferred")
 
 
 def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
@@ -187,23 +207,40 @@ def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
     return numbers
 
 
+def _repair_ruc(raw: str) -> tuple[str, bool] | None:
+    """Return a RUC candidate with OCR letters mapped back to digits and whether that changed it (D212).
+
+    Returns ``None`` when the result is not 11 digits.
+    """
+    upper = raw.upper()
+    fixed = "".join(RUC_DIGIT_FIXES.get(char, char) for char in upper)
+    if len(fixed) != RUC_LENGTH or not fixed.isdigit():
+        return None
+    return fixed, fixed != upper
+
+
 def _ruc_matches(
     searched: str,
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
-) -> list[tuple[str, float, bool]]:
-    """Return the distinct valid RUCs with a buyer-line flag, anchored matches first, each in text order."""
+) -> list[_RucMatch]:
+    """Return the distinct valid RUCs with a buyer-line flag, anchored matches first, each in text order.
+
+    A keyword-anchored match is repaired before its check digit is tested (D212).
+    """
     buyer_lines = _buyer_line_numbers(searched, rules)
-    found: list[tuple[str, float, bool]] = []
+    found: list[_RucMatch] = []
     seen: set[str] = set()
     for pattern in rules.ruc:
         for match in _matches(pattern, searched):
-            value = match.group("value")
-            if value in seen or not is_valid_ruc(value):
+            repair = _repair_ruc(match.group("value"))
+            if repair is None or repair[0] in seen or not is_valid_ruc(repair[0]):
                 continue
+            value, repaired = repair
             seen.add(value)
             line = searched.count(LINE_SEPARATOR, 0, match.start("value"))
-            found.append((value, _confidence(spans, *match.span("value")), line in buyer_lines))
+            confidence = _confidence(spans, *match.span("value"))
+            found.append(_RucMatch(value, confidence, line in buyer_lines, repaired))
     return found
 
 

@@ -12,3 +12,5 @@
 # Synthetic WhatsApp placeholder used by tests/unit/test_channels_base.py: it is a
 # phone number that happens to pass the RUC check digit, so it must be listed too.
 51900000000
+# The /->7 repair case of D212: 200000000/9 reads as this value.
+20000000079
