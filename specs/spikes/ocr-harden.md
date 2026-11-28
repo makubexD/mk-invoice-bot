@@ -71,3 +71,23 @@ The helper probe re-run on #58's photo, each pass alone (R right, W wrong, - not
   nothing is missing, and pass 4 (the only one with the right número, at 0.61) never runs. Best-of-passes keeps pass
   3's número at 0.43: wrong, but below `review_threshold`, so the invoice goes to `CONFIRMING` (BR-E09) rather than
   being filed silently. Live row (b) of step 9, "número right", would fail as the branch stands.
+
+## Live check (step 9)
+
+Live #59, 2026-11-27: the branch at `ebaeccf` deployed live, and the owner resent the La Choza Náutica Minka ticket on
+Telegram (flow A). No QR decoded; OCR only.
+
+| Row | Check                                            | Result                                                                         |
+| --- | ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| a   | issuer RUC repaired, found in the padrón, named  | pass: `inferred`, confidence 0.69, razón social from the padrón                |
+| b   | número and fecha right                           | fecha right (0.72); número wrong at 0.43, the step 8 finding                   |
+| c   | a field below the threshold is shown as doubtful | not reached: the route asked BR-R03 first; moved to step 16                    |
+| d   | routes to RK Export or asks BR-R04               | **fail**: asked BR-R03 ("boleta sin datos" on a factura); D213, steps 10 to 15 |
+| e   | the fetch step and the printed consulta URL      | no printed URL read (`printed_url` empty), so nothing was fetched              |
+| f   | flow B untouched                                 | pass: no flow B code changed on the branch, no flow B invoice since the deploy |
+
+- **Why (d) failed**: every one of #59's six passes reads the buyer RUC 2 or 3 digits off, so it fails the check digit
+  and no buyer is kept; with no buyer, routing is BR-R03, not BR-R04. Three passes read the buyer name close to the
+  padrón's razón social for `owner.ruc`; two put the `CLIENTE:` label after other text on its line, which the
+  line-anchored `buyer_label` misses. D213 (owner, 2026-11-27) infers the buyer only when a near RUC and the name
+  agree.
