@@ -39,10 +39,35 @@ Probing the live helper on #58's photo (from the plan, aggregates only):
 | Run    | Pairs | QR rate     | OCR-only rate | ruc_emisor | tipo | serie | numero | fecha_emision | total | igv | base | num_doc_adq |
 | ------ | ----: | ----------- | ------------- | ---------: | ---: | ----: | -----: | ------------: | ----: | --: | ---: | ----------: |
 | before |     7 | 71.4% (5/7) | n/a           |        6/7 |  7/7 |   7/7 |    6/7 |           6/7 |   7/7 | 5/7 |  0/7 |         6/7 |
+| after  |     7 | 71.4% (5/7) | n/a           |        7/7 |  7/7 |   7/7 |    6/7 |           7/7 |   7/7 | 5/7 |  1/7 |         6/7 |
 
 - **OCR-only rate is n/a**: every member has a printed QR, so the script's OCR-only rate (members without a QR) has
   nothing to count and prints `0.0%`. #58, whose QR does not decode, is scored under the QR rate.
 - **#58 alone**: right on `tipo`, `serie` and `total`; wrong or missing on `ruc_emisor`, `numero`, `fecha_emision`,
   `igv`, `base` and `num_doc_adq`. Apart from `base`, every other miss in the row but one `igv` is #58's.
-- **`base` is 0/7**: no reading of the set gives the taxable base the receipt prints, the 6 clean photos included. It
+- **`base` is 0/7 before**: no reading of the set gives the taxable base the receipt prints, the 6 clean photos included. It
   is not a required field and is outside this plan; noted for a later look.
+
+The after run is the branch at step 7 (`D212` items 1 to 5 in). No per-field rate dropped. #58 now reads `ruc_emisor`
+(repaired, flagged `inferred`), `fecha_emision` and `base` right; `numero`, `igv` and `num_doc_adq` are still wrong.
+The 6 clean photos read the same as before.
+
+## #58 after, pass by pass
+
+The helper probe re-run on #58's photo, each pass alone (R right, W wrong, - not read; confidence; `i` inferred):
+
+| Pass                   | ruc_emisor | tipo     | serie  | numero | fecha_emision | total  |
+| ---------------------- | ---------- | -------- | ------ | ------ | ------------- | ------ |
+| first (binarized)      | -          | R 0.15   | -      | -      | R 0.72        | R 0.92 |
+| 1 deskewed             | -          | R 0.68   | R 0.31 | W 0.31 | -             | -      |
+| 2 upscaled             | -          | R 0.18 i | R 0.18 | W 0.18 | W 0.00        | -      |
+| 3 upscaled, block mode | R 0.69 i   | R 0.78   | R 0.43 | W 0.43 | W 0.00        | -      |
+| 4 crop                 | -          | R 0.56   | R 0.61 | R 0.61 | -             | R 0.97 |
+| 5 crop                 | -          | -        | -      | -      | W 0.00        | -      |
+| helper keeps           | R 0.69 i   | R 0.78   | R 0.43 | W 0.43 | R 0.72        | R 0.92 |
+
+- **Finding: the retries stop before the pass that reads the número right.** The retry loop runs only while a
+  required field is missing (D198). Before D212 the RUC was never read, so every pass ran; now pass 3 repairs it,
+  nothing is missing, and pass 4 (the only one with the right número, at 0.61) never runs. Best-of-passes keeps pass
+  3's número at 0.43: wrong, but below `review_threshold`, so the invoice goes to `CONFIRMING` (BR-E09) rather than
+  being filed silently. Live row (b) of step 9, "número right", would fail as the branch stands.
