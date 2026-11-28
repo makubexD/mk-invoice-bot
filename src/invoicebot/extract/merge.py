@@ -4,8 +4,8 @@ Two jobs. ``merge`` joins the OCR and QR readings (D81): OCR is the primary read
 confirms it. A field both readers give with the same value reaches full confidence, a field they
 disagree on takes the QR's field unless the QR is contradicted, and then keeps the OCR value
 flagged ``conflict`` (D210, D211), and a field only one reader gives keeps that reader's confidence
-and flag (R-2.6). ``fill_missing`` fills a reading's missing
-required fields from other OCR reads of the same document (D200).
+and flag (R-2.6). ``best_of_reads`` takes each required field from the best of
+several OCR reads of the same document, by confidence (D200, D212).
 """
 
 from __future__ import annotations
@@ -14,7 +14,16 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import date
 
-from invoicebot.extract.fields import AMOUNT_FIELDS, FULL_CONFIDENCE, REQUIRED, Field, Reading, finite_decimal
+from invoicebot.extract.fields import (
+    AMOUNT_FIELDS,
+    BUYER_NAME,
+    FULL_CONFIDENCE,
+    REQUIRED,
+    UNCHECKED_BUYER_RUC,
+    Field,
+    Reading,
+    finite_decimal,
+)
 
 
 def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
@@ -105,55 +114,97 @@ def _iso_date(text: str) -> date | None:
         return None
 
 
-#: The invoice number's two parts, filled together or not at all (D200).
+#: The invoice number's two parts, taken together from one read or not at all (D200, D212).
 _SERIE_NUMERO = ("serie", "numero")
 
+#: The buyer hints, carried only without a buyer RUC (D213).
+_BUYER_HINTS = (UNCHECKED_BUYER_RUC, BUYER_NAME)
+#: A buyer moves with its document type, so a rule on ``tipo_doc_adq`` still sees it.
+_BUYER = ("num_doc_adq", "tipo_doc_adq")
 
-def fill_missing(kept: Reading, others: Sequence[Reading], qr_names: frozenset[str] = frozenset()) -> Reading:
-    """Return ``kept`` with its missing required fields taken from ``others`` (D200).
+#: The score of a read that lacks a field (or half a pair): lower than any confidence.
+_MISSING = (-1, -1.0)
+#: A value OCR printed outranks one it repaired or inferred, whatever their confidences (D212).
+_PRINTED, _INFERRED = 1, 0
 
-    Each missing required field comes from the first reading in ``others`` that has it, except
-    ``serie`` and ``numero``, which move together: both are taken from the first reading with both
-    when neither ``kept`` nor the QR has either. A field named in ``qr_names`` (the QR reading's
-    fields) is not filled, so the QR value is the one the merge keeps. A ``ruc_emisor`` equal to
-    the buyer's ``num_doc_adq`` is skipped, and a filled ``ruc_emisor`` brings that read's
-    ``num_doc_adq`` when there is no buyer yet, so D199 can still swap them. Filled fields come
-    after the existing ones and the URLs stay ``kept``'s; with nothing to fill, ``kept`` itself is
-    returned.
+
+def best_of_reads(
+    kept: Reading, others: Sequence[Reading], qr_names: frozenset[str] = frozenset()
+) -> Reading:
+    """Return ``kept`` with each required field replaced by the best read of it (D200, D212).
+
+    Each required field comes from the read that gives it at the highest confidence among ``kept``
+    and ``others``; a tie keeps ``kept``'s, then the earlier read's, and a missing field scores
+    lower than any confidence. ``serie`` and ``numero`` move together from one read, scored by the
+    lower of their two confidences; a read with only one of them has no pair and never splits one.
+    A field named in ``qr_names`` (the QR reading's fields) is never taken, so the QR value is the
+    one the merge keeps, and the pair is not taken when the QR has either part. A ``ruc_emisor``
+    from another read that equals ``kept``'s buyer ``num_doc_adq`` is skipped, and a ``ruc_emisor``
+    taken from another read brings that read's ``num_doc_adq`` when neither ``kept`` nor the QR has
+    a buyer, so D199 can still swap them. Fields outside ``REQUIRED`` and the URLs stay ``kept``'s;
+    taken fields replace in place, and with nothing better ``kept`` itself is returned. The buyer
+    hints (``num_doc_adq_unchecked``, ``nombre_adq``) are each taken from their highest-confidence
+    read (a tie keeps ``kept``'s) when the result, or the QR, has no ``num_doc_adq``; otherwise
+    neither hint is carried (D213).
     """
-
-    present = {name for name in (*REQUIRED, "num_doc_adq") if kept.value(name) is not None} | qr_names
-    filled: dict[str, Field] = {}
-    for name in REQUIRED:
-        if name not in _SERIE_NUMERO and name not in present:
-            filled.update(_first_fill(name, kept, others, present))
-    if present.isdisjoint(_SERIE_NUMERO):
-        for other in others:
-            if other.value("serie") is not None and other.value("numero") is not None:
-                filled.update(serie=other.fields["serie"], numero=other.fields["numero"])
-                break
-    if not filled:
+    taken: dict[str, Field] = {}
+    groups = [(name,) for name in REQUIRED if name not in _SERIE_NUMERO] + [_SERIE_NUMERO]
+    buyer = kept.value("num_doc_adq")
+    for names in groups:
+        if qr_names.isdisjoint(names):
+            read = _best_read(names, kept, others, buyer)
+            if read is not kept:
+                taken.update({name: read.fields[name] for name in names})
+                brings_buyer = names == ("ruc_emisor",) and buyer is None and "num_doc_adq" not in qr_names
+                if brings_buyer and read.value("num_doc_adq") is not None:
+                    taken.update({name: read.fields[name] for name in _BUYER if name in read.fields})
+    fields = _with_buyer_hints({**kept.fields, **taken}, kept, others, "num_doc_adq" in qr_names)
+    if fields == kept.fields:
         return kept
-    return replace(kept, fields={**kept.fields, **filled})
+    return replace(kept, fields=fields)
 
 
-def _first_fill(name: str, kept: Reading, others: Sequence[Reading], present: set[str]) -> dict[str, Field]:
-    """Return the fields the first fitting read in ``others`` gives for ``name`` (D200).
+def _with_buyer_hints(
+    fields: dict[str, Field], kept: Reading, others: Sequence[Reading], qr_has_buyer: bool
+) -> dict[str, Field]:
+    """Return ``fields`` with the buyer hints dropped, or taken from their best read (D213)."""
+    without_hints = {name: field for name, field in fields.items() if name not in _BUYER_HINTS}
+    if "num_doc_adq" in fields or qr_has_buyer:
+        return without_hints
+    for name in _BUYER_HINTS:
+        read = _best_read((name,), kept, others, None)
+        if read.value(name) is not None:
+            without_hints[name] = read.fields[name]
+    return without_hints
 
-    An issuer comes with that read's buyer when no buyer is ``present``, so D199 sees both.
+
+def _best_read(
+    names: tuple[str, ...], kept: Reading, others: Sequence[Reading], buyer: str | None
+) -> Reading:
+    """Return the read scoring highest on ``names``, ``kept`` unless another is strictly better (D212).
+
+    A ``ruc_emisor`` equal to ``buyer`` is not a candidate from another read (D199), and a printed
+    ``ruc_emisor`` in ``kept`` is never replaced: only a missing or repaired one is.
     """
+    best, best_score = kept, _score(names, kept)
+    if names == ("ruc_emisor",) and best_score[0] == _PRINTED:
+        # A printed issuer is kept: another pass's RUC may be the buyer's (own) RUC read as the issuer.
+        return kept
     for other in others:
-        if (field := _fillable(name, kept, other)) is None:
+        if names == ("ruc_emisor",) and other.value("ruc_emisor") == buyer:
             continue
-        if name == "ruc_emisor" and "num_doc_adq" not in present and other.value("num_doc_adq") is not None:
-            return {name: field, "num_doc_adq": other.fields["num_doc_adq"]}
-        return {name: field}
-    return {}
+        if (score := _score(names, other)) > best_score:
+            best, best_score = other, score
+    return best
 
 
-def _fillable(name: str, kept: Reading, other: Reading) -> Field | None:
-    """Return ``other``'s field ``name`` when it may fill ``kept``'s gap, else ``None`` (D200)."""
-    value = other.value(name)
-    if value is None or (name == "ruc_emisor" and value == kept.value("num_doc_adq")):
-        return None
-    return other.fields[name]
+def _score(names: tuple[str, ...], read: Reading) -> tuple[int, float]:
+    """Return how ``read`` ranks on ``names``: printed before inferred, then the lowest confidence.
+
+    ``_MISSING`` when one of ``names`` is absent, so a repaired RUC never displaces a printed one (D212).
+    """
+    if any(read.value(name) is None for name in names):
+        return _MISSING
+    fields = [read.fields[name] for name in names]
+    rank = _INFERRED if any(field.flag == "inferred" for field in fields) else _PRINTED
+    return rank, min(field.confidence for field in fields)

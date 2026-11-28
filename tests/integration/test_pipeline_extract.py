@@ -35,8 +35,18 @@ from psycopg_pool import AsyncConnectionPool
 from invoicebot.channels.base import AttachmentKind
 from invoicebot.channels.buttons import button_id
 from invoicebot.config.loader import load_config
-from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr
-from invoicebot.extract.fields import FULL_CONFIDENCE, REQUIRED, Field, Reading, reading_to_json
+from invoicebot.config.models import Extraction, MediaLimits, MediaMaxBytes, Ocr, Routing, RoutingRule
+from invoicebot.extract.fields import (
+    BUYER_NAME,
+    FULL_CONFIDENCE,
+    REQUIRED,
+    UNCHECKED_BUYER_RUC,
+    Field,
+    Flag,
+    Reading,
+    Source,
+    reading_to_json,
+)
 from invoicebot.extract.qr_payload import parse_qr_payload
 from invoicebot.extract.validate import is_valid_ruc
 from invoicebot.gaps.kinds import fingerprint
@@ -338,14 +348,26 @@ async def _run_handler(
     helper_timeout_s: float = HELPER_TIMEOUT_S,
     media: MediaLimits = MEDIA,
     helper_prefix: Sequence[str] = (),
+    routing: Routing | None = None,
 ) -> None:
     """Run the extract handler once for invoice_id."""
     await make_extract_handler(
         pool,
-        ExtractInputs(_config(helper_timeout_s=helper_timeout_s), media, RULES_PATH, frozenset({WORK_RUC})),
+        ExtractInputs(
+            _config(helper_timeout_s=helper_timeout_s),
+            media,
+            RULES_PATH,
+            frozenset({WORK_RUC}),
+            routing or _no_routing(),
+        ),
         _gap_context(),
         helper_prefix=helper_prefix,
     )(_job(invoice_id))
+
+
+def _no_routing() -> Routing:
+    """Return routing rules that name no buyer, for tests that match none (D213)."""
+    return Routing(confirm_mode="auto", rules=[], unmatched="ask")
 
 
 def _ocr_reading() -> Reading:
@@ -377,6 +399,7 @@ async def _run_handler_with_reading(
     invoice_id: int,
     reading: Reading,
     monkeypatch: pytest.MonkeyPatch,
+    routing: Routing | None = None,
 ) -> None:
     """Run the extract handler once with ``reading`` in place of the helper's output (R-2.5)."""
     result = _HelperResult(
@@ -391,7 +414,7 @@ async def _run_handler_with_reading(
         return result
 
     monkeypatch.setattr(extract_module, "run_extract_helper", _fake_run_extract_helper)
-    await _run_handler(pool, invoice_id)
+    await _run_handler(pool, invoice_id, routing=routing)
 
 
 async def _seed_padron_row(pool: AsyncConnectionPool[AsyncConnection[Any]], razon_social: str) -> None:
@@ -401,6 +424,113 @@ async def _seed_padron_row(pool: AsyncConnectionPool[AsyncConnection[Any]], razo
             "INSERT INTO padron (ruc, razon_social, estado, condicion) VALUES (%s, %s, %s, %s)",
             (int(SYNTHETIC_RUC), razon_social, "ACTIVO", "HABIDO"),
         )
+
+
+#: The synthetic buyer a routing rule names, its padrón name and a near misread of its RUC (D213).
+ROUTING_BUYER_RUC = "20000000044"
+ROUTING_BUYER_NAME = "COMERCIAL ANDINA SAC"
+MISREAD_BUYER_RUC = "20000000047"
+
+
+def _buyer_routing() -> Routing:
+    """Return routing rules that name ROUTING_BUYER_RUC and one non-RUC buyer (D213)."""
+    return Routing(
+        confirm_mode="auto",
+        rules=[RoutingRule(id="BR-R02", when={"num_doc_adq": [ROUTING_BUYER_RUC, "12345678"]}, flow="work")],
+        unmatched="ask",
+    )
+
+
+def _reading_with_buyer_hints(buyer_name: str) -> Reading:
+    """Return the fake OCR reading with an unchecked buyer RUC and a buyer name, no buyer (D213)."""
+    reading = _ocr_reading()
+    kept = {n: f for n, f in reading.fields.items() if n not in {"num_doc_adq", "tipo_doc_adq"}}
+    hints = {
+        UNCHECKED_BUYER_RUC: Field(MISREAD_BUYER_RUC, "ocr", 0.9),
+        BUYER_NAME: Field(buyer_name, "ocr", 0.9),
+    }
+    return replace(reading, fields={**kept, **hints})
+
+
+async def _seed_buyer_padron_row(pool: AsyncConnectionPool[AsyncConnection[Any]]) -> None:
+    """Seed the routing buyer in the padrón (D213)."""
+    async with pool.connection() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO padron (ruc, razon_social, estado, condicion) VALUES (%s, %s, %s, %s)",
+            (int(ROUTING_BUYER_RUC), ROUTING_BUYER_NAME, "ACTIVO", "HABIDO"),
+        )
+
+
+async def test_near_buyer_ruc_and_close_name_store_the_routing_ruc(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D213: a near unchecked buyer RUC with a close name stores the routing RUC as an inferred buyer."""
+    await _seed_buyer_padron_row(db_pool)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"buyer{PNG}"))
+
+    await _run_handler_with_reading(
+        db_pool,
+        invoice_id,
+        _reading_with_buyer_hints("COMERCIAL ANDINA S.A.C."),
+        monkeypatch,
+        _buyer_routing(),
+    )
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+    assert reading is not None
+    buyer = reading.fields["num_doc_adq"]
+    assert (buyer.value, buyer.source, buyer.flag) == (ROUTING_BUYER_RUC, "ocr", "inferred")
+    assert UNCHECKED_BUYER_RUC not in reading.fields
+
+
+async def test_near_buyer_ruc_and_far_name_store_no_buyer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D213: a near unchecked buyer RUC with a far name stores no buyer."""
+    await _seed_buyer_padron_row(db_pool)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"far{PNG}"))
+
+    await _run_handler_with_reading(
+        db_pool,
+        invoice_id,
+        _reading_with_buyer_hints("FERRETERIA LOS PINOS"),
+        monkeypatch,
+        _buyer_routing(),
+    )
+
+    async with db_pool.connection() as conn:
+        reading = await load_reading(conn, invoice_id)
+    assert reading is not None
+    assert "num_doc_adq" not in reading.fields
+    assert BUYER_NAME not in reading.fields
+    assert UNCHECKED_BUYER_RUC not in reading.fields
+
+
+async def test_partial_reading_with_buyer_hints_stores_the_matched_buyer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D213: a BR-E01 reading is matched before it is saved, so the user's edit routes on the buyer."""
+    await _seed_buyer_padron_row(db_pool)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"partial{PNG}"))
+    reading = _reading_with_buyer_hints("COMERCIAL ANDINA S.A.C.")
+    partial = replace(reading, fields={n: f for n, f in reading.fields.items() if n != "total"})
+
+    await _run_handler_with_reading(db_pool, invoice_id, partial, monkeypatch, _buyer_routing())
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_row(conn, invoice_id)
+        stored = await load_reading(conn, invoice_id)
+    assert state == ("EXTRACT_FAILED", "BR-E01")
+    assert stored is not None
+    assert stored.value("num_doc_adq") == ROUTING_BUYER_RUC
+    assert BUYER_NAME not in stored.fields
 
 
 def _record_text(record: logging.LogRecord) -> str:
@@ -707,6 +837,80 @@ async def test_extraction_logs_carry_no_razon_social(
     assert leaks == []
 
 
+def _with_issuer_flag(reading: Reading, flag: Flag | None, ruc: str = SYNTHETIC_RUC) -> Reading:
+    """Return ``reading`` whose issuer RUC is ``ruc`` carrying ``flag`` (D212)."""
+    issuer = Field(ruc, "ocr", FULL_CONFIDENCE, flag)
+    return replace(reading, fields={**reading.fields, "ruc_emisor": issuer})
+
+
+async def test_inferred_issuer_in_the_padron_routes_on_with_its_razon_social(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, R-2.4: a repaired issuer RUC the padrón holds keeps its flag and gets the padrón name."""
+    await _seed_padron_row(db_pool, PADRON_RAZON_SOCIAL)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"known{PNG}"))
+
+    await _run_handler_with_reading(
+        db_pool, invoice_id, _with_issuer_flag(_ocr_reading(), "inferred"), monkeypatch
+    )
+
+    async with db_pool.connection() as conn:
+        state, _ = await _invoice_row(conn, invoice_id)
+        reading = await load_reading(conn, invoice_id)
+
+    assert state == "ROUTING"
+    assert reading is not None
+    assert reading.fields["ruc_emisor"].flag == "inferred"
+    assert reading.fields["razon_social"].value == PADRON_RAZON_SOCIAL
+
+
+async def test_inferred_issuer_missing_from_the_padron_is_dropped_to_br_e01(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: a repaired issuer RUC the padrón lacks leaves the reading and is listed missing."""
+    invoice_id, profile_id = await _invoice_with_photo(
+        db_pool, _write_blank_photo(tmp_path / f"unknown{PNG}")
+    )
+
+    await _run_handler_with_reading(
+        db_pool, invoice_id, _with_issuer_flag(_ocr_reading(), "inferred"), monkeypatch
+    )
+
+    async with db_pool.connection() as conn:
+        state, rule_id = await _invoice_row(conn, invoice_id)
+        stored = await load_reading(conn, invoice_id)
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+
+    assert (state, rule_id) == ("EXTRACT_FAILED", "BR-E01")
+    assert stored is not None
+    assert "ruc_emisor" not in stored.fields
+    assert stored.missing_required() == ("ruc_emisor",)
+    assert messages == [unreadable_text(invoice_id, stored)]
+    read_part, missing_part = messages[0].split("❓ Falta: ")
+    assert missing_part.startswith("RUC del emisor")
+    assert "RUC del emisor" not in read_part
+
+
+async def test_unflagged_issuer_missing_from_the_padron_still_routes_on(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212: an issuer RUC read as printed is kept whether or not the padrón holds it."""
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"printed{PNG}"))
+
+    await _run_handler_with_reading(db_pool, invoice_id, _ocr_reading(), monkeypatch)
+
+    async with db_pool.connection() as conn:
+        state, _ = await _invoice_row(conn, invoice_id)
+
+    assert state == "ROUTING"
+
+
 async def test_qr_and_printed_text_confirm_each_other(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
@@ -809,6 +1013,70 @@ async def test_partial_reading_sends_br_e01_naming_the_fields(
             {"id": button_id(invoice_id, "cancel"), "title": BUTTON_CANCEL},
         ]
     ]
+
+
+def _partial_with_numero(source: Source, confidence: float) -> Reading:
+    """Return :func:`_partial_ocr_reading` with ``numero`` read from ``source`` at ``confidence`` (D212)."""
+    reading = _partial_ocr_reading()
+    numero = replace(reading.fields["numero"], source=source, confidence=confidence)
+    return replace(reading, fields={**reading.fields, "numero": numero})
+
+
+async def _br_e01_text(
+    pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    reading: Reading,
+) -> str:
+    """Run the handler on ``reading`` and return the one BR-E01 text it queued (D212)."""
+    invoice_id, profile_id = await _invoice_with_photo(pool, _write_blank_photo(tmp_path / f"doubt{PNG}"))
+    await _run_handler_with_reading(pool, invoice_id, reading, monkeypatch)
+    async with pool.connection() as conn:
+        messages = await _outbox_rows(conn, profile_id, "BR-E01")
+    assert len(messages) == 1
+    return messages[0]
+
+
+async def test_partial_reading_names_a_low_confidence_printed_field_as_doubtful(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: a número read by OCR at 0.18 is on the doubtful line, not on the read line."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("ocr", 0.18))
+
+    read_line = next(line for line in text.splitlines() if line.startswith("✅ Leído: "))
+    assert "⚠️ Dudoso (revísalo): número " in text
+    assert "número" not in read_line
+    assert "serie" in read_line
+
+
+async def test_partial_reading_with_every_field_above_the_threshold_has_no_doubtful_line(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D212, BR-E01: fields read at or above the threshold keep today's text, read line then missing line."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("ocr", 0.8))
+
+    lines = text.splitlines()
+    read_at = next(index for index, line in enumerate(lines) if line.startswith("✅ Leído: "))
+    assert "Dudoso" not in text
+    assert "número" in lines[read_at]
+    assert lines[read_at + 1] == "❓ Falta: fecha, total"
+
+
+@pytest.mark.parametrize("confidence", [1.0, 0.5])
+async def test_partial_reading_never_doubts_a_qr_field(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    confidence: float,
+) -> None:
+    """D212, BR-E01: a field from the QR is never doubtful, at 1.0 or below the threshold."""
+    text = await _br_e01_text(db_pool, tmp_path, monkeypatch, _partial_with_numero("qr", confidence))
+
+    assert "Dudoso" not in text
 
 
 async def test_partial_reading_is_stored_for_the_answers(

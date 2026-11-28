@@ -284,14 +284,18 @@ MESSAGES: dict[str, str] = {
 }
 
 #: BR-E01's text when the reading kept some required fields: the fields read, with
-#: their values, and the lines to type for the ones still missing (D188).
+#: their values, any read below the review threshold (D212), and the lines to type for
+#: the ones still missing (D188).
 UNREADABLE_PARTIAL = (
     "Leí parte del comprobante #{id}.\n"
     "✅ Leído: {read_desc}\n"
+    "{doubtful_line}"
     "❓ Falta: {missing_desc}\n"
     "Envíame otra foto más cerca y con buena luz, o escríbeme solo lo que falta, un dato por línea:\n"
     "{missing_lines}"
 )
+#: BR-E01's ``{doubtful_line}``: the printed fields read below the review threshold (D212).
+UNREADABLE_DOUBTFUL_LINE = "⚠️ Dudoso (revísalo): {doubtful_desc}\n"
 
 #: BR-F07's ``{gap_line}`` when a PORTAL_MISSING gap is linked to the invoice (spec 06 §1).
 GAP_LINE_PORTAL = "Ya avisé para agregar este portal; cuando esté listo lo reintento solo."
@@ -495,6 +499,9 @@ BUYER_DESC: dict[str, str] = {
 }
 _OTHER_BUYER_DESC = "del documento {num}"
 _NO_BUYER_DESC = "de ningún cliente (boleta sin datos)"
+#: A factura always names its buyer, so one without a buyer is a buyer OCR could not read (D213).
+_FACTURA_TIPO = "01"
+_UNREAD_BUYER_DESC = "de un cliente que no pude leer"
 
 
 def tipo_phrase(tipo: str) -> str:
@@ -516,14 +523,14 @@ def fields_desc(names: Sequence[str]) -> str:
     return ", ".join(FIELD_DESC.get(name, name) for name in names)
 
 
-def buyer_desc(tipo_doc: str, num_doc: str) -> str:
-    """Return ``{buyer_desc}`` for BR-R03 and BR-R07.
+def buyer_desc(tipo: str, tipo_doc: str, num_doc: str) -> str:
+    """Return ``{buyer_desc}`` for BR-R03 and BR-R07; a factura with no buyer was misread (D213).
 
     shortcut: the spec adds the buyer's razón social after a RUC; that needs the padrón,
     which arrives in ``read-more``.
     """
     if not num_doc:
-        return _NO_BUYER_DESC
+        return _UNREAD_BUYER_DESC if tipo == _FACTURA_TIPO else _NO_BUYER_DESC
     template = BUYER_DESC.get(tipo_doc, _OTHER_BUYER_DESC)
     return template.format(num=num_doc)
 

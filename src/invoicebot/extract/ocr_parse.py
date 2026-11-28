@@ -14,8 +14,12 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 
 from invoicebot.extract.fields import (
+    BUYER_NAME,
     MAX_PRINTED_URL_CHARS,
     PRINTED_URL_PATH_CHARS,
+    RUC_DOCUMENT_TYPE,
+    RUC_LENGTH,
+    UNCHECKED_BUYER_RUC,
     Field,
     Flag,
     Reading,
@@ -34,11 +38,16 @@ from invoicebot.sunat_origins import is_sunat_host
 
 WORD_SEPARATOR = " "
 LINE_SEPARATOR = "\n"
-RUC_DOCUMENT_TYPE = "6"
+#: Longest buyer name kept, so a long OCR line cannot fill a field (D213).
+MAX_BUYER_NAME_CHARS = 100
+#: Fewest letters a buyer name needs, so a lone dash or digit string is no name (D213).
+MIN_BUYER_NAME_LETTERS = 3
 #: Lines after a buyer label whose RUC still belongs to the buyer (D198).
 BUYER_LINES = 2
 SERIE_FIX_LENGTH = 3
 SERIE_DIGIT_FIXES = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1"}
+#: OCR letters and marks read in place of a RUC digit, applied after upper-casing (D212).
+RUC_DIGIT_FIXES = {"O": "0", "U": "0", "D": "0", "Q": "0", "I": "1", "L": "1", "|": "1", "/": "7"}
 #: Years a date misread as a four-digit serie can start with (D211).
 DATE_YEARS = range(1900, 2100)
 #: Digits of the month and day a date misread as a número carries, ``mmdd`` (D211).
@@ -48,6 +57,8 @@ AMOUNT_SEPARATORS = frozenset(".,")
 AMOUNT_DECIMALS = 2
 AMOUNT_SEPARATOR_OFFSET = AMOUNT_DECIMALS + 1
 AMOUNT_SEPARATORS_PATTERN = re.compile(r"[.,]")
+#: A letter or digit before a buyer label means the label does not start its line (D213).
+_WORD_CHAR = re.compile(r"\w")
 NO_CONFIDENCE = 0.0
 #: Most OCR text characters parsed, so a huge read cannot exhaust the helper (R-9.2).
 MAX_OCR_TEXT_CHARS = 64 * 1024
@@ -160,50 +171,153 @@ def _confidence(spans: tuple[_WordSpan, ...], start: int, end: int) -> float:
     return sum(overlapping) / len(overlapping) if overlapping else NO_CONFIDENCE
 
 
+@dataclass(frozen=True)
+class _RucMatch:
+    """One valid RUC read from the text; ``repaired`` means OCR letters became digits (D212)."""
+
+    value: str
+    confidence: float
+    is_buyer: bool
+    repaired: bool
+
+    def to_field(self) -> Field:
+        """Return the RUC as an OCR field, flagged ``inferred`` when it was repaired (D212)."""
+        return _ocr_field(self.value, self.confidence, flag="inferred" if self.repaired else None)
+
+
 def _add_rucs(
     fields: dict[str, Field],
     searched: str,
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> None:
-    """Add the issuer and buyer RUCs; a RUC under a buyer label is never the issuer's (R-2.4, D198)."""
+    """Add the issuer and buyer RUCs; a RUC under a buyer label is never the issuer's (R-2.4, D198).
+
+    A RUC repaired from OCR letters is flagged ``inferred`` (D212).
+    """
     found = _ruc_matches(searched, spans, rules)
-    buyers = [(value, confidence) for value, confidence, is_buyer in found if is_buyer]
-    others = [(value, confidence) for value, confidence, is_buyer in found if not is_buyer]
+    buyers = [match for match in found if match.is_buyer]
+    others = [match for match in found if not match.is_buyer]
     if others:
-        fields["ruc_emisor"] = _ocr_field(*others[0])
+        fields["ruc_emisor"] = others[0].to_field()
     buyer = buyers[0] if buyers else (others[1] if len(others) > 1 else None)
     if buyer is not None:
-        fields["num_doc_adq"] = _ocr_field(*buyer)
-        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer[1], flag="inferred")
+        fields["num_doc_adq"] = buyer.to_field()
+        fields["tipo_doc_adq"] = _ocr_field(RUC_DOCUMENT_TYPE, buyer.confidence, flag="inferred")
+    else:
+        fields.update(_buyer_hints(searched, spans, rules))
 
 
-def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
-    """Return the line numbers of buyer-label lines and the :data:`BUYER_LINES` lines after each (D198)."""
+def _buyer_hints(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> dict[str, Field]:
+    """Return the buyer hints OCR can give when no valid buyer RUC was read (D213).
+
+    ``num_doc_adq_unchecked`` is the buyer-line RUC that fails its check digit and ``nombre_adq``
+    the text after the first buyer label. Both are flagged ``inferred``.
+    """
+    hints: dict[str, Field] = {}
+    unchecked = _read_unchecked_buyer_ruc(searched, spans, rules)
+    if unchecked is not None:
+        hints[UNCHECKED_BUYER_RUC] = unchecked
+    name = _read_buyer_name(searched, spans, rules)
+    if name is not None:
+        hints[BUYER_NAME] = name
+    return hints
+
+
+def _read_unchecked_buyer_ruc(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> Field | None:
+    """Return the first buyer-line RUC of 11 digits that fails :func:`is_valid_ruc`, or None (D213)."""
+    buyer_lines = _buyer_line_numbers(searched, rules, starting_line=False)
+    for pattern in rules.ruc:
+        for match in _matches(pattern, searched):
+            repair = _repair_ruc(match.group("value"))
+            line = searched.count(LINE_SEPARATOR, 0, match.start("value"))
+            if repair is None or line not in buyer_lines or is_valid_ruc(repair[0]):
+                continue
+            confidence = _confidence(spans, *match.span("value"))
+            return _ocr_field(repair[0], confidence, flag="inferred")
+    return None
+
+
+def _read_buyer_name(
+    searched: str,
+    spans: tuple[_WordSpan, ...],
+    rules: ParsingRules,
+) -> Field | None:
+    """Return the text after the first buyer label that holds a name, or None (D213).
+
+    The name is capped at :data:`MAX_BUYER_NAME_CHARS` and needs
+    :data:`MIN_BUYER_NAME_LETTERS` letters.
+    """
+    line_start = 0
+    for line in searched.split(LINE_SEPARATOR):
+        label = rules.buyer_label.search(line)
+        if label is not None:
+            rest = line[label.end() :]
+            name = rest.strip()[:MAX_BUYER_NAME_CHARS].strip()
+            if sum(char.isalpha() for char in name) >= MIN_BUYER_NAME_LETTERS:
+                start = line_start + label.end() + len(rest) - len(rest.lstrip())
+                confidence = _confidence(spans, start, start + len(name))
+                return _ocr_field(name, confidence, flag="inferred")
+        line_start += len(line) + len(LINE_SEPARATOR)
+    return None
+
+
+def _buyer_line_numbers(searched: str, rules: ParsingRules, *, starting_line: bool) -> set[int]:
+    """Return the line numbers of buyer-label lines and the :data:`BUYER_LINES` lines after each (D198).
+
+    With ``starting_line``, only a label that starts its line counts: a mid-line ``CLIENTE:``
+    (``ATENCION AL CLIENTE:``) may give D213's hints but never makes a valid RUC the buyer.
+    """
     numbers: set[int] = set()
     for number, line in enumerate(searched.split(LINE_SEPARATOR)):
-        if rules.buyer_label.search(line):
+        label = rules.buyer_label.search(line)
+        if label is not None and not (starting_line and _WORD_CHAR.search(line, 0, label.start())):
             numbers.update(range(number, number + BUYER_LINES + 1))
     return numbers
+
+
+def _repair_ruc(raw: str) -> tuple[str, bool] | None:
+    """Return a RUC candidate with OCR letters mapped back to digits and whether that changed it (D212).
+
+    Returns ``None`` when the result is not 11 digits.
+    """
+    upper = raw.upper()
+    fixed = "".join(RUC_DIGIT_FIXES.get(char, char) for char in upper)
+    if len(fixed) != RUC_LENGTH or not fixed.isdigit():
+        return None
+    return fixed, fixed != upper
 
 
 def _ruc_matches(
     searched: str,
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
-) -> list[tuple[str, float, bool]]:
-    """Return the distinct valid RUCs with a buyer-line flag, anchored matches first, each in text order."""
-    buyer_lines = _buyer_line_numbers(searched, rules)
-    found: list[tuple[str, float, bool]] = []
+) -> list[_RucMatch]:
+    """Return the distinct valid RUCs with a buyer-line flag, anchored matches first, each in text order.
+
+    A keyword-anchored match is repaired before its check digit is tested (D212).
+    """
+    buyer_lines = _buyer_line_numbers(searched, rules, starting_line=True)
+    found: list[_RucMatch] = []
     seen: set[str] = set()
     for pattern in rules.ruc:
         for match in _matches(pattern, searched):
-            value = match.group("value")
-            if value in seen or not is_valid_ruc(value):
+            repair = _repair_ruc(match.group("value"))
+            if repair is None or repair[0] in seen or not is_valid_ruc(repair[0]):
                 continue
+            value, repaired = repair
             seen.add(value)
             line = searched.count(LINE_SEPARATOR, 0, match.start("value"))
-            found.append((value, _confidence(spans, *match.span("value")), line in buyer_lines))
+            confidence = _confidence(spans, *match.span("value"))
+            found.append(_RucMatch(value, confidence, line in buyer_lines, repaired))
     return found
 
 
@@ -286,9 +400,12 @@ def _read_date(
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> Field | None:
-    """Return the first date the shared QR date parser accepts, as an ISO string (R-2.3)."""
+    """Return the first date the shared QR date parser accepts, as an ISO string (R-2.3).
+
+    Spaces OCR put around a separator are dropped before parsing (D212).
+    """
     for match in _matches(rules.date, searched):
-        value = match.group("value")
+        value = "".join(match.group("value").split())
         normalized = value.replace("-", "/") if value[2] == "-" else value
         iso = parse_date(normalized)
         if iso is not None:

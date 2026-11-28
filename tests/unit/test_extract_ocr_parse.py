@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from invoicebot.extract.ocr import OcrText, OcrWord
-from invoicebot.extract.ocr_parse import parse_ocr
+from invoicebot.extract.ocr_parse import MAX_BUYER_NAME_CHARS, parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -23,6 +23,9 @@ WRONG_CHECK_DIGIT_RUC = "20000000002"
 DEFAULT_CONFIDENCE = 0.95
 LONG_FILLER = "A" * 100_000
 RULE_MATCH_CAP = 50
+RUC_CHECK_MODULUS = 11
+RUC_CHECK_DIGIT_WRAP = 10
+LONG_NAME_LETTERS = 150
 LONG_URL = "https://portal.example.pe/" + "a" * 224
 
 
@@ -322,6 +325,24 @@ def test_parse_ocr_dash_date_becomes_iso(rules: ParsingRules) -> None:
 
 
 @pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        pytest.param("FECHA DE EMISION: 29- 10- 2026 01: 32 PM", "2026-10-29", id="spaced-dd-mm-yyyy"),
+        pytest.param("FECHA: 2026 -10- 29", "2026-10-29", id="spaced-iso"),
+        pytest.param("FECHA: 29-10-2026", "2026-10-29", id="unspaced"),
+        pytest.param("FECHA: 29 10 2026", None, id="no-separator"),
+    ],
+)
+def test_parse_ocr_date_with_spaces_around_separators(
+    rules: ParsingRules, line: str, expected: str | None
+) -> None:
+    """D212: spaces around a date separator are tolerated; a date with no separator is not read."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", line), rules)
+
+    assert fields.get("fecha_emision") == expected
+
+
+@pytest.mark.parametrize(
     ("lines", "field", "misread"),
     [
         pytest.param(("TOTAL ITEMS 3", "125.50"), "total", "3125.50", id="total-across-lines"),
@@ -570,3 +591,117 @@ def test_parse_ocr_labelled_buyer_wins_over_a_second_unlabelled_ruc(rules: Parsi
 
     assert fields["ruc_emisor"] == SYNTHETIC_RUC
     assert fields["num_doc_adq"] == BUYER_RUC
+
+
+def test_parse_ocr_ruc_with_letter_o_is_repaired_and_inferred(rules: ParsingRules) -> None:
+    """D212: letters O read in place of zeros are repaired and the RUC is flagged inferred."""
+    field = parse_ocr(_ocr("RUC: 2OOOOOOOOO1"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == SYNTHETIC_RUC
+    assert field.flag == "inferred"
+
+
+def test_parse_ocr_ruc_with_slash_reads_as_seven(rules: ParsingRules) -> None:
+    """D212: a slash read in place of a 7 is repaired and the RUC is flagged inferred."""
+    field = parse_ocr(_ocr("RUC: 200000000/9"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == "20000000079"
+    assert field.flag == "inferred"
+
+
+def test_parse_ocr_repaired_ruc_failing_check_digit_is_not_read(rules: ParsingRules) -> None:
+    """D212: a repaired RUC that fails the check digit is dropped."""
+    assert "ruc_emisor" not in _fields(_ocr("RUC: 2OOOOOOOOO2"), rules)
+
+
+def test_parse_ocr_clean_ruc_is_not_flagged(rules: ParsingRules) -> None:
+    """D212: a RUC read as 11 digits is unchanged and carries no flag."""
+    field = parse_ocr(_ocr(f"RUC: {SYNTHETIC_RUC}"), rules).reading.fields["ruc_emisor"]
+
+    assert field.value == SYNTHETIC_RUC
+    assert field.flag is None
+
+
+def test_parse_ocr_bare_ruc_with_letters_is_not_repaired(rules: ParsingRules) -> None:
+    """D212: without the RUC keyword a letter-bearing string is never repaired."""
+    assert "ruc_emisor" not in _fields(_ocr("2OOOOOOOOO1"), rules)
+
+
+def test_parse_ocr_repaired_ruc_under_buyer_label_is_the_buyer(rules: ParsingRules) -> None:
+    """D212: a repaired RUC under CLIENTE goes to num_doc_adq, flagged inferred."""
+    fields = parse_ocr(_ocr("CLIENTE: EMPRESA SAC", "RUC: 2OOOOOOOOO1"), rules).reading.fields
+
+    assert "ruc_emisor" not in fields
+    assert fields["num_doc_adq"].value == SYNTHETIC_RUC
+    assert fields["num_doc_adq"].flag == "inferred"
+
+
+def _with_check_digit(body: str) -> str:
+    """Return the synthetic ten-digit ``body`` with the RUC check digit appended (D213)."""
+    weights = (5, 4, 3, 2, 7, 6, 5, 4, 3, 2)
+    total = sum(int(digit) * weight for digit, weight in zip(body, weights, strict=True))
+    return body + str((RUC_CHECK_MODULUS - total % RUC_CHECK_MODULUS) % RUC_CHECK_DIGIT_WRAP)
+
+
+@pytest.mark.parametrize(
+    "line",
+    ["XX AN CLIENTE: RK EXPORT PERU SAC", "CLIENTE: X", "Señor(es): X", "SR.: X", "ADQUIRIENTE; X"],
+)
+def test_buyer_label_matches_clients_after_text_and_line_start_forms(rules: ParsingRules, line: str) -> None:
+    """D213: CLIENTE may follow other text; the existing line-start forms still match."""
+    assert rules.buyer_label.search(line)
+
+
+@pytest.mark.parametrize("line", ["MI CLIENTE", "XX SR.: EMPRESA"])
+def test_buyer_label_refuses_unpunctuated_cliente_and_mid_line_sr(rules: ParsingRules, line: str) -> None:
+    """D213: CLIENTE needs its punctuation and SR stays at the line start."""
+    assert not rules.buyer_label.search(line)
+
+
+def test_parse_ocr_failed_buyer_ruc_keeps_unchecked_ruc_and_name(rules: ParsingRules) -> None:
+    """D213: a buyer RUC failing the check digit and the name are kept as inferred hints."""
+    fields = parse_ocr(
+        _ocr("CLIENTE: RC EXPORT PLRU SAC", f"RUC: {WRONG_CHECK_DIGIT_RUC}"), rules
+    ).reading.fields
+
+    assert "num_doc_adq" not in fields
+    assert fields["num_doc_adq_unchecked"].value == WRONG_CHECK_DIGIT_RUC
+    assert fields["num_doc_adq_unchecked"].flag == "inferred"
+    assert fields["nombre_adq"].value == "RC EXPORT PLRU SAC"
+    assert fields["nombre_adq"].flag == "inferred"
+    assert fields["nombre_adq"].source == "ocr"
+
+
+def test_parse_ocr_valid_buyer_ruc_adds_no_hints(rules: ParsingRules) -> None:
+    """D213: a buyer RUC that passes the check digit gives num_doc_adq and neither hint."""
+    valid = _with_check_digit("2012345678")
+    fields = _fields(_ocr("CLIENTE: EMPRESA SAC", f"RUC: {valid}"), rules)
+
+    assert fields["num_doc_adq"] == valid
+    assert "num_doc_adq_unchecked" not in fields
+    assert "nombre_adq" not in fields
+
+
+def test_parse_ocr_buyer_label_without_a_name_gives_no_nombre(rules: ParsingRules) -> None:
+    """D213: CLIENTE: - holds fewer than three letters, so there is no nombre_adq."""
+    assert "nombre_adq" not in _fields(_ocr("CLIENTE: -"), rules)
+
+
+def test_parse_ocr_long_buyer_name_is_cut(rules: ParsingRules) -> None:
+    """D213: a 150-letter name is cut to MAX_BUYER_NAME_CHARS characters."""
+    fields = _fields(_ocr("CLIENTE: " + "A" * LONG_NAME_LETTERS), rules)
+
+    assert len(fields["nombre_adq"]) == MAX_BUYER_NAME_CHARS
+
+
+def test_parse_ocr_mid_line_cliente_label_does_not_make_a_valid_ruc_the_buyer(rules: ParsingRules) -> None:
+    """D213: a RUC under ATENCION AL CLIENTE: is not the buyer's; only a line-start label marks one."""
+    fields = _fields(_ocr("ATENCION AL CLIENTE: 0800 12345", f"RUC: {BUYER_RUC}"), rules)
+    assert fields.get("ruc_emisor") == BUYER_RUC
+    assert "num_doc_adq" not in fields
+
+
+def test_parse_ocr_buyer_name_skips_a_label_line_without_a_name(rules: ParsingRules) -> None:
+    """D213: ATENCION AL CLIENTE: with a phone number gives no name; the later CLIENTE: line does."""
+    fields = _fields(_ocr("ATENCION AL CLIENTE: 0800 12345", "CLIENTE: ACME SAC"), rules)
+    assert fields.get("nombre_adq") == "ACME SAC"

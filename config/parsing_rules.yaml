@@ -2,13 +2,13 @@
 # Every pattern is compiled with re.IGNORECASE and searched in the OCR text, one OCR line per text line.
 # A pattern's named group carries the value.
 ruc:   # in order: keyword-anchored first, then a bare 11-digit RUC
-  - 'R\.?\s?U\.?\s?C\.?\s*[:;.,!|\[\]]?\s*(?:N[°º.]?\s*)?(?P<value>\d{11})(?!\d)'
+  - 'R\.?\s?U\.?\s?C\.?\s*[:;.,!|\[\]]?\s*(?:N[°º.]?\s*)?(?P<value>[\dOUDQIL|/]{11})(?!\d)'
   - '(?<!\d)(?P<value>(?:10|15|17|20)\d{9})(?!\d)'
 tipo:
   "01": ['FACTURA\s+(?:DE\s+VENTA\s+)?ELECTR[OÓ0]NICA']
   "03": ['BOLETA\s+(?:DE\s+VENTA\s+)?ELECTR[OÓ0]NICA']
 serie_numero: '(?<![A-Z0-9])(?P<serie>[FBE][A-Z0-9]{3}|\d{4})\s*[-–—]\s*(?P<numero>\d{1,8})(?!\d)(?![-/]\d)'
-date: '(?<!\d)(?P<value>\d{2}[/-]\d{2}[/-]\d{4}|\d{4}-\d{2}-\d{2})(?!\d)'
+date: '(?<!\d)(?P<value>\d{2}\s?[/-]\s?\d{2}\s?[/-]\s?\d{4}|\d{4}\s?-\s?\d{2}\s?-\s?\d{2})(?!\d)'
 amount_gap: '[^\d\n]{0,25}(?:\d+(?:[.,]\d+)?\s*%[^\d\n]{0,25})?'
 amount_value: 'S?/?\.?\s*(?P<value>\d{1,3}(?:[.,\x20]\d{3})*[.,]\d{2}|\d+[.,]\d{2})(?!\d)'
 amounts:   # field -> keywords; the first keyword (in list order) with a match wins
@@ -25,5 +25,6 @@ amounts:   # field -> keywords; the first keyword (in list order) with a match w
 # The line just above a printed portal address; OCR may read the colon as `;` (D191, spike).
 printed_url_anchor: '\bconsult\w*\b.*\ben\s*[:;.,]?\s*$'
 # A line naming the buyer; a RUC on it or just below it is the buyer's, never the issuer's (D198).
-# The label starts the line and its separator follows, so an issuer named "EL SEÑOR DE ..." is no buyer.
-buyer_label: '^\W*(?:CLIENTE|SE[ÑN]OR(?:\(?ES\)?)?|SR(?:\(?ES\)?)?\.?|ADQUIRIENTE)\s*[:;.,!|]'
+# SEÑOR(ES) and SR(ES) start the line and the separator follows, so an issuer named "EL SEÑOR DE ..." is no buyer;
+# CLIENTE and ADQUIRIENTE may follow other text when the separator follows them (D213).
+buyer_label: '^\W*(?:SE[ÑN]OR(?:\(?ES\)?)?|SR(?:\(?ES\)?)?\.?)\s*[:;.,!|]|\b(?:CLIENTE|ADQUIRIENTE)\s*[:;.,!|]'

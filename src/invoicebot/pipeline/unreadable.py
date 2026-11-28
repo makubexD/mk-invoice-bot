@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from datetime import date
 from typing import Final
 
@@ -13,6 +13,7 @@ from invoicebot.rules.messages_es import (
     MESSAGES,
     SUMMARY_DATE_FORMAT,
     TIPO_DESC,
+    UNREADABLE_DOUBTFUL_LINE,
     UNREADABLE_PARTIAL,
     fields_desc,
 )
@@ -41,25 +42,36 @@ def edit_key(field: str) -> str:
     return field
 
 
-def unreadable_text(invoice_id: int, reading: Reading | None) -> str:
+def unreadable_text(invoice_id: int, reading: Reading | None, doubtful: Collection[str] = ()) -> str:
     """Return BR-E01's text for an invoice whose reading lacks required fields (BR-E01, D188).
 
     An invoice with no stored reading, or one that read none of the required fields, gets
     the generic text. Otherwise the text lists the required fields that were read, with
-    their values, and one ``key=value`` line to type for each one still missing.
+    their values, and one ``key=value`` line to type for each one still missing. A read
+    field named in ``doubtful`` leaves the read line for a doubtful line of its own (D212).
     """
     if reading is None:
         return MESSAGES[RULE_UNREADABLE]
-    read = tuple(name for name in REQUIRED if reading.value(name) is not None)
-    if not read:
+    kept = tuple(name for name in REQUIRED if reading.value(name) is not None)
+    if not kept:
         return MESSAGES[RULE_UNREADABLE]
+    read = tuple(name for name in kept if name not in doubtful)
+    unsure = tuple(name for name in kept if name in doubtful)
     missing = reading.missing_required()
     return UNREADABLE_PARTIAL.format(
         id=invoice_id,
-        read_desc="; ".join(f"{FIELD_DESC[name]} {_shown(reading, name)}" for name in read),
+        read_desc=_described(reading, read),
+        doubtful_line=UNREADABLE_DOUBTFUL_LINE.format(doubtful_desc=_described(reading, unsure))
+        if unsure
+        else "",
         missing_desc=fields_desc(missing),
         missing_lines="\n".join(f"{edit_key(name)}={_MISSING_EXAMPLES.get(name, '…')}" for name in missing),
     )
+
+
+def _described(reading: Reading, names: tuple[str, ...]) -> str:
+    """Return each field's name and shown value, ``; `` separated (D188)."""
+    return "; ".join(f"{FIELD_DESC[name]} {_shown(reading, name)}" for name in names)
 
 
 def _shown(reading: Reading, name: str) -> str:

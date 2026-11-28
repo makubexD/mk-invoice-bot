@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -26,12 +26,26 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 
 from invoicebot.channels.base import AttachmentKind, Button
 from invoicebot.channels.media_limits import max_bytes_for
-from invoicebot.config.models import Extraction, MediaLimits
-from invoicebot.extract.fields import Reading, reading_from_json
+from invoicebot.config.models import Extraction, MediaLimits, Routing
+from invoicebot.extract.buyer_match import match_buyer
+from invoicebot.extract.fields import (
+    BUYER_NAME,
+    REQUIRED,
+    RUC_LENGTH,
+    UNCHECKED_BUYER_RUC,
+    Reading,
+    reading_from_json,
+)
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.padron import with_padron
 from invoicebot.extract.parties import with_own_buyer
-from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
+from invoicebot.extract.validate import (
+    RULE_BAD_RUC,
+    RULE_UNSUPPORTED_TIPO,
+    check_issuer,
+    check_tipo,
+    doubtful_fields,
+)
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.helper import run_helper
@@ -43,7 +57,7 @@ from invoicebot.pipeline.handlers import (
     reject_media,
 )
 from invoicebot.pipeline.outgoing import Addressee, queue_message
-from invoicebot.pipeline.questions import unreadable_buttons
+from invoicebot.pipeline.questions import PRINTED_SOURCES, unreadable_buttons
 from invoicebot.pipeline.unreadable import RULE_UNREADABLE, unreadable_text
 from invoicebot.queue.jobs import Job, enqueue
 from invoicebot.queue.worker import HEAVY, Handler
@@ -87,6 +101,8 @@ class _Failure:
 
     rule_id: RuleId
     reading: Reading | None
+    #: The printed fields read below the review threshold, which BR-E01 names as doubtful (D212).
+    doubtful: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,13 +110,16 @@ class ExtractInputs:
     """What the extract handler reads an invoice with (S3.11, D199).
 
     ``rules_path`` is the parsing-rule file the helper reads the OCR fields with, and
-    ``own_rucs`` are the RUCs the bot files invoices for (``owner.ruc``, ``work.ruc``).
+    ``own_rucs`` are the RUCs the bot files invoices for (``owner.ruc``, ``work.ruc``), and
+    ``routing`` holds the rules whose ``num_doc_adq`` RUCs a misread buyer is matched to
+    (D213; config load has already resolved their ``{owner.ruc}`` placeholders).
     """
 
     extraction: Extraction
     media: MediaLimits
     rules_path: Path
     own_rucs: frozenset[str]
+    routing: Routing
 
 
 class _HelperResult(BaseModel):
@@ -189,10 +208,21 @@ def make_extract_handler(
             _log_outcome(job.invoice_id, result, RULE_MEDIA_REJECTED, started)
             return
 
-        rule_id, reading = _classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
+        rule_id, reading = await _drop_unknown_repair(
+            pool, *_classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
+        )
+        if reading is not None:
+            # Before the split, so a BR-E01 reading the user completes also routes on the matched buyer.
+            async with pool.connection() as conn:
+                reading = await _with_buyer_match(conn, reading, inputs.routing)
         if rule_id is not None:
             await _finish(
-                pool, job.invoice_id, invoice, _Failure(rule_id, reading), gaps, expected=EXTRACTING
+                pool,
+                job.invoice_id,
+                invoice,
+                _Failure(rule_id, reading, _doubtful(reading, inputs.extraction)),
+                gaps,
+                expected=EXTRACTING,
             )
             _log_outcome(job.invoice_id, result, rule_id, started)
             return
@@ -364,6 +394,27 @@ def _classify(
     return None, reading
 
 
+async def _drop_unknown_repair(
+    pool: Pool,
+    rule_id: RuleId | None,
+    reading: Reading | None,
+) -> tuple[RuleId | None, Reading | None]:
+    """Drop an inferred issuer RUC the padrón does not hold, so BR-E01 lists it missing (R-2.4, D212).
+
+    A repaired RUC can pass the check digit by chance; only a padrón row confirms it. A
+    wrong repair then becomes a missing field, never a wrong issuer. Any other reading,
+    and any RUC the reader found as printed, is returned unchanged.
+    """
+    field = None if reading is None else reading.fields.get("ruc_emisor")
+    if reading is None or field is None or field.flag != "inferred":
+        return rule_id, reading
+    async with pool.connection() as conn:
+        if await lookup(conn, field.value) is not None:
+            return rule_id, reading
+    kept = {name: kept_field for name, kept_field in reading.fields.items() if name != "ruc_emisor"}
+    return RULE_UNREADABLE, replace(reading, fields=kept)
+
+
 async def _with_padron(conn: AsyncConnection[Any], reading: Reading) -> Reading:
     """Return ``reading`` with its issuer's razón social from the padrón when it has one (R-2.5).
 
@@ -375,6 +426,43 @@ async def _with_padron(conn: AsyncConnection[Any], reading: Reading) -> Reading:
         return reading
     row = await lookup(conn, ruc)
     return with_padron(reading, None if row is None else row.razon_social)
+
+
+def _routing_rucs(routing: Routing) -> frozenset[str]:
+    """Return the RUC-shaped buyer values the routing rules name."""
+    return frozenset(
+        value
+        for rule in routing.rules
+        for value in rule.when.get("num_doc_adq", [])
+        if len(value) == RUC_LENGTH and value.isdigit()
+    )
+
+
+async def _with_buyer_match(conn: AsyncConnection[Any], reading: Reading, routing: Routing) -> Reading:
+    """Return ``reading`` with its buyer matched to a routing RUC by a near RUC and name (D213).
+
+    Only a reading with the unchecked buyer RUC hint looks anything up, on the caller's
+    connection, so a normal read costs no query. A routing RUC with no padrón row is skipped.
+    The hints are dropped either way, so a buyer's name read by OCR is never stored.
+    """
+    if UNCHECKED_BUYER_RUC not in reading.fields:
+        return _without_buyer_hints(reading)
+    names: dict[str, str] = {}
+    for ruc in sorted(_routing_rucs(routing)):
+        row = await lookup(conn, ruc)
+        if row is not None:
+            names[ruc] = row.razon_social
+    return _without_buyer_hints(match_buyer(reading, names))
+
+
+def _without_buyer_hints(reading: Reading) -> Reading:
+    """Return ``reading`` without D213's buyer hints, so a buyer's name is never stored."""
+    if UNCHECKED_BUYER_RUC not in reading.fields and BUYER_NAME not in reading.fields:
+        return reading
+    fields = {
+        name: field for name, field in reading.fields.items() if name not in (UNCHECKED_BUYER_RUC, BUYER_NAME)
+    }
+    return replace(reading, fields=fields)
 
 
 async def _finish(
@@ -396,7 +484,7 @@ async def _finish(
     there.
     """
     rule_id = failure.rule_id
-    text, buttons = _failure_reply(rule_id, invoice_id, failure.reading)
+    text, buttons = _failure_reply(invoice_id, failure)
     async with pool.connection() as conn, conn.transaction():
         await set_state(conn, invoice_id, FAILURE_STATE[rule_id], rule_id=rule_id, expected=expected)
         if failure.reading is not None:
@@ -445,16 +533,33 @@ def _parser_miss_sighting(invoice_id: int, reading: Reading | None) -> GapSighti
     )
 
 
-def _failure_reply(rule_id: RuleId, invoice_id: int, reading: Reading | None) -> tuple[str, list[Button]]:
+def _failure_reply(invoice_id: int, failure: _Failure) -> tuple[str, list[Button]]:
     """Return the failure rule's text and buttons (spec 06).
 
-    BR-E01 names the required fields the reading kept and the ones still missing, and
-    carries [Editar] / [Cancelar] (BR-E01, D188); the other rules keep their text and no
-    buttons.
+    BR-E01 names the required fields the reading kept, the doubtful ones apart (D212), and
+    the ones still missing, and carries [Editar] / [Cancelar] (BR-E01, D188); the other
+    rules keep their text and no buttons.
     """
-    if rule_id == RULE_UNREADABLE:
-        return unreadable_text(invoice_id, reading), unreadable_buttons(invoice_id)
-    return _message(rule_id, reading), []
+    if failure.rule_id == RULE_UNREADABLE:
+        return unreadable_text(invoice_id, failure.reading, failure.doubtful), unreadable_buttons(invoice_id)
+    return _message(failure.rule_id, failure.reading), []
+
+
+def _doubtful(reading: Reading | None, extraction: Extraction) -> tuple[str, ...]:
+    """Return the required fields read from the printed text that need review (D212).
+
+    Doubtful means what :func:`doubtful_fields` says, so BR-E01 and the summary agree.
+    """
+    if reading is None:
+        return ()
+    doubtful = doubtful_fields(reading, extraction.review_threshold, extraction.igv_rates)
+    return tuple(
+        name
+        for name in doubtful
+        if name in REQUIRED
+        and (field := reading.fields.get(name)) is not None
+        and field.source in PRINTED_SOURCES
+    )
 
 
 def _message(rule_id: RuleId, reading: Reading | None) -> str:

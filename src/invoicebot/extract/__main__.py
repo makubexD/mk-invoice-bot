@@ -41,7 +41,7 @@ from pypdfium2 import PdfDocument
 from invoicebot.config.models import Ocr
 from invoicebot.extract.fields import FULL_CONFIDENCE, Reading, reading_to_json
 from invoicebot.extract.image import ImageUnreadable, crop_receipt, load_gray
-from invoicebot.extract.merge import fill_missing, merge
+from invoicebot.extract.merge import best_of_reads, merge
 from invoicebot.extract.ocr import OcrText, binarize, deskew, preprocess, read_text
 from invoicebot.extract.ocr_parse import parse_ocr
 from invoicebot.extract.parsing_rules import ParsingRules, load_rules
@@ -299,8 +299,8 @@ def _retries(
     with only that time. The budget is ``ocr_cfg.timeout_s`` less ``STRIP_TIMEOUT_S``, kept for
     the strip re-read that follows. The best has the fewest missing required fields once merged
     with ``qr_reading``, a tie keeping the earlier reading; the reading kept is the OCR one,
-    unmerged, with the fields it lacks filled from the other reads (``fill_missing``), and the
-    retries stop once those fills leave nothing missing. ``first`` carries the deskewed image it
+    unmerged, with each field taking its best pass among the reads (D212), and the
+    retries stop once that leaves nothing missing. ``first`` carries the deskewed image it
     came from; the image returned is the best read's.
     """
     best = first
@@ -328,14 +328,14 @@ def _retries(
 
 
 def _filled(best: Reading | None, reads: list[Reading], qr: Reading | None) -> Reading | None:
-    """Return ``best`` with the gaps ``qr`` leaves filled from the other ``reads`` (D200).
+    """Return ``best`` with each field ``qr`` lacks taken from its best pass in ``reads`` (D200, D212).
 
-    With no ``best`` there is nothing to fill and ``None`` is returned.
+    With no ``best`` there is nothing to improve and ``None`` is returned.
     """
     if best is None:
         return None
     qr_names = frozenset() if qr is None else frozenset(qr.fields)
-    return fill_missing(best, [read for read in reads if read is not best], qr_names)
+    return best_of_reads(best, [read for read in reads if read is not best], qr_names)
 
 
 def _with_url_strip(

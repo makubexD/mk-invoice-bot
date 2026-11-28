@@ -15,7 +15,7 @@ import re
 from datetime import date
 from decimal import Decimal
 
-from invoicebot.extract.fields import FULL_CONFIDENCE, Field, Flag, Reading, finite_decimal
+from invoicebot.extract.fields import FULL_CONFIDENCE, RUC_LENGTH, Field, Flag, Reading, finite_decimal
 from invoicebot.extract.validate import is_valid_ruc
 
 PIPE = "|"
@@ -24,7 +24,6 @@ REQUIRED_PART_COUNT = 7
 TIPO_DOC_ADQ_INDEX = 7
 NUM_DOC_ADQ_INDEX = 8
 INFERRED_CONFIDENCE = 0.9
-RUC_LENGTH = 11
 DNI_LENGTH = 8
 DOCUMENT_TYPE_BY_SERIE_LETTER = {"F": "01", "B": "03"}
 BUYER_TYPE_BY_WORD = {"RUC": "6", "DNI": "1"}
