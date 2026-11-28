@@ -286,7 +286,7 @@ Files: `specs/spikes/ocr-harden.md`.
 
 Deploy this branch's image (tag and back up the config first, as in step 9). **Ask the owner** to resend the La Choza
 Náutica Minka ticket. Rows: (a) BR-R04 asks with RK Export (Drive) pre-selected; (b) the issuer still reads as in step
-9; (c) a ticket whose buyer RUC reads cleanly still routes silently (any earlier flow A photo); (d) flow B untouched.
-Also re-run step 8's golden set and record that no per-field rate dropped. No invoice values in the file.
+9; (c) a ticket whose buyer RUC reads cleanly still routes silently (any earlier flow A photo); (d) flow B untouched;
+(e) after confirming, a field below the threshold is shown as doubtful, not read (step 9's row c). Also re-run step 8's golden set and record that no per-field rate dropped. No invoice values in the file.
 
 Test: `npx prettier --check specs/spikes/ocr-harden.md`.
