@@ -731,12 +731,12 @@ async def test_qr_and_printed_text_confirm_each_other(
     assert all(reading.fields[name].flag is None for name in REQUIRED)
 
 
-async def test_printed_total_disagreeing_with_qr_is_flagged_conflict(
+async def test_printed_total_disagreeing_with_matching_qr_takes_qr_total(
     db_pool: AsyncConnectionPool[AsyncConnection[Any]],
     tmp_path: Path,
     draw_text: Callable[[np.ndarray, Sequence[str]], None],
 ) -> None:
-    """D81: a printed total that disagrees with the QR routes with the OCR total flagged conflict."""
+    """D210: a printed total disagreeing with a QR that matches on RUC and date routes with the QR total."""
     lines = (*PRINTED_LINES[:-1], f"IMPORTE TOTAL S/ {CONFLICT_TOTAL}")
     photo = _write_printed_photo(lines, tmp_path / f"conflict{PNG}", draw_text, qr_payload=CONFIRMING_PAYLOAD)
     invoice_id, _ = await _invoice_with_photo(db_pool, photo)
@@ -750,7 +750,7 @@ async def test_printed_total_disagreeing_with_qr_is_flagged_conflict(
     assert (state, rule_id) == ("ROUTING", None)
     assert reading is not None
     total = reading.fields["total"]
-    assert (total.value, total.source, total.flag) == (CONFLICT_TOTAL, "ocr", "conflict")
+    assert (total.value, total.source, total.flag) == (TOTAL, "qr", None)
 
 
 async def test_blank_photo_fails_with_br_e01(
