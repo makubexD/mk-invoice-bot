@@ -47,6 +47,59 @@ def test_merge_different_amount_keeps_ocr_value_and_flags_conflict() -> None:
     )
 
 
+def _agreeing_anchors() -> tuple[dict[str, Field], dict[str, Field]]:
+    """Return OCR and QR fields that agree on `ruc_emisor` and `total`."""
+    ocr = {"ruc_emisor": _ocr_field("20000000001"), "total": _ocr_field("12.50")}
+    qr = {"ruc_emisor": _qr_field("20000000001"), "total": _qr_field("12.5")}
+    return ocr, qr
+
+
+def test_merge_corroborating_qr_wins_a_serie_and_numero_conflict() -> None:
+    """D210: RUC and total agree, so the QR's `serie` and `numero` replace the OCR's, unflagged."""
+    ocr, qr = _agreeing_anchors()
+    ocr |= {"serie": _ocr_field("2026"), "numero": _ocr_field("222")}
+    qr |= {"serie": _qr_field("F001"), "numero": _qr_field("222")}
+
+    merged = merge(_reading(ocr), _reading(qr))
+
+    assert merged.fields["serie"] == _qr_field("F001")
+    assert merged.fields["numero"] == Field(value="222", source="ocr", confidence=FULL_CONFIDENCE, flag=None)
+
+
+def test_merge_without_an_agreeing_anchor_flags_the_ocr_value_as_conflict() -> None:
+    """D210: no anchor agrees, so D81 holds: the OCR value stays, flagged conflict."""
+    ocr = {"ruc_emisor": _ocr_field("20000000001"), "serie": _ocr_field("2026")}
+    qr = {"ruc_emisor": _qr_field("20000000002"), "serie": _qr_field("F001")}
+
+    merged = merge(_reading(ocr), _reading(qr))
+
+    assert merged.fields["serie"] == Field(
+        value="2026", source="ocr", confidence=OCR_CONFIDENCE, flag="conflict"
+    )
+    assert merged.fields["ruc_emisor"].flag == "conflict"
+
+
+def test_merge_inferred_qr_anchor_does_not_corroborate() -> None:
+    """D210: the only agreeing anchor is inferred on the QR, so the OCR `serie` stays flagged conflict."""
+    ocr = {"ruc_emisor": _ocr_field("20000000001"), "serie": _ocr_field("2026")}
+    qr = {"ruc_emisor": _qr_field("20000000001", "inferred"), "serie": _qr_field("F001")}
+
+    merged = merge(_reading(ocr), _reading(qr))
+
+    assert merged.fields["serie"] == Field(
+        value="2026", source="ocr", confidence=OCR_CONFIDENCE, flag="conflict"
+    )
+
+
+def test_merge_with_a_url_only_qr_keeps_the_ocr_reading() -> None:
+    """D210: a QR with no fields (URL only) leaves the OCR fields unchanged."""
+    ocr = {"serie": _ocr_field("F001")}
+
+    merged = merge(_reading(ocr), _reading({}, document_url=DOCUMENT_URL))
+
+    assert merged.fields == ocr
+
+
 def test_merge_keeps_qr_only_field() -> None:
     """D81: `num_doc_adq` only in the QR comes through as that QR field."""
     qr_field = _qr_field("20000000001")

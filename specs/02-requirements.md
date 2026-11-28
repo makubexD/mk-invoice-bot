@@ -61,7 +61,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
 - **R-2.2 (M)** WHEN a SUNAT QR is decoded, THE SYSTEM SHALL extract: `ruc_emisor`, `tipo` (01/03/07/08), `serie`, `numero`, `igv`, `total`, `fecha_emision`, `tipo_doc_adq`, `num_doc_adq`. A payload with a wrong or empty document-type or buyer-type part is repaired, not rejected (D79).
 - **R-2.3 (M)** THE SYSTEM SHALL run OCR (OpenCV preprocessing + Tesseract `spa`) on every photo, whether or not a QR decodes, and a regex/keyword parser that extracts the same fields plus `razon_social` (header text). The OCR and QR readings are merged (D81):
   - a field both give with the same value gets confidence 1.0;
-  - when they disagree, the OCR value stays and the field is flagged `conflict`;
+  - when they disagree, the QR's value wins if the QR corroborates the reading (D210), else the OCR value stays and the field is flagged `conflict`;
   - a field only one of them gives comes from that one.
 - **R-2.4 (M)** THE SYSTEM SHALL validate:
   - the RUC check digit (mod 11);
@@ -71,7 +71,7 @@ Priority: **M** = must, in the MVP; **S** = should, in v1; **C** = could (later)
   - `IGV ≈ base × rate` (tolerance S/ 0.05) for a rate in the configured list `extraction.igv_rates` (today 0.18, plus the reduced restaurant rates 0.10 and 0.105 under Ley 31556, which change by year; all three appear in the 2026 invoices). A miss marks `igv` as `needs_review`; it never rejects the invoice.
   - Outcomes: a bad RUC check digit → BR-E02; a date out of bounds → BR-E03; a `tipo` outside `extraction.supported_tipos` → BR-E05; any other failed check, or a required field below `review_threshold` → `CONFIRMING` with BR-E09.
 - **R-2.5 (M)** THE SYSTEM SHALL resolve `razon_social` and `estado/condición` of the issuer from the local padrón RUC. OCR text is the fallback.
-- **R-2.6 (M)** Each field SHALL carry `source ∈ {qr, xml, ocr, padron, llm, user}` and `confidence ∈ [0, 1]`. It MAY also carry a flag: `inferred` for a value the reader deduced (D79), or `conflict` for an OCR value the QR contradicts (D81). Both flags are shown on the summary's warning line (D80).
+- **R-2.6 (M)** Each field SHALL carry `source ∈ {qr, xml, ocr, padron, llm, user}` and `confidence ∈ [0, 1]`. It MAY also carry a flag: `inferred` for a value the reader deduced (D79), or `conflict` for an OCR value an uncorroborated QR contradicts (D81, D210). Both flags are shown on the summary's warning line (D80).
 - **R-2.7 (S)** WHEN the official XML is obtained, THE SYSTEM SHALL read it with the hardened parser (R-2.12) for two things only: to check it is the right invoice (R-5.6), and to take its amounts (base, IGV, service charge, ICBPER, discounts, total) as authoritative. Any discrepancy from the photo data is reported in the completion message. IF the XML can't be read, the photo's values are kept and marked `needs_review` (D57).
 - **R-2.8 (S)** IF the QR contains a URL instead of data, THE SYSTEM SHALL store it as `document_url` for the fetcher.
 - **R-2.10 (S)** THE SYSTEM SHALL capture URLs printed on the receipt (OCR regex such as `consulte .* en (\S+)`) as `printed_urls`. They are hints for the gap issue (R-11.5, R-11.12), not fetch targets. Dropped from the code until the gap service reads them (D101).
