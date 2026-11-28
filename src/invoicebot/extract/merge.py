@@ -2,9 +2,9 @@
 
 Two jobs. ``merge`` joins the OCR and QR readings (D81): OCR is the primary reading and the QR
 confirms it. A field both readers give with the same value reaches full confidence, a field they
-disagree on takes the QR's field when the QR corroborates the reading and else keeps the OCR value
-flagged ``conflict`` (D210), and a field only one reader gives keeps that reader's confidence and
-flag (R-2.6). ``fill_missing`` fills a reading's missing
+disagree on takes the QR's field unless the QR is contradicted, and then keeps the OCR value
+flagged ``conflict`` (D210, D211), and a field only one reader gives keeps that reader's confidence
+and flag (R-2.6). ``fill_missing`` fills a reading's missing
 required fields from other OCR reads of the same document (D200).
 """
 
@@ -29,11 +29,11 @@ def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
     if qr is None:
         return ocr
 
-    corroborated = _corroborates(ocr, qr)
+    qr_wins = not _contradicts(ocr, qr)
     fields = {
         name: ocr_field
         if (qr_field := qr.fields.get(name)) is None
-        else _merged_field(name, ocr_field, qr_field, corroborated)
+        else _merged_field(name, ocr_field, qr_field, qr_wins)
         for name, ocr_field in ocr.fields.items()
     }
     for name, qr_field in qr.fields.items():
@@ -47,26 +47,28 @@ def merge(ocr: Reading | None, qr: Reading | None) -> Reading:
     )
 
 
-#: Fields whose agreement shows the QR belongs to the invoice the OCR read (D210).
+#: Fields that show whether the QR belongs to the invoice the OCR read (D210, D211).
 ANCHOR_FIELDS = ("ruc_emisor", "total", "fecha_emision")
 
 
-def _corroborates(ocr: Reading, qr: Reading) -> bool:
-    """Return whether the QR matches the OCR on an anchor field that the QR did not infer (D210)."""
-    for name in ANCHOR_FIELDS:
-        ocr_field, qr_field = ocr.fields.get(name), qr.fields.get(name)
-        if (
-            ocr_field is not None
-            and qr_field is not None
-            and qr_field.flag != "inferred"
-            and same_value(name, ocr_field.value, qr_field.value)
-        ):
-            return True
-    return False
+def _contradicts(ocr: Reading, qr: Reading) -> bool:
+    """Return whether the readers share an anchor the QR did not infer and agree on none (D211).
+
+    A single agreeing anchor shows the QR is this invoice's (D210); with no shared anchor there is
+    no evidence against it, so it is not contradicted.
+    """
+    shared = [
+        (name, ocr_field.value, qr_field.value)
+        for name in ANCHOR_FIELDS
+        if (ocr_field := ocr.fields.get(name)) is not None
+        and (qr_field := qr.fields.get(name)) is not None
+        and qr_field.flag != "inferred"
+    ]
+    return bool(shared) and not any(same_value(*anchor) for anchor in shared)
 
 
-def _merged_field(name: str, ocr_field: Field, qr_field: Field, corroborated: bool) -> Field:
-    """Return the merged field: confirmed, the QR's when it corroborates, or a conflict (D81, D210).
+def _merged_field(name: str, ocr_field: Field, qr_field: Field, qr_wins: bool) -> Field:
+    """Return the merged field: confirmed, the QR's when it is not contradicted, or a conflict (D81, D211).
 
     When both readers inferred the field, their agreement is not independent evidence: it stays
     ``inferred`` at the OCR confidence rather than reaching full confidence.
@@ -75,7 +77,7 @@ def _merged_field(name: str, ocr_field: Field, qr_field: Field, corroborated: bo
         if ocr_field.flag == "inferred" and qr_field.flag == "inferred":
             return ocr_field
         return replace(ocr_field, confidence=FULL_CONFIDENCE, flag=None)
-    return qr_field if corroborated else replace(ocr_field, flag="conflict")
+    return qr_field if qr_wins else replace(ocr_field, flag="conflict")
 
 
 def same_value(name: str, ocr_value: str, qr_value: str) -> bool:

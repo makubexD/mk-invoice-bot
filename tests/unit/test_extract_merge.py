@@ -1,4 +1,4 @@
-"""Tests for merging the OCR and QR readings (D81, R-2.6, D189)."""
+"""Tests for merging the OCR and QR readings (D81, R-2.6, D189, D210, D211)."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def test_merge_corroborating_qr_wins_a_serie_and_numero_conflict() -> None:
 
 
 def test_merge_without_an_agreeing_anchor_flags_the_ocr_value_as_conflict() -> None:
-    """D210: no anchor agrees, so D81 holds: the OCR value stays, flagged conflict."""
+    """D211: the only shared anchor disagrees, so D81 holds: the OCR value stays, flagged conflict."""
     ocr = {"ruc_emisor": _ocr_field("20000000001"), "serie": _ocr_field("2026")}
     qr = {"ruc_emisor": _qr_field("20000000002"), "serie": _qr_field("F001")}
 
@@ -79,16 +79,39 @@ def test_merge_without_an_agreeing_anchor_flags_the_ocr_value_as_conflict() -> N
     assert merged.fields["ruc_emisor"].flag == "conflict"
 
 
-def test_merge_inferred_qr_anchor_does_not_corroborate() -> None:
-    """D210: the only agreeing anchor is inferred on the QR, so the OCR `serie` stays flagged conflict."""
+def test_merge_inferred_qr_anchor_is_no_evidence_so_the_qr_wins() -> None:
+    """D211: the only shared anchor is inferred on the QR, so nothing contradicts it and its `serie` wins."""
     ocr = {"ruc_emisor": _ocr_field("20000000001"), "serie": _ocr_field("2026")}
-    qr = {"ruc_emisor": _qr_field("20000000001", "inferred"), "serie": _qr_field("F001")}
+    qr = {"ruc_emisor": _qr_field("20000000002", "inferred"), "serie": _qr_field("F001")}
 
     merged = merge(_reading(ocr), _reading(qr))
 
-    assert merged.fields["serie"] == Field(
-        value="2026", source="ocr", confidence=OCR_CONFIDENCE, flag="conflict"
-    )
+    assert merged.fields["serie"] == _qr_field("F001")
+
+
+def test_merge_ocr_without_anchors_takes_the_qr_serie_and_numero() -> None:
+    """D211: the OCR read no anchor, so the QR is not contradicted and its `serie` and `numero` win."""
+    ocr = {"serie": _ocr_field("2026"), "numero": _ocr_field("222"), "base": _ocr_field("135.94")}
+    qr = {
+        "ruc_emisor": _qr_field("20000000001"),
+        "serie": _qr_field("F001"),
+        "numero": _qr_field("12367"),
+    }
+
+    merged = merge(_reading(ocr), _reading(qr))
+
+    assert (merged.fields["serie"], merged.fields["numero"]) == (_qr_field("F001"), _qr_field("12367"))
+    assert merged.fields["base"] == _ocr_field("135.94")
+
+
+def test_merge_one_agreeing_anchor_outweighs_a_disagreeing_one() -> None:
+    """D210, D211: RUC agrees and total disagrees, so the QR wins the total and the `serie`."""
+    ocr = {"ruc_emisor": _ocr_field("20000000001"), "total": _ocr_field("16.41"), "serie": _ocr_field("2026")}
+    qr = {"ruc_emisor": _qr_field("20000000001"), "total": _qr_field("160.41"), "serie": _qr_field("F001")}
+
+    merged = merge(_reading(ocr), _reading(qr))
+
+    assert (merged.fields["total"], merged.fields["serie"]) == (_qr_field("160.41"), _qr_field("F001"))
 
 
 def test_merge_with_a_url_only_qr_keeps_the_ocr_reading() -> None:

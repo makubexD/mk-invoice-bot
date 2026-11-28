@@ -192,6 +192,30 @@ def test_parse_ocr_four_digit_serie_is_read_without_a_letter_serie(rules: Parsin
     assert (fields["serie"], fields["numero"]) == ("0001", "123")
 
 
+def test_parse_ocr_date_with_a_lost_hyphen_is_not_a_serie(rules: ParsingRules) -> None:
+    """D211: a date read as 2026-0222, with a hyphen lost, is not read as serie 2026 and numero 222."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", "2026-0222 00 17:34"), rules)
+
+    assert "serie" not in fields
+    assert "numero" not in fields
+
+
+@pytest.mark.parametrize(
+    ("line", "serie", "numero"),
+    [
+        pytest.param("0001-0222", "0001", "222", id="not-year-shaped"),
+        pytest.param("2026-1399", "2026", "1399", id="not-a-valid-date"),
+    ],
+)
+def test_parse_ocr_four_digit_serie_that_is_not_a_date_is_read(
+    rules: ParsingRules, line: str, serie: str, numero: str
+) -> None:
+    """D211: a four-digit serie and numero that do not form a yyyy-mmdd date are still read."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", line), rules)
+
+    assert (fields["serie"], fields["numero"]) == (serie, numero)
+
+
 def test_parse_ocr_alphanumeric_letter_serie_outranks_an_address(rules: ParsingRules) -> None:
     """R-2.4: a valid letter serie with letters after the first, such as FA01, is still a letter serie."""
     fields = _fields(_ocr("JR. PUNO 1050 - 201", "FA01-55"), rules)

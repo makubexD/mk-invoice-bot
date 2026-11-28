@@ -39,6 +39,10 @@ RUC_DOCUMENT_TYPE = "6"
 BUYER_LINES = 2
 SERIE_FIX_LENGTH = 3
 SERIE_DIGIT_FIXES = {"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1"}
+#: Years a date misread as a four-digit serie can start with (D211).
+DATE_YEARS = range(1900, 2100)
+#: Digits of the month and day a date misread as a número carries, ``mmdd`` (D211).
+MONTH_DAY_DIGITS = 4
 AMOUNT_SEPARATOR = "."
 AMOUNT_SEPARATORS = frozenset(".,")
 AMOUNT_DECIMALS = 2
@@ -212,7 +216,8 @@ def _read_serie_numero(
 
     A candidate whose repaired serie fails :func:`check_serie` is skipped, numero included.
     A letter serie outranks a four-digit one, which is usually an address or a date. A letter
-    serie needs a digit after its letter, so a word such as ``BASE`` is not one.
+    serie needs a digit after its letter, so a word such as ``BASE`` is not one. A four-digit
+    serie that is a date with one hyphen lost (``2026-0222``) is skipped (D211).
     """
     fallback: tuple[re.Match[str], str] | None = None
     for match in _matches(rules.serie_numero, searched):
@@ -221,12 +226,19 @@ def _read_serie_numero(
             continue
         if serie[:1].isalpha() and any(char.isdigit() for char in serie[1:]):
             return _serie_numero_fields(match, serie, spans)
-        if serie.isdigit() and fallback is None:
+        if serie.isdigit() and fallback is None and not _is_date(serie, match.group("numero")):
             fallback = (match, serie)
     if fallback is None:
         return None, None
     match, serie = fallback
     return _serie_numero_fields(match, serie, spans)
+
+
+def _is_date(serie: str, numero: str) -> bool:
+    """Return whether a four-digit serie and its número read as one ``yyyy-mmdd`` date (D211)."""
+    if int(serie) not in DATE_YEARS or len(numero) != MONTH_DAY_DIGITS:
+        return False
+    return parse_date(f"{serie}-{numero[:2]}-{numero[2:]}") is not None
 
 
 def _serie_numero_fields(
