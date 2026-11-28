@@ -1399,3 +1399,24 @@ async def test_one_llm_field_asks_even_with_auto(
     assert text.endswith("¿Está todo bien?")
     assert [button["title"] for button in buttons] == ["Confirmar", "Editar", "Cancelar"]
     assert SUMMARY_MOVING not in text  # D188: the bot waits here
+
+
+async def test_inferred_unrouted_buyer_asks_but_counts_no_gap(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+) -> None:
+    """D213: an inferred buyer no rule names asks BR-R03 but is no UNROUTED_BUYER sighting (BR-R06)."""
+    profile_id = f"{FULL_PROFILE}-{uuid4().hex}"
+    cfg = _config(profile_id, FULL_PROFILE)
+    buyer = "20000000079"
+    reading = _reading(await _today(db_pool), buyer=buyer)
+    fields = dict(reading.fields)
+    fields["num_doc_adq"] = _field(buyer, source="ocr", confidence=0.95, flag="inferred")
+    invoice_id = await _routing_invoice(db_pool, profile_id, Reading(fields=fields, document_url=None))
+
+    await _run(db_pool, cfg, invoice_id)
+
+    async with db_pool.connection() as conn:
+        row = await _invoice(conn, invoice_id)
+        gap = await _gap(conn, buyer)
+    assert row[:2] == ("CONFIRMING", "BR-R03")
+    assert gap is None

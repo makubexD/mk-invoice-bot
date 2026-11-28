@@ -79,3 +79,32 @@ def test_inferred_buyer_takes_lower_confidence_and_drops_hints() -> None:
     assert result.fields["tipo_doc_adq"].confidence == 0.8
     assert "num_doc_adq_unchecked" not in result.fields
     assert "nombre_adq" not in result.fields
+
+
+def test_padron_name_without_letters_never_matches() -> None:
+    """D213: a padrón name that squashes to nothing cannot vouch for a near RUC."""
+    assert match_buyer(_reading(_off(RUC, 1), "RK EXPORT"), {RUC: "-- ."}).value("num_doc_adq") is None
+
+
+def test_accented_padron_name_matches_its_unaccented_read() -> None:
+    """D213: accents fold before comparing, so COMPAÑÍA matches an OCR read of COMPANIA."""
+    routing = {RUC: "COMPAÑÍA ÑANDÚ S.A.C."}
+    assert match_buyer(_reading(_off(RUC, 1), "COMPANIA NANDU SAC"), routing).value("num_doc_adq") == RUC
+
+
+def test_issuers_own_ruc_never_matches_as_the_buyer() -> None:
+    """D213: a routing RUC equal to the reading's issuer is never inferred as its buyer."""
+    reading = _reading(_off(RUC, 1), "RK EXPORT PERU SAC", ruc_emisor=Field(RUC, "ocr", 0.95))
+    assert match_buyer(reading, ROUTING).value("num_doc_adq") is None
+
+
+def test_inferred_buyer_keeps_the_hints_source() -> None:
+    """D213: a buyer matched from a PDF text layer's hints keeps source pdf."""
+    reading = Reading(
+        fields={
+            "num_doc_adq_unchecked": Field(_off(RUC, 1), "pdf", 1.0),
+            "nombre_adq": Field("RK EXPORT PERU SAC", "pdf", 1.0),
+        },
+        document_url=None,
+    )
+    assert match_buyer(reading, ROUTING).fields["num_doc_adq"].source == "pdf"

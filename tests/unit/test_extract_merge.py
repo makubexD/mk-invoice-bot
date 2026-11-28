@@ -454,3 +454,37 @@ def test_best_of_reads_drops_buyer_hints_when_the_result_has_a_buyer() -> None:
     assert "nombre_adq" not in result.fields
     assert "num_doc_adq_unchecked" not in result.fields
     assert result.fields["num_doc_adq"] == kept.fields["num_doc_adq"]
+
+
+def test_best_of_reads_printed_ruc_outranks_a_repaired_one() -> None:
+    """D212: a repaired (inferred) issuer RUC never displaces a printed one, whatever its confidence."""
+    kept = _reading({"ruc_emisor": _ocr_field("20000000001", confidence=0.5)})
+    other = _reading({"ruc_emisor": _ocr_field("20000000028", confidence=0.95, flag="inferred")})
+    assert best_of_reads(kept, [other]).value("ruc_emisor") == "20000000001"
+
+
+def test_best_of_reads_printed_ruc_from_another_pass_replaces_a_repaired_one() -> None:
+    """D212: a printed issuer RUC from another pass replaces kept's repaired one."""
+    kept = _reading({"ruc_emisor": _ocr_field("20000000028", confidence=0.95, flag="inferred")})
+    other = _reading({"ruc_emisor": _ocr_field("20000000001", confidence=0.5)})
+    assert best_of_reads(kept, [other]).value("ruc_emisor") == "20000000001"
+
+
+def test_best_of_reads_keeps_a_printed_issuer_over_a_higher_confidence_one() -> None:
+    """D212: a printed issuer in kept stays; another pass's RUC may be the buyer read as the issuer."""
+    kept = _reading({"ruc_emisor": _ocr_field("20000000001", confidence=0.7)})
+    other = _reading({"ruc_emisor": _ocr_field("20000000028", confidence=0.95)})
+    assert best_of_reads(kept, [other]).value("ruc_emisor") == "20000000001"
+
+
+def test_best_of_reads_issuer_from_another_pass_brings_its_buyer_document_type() -> None:
+    """D212: a buyer brought with another pass's issuer comes with its tipo_doc_adq."""
+    kept = _reading({"tipo": _ocr_field("01")})
+    other = _reading(
+        {
+            "ruc_emisor": _ocr_field("20000000001"),
+            "num_doc_adq": _ocr_field("20000000028"),
+            "tipo_doc_adq": _ocr_field("6", flag="inferred"),
+        }
+    )
+    assert best_of_reads(kept, [other]).value("tipo_doc_adq") == "6"

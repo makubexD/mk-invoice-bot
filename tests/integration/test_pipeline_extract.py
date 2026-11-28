@@ -507,6 +507,30 @@ async def test_near_buyer_ruc_and_far_name_store_no_buyer(
         reading = await load_reading(conn, invoice_id)
     assert reading is not None
     assert "num_doc_adq" not in reading.fields
+    assert BUYER_NAME not in reading.fields
+    assert UNCHECKED_BUYER_RUC not in reading.fields
+
+
+async def test_partial_reading_with_buyer_hints_stores_the_matched_buyer(
+    db_pool: AsyncConnectionPool[AsyncConnection[Any]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D213: a BR-E01 reading is matched before it is saved, so the user's edit routes on the buyer."""
+    await _seed_buyer_padron_row(db_pool)
+    invoice_id, _ = await _invoice_with_photo(db_pool, _write_blank_photo(tmp_path / f"partial{PNG}"))
+    reading = _reading_with_buyer_hints("COMERCIAL ANDINA S.A.C.")
+    partial = replace(reading, fields={n: f for n, f in reading.fields.items() if n != "total"})
+
+    await _run_handler_with_reading(db_pool, invoice_id, partial, monkeypatch, _buyer_routing())
+
+    async with db_pool.connection() as conn:
+        state = await _invoice_row(conn, invoice_id)
+        stored = await load_reading(conn, invoice_id)
+    assert state == ("EXTRACT_FAILED", "BR-E01")
+    assert stored is not None
+    assert stored.value("num_doc_adq") == ROUTING_BUYER_RUC
+    assert BUYER_NAME not in stored.fields
 
 
 def _record_text(record: logging.LogRecord) -> str:

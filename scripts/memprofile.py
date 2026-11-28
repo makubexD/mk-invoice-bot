@@ -371,7 +371,11 @@ def _handlers(pool: Pool, setup: _Setup, media: FakeChannel, http: httpx.AsyncCl
         EXTRACT_STEP: make_extract_handler(
             pool,
             ExtractInputs(
-                cfg.extraction, cfg.limits.media, PARSING_RULES, frozenset({cfg.owner.ruc, cfg.work.ruc})
+                cfg.extraction,
+                cfg.limits.media,
+                PARSING_RULES,
+                frozenset({cfg.owner.ruc, cfg.work.ruc}),
+                cfg.routing,
             ),
             GapContext(profiles=cfg.profiles, gaps_cfg=cfg.gaps),
             helper_prefix=(),

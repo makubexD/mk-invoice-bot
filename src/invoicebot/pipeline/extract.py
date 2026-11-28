@@ -28,11 +28,24 @@ from invoicebot.channels.base import AttachmentKind, Button
 from invoicebot.channels.media_limits import max_bytes_for
 from invoicebot.config.models import Extraction, MediaLimits, Routing
 from invoicebot.extract.buyer_match import match_buyer
-from invoicebot.extract.fields import REQUIRED, RUC_LENGTH, UNCHECKED_BUYER_RUC, Reading, reading_from_json
+from invoicebot.extract.fields import (
+    BUYER_NAME,
+    REQUIRED,
+    RUC_LENGTH,
+    UNCHECKED_BUYER_RUC,
+    Reading,
+    reading_from_json,
+)
 from invoicebot.extract.names import QrDecoder, QrVariant
 from invoicebot.extract.padron import with_padron
 from invoicebot.extract.parties import with_own_buyer
-from invoicebot.extract.validate import RULE_BAD_RUC, RULE_UNSUPPORTED_TIPO, check_issuer, check_tipo
+from invoicebot.extract.validate import (
+    RULE_BAD_RUC,
+    RULE_UNSUPPORTED_TIPO,
+    check_issuer,
+    check_tipo,
+    doubtful_fields,
+)
 from invoicebot.gaps.kinds import fingerprint
 from invoicebot.github.issue_text import IssueFields
 from invoicebot.helper import run_helper
@@ -198,12 +211,16 @@ def make_extract_handler(
         rule_id, reading = await _drop_unknown_repair(
             pool, *_classify(result, inputs.extraction.supported_tipos, inputs.own_rucs)
         )
+        if reading is not None:
+            # Before the split, so a BR-E01 reading the user completes also routes on the matched buyer.
+            async with pool.connection() as conn:
+                reading = await _with_buyer_match(conn, reading, inputs.routing)
         if rule_id is not None:
             await _finish(
                 pool,
                 job.invoice_id,
                 invoice,
-                _Failure(rule_id, reading, _doubtful(reading, inputs.extraction.review_threshold)),
+                _Failure(rule_id, reading, _doubtful(reading, inputs.extraction)),
                 gaps,
                 expected=EXTRACTING,
             )
@@ -214,7 +231,6 @@ def make_extract_handler(
 
         async with pool.connection() as conn, conn.transaction():
             reading = await _with_padron(conn, reading)
-            reading = await _with_buyer_match(conn, reading, inputs.routing)
             await save_reading(conn, job.invoice_id, reading)
             await set_state(conn, job.invoice_id, ROUTING, expected=EXTRACTING)
             await enqueue(conn, job.invoice_id, ROUTE_STEP)
@@ -427,15 +443,26 @@ async def _with_buyer_match(conn: AsyncConnection[Any], reading: Reading, routin
 
     Only a reading with the unchecked buyer RUC hint looks anything up, on the caller's
     connection, so a normal read costs no query. A routing RUC with no padrón row is skipped.
+    The hints are dropped either way, so a buyer's name read by OCR is never stored.
     """
     if UNCHECKED_BUYER_RUC not in reading.fields:
-        return reading
+        return _without_buyer_hints(reading)
     names: dict[str, str] = {}
     for ruc in sorted(_routing_rucs(routing)):
         row = await lookup(conn, ruc)
         if row is not None:
             names[ruc] = row.razon_social
-    return match_buyer(reading, names)
+    return _without_buyer_hints(match_buyer(reading, names))
+
+
+def _without_buyer_hints(reading: Reading) -> Reading:
+    """Return ``reading`` without D213's buyer hints, so a buyer's name is never stored."""
+    if UNCHECKED_BUYER_RUC not in reading.fields and BUYER_NAME not in reading.fields:
+        return reading
+    fields = {
+        name: field for name, field in reading.fields.items() if name not in (UNCHECKED_BUYER_RUC, BUYER_NAME)
+    }
+    return replace(reading, fields=fields)
 
 
 async def _finish(
@@ -518,16 +545,20 @@ def _failure_reply(invoice_id: int, failure: _Failure) -> tuple[str, list[Button
     return _message(failure.rule_id, failure.reading), []
 
 
-def _doubtful(reading: Reading | None, threshold: float) -> tuple[str, ...]:
-    """Return the required fields read from the printed text below ``threshold`` (D212)."""
+def _doubtful(reading: Reading | None, extraction: Extraction) -> tuple[str, ...]:
+    """Return the required fields read from the printed text that need review (D212).
+
+    Doubtful means what :func:`doubtful_fields` says, so BR-E01 and the summary agree.
+    """
     if reading is None:
         return ()
+    doubtful = doubtful_fields(reading, extraction.review_threshold, extraction.igv_rates)
     return tuple(
         name
-        for name in REQUIRED
-        if (field := reading.fields.get(name)) is not None
+        for name in doubtful
+        if name in REQUIRED
+        and (field := reading.fields.get(name)) is not None
         and field.source in PRINTED_SOURCES
-        and field.confidence < threshold
     )
 
 

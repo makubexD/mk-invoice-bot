@@ -57,6 +57,8 @@ AMOUNT_SEPARATORS = frozenset(".,")
 AMOUNT_DECIMALS = 2
 AMOUNT_SEPARATOR_OFFSET = AMOUNT_DECIMALS + 1
 AMOUNT_SEPARATORS_PATTERN = re.compile(r"[.,]")
+#: A letter or digit before a buyer label means the label does not start its line (D213).
+_WORD_CHAR = re.compile(r"\w")
 NO_CONFIDENCE = 0.0
 #: Most OCR text characters parsed, so a huge read cannot exhaust the helper (R-9.2).
 MAX_OCR_TEXT_CHARS = 64 * 1024
@@ -232,7 +234,7 @@ def _read_unchecked_buyer_ruc(
     rules: ParsingRules,
 ) -> Field | None:
     """Return the first buyer-line RUC of 11 digits that fails :func:`is_valid_ruc`, or None (D213)."""
-    buyer_lines = _buyer_line_numbers(searched, rules)
+    buyer_lines = _buyer_line_numbers(searched, rules, starting_line=False)
     for pattern in rules.ruc:
         for match in _matches(pattern, searched):
             repair = _repair_ruc(match.group("value"))
@@ -249,7 +251,7 @@ def _read_buyer_name(
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> Field | None:
-    """Return the text after the first buyer label as a field, or None when it is no name (D213).
+    """Return the text after the first buyer label that holds a name, or None (D213).
 
     The name is capped at :data:`MAX_BUYER_NAME_CHARS` and needs
     :data:`MIN_BUYER_NAME_LETTERS` letters.
@@ -260,20 +262,24 @@ def _read_buyer_name(
         if label is not None:
             rest = line[label.end() :]
             name = rest.strip()[:MAX_BUYER_NAME_CHARS].strip()
-            if sum(char.isalpha() for char in name) < MIN_BUYER_NAME_LETTERS:
-                return None
-            start = line_start + label.end() + len(rest) - len(rest.lstrip())
-            confidence = _confidence(spans, start, start + len(name))
-            return _ocr_field(name, confidence, flag="inferred")
+            if sum(char.isalpha() for char in name) >= MIN_BUYER_NAME_LETTERS:
+                start = line_start + label.end() + len(rest) - len(rest.lstrip())
+                confidence = _confidence(spans, start, start + len(name))
+                return _ocr_field(name, confidence, flag="inferred")
         line_start += len(line) + len(LINE_SEPARATOR)
     return None
 
 
-def _buyer_line_numbers(searched: str, rules: ParsingRules) -> set[int]:
-    """Return the line numbers of buyer-label lines and the :data:`BUYER_LINES` lines after each (D198)."""
+def _buyer_line_numbers(searched: str, rules: ParsingRules, *, starting_line: bool) -> set[int]:
+    """Return the line numbers of buyer-label lines and the :data:`BUYER_LINES` lines after each (D198).
+
+    With ``starting_line``, only a label that starts its line counts: a mid-line ``CLIENTE:``
+    (``ATENCION AL CLIENTE:``) may give D213's hints but never makes a valid RUC the buyer.
+    """
     numbers: set[int] = set()
     for number, line in enumerate(searched.split(LINE_SEPARATOR)):
-        if rules.buyer_label.search(line):
+        label = rules.buyer_label.search(line)
+        if label is not None and not (starting_line and _WORD_CHAR.search(line, 0, label.start())):
             numbers.update(range(number, number + BUYER_LINES + 1))
     return numbers
 
@@ -299,7 +305,7 @@ def _ruc_matches(
 
     A keyword-anchored match is repaired before its check digit is tested (D212).
     """
-    buyer_lines = _buyer_line_numbers(searched, rules)
+    buyer_lines = _buyer_line_numbers(searched, rules, starting_line=True)
     found: list[_RucMatch] = []
     seen: set[str] = set()
     for pattern in rules.ruc:

@@ -119,9 +119,13 @@ _SERIE_NUMERO = ("serie", "numero")
 
 #: The buyer hints, carried only without a buyer RUC (D213).
 _BUYER_HINTS = (UNCHECKED_BUYER_RUC, BUYER_NAME)
+#: A buyer moves with its document type, so a rule on ``tipo_doc_adq`` still sees it.
+_BUYER = ("num_doc_adq", "tipo_doc_adq")
 
 #: The score of a read that lacks a field (or half a pair): lower than any confidence.
-_MISSING = -1.0
+_MISSING = (-1, -1.0)
+#: A value OCR printed outranks one it repaired or inferred, whatever their confidences (D212).
+_PRINTED, _INFERRED = 1, 0
 
 
 def best_of_reads(
@@ -153,7 +157,7 @@ def best_of_reads(
                 taken.update({name: read.fields[name] for name in names})
                 brings_buyer = names == ("ruc_emisor",) and buyer is None and "num_doc_adq" not in qr_names
                 if brings_buyer and read.value("num_doc_adq") is not None:
-                    taken["num_doc_adq"] = read.fields["num_doc_adq"]
+                    taken.update({name: read.fields[name] for name in _BUYER if name in read.fields})
     fields = _with_buyer_hints({**kept.fields, **taken}, kept, others, "num_doc_adq" in qr_names)
     if fields == kept.fields:
         return kept
@@ -179,9 +183,13 @@ def _best_read(
 ) -> Reading:
     """Return the read scoring highest on ``names``, ``kept`` unless another is strictly better (D212).
 
-    A ``ruc_emisor`` equal to ``buyer`` is not a candidate from another read (D199).
+    A ``ruc_emisor`` equal to ``buyer`` is not a candidate from another read (D199), and a printed
+    ``ruc_emisor`` in ``kept`` is never replaced: only a missing or repaired one is.
     """
     best, best_score = kept, _score(names, kept)
+    if names == ("ruc_emisor",) and best_score[0] == _PRINTED:
+        # A printed issuer is kept: another pass's RUC may be the buyer's (own) RUC read as the issuer.
+        return kept
     for other in others:
         if names == ("ruc_emisor",) and other.value("ruc_emisor") == buyer:
             continue
@@ -190,8 +198,13 @@ def _best_read(
     return best
 
 
-def _score(names: tuple[str, ...], read: Reading) -> float:
-    """Return the lowest confidence ``read`` gives over ``names``, or ``_MISSING`` when one is absent."""
+def _score(names: tuple[str, ...], read: Reading) -> tuple[int, float]:
+    """Return how ``read`` ranks on ``names``: printed before inferred, then the lowest confidence.
+
+    ``_MISSING`` when one of ``names`` is absent, so a repaired RUC never displaces a printed one (D212).
+    """
     if any(read.value(name) is None for name in names):
         return _MISSING
-    return min(read.fields[name].confidence for name in names)
+    fields = [read.fields[name] for name in names]
+    rank = _INFERRED if any(field.flag == "inferred" for field in fields) else _PRINTED
+    return rank, min(field.confidence for field in fields)

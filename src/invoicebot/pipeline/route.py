@@ -300,7 +300,7 @@ def _resolve_flow(decision: _Decision) -> _Resolved | _Step:
             buttons,
             choices=tuple(flow_id for flow_id, _ in candidates),
             menu=decision.menu,
-            unrouted_buyer=reading.value("num_doc_adq"),
+            unrouted_buyer=_sighted_buyer(reading),
         )
     return _Resolved(
         flow_id=cast(str, result.flow),
@@ -550,6 +550,19 @@ def _refusal(rule_id: str, reading: Reading, flow: Flow | None) -> str:
     return MESSAGES[RULE_UNMATCHED].format(buyer_desc=buyer)
 
 
+#: The readers whose text D212 repairs and D213 matches a buyer from: an OCR read or a PDF text layer.
+_INFERRING_SOURCES = frozenset({"ocr", "pdf"})
+
+
+def _sighted_buyer(reading: Reading) -> str | None:
+    """Return the buyer RUC an UNROUTED_BUYER sighting counts (BR-R06), or None for an inferred one.
+
+    A repaired or inferred buyer may exist only through OCR, so it never raises the gap (D213).
+    """
+    buyer = reading.fields.get("num_doc_adq")
+    return None if buyer is None or buyer.flag == "inferred" else buyer.value
+
+
 def _doubtful_buyer(reading: Reading, threshold: float) -> bool:
     """Return whether the buyer was read by OCR below the review threshold or inferred (BR-R04).
 
@@ -557,6 +570,8 @@ def _doubtful_buyer(reading: Reading, threshold: float) -> bool:
     about whatever its confidence.
     """
     buyer = reading.fields.get("num_doc_adq")
-    if buyer is None or buyer.source != "ocr":
+    if buyer is None:
         return False
-    return buyer.flag == "inferred" or buyer.confidence < threshold
+    if buyer.flag == "inferred" and buyer.source in _INFERRING_SOURCES:
+        return True
+    return buyer.source == "ocr" and buyer.confidence < threshold

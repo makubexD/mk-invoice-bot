@@ -692,3 +692,16 @@ def test_parse_ocr_long_buyer_name_is_cut(rules: ParsingRules) -> None:
     fields = _fields(_ocr("CLIENTE: " + "A" * LONG_NAME_LETTERS), rules)
 
     assert len(fields["nombre_adq"]) == MAX_BUYER_NAME_CHARS
+
+
+def test_parse_ocr_mid_line_cliente_label_does_not_make_a_valid_ruc_the_buyer(rules: ParsingRules) -> None:
+    """D213: a RUC under ATENCION AL CLIENTE: is not the buyer's; only a line-start label marks one."""
+    fields = _fields(_ocr("ATENCION AL CLIENTE: 0800 12345", f"RUC: {BUYER_RUC}"), rules)
+    assert fields.get("ruc_emisor") == BUYER_RUC
+    assert "num_doc_adq" not in fields
+
+
+def test_parse_ocr_buyer_name_skips_a_label_line_without_a_name(rules: ParsingRules) -> None:
+    """D213: ATENCION AL CLIENTE: with a phone number gives no name; the later CLIENTE: line does."""
+    fields = _fields(_ocr("ATENCION AL CLIENTE: 0800 12345", "CLIENTE: ACME SAC"), rules)
+    assert fields.get("nombre_adq") == "ACME SAC"
