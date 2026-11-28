@@ -108,6 +108,11 @@ def _iso_date(text: str) -> date | None:
 #: The invoice number's two parts, taken together from one read or not at all (D200, D212).
 _SERIE_NUMERO = ("serie", "numero")
 
+#: The buyer hints OCR gives when it cannot read the buyer's RUC (D213): carried only without one.
+UNCHECKED_BUYER_RUC = "num_doc_adq_unchecked"
+BUYER_NAME = "nombre_adq"
+_BUYER_HINTS = (UNCHECKED_BUYER_RUC, BUYER_NAME)
+
 #: The score of a read that lacks a field (or half a pair): lower than any confidence.
 _MISSING = -1.0
 
@@ -126,7 +131,10 @@ def best_of_reads(
     from another read that equals ``kept``'s buyer ``num_doc_adq`` is skipped, and a ``ruc_emisor``
     taken from another read brings that read's ``num_doc_adq`` when neither ``kept`` nor the QR has
     a buyer, so D199 can still swap them. Fields outside ``REQUIRED`` and the URLs stay ``kept``'s;
-    taken fields replace in place, and with nothing better ``kept`` itself is returned.
+    taken fields replace in place, and with nothing better ``kept`` itself is returned. The buyer
+    hints (``num_doc_adq_unchecked``, ``nombre_adq``) are each taken from their highest-confidence
+    read (a tie keeps ``kept``'s) when the result, or the QR, has no ``num_doc_adq``; otherwise
+    neither hint is carried (D213).
     """
     taken: dict[str, Field] = {}
     groups = [(name,) for name in REQUIRED if name not in _SERIE_NUMERO] + [_SERIE_NUMERO]
@@ -139,9 +147,24 @@ def best_of_reads(
                 brings_buyer = names == ("ruc_emisor",) and buyer is None and "num_doc_adq" not in qr_names
                 if brings_buyer and read.value("num_doc_adq") is not None:
                     taken["num_doc_adq"] = read.fields["num_doc_adq"]
-    if not taken:
+    fields = _with_buyer_hints({**kept.fields, **taken}, kept, others, "num_doc_adq" in qr_names)
+    if fields == kept.fields:
         return kept
-    return replace(kept, fields={**kept.fields, **taken})
+    return replace(kept, fields=fields)
+
+
+def _with_buyer_hints(
+    fields: dict[str, Field], kept: Reading, others: Sequence[Reading], qr_has_buyer: bool
+) -> dict[str, Field]:
+    """Return ``fields`` with the buyer hints dropped, or taken from their best read (D213)."""
+    without_hints = {name: field for name, field in fields.items() if name not in _BUYER_HINTS}
+    if "num_doc_adq" in fields or qr_has_buyer:
+        return without_hints
+    for name in _BUYER_HINTS:
+        read = _best_read((name,), kept, others, None)
+        if read.value(name) is not None:
+            without_hints[name] = read.fields[name]
+    return without_hints
 
 
 def _best_read(

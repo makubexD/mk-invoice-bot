@@ -415,3 +415,42 @@ def test_best_of_reads_skips_a_better_issuer_equal_to_the_buyer() -> None:
     other = _reading({"ruc_emisor": _ocr_field(BUYER_RUC, 0.9)})
 
     assert best_of_reads(kept, [other]) is kept
+
+
+def test_best_of_reads_takes_buyer_hints_read_only_by_another_pass() -> None:
+    """D213: `kept` has no buyer and no hints, `others[0]` has both: both are taken."""
+    kept = _reading({"total": _ocr_field("12.50")})
+    other = _reading({"num_doc_adq_unchecked": _ocr_field("20000000019"), "nombre_adq": _ocr_field("RK SAC")})
+
+    result = best_of_reads(kept, [other])
+
+    assert result.fields["num_doc_adq_unchecked"] == other.fields["num_doc_adq_unchecked"]
+    assert result.fields["nombre_adq"] == other.fields["nombre_adq"]
+
+
+def test_best_of_reads_takes_the_higher_confidence_buyer_name() -> None:
+    """D213: of `kept` at 0.4 and `others[0]` at 0.8, the `nombre_adq` of `others[0]` wins."""
+    kept = _reading({"nombre_adq": _ocr_field("RK SAK", 0.4)})
+    other = _reading({"nombre_adq": _ocr_field("RK SAC", 0.8)})
+
+    assert best_of_reads(kept, [other]).fields["nombre_adq"] == other.fields["nombre_adq"]
+
+
+def test_best_of_reads_buyer_hint_tie_keeps_kept() -> None:
+    """D213: equal confidence for `nombre_adq` keeps `kept`'s, and `kept` itself is returned."""
+    kept = _reading({"nombre_adq": _ocr_field("RK SAK", 0.6)})
+    other = _reading({"nombre_adq": _ocr_field("RK SAC", 0.6)})
+
+    assert best_of_reads(kept, [other]) is kept
+
+
+def test_best_of_reads_drops_buyer_hints_when_the_result_has_a_buyer() -> None:
+    """D213: `kept` has `num_doc_adq` and a hint, `others[0]` has a hint: no hint is returned."""
+    kept = _reading({"num_doc_adq": _ocr_field(BUYER_RUC), "nombre_adq": _ocr_field("RK SAK")})
+    other = _reading({"num_doc_adq_unchecked": _ocr_field("20000000019")})
+
+    result = best_of_reads(kept, [other])
+
+    assert "nombre_adq" not in result.fields
+    assert "num_doc_adq_unchecked" not in result.fields
+    assert result.fields["num_doc_adq"] == kept.fields["num_doc_adq"]
