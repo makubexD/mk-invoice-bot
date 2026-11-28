@@ -69,8 +69,8 @@ The helper probe re-run on #58's photo, each pass alone (R right, W wrong, - not
 - **Finding: the retries stop before the pass that reads the número right.** The retry loop runs only while a
   required field is missing (D198). Before D212 the RUC was never read, so every pass ran; now pass 3 repairs it,
   nothing is missing, and pass 4 (the only one with the right número, at 0.61) never runs. Best-of-passes keeps pass
-  3's número at 0.43: wrong, but below `review_threshold`, so the invoice goes to `CONFIRMING` (BR-E09) rather than
-  being filed silently. Live row (b) of step 9, "número right", would fail as the branch stands.
+  3's número at 0.43: wrong, but below `review_threshold`, so the summary lists it under `⚠️ Revisa` (D80, D189)
+  rather than showing it as read. Live row (b) of step 9, "número right", would fail as the branch stands.
 
 ## Live check (step 9)
 
@@ -91,3 +91,40 @@ Telegram (flow A). No QR decoded; OCR only.
   padrón's razón social for `owner.ruc`; two put the `CLIENTE:` label after other text on its line, which the
   line-anchored `buyer_label` misses. D213 (owner, 2026-11-27) infers the buyer only when a near RUC and the name
   agree.
+
+## Live check of D213 (step 16)
+
+Live #61 and #62, 2026-11-28: the branch at `b0ea5fa` deployed live; the owner cancelled #59 and resent the same La
+Choza Náutica Minka photo (byte for byte, flow A). #61 was cancelled after the review below and the photo resent as
+#62 to walk the happy path one message at a time. No QR decoded; OCR only.
+
+| Row | Check                                             | Result                                                                                                                                                        |
+| --- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a   | BR-R04 asks with RK Export (Drive) pre-selected   | pass: the inferred buyer RUC is the printed one; the owner answered [Sí]                                                                                      |
+| b   | the issuer reads as in step 9                     | pass: `inferred`, 0.69, razón social from the padrón                                                                                                          |
+| c   | a cleanly read buyer RUC still routes silently    | pass offline only: the golden set's 6 clean photos read the buyer at 0.94 to 1.0, not inferred, so BR-R04's condition is false; no live flow A photo was sent |
+| d   | flow B untouched                                  | pass: no flow B code changed on the branch, no flow B invoice since the deploy                                                                                |
+| e   | after confirming, a doubtful field shows doubtful | pass: the wrong número (0.43) is listed under `⚠️ Revisa`; [✏️ Corregir] with `numero=…` stored it as `user` and re-ran the fetch chain                       |
+
+Golden set re-run (step 8's set and command, branch at `b0ea5fa`): the same per-field rates as step 8's after row; no
+rate dropped.
+
+Findings for the next phase (owner goals, 2026-11-28: read poor photos better; ask for exactly the fields missing,
+interactively; reach the printed site even when the store has no portal entry, and prefill it):
+
+- **Buyer RUC unread, asked by design.** Every pass misses the buyer RUC digits (printed lighter); D213 matches it by a
+  near RUC and the `CLIENTE:` name, so BR-R04 asks even though the match is right. Candidate D213 amendment: route
+  silently when the inferred buyer is `owner.ruc` and the name matches the padrón at ≥ 0.9 (owner to decide).
+- **Printed URL unread.** The anchor line reads as `Coteidta CPE cm:`, so `printed_url_anchor` never matches and the
+  strip re-read never runs; a targeted 2x re-read of the bottom band gives fragments only. The receipt crop keeps
+  1535 of 1920 rows and cuts the bottom of the ticket, where the URL is. With no URL, [🔗 Enseñar el portal] falls to
+  BR-F02, whose text names `Consulte su comprobante en…` where this ticket prints `Consulta CPE en:`.
+- **QR not decoded**: the shadow line crosses it; 18 contrast and upscale variants of the QR region decode nothing.
+- **A wrong número blocks the mailbox fetch**: `email_inbox` matches attachment names on serie-número, so before the
+  correction it could never find this invoice.
+- **Revisa is noisy**: 8 fields listed, one wrong; the buyer fields stay listed after the owner confirmed them on
+  BR-R04, and tipo, base and the buyer document are named but not shown.
+- **A correction restarts the fetch round**: the summary and BR-F13 are posted again, while the first BR-F13 keeps its
+  live buttons; [✏️ Corregir] and [✏️ Lo escribo] can both be open with no sign which one a text answers.
+- **Spec drift**: BR-E09 (`06`) and R-2.x (`02`, line 75) still say a required field below `review_threshold` goes to
+  `CONFIRMING`; since D80, D126 and D189 the code lists it under `⚠️ Revisa` and the invoice goes on.
