@@ -286,9 +286,12 @@ def _read_date(
     spans: tuple[_WordSpan, ...],
     rules: ParsingRules,
 ) -> Field | None:
-    """Return the first date the shared QR date parser accepts, as an ISO string (R-2.3)."""
+    """Return the first date the shared QR date parser accepts, as an ISO string (R-2.3).
+
+    Spaces OCR put around a separator are dropped before parsing (D212).
+    """
     for match in _matches(rules.date, searched):
-        value = match.group("value")
+        value = "".join(match.group("value").split())
         normalized = value.replace("-", "/") if value[2] == "-" else value
         iso = parse_date(normalized)
         if iso is not None:

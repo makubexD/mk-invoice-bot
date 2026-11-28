@@ -322,6 +322,24 @@ def test_parse_ocr_dash_date_becomes_iso(rules: ParsingRules) -> None:
 
 
 @pytest.mark.parametrize(
+    ("line", "expected"),
+    [
+        pytest.param("FECHA DE EMISION: 29- 10- 2026 01: 32 PM", "2026-10-29", id="spaced-dd-mm-yyyy"),
+        pytest.param("FECHA: 2026 -10- 29", "2026-10-29", id="spaced-iso"),
+        pytest.param("FECHA: 29-10-2026", "2026-10-29", id="unspaced"),
+        pytest.param("FECHA: 29 10 2026", None, id="no-separator"),
+    ],
+)
+def test_parse_ocr_date_with_spaces_around_separators(
+    rules: ParsingRules, line: str, expected: str | None
+) -> None:
+    """D212: spaces around a date separator are tolerated; a date with no separator is not read."""
+    fields = _fields(_ocr(f"RUC {SYNTHETIC_RUC}", line), rules)
+
+    assert fields.get("fecha_emision") == expected
+
+
+@pytest.mark.parametrize(
     ("lines", "field", "misread"),
     [
         pytest.param(("TOTAL ITEMS 3", "125.50"), "total", "3125.50", id="total-across-lines"),
